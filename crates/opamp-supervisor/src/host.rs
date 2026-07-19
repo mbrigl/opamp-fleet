@@ -1,30 +1,51 @@
-//! The Supervisor Host: the process that runs the supervisors this project hosts (ADR-0008).
+//! The Supervisor Host: the process that runs the supervisors this project hosts (ADR-0009).
 //!
-//! Today it hosts exactly one — the OpAMP-native [`Supervisor`] (the Collector Supervisor). Running
-//! *many* supervisors as plugins, and Custom Supervisors that bring non-OpAMP Foreign Agents into the
-//! same control loop, is the next milestone (its own ADR); this is the shape that grows into it.
+//! Each supervisor is its own OpAMP Agent — its own connection, Instance UID, and storage — and runs as
+//! its own task. The Host spawns them, then owns startup and shutdown for all of them. Adding a kind of
+//! agent is a new adapter behind the [`ManagedAgent`](crate::agent::ManagedAgent) port, not a change
+//! here.
 
 use tracing::info;
 
+use crate::agent::ManagedAgent;
 use crate::supervisor::Supervisor;
 
 /// The Supervisor Host process: it owns and runs its supervisors.
+#[derive(Default)]
 pub struct SupervisorHost {
-    supervisor: Supervisor,
+    handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl SupervisorHost {
-    /// A host wrapping the one supervisor it runs today.
-    pub fn new(supervisor: Supervisor) -> Self {
-        Self { supervisor }
+    /// A host running no supervisors yet.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Runs the hosted supervisor until the process is asked to stop (Ctrl-C / SIGTERM). On shutdown
-    /// the collector the supervisor owns is torn down with it (`kill_on_drop`).
-    pub async fn run(mut self) {
-        tokio::select! {
-            _ = self.supervisor.run() => {}
-            _ = shutdown_signal() => info!("shutting down"),
+    /// Spawns a supervisor as its own task; it runs its OpAMP loop until the host shuts down.
+    pub fn spawn<A: ManagedAgent>(&mut self, mut supervisor: Supervisor<A>) {
+        self.handles.push(tokio::spawn(async move {
+            supervisor.run().await;
+        }));
+    }
+
+    /// How many supervisors the host is running.
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Whether the host is running no supervisors.
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    /// Runs until the process is asked to stop (Ctrl-C / SIGTERM), then tears every supervisor down —
+    /// dropping each agent, whose `kill_on_drop` child processes are killed with it.
+    pub async fn run(self) {
+        shutdown_signal().await;
+        info!(supervisors = self.handles.len(), "shutting down");
+        for handle in &self.handles {
+            handle.abort();
         }
     }
 }

@@ -129,11 +129,12 @@ A Cargo workspace ([ADR-0005](docs/adr/0005-cargo-workspace-layout.md)); the too
 - **Lint / format:** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
 - **Run the server:** `cargo run -p opamp-server` — serves the OpAMP endpoint on `:4320` and the fleet
   REST API + UI on `:4321`, distributing [`config/collector.yaml`](config/collector.yaml).
-- **Run the Supervisor Host:** `cargo run -p opamp-supervisor -- -server ws://127.0.0.1:4320/v1/opamp
-  -collector otelcol-contrib -fallback config/collector.yaml` — the OpAMP-native **Collector
-  Supervisor** ([ADR-0008](docs/adr/0008-collector-supervisor-go-reference-compat.md)) connects to the
-  server, applies the configuration by restarting the collector, and reports its health and effective
-  config back (`-h` lists all flags).
+- **Run the Supervisor Host:** `cargo run -p opamp-supervisor -- -config config/supervisors.yaml` —
+  one process runs the supervisors declared in [`config/supervisors.yaml`](config/supervisors.yaml)
+  ([ADR-0009](docs/adr/0009-plugin-hexagonal-supervisor-host.md)), each its own OpAMP Agent: an
+  OpAMP-native **Collector Supervisor** ([ADR-0008](docs/adr/0008-collector-supervisor-go-reference-compat.md))
+  for OpenTelemetry Collectors, and a **Custom Supervisor** that brings a non-OpAMP **Foreign Agent**
+  (any process with a config file) into the same control loop.
 
 ## Usage
 
@@ -169,10 +170,11 @@ docs/adr/                     # Architecture Decision Records (+ template)
 Cargo.toml                    # Cargo workspace (crates/*)
 rust-toolchain.toml           # pinned Rust channel (container + CI agree)
 config/collector.yaml         # the collector configuration the server distributes
+config/supervisors.yaml       # the Supervisor Host config: which supervisors to run (ADR-0009)
 crates/
   opamp-proto/                # shared OpAMP wire layer (vendored .proto + WS framing)
   opamp-server/               # the OpAMP Fleet Server (OpAMP endpoint, REST API, UI)
-  opamp-supervisor/           # the Supervisor Host (Collector Supervisor, ADR-0008)
+  opamp-supervisor/           # the Supervisor Host (Collector + Custom supervisors, ADR-0008/0009)
 .devcontainer/
   devcontainer.json           # Compose-based Dev Container (dev service)
   docker-compose.yml          # dev + OpAMP agent sidecars

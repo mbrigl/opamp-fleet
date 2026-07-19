@@ -662,6 +662,7 @@ dependencies = [
  "futures-util",
  "hex",
  "opamp-proto",
+ "serde",
  "serde_yaml",
  "tokio",
  "tokio-tungstenite 0.30.0",

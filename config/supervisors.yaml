@@ -1,0 +1,27 @@
+# The Supervisor Host: which supervisors this one process runs (ADR-0009).
+#
+# Each entry is one Supervisor = one OpAMP Agent, with its own Instance UID and storage subdirectory.
+# `type: collector` manages an OpenTelemetry Collector natively; `type: custom` manages a non-OpAMP
+# Foreign Agent (a plain process with a config file) through a Custom Supervisor.
+
+# The OpAMP server every supervisor connects to (each entry may override it with its own `server:`).
+server: ws://127.0.0.1:4320/v1/opamp
+# The base storage directory; each supervisor gets `storage/<name>`.
+storage: /tmp/opamp-supervisor
+
+supervisors:
+  # An OpAMP-native OpenTelemetry Collector — the Collector Supervisor (ADR-0008).
+  - type: collector
+    name: otelcol
+    collector: otelcol-contrib          # executable on PATH (installed by the Dev Container)
+    fallback: config/collector.yaml      # run this until the server answers
+
+  # A non-OpAMP Foreign Agent — the Custom Supervisor (ADR-0009). It writes the distributed config to
+  # `config_path` and (re)starts the process; `reload:` runs a reload command instead of a restart.
+  # Uncomment and point it at a real agent (nginx, a legacy daemon, …):
+  #
+  # - type: custom
+  #   name: nginx
+  #   command: ["/usr/sbin/nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+  #   config_path: /etc/nginx/nginx.conf
+  #   reload: ["/usr/sbin/nginx", "-s", "reload"]

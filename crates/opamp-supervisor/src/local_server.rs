@@ -54,20 +54,10 @@ impl CollectorLink {
             .clone()
     }
 
-    /// Completes when the collector next reports a meaningful change. Coalescing: several changes
-    /// while nothing awaits collapse into one wake-up, and the awaiter then reads the latest state.
-    pub async fn changed(&self) {
-        self.changed.notified().await;
-    }
-
-    /// A link pre-seeded with a report, for tests that exercise how reports are consumed without
-    /// standing up the server and a collector.
-    #[cfg(test)]
-    pub(crate) fn seeded(report: CollectorReport) -> Self {
-        Self {
-            latest: Arc::new(Mutex::new(report)),
-            changed: Arc::new(Notify::new()),
-        }
+    /// The `Notify` this link fires on a meaningful change, for building a
+    /// [`ChangeSignal`](crate::agent::ChangeSignal) the OpAMP loop can await.
+    pub fn change_notify(&self) -> Arc<Notify> {
+        self.changed.clone()
     }
 }
 

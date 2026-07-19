@@ -1,7 +1,8 @@
 {
   // Run/debug the workspace binaries. Uses CodeLLDB (`vadimcn.vscode-lldb`), which the Dev Container
   // installs; its `cargo` integration builds the crate first, then launches the binary. `cwd` is the
-  // repository root so the server finds `config/collector.yaml` (a path relative to the working dir).
+  // repository root so the binaries find their config paths (relative to the working dir):
+  // `config/collector.yaml` for the server, `config/supervisors.yaml` for the supervisor host.
   "version": "0.2.0",
   "configurations": [
     {
@@ -24,9 +25,19 @@
         "args": ["build", "--bin=opamp-supervisor", "--package=opamp-supervisor"],
         "filter": { "name": "opamp-supervisor", "kind": "bin" }
       },
-      "args": [],
+      // Run the supervisors declared in config/supervisors.yaml (ADR-0009).
+      "args": ["-config", "config/supervisors.yaml"],
       "cwd": "${workspaceFolder}",
       "env": { "RUST_LOG": "info" }
+    }
+  ],
+  // Start the server and the supervisor host together (F5 -> "Run server + supervisor host"). The
+  // supervisor reconnects with backoff, so a brief race while the server binds is harmless.
+  "compounds": [
+    {
+      "name": "Run server + supervisor host",
+      "configurations": ["Run opamp-server", "Run opamp-supervisor"],
+      "stopAll": true
     }
   ]
 }
