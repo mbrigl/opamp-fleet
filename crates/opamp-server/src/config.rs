@@ -95,7 +95,13 @@ impl ConfigSource {
         // Best-effort cleanup if we fail before the rename; a successful rename leaves nothing behind.
         let result = (|| {
             fs::write(&tmp, body)?;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))?;
+            // Pin sane file permissions on Unix; Windows uses ACLs (inherited from the directory), where
+            // Unix mode bits do not apply, so this is skipped there.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))?;
+            }
             fs::rename(&tmp, &self.path)
         })();
         if result.is_err() {
@@ -104,9 +110,6 @@ impl ConfigSource {
         result
     }
 }
-
-// `Permissions::from_mode` is a Unix extension; the server targets the Linux Dev Container.
-use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,49 @@
+name: Cross-platform build
+
+# The Supervisor Host ships for Linux, Windows, and macOS (ADR-0009). This pipeline builds the workspace
+# natively on each so the platform-specific code compiles everywhere — process control (SIGTERM on Unix
+# vs. TerminateProcess on Windows, agent.rs) and the TLS stack (ADR-0012). It is kept separate from
+# ci.yml (the Definition-of-Done gate, AGENTS.md §5) because it is a portability check, not that gate.
+#
+# Tests are not run here: the supervisor's test doubles launch Unix programs (/bin/true, cat, …), so
+# `--all-targets` compiles the test code (matching the README build command) without running it. Linux is
+# in the matrix too, so this pipeline is a self-contained "builds on all three" guarantee.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others — each is an independent signal.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # prost-build invokes protoc to generate the OpAMP types (ADR-0006); this installs it on every OS.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # rustls's ring crypto provider (ADR-0012) assembles with NASM on Windows.
+      - name: Install NASM (ring assembly)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      # rust-toolchain.toml pins the channel; `rustup show` provisions it on the runner (ADR-0004).
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+
+      - name: Build
+        run: cargo build --workspace --all-targets
