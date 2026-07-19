@@ -8,16 +8,17 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use serde::Serialize;
 use tracing::{error, info};
 
+use crate::server::FleetPush;
 use crate::ui::UiState;
 
 /// The REST API routes, to be merged into the UI listener's router.
@@ -26,7 +27,30 @@ pub fn router(state: UiState) -> Router {
         .route("/api/fleet", get(fleet))
         .route("/api/fleet/events", get(fleet_events))
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/agents/{uid}/restart", post(restart_agent))
         .with_state(state)
+}
+
+/// `POST /api/agents/{uid}/restart` — asks the agent with this instance UID (hex) to restart (ADR-0011).
+/// `202` once the command is fanned out to the agent's connection, `404` if no such agent is connected,
+/// `400` if the UID is not hex. Writing the config is still the only *reconfiguration* path (ADR-0007);
+/// this is a separate, targeted control action.
+async fn restart_agent(State(state): State<UiState>, Path(uid): Path<String>) -> Response {
+    let Ok(bytes) = hex::decode(&uid) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid agent uid (expected hex)".to_string(),
+        );
+    };
+    if !state.fleet.is_connected(&bytes) {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "no connected agent with that uid".to_string(),
+        );
+    }
+    let _ = state.pushes.send(FleetPush::Restart(bytes));
+    info!(agent = %uid, "restart requested from the API");
+    StatusCode::ACCEPTED.into_response()
 }
 
 /// `GET /api/fleet` — the current fleet as JSON.

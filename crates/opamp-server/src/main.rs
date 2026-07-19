@@ -17,8 +17,7 @@ use tracing_subscriber::EnvFilter;
 use opamp::api;
 use opamp::config::ConfigSource;
 use opamp::fleet::Fleet;
-use opamp::proto;
-use opamp::server::{self, AppState, LISTEN_PATH};
+use opamp::server::{self, AppState, FleetPush, ServerOffers, TelemetryOffer, LISTEN_PATH};
 use opamp::ui::{self, UiState};
 
 /// The command-line configuration, mirroring the flags the README documents.
@@ -27,6 +26,12 @@ struct Options {
     ui_endpoint: String,
     config_path: String,
     poll_interval: Duration,
+    /// The heartbeat interval to offer agents (ADR-0011); `None` offers none.
+    heartbeat_interval: Option<Duration>,
+    /// The OTLP/HTTP destination to offer for agents' own telemetry (ADR-0011); `None` offers none.
+    own_telemetry_endpoint: Option<String>,
+    /// Optional headers attached to the own-telemetry offer (e.g. an auth token).
+    own_telemetry_headers: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -36,6 +41,9 @@ impl Default for Options {
             ui_endpoint: "0.0.0.0:4321".to_string(),
             config_path: "config/collector.yaml".to_string(),
             poll_interval: Duration::from_secs(2),
+            heartbeat_interval: None,
+            own_telemetry_endpoint: None,
+            own_telemetry_headers: Vec::new(),
         }
     }
 }
@@ -48,12 +56,24 @@ async fn main() {
         )
         .init();
 
-    let opts = match parse_args() {
+    let mut opts = match parse_args() {
         Ok(opts) => opts,
         Err(msg) => {
             eprintln!("{msg}");
             std::process::exit(2);
         }
+    };
+
+    // The control offers the Server makes beyond config distribution (ADR-0011), from the flags above.
+    let offers = ServerOffers {
+        heartbeat_interval_seconds: opts.heartbeat_interval.map_or(0, |d| d.as_secs()),
+        own_telemetry: opts
+            .own_telemetry_endpoint
+            .take()
+            .map(|endpoint| TelemetryOffer {
+                endpoint,
+                headers: std::mem::take(&mut opts.own_telemetry_headers),
+            }),
     };
 
     let config = Arc::new(ConfigSource::new(&opts.config_path));
@@ -74,16 +94,25 @@ async fn main() {
 
     // A bounded channel: a connection that falls this far behind recovers via the hash comparison on
     // its next report, so dropping stale pushes for a slow agent is safe.
-    let (pushes, _) = broadcast::channel(16);
+    let (pushes, _) = broadcast::channel::<FleetPush>(16);
 
-    let app_state = Arc::new(AppState::new(config.clone(), fleet.clone(), pushes.clone()));
+    let app_state = Arc::new(AppState::new(
+        config.clone(),
+        fleet.clone(),
+        pushes.clone(),
+        offers,
+    ));
 
     // One shutdown signal drives both listeners: a background task flips the watch, and each server
     // awaits it. Calling `ctrl_c()` once per server would race over who receives the signal.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     tokio::spawn(await_shutdown(shutdown_tx));
 
-    tokio::spawn(poll_config(config.clone(), pushes, opts.poll_interval));
+    tokio::spawn(poll_config(
+        config.clone(),
+        pushes.clone(),
+        opts.poll_interval,
+    ));
 
     let opamp = serve(
         &opts.endpoint,
@@ -92,8 +121,13 @@ async fn main() {
         format!("OpAMP server listening (path {LISTEN_PATH})"),
     );
 
-    // The UI listener also serves the JSON REST API under /api (ADR-0007), plain.
-    let ui_state = UiState { fleet, config };
+    // The UI listener also serves the JSON REST API under /api (ADR-0007), plain. It holds the push
+    // channel too, so a restart request from the UI/API reaches the agent's connection (ADR-0011).
+    let ui_state = UiState {
+        fleet,
+        config,
+        pushes,
+    };
     let ui = serve(
         &opts.ui_endpoint,
         ui::router(ui_state.clone()).merge(api::router(ui_state)),
@@ -143,7 +177,7 @@ async fn serve(
 /// delivered (ADR-0003).
 async fn poll_config(
     config: Arc<ConfigSource>,
-    pushes: broadcast::Sender<Arc<proto::AgentRemoteConfig>>,
+    pushes: broadcast::Sender<FleetPush>,
     interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -166,7 +200,7 @@ async fn poll_config(
                 );
                 // An error means no connection is subscribed right now; the next agent to report
                 // reconciles via the hash comparison, so there is nothing to recover here.
-                let _ = pushes.send(Arc::new(cfg));
+                let _ = pushes.send(FleetPush::Config(Arc::new(cfg)));
             }
             Err(e) => error!(error = %e, "cannot read collector configuration"),
         }
@@ -225,6 +259,9 @@ fn parse_args() -> Result<Options, String> {
             "ui-endpoint" => opts.ui_endpoint = value()?,
             "config" => opts.config_path = value()?,
             "poll-interval" => opts.poll_interval = parse_duration(&value()?)?,
+            "heartbeat-interval" => opts.heartbeat_interval = Some(parse_duration(&value()?)?),
+            "own-telemetry-endpoint" => opts.own_telemetry_endpoint = Some(value()?),
+            "own-telemetry-header" => opts.own_telemetry_headers.push(parse_header(&value()?)?),
             "help" | "h" => {
                 // Help is not an error: print usage to stdout and exit cleanly.
                 println!("{USAGE}");
@@ -239,10 +276,13 @@ fn parse_args() -> Result<Options, String> {
 const USAGE: &str = "\
 usage: opamp-server [flags]
 
-  -endpoint <addr>        address to accept OpAMP agent connections on (default 0.0.0.0:4320)
-  -ui-endpoint <addr>     address to serve the fleet UI + REST API on (default 0.0.0.0:4321)
-  -config <path>          collector configuration to distribute (default config/collector.yaml)
-  -poll-interval <dur>    how often the file is checked for changes, e.g. 2s, 500ms (default 2s)";
+  -endpoint <addr>              address to accept OpAMP agent connections on (default 0.0.0.0:4320)
+  -ui-endpoint <addr>           address to serve the fleet UI + REST API on (default 0.0.0.0:4321)
+  -config <path>                collector configuration to distribute (default config/collector.yaml)
+  -poll-interval <dur>          how often the file is checked for changes, e.g. 2s, 500ms (default 2s)
+  -heartbeat-interval <dur>     heartbeat interval to offer agents, e.g. 30s (default: offer none)
+  -own-telemetry-endpoint <url> OTLP/HTTP destination to offer for agents' own telemetry (default: none)
+  -own-telemetry-header <k=v>   header for the own-telemetry offer; repeatable (e.g. Authorization=Bearer x)";
 
 /// Parses a short duration string: an integer followed by `ms`, `s`, or `m`. Kept minimal on purpose
 /// — the only caller is the poll interval.
@@ -273,4 +313,13 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 
 fn bad_duration(s: &str) -> String {
     format!("cannot parse duration {s:?} (expected e.g. 2s, 500ms, 1m)")
+}
+
+/// Parses a `key=value` header for the own-telemetry offer (ADR-0011). The value may contain `=`; only
+/// the first splits key from value. An empty key is rejected.
+fn parse_header(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(key, value)| (key.trim().to_string(), value.to_string()))
+        .filter(|(key, _)| !key.is_empty())
+        .ok_or_else(|| format!("cannot parse header {s:?} (expected key=value)"))
 }

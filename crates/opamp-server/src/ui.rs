@@ -12,29 +12,35 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, RawQuery, State};
+use axum::extract::{Form, Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
+use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::config::ConfigSource;
 use crate::fleet::{AgentState, Fleet};
+use crate::server::FleetPush;
 
-/// Shared state for the UI: the fleet to display and the configuration to read and write.
+/// Shared state for the UI: the fleet to display, the configuration to read and write, and the push
+/// channel a restart command is fanned out on (ADR-0011).
 #[derive(Clone)]
 pub struct UiState {
     pub fleet: Arc<Fleet>,
     pub config: Arc<ConfigSource>,
+    pub pushes: broadcast::Sender<FleetPush>,
 }
 
-/// The fleet UI router: the page at `/` and the configuration write at `POST /config`.
+/// The fleet UI router: the page at `/`, the configuration write at `POST /config`, and a per-agent
+/// restart at `POST /agents/{uid}/restart` (ADR-0011).
 pub fn router(state: UiState) -> Router {
     Router::new()
         .route("/", get(show))
         .route("/config", post(save))
+        .route("/agents/{uid}/restart", post(restart))
         .with_state(state)
 }
 
@@ -113,6 +119,19 @@ async fn save(State(state): State<UiState>, Form(form): Form<ConfigForm>) -> Res
     );
 
     Redirect::to("/?saved").into_response()
+}
+
+/// Requests a restart of one agent (ADR-0011): if it is connected, the command is fanned out to its
+/// connection; either way it redirects back to the page, keeping the plain-form, no-JavaScript UX.
+async fn restart(State(state): State<UiState>, Path(uid): Path<String>) -> Response {
+    match hex::decode(&uid) {
+        Ok(bytes) if state.fleet.is_connected(&bytes) => {
+            let _ = state.pushes.send(FleetPush::Restart(bytes));
+            info!(agent = %uid, "restart requested from the UI");
+        }
+        _ => error!(agent = %uid, "restart requested for an unknown or disconnected agent"),
+    }
+    Redirect::to("/").into_response()
 }
 
 /// Re-renders the page with an error banner and the current fleet, for a rejected write.

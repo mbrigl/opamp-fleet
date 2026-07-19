@@ -15,8 +15,8 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::proto::{
-    any_value, AgentDescription, AgentRemoteConfig, AgentToServer, ComponentHealth,
-    RemoteConfigStatus, RemoteConfigStatuses,
+    any_value, AgentCapabilities, AgentDescription, AgentRemoteConfig, AgentToServer,
+    AvailableComponents, ComponentHealth, RemoteConfigStatus, RemoteConfigStatuses,
 };
 
 /// The empty-string key an agent's top-level configuration file is filed under (see
@@ -32,6 +32,12 @@ struct Agent {
     description: Option<AgentDescription>,
     health: Option<ComponentHealth>,
     config_status: Option<RemoteConfigStatus>,
+    /// The capabilities the agent last declared (an `AgentCapabilities` bitmask). Always sent by a
+    /// conforming agent, so it is folded whenever non-zero.
+    capabilities: u64,
+    /// The components the agent last reported it can run (`ReportsAvailableComponents`), or `None` if it
+    /// has not reported them.
+    available_components: Option<AvailableComponents>,
     effective_config: String,
     /// When the last message from this agent arrived, or `None` before its first message.
     last_seen: Option<Instant>,
@@ -59,6 +65,14 @@ impl Agent {
         if let Some(st) = &msg.remote_config_status {
             self.config_hash = st.last_remote_config_hash.clone();
             self.config_status = Some(st.clone());
+        }
+        // Capabilities are a required field a conforming agent sets on every message; a zero value means
+        // "not carried" here, so — like the other fields — it leaves the remembered value unchanged.
+        if msg.capabilities != 0 {
+            self.capabilities = msg.capabilities;
+        }
+        if let Some(ac) = &msg.available_components {
+            self.available_components = Some(ac.clone());
         }
         if let Some(ec) = &msg.effective_config {
             if ec.config_map.is_some() {
@@ -118,6 +132,19 @@ impl Agent {
             config_hash: short_hash(&self.config_hash),
             in_sync: want.is_some_and(|w| w.config_hash == self.config_hash),
             effective_config: self.effective_config.clone(),
+            capabilities: capability_names(self.capabilities),
+            accepts_restart: self.capabilities & AgentCapabilities::AcceptsRestartCommand as u64
+                != 0,
+            components: self
+                .available_components
+                .as_ref()
+                .map(component_groups)
+                .unwrap_or_default(),
+            components_hash: self
+                .available_components
+                .as_ref()
+                .map(|ac| short_hash(&ac.hash))
+                .unwrap_or_default(),
             last_seen: humanize_since(self.last_seen),
         }
     }
@@ -173,6 +200,18 @@ impl Agent {
             config_hash: hex::encode(&self.config_hash),
             in_sync: want.is_some_and(|w| w.config_hash == self.config_hash),
             effective_config: self.effective_config.clone(),
+            capabilities: capability_names(self.capabilities),
+            accepts_restart: self.capabilities & AgentCapabilities::AcceptsRestartCommand as u64
+                != 0,
+            available_components: self.available_components.as_ref().map(|ac| {
+                AvailableComponentsDto {
+                    hash: hex::encode(&ac.hash),
+                    components: component_groups(ac)
+                        .into_iter()
+                        .map(|(name, components)| ComponentGroupDto { name, components })
+                        .collect(),
+                }
+            }),
             last_seen_seconds_ago: elapsed.map(|d| d.as_secs()),
             last_seen_unix: elapsed.and_then(|d| {
                 SystemTime::now()
@@ -206,6 +245,15 @@ pub struct AgentState {
     /// Whether the agent holds the configuration the server currently distributes.
     pub in_sync: bool,
     pub effective_config: String,
+    /// The capabilities the agent declares, as OpAMP names (`ReportsHealth`, `AcceptsRemoteConfig`, …).
+    pub capabilities: Vec<String>,
+    /// Whether the agent declares `AcceptsRestartCommand`, so the view offers a restart button (ADR-0011).
+    pub accepts_restart: bool,
+    /// The components the agent reports it can run, grouped by kind (`receivers` → `otlp`, …). Empty
+    /// when the agent has not reported any.
+    pub components: Vec<(String, Vec<String>)>,
+    /// A short hash of the reported available components, empty when none were reported.
+    pub components_hash: String,
     pub last_seen: String,
 }
 
@@ -233,6 +281,12 @@ pub struct AgentDto {
     /// Whether the agent holds the configuration the server currently distributes.
     pub in_sync: bool,
     pub effective_config: String,
+    /// The capabilities the agent declares, as OpAMP names (`ReportsHealth`, `AcceptsRemoteConfig`, …).
+    pub capabilities: Vec<String>,
+    /// Whether the agent declares `AcceptsRestartCommand` (ADR-0011).
+    pub accepts_restart: bool,
+    /// The components the agent reports it can run, or `null` when it has not reported them.
+    pub available_components: Option<AvailableComponentsDto>,
     /// Seconds since the agent was last heard from, or `null` before its first message.
     pub last_seen_seconds_ago: Option<u64>,
     /// Absolute wall-clock time the agent was last heard from, Unix seconds, or `null`.
@@ -244,6 +298,22 @@ pub struct AgentDto {
 pub struct AttributeDto {
     pub key: String,
     pub value: String,
+}
+
+/// The components an agent reports it can run, as the REST API serializes them (ADR-0007).
+#[derive(Serialize)]
+pub struct AvailableComponentsDto {
+    /// The agent-calculated hash of its available components, full hex.
+    pub hash: String,
+    /// The component groups (`receivers`, `processors`, …), each with its member component names.
+    pub components: Vec<ComponentGroupDto>,
+}
+
+/// One group of available components (e.g. all `receivers`) in an [`AvailableComponentsDto`].
+#[derive(Serialize)]
+pub struct ComponentGroupDto {
+    pub name: String,
+    pub components: Vec<String>,
 }
 
 /// The connected agents, keyed by an opaque per-connection id. One connection is one agent; the id is
@@ -308,6 +378,16 @@ impl Fleet {
         };
         self.notify_changed();
         folded
+    }
+
+    /// Whether some connected agent has reported the given instance UID — the guard for a targeted
+    /// restart, so the API can answer `404` when no such agent is connected (ADR-0011).
+    pub fn is_connected(&self, uid: &[u8]) -> bool {
+        self.agents
+            .lock()
+            .expect("fleet lock poisoned")
+            .values()
+            .any(|a| a.uid == uid)
     }
 
     /// The instance UID of the agent behind a connection, once it has reported one. Needed to address
@@ -393,6 +473,44 @@ fn status_name(status: i32) -> String {
         .to_string()
 }
 
+/// Decodes an `AgentCapabilities` bitmask into the set OpAMP capability names, sorted by bit so the
+/// order is stable. A bit the server does not know (from a newer protocol) is shown as its hex value
+/// rather than dropped.
+fn capability_names(capabilities: u64) -> Vec<String> {
+    (0..u64::BITS)
+        .map(|bit| 1u64 << bit)
+        .filter(|flag| capabilities & flag != 0)
+        .map(|flag| {
+            i32::try_from(flag)
+                .ok()
+                .and_then(|value| AgentCapabilities::try_from(value).ok())
+                .map(|cap| {
+                    let name = cap.as_str_name();
+                    name.strip_prefix("AgentCapabilities_")
+                        .unwrap_or(name)
+                        .to_string()
+                })
+                .unwrap_or_else(|| format!("0x{flag:x}"))
+        })
+        .collect()
+}
+
+/// Projects an agent's reported available components into `(group, member names)` pairs, both sorted, so
+/// the fleet view and the API present a stable, readable list (`receivers` → `otlp`, `hostmetrics`, …).
+fn component_groups(components: &AvailableComponents) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = components
+        .components
+        .iter()
+        .map(|(group, details)| {
+            let mut members: Vec<String> = details.sub_component_map.keys().cloned().collect();
+            members.sort();
+            (group.clone(), members)
+        })
+        .collect();
+    groups.sort_by(|a, b| a.0.cmp(&b.0));
+    groups
+}
+
 /// Renders a hash or instance UID for humans; the full value is noise in a table cell or a log line.
 fn short_hash(bytes: &[u8]) -> String {
     const N: usize = 6;
@@ -422,7 +540,9 @@ fn humanize_since(last_seen: Option<Instant>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AgentConfigFile, AgentConfigMap, AnyValue, EffectiveConfig, KeyValue};
+    use crate::proto::{
+        AgentConfigFile, AgentConfigMap, AnyValue, ComponentDetails, EffectiveConfig, KeyValue,
+    };
 
     fn kv(key: &str, val: &str) -> KeyValue {
         KeyValue {
@@ -694,6 +814,119 @@ mod tests {
 
         assert_eq!(fleet.disconnect(2).as_deref(), Some("aa"));
         assert_eq!(fleet.snapshot(None).len(), 1);
+    }
+
+    #[test]
+    fn folds_capabilities_and_decodes_their_names() {
+        let mut agent = Agent::default();
+        agent.fold(&AgentToServer {
+            sequence_num: 1,
+            capabilities: AgentCapabilities::ReportsHealth as u64
+                | AgentCapabilities::AcceptsRemoteConfig as u64,
+            ..Default::default()
+        });
+        // Decoded to names, ordered by bit (AcceptsRemoteConfig 0x2 before ReportsHealth 0x800).
+        assert_eq!(
+            agent.state(None).capabilities,
+            vec![
+                "AcceptsRemoteConfig".to_string(),
+                "ReportsHealth".to_string()
+            ]
+        );
+        // A later heartbeat that does not carry capabilities keeps the remembered ones (delta rule).
+        agent.fold(&AgentToServer {
+            sequence_num: 2,
+            ..Default::default()
+        });
+        assert_eq!(agent.state(None).capabilities.len(), 2);
+    }
+
+    #[test]
+    fn capability_names_shows_unknown_bits_as_hex() {
+        let caps = AgentCapabilities::AcceptsRemoteConfig as u64 | (1u64 << 40);
+        let names = capability_names(caps);
+        assert!(names.contains(&"AcceptsRemoteConfig".to_string()));
+        assert!(names.iter().any(|n| n == "0x10000000000"), "{names:?}");
+    }
+
+    #[test]
+    fn folds_and_groups_available_components() {
+        let group = |members: &[&str]| ComponentDetails {
+            sub_component_map: members
+                .iter()
+                .map(|m| (m.to_string(), ComponentDetails::default()))
+                .collect(),
+            ..Default::default()
+        };
+        let ac = AvailableComponents {
+            hash: vec![0xde, 0xad],
+            components: [
+                ("receivers".to_string(), group(&["otlp", "hostmetrics"])),
+                ("exporters".to_string(), group(&["debug"])),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut agent = Agent::default();
+        agent.fold(&AgentToServer {
+            sequence_num: 1,
+            available_components: Some(ac),
+            ..Default::default()
+        });
+
+        // Groups and members are both sorted, so the view is stable across refreshes.
+        let st = agent.state(None);
+        assert_eq!(
+            st.components,
+            vec![
+                ("exporters".to_string(), vec!["debug".to_string()]),
+                (
+                    "receivers".to_string(),
+                    vec!["hostmetrics".to_string(), "otlp".to_string()]
+                ),
+            ]
+        );
+        assert_eq!(st.components_hash, "dead");
+
+        // The API projection mirrors it, with the full hash.
+        let dto = agent.api_state(None);
+        let components = dto.available_components.expect("components reported");
+        assert_eq!(components.hash, "dead");
+        assert_eq!(components.components[0].name, "exporters");
+        assert_eq!(
+            components.components[1].components,
+            vec!["hostmetrics", "otlp"]
+        );
+    }
+
+    #[test]
+    fn agents_without_reports_expose_empty_capabilities_and_no_components() {
+        let agent = Agent::default();
+        assert!(agent.state(None).capabilities.is_empty());
+        assert!(!agent.state(None).accepts_restart);
+        assert!(agent.state(None).components.is_empty());
+        assert!(agent.api_state(None).available_components.is_none());
+    }
+
+    #[test]
+    fn accepts_restart_tracks_the_capability_and_is_connected_finds_the_agent() {
+        let fleet = Fleet::new();
+        fleet.connect(1);
+        fleet.fold(
+            1,
+            &AgentToServer {
+                instance_uid: vec![0xab, 0xcd],
+                sequence_num: 1,
+                capabilities: AgentCapabilities::AcceptsRestartCommand as u64,
+                ..Default::default()
+            },
+        );
+        assert!(
+            fleet.is_connected(&[0xab, 0xcd]),
+            "the reported uid is connected"
+        );
+        assert!(!fleet.is_connected(&[0x00]), "an unknown uid is not");
+        assert!(fleet.snapshot(None)[0].accepts_restart);
     }
 
     #[test]

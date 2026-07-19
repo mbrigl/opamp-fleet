@@ -21,7 +21,7 @@ use opamp::proto::{
     any_value, AgentDescription, AgentToServer, AnyValue, ComponentHealth, KeyValue,
     RemoteConfigStatus, RemoteConfigStatuses,
 };
-use opamp::server::{self, AppState};
+use opamp::server::{self, AppState, ServerOffers};
 use opamp::ui::UiState;
 
 #[tokio::test]
@@ -37,7 +37,12 @@ async fn a_connected_agent_appears_in_the_fleet_with_its_status() {
 
     let fleet = Arc::new(Fleet::new());
     let (pushes, _) = tokio::sync::broadcast::channel(16);
-    let app_state = Arc::new(AppState::new(config.clone(), fleet.clone(), pushes));
+    let app_state = Arc::new(AppState::new(
+        config.clone(),
+        fleet.clone(),
+        pushes.clone(),
+        ServerOffers::default(),
+    ));
 
     // Serve the OpAMP endpoint on an ephemeral port and connect a WebSocket client to it.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -94,6 +99,7 @@ async fn a_connected_agent_appears_in_the_fleet_with_its_status() {
     let api_router = api::router(UiState {
         fleet: fleet.clone(),
         config: config.clone(),
+        pushes: pushes.clone(),
     });
     let resp = api_router
         .oneshot(

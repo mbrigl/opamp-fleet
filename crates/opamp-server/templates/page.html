@@ -25,6 +25,8 @@
   textarea { width: 100%; min-height: 22rem; padding: .75rem; font-size: .85rem; border-radius: 6px; border: 1px solid rgba(128,128,128,.5); background: transparent; color: inherit; }
   button { margin-top: .75rem; padding: .5rem 1.1rem; font: inherit; border-radius: 6px; cursor: pointer; }
   .empty { padding: 1.5rem; text-align: center; opacity: .6; border: 1px dashed rgba(128,128,128,.5); border-radius: 6px; }
+  form.inline { display: inline; }
+  form.inline button { margin: .4rem 0 0; padding: .15rem .55rem; font-size: .75rem; }
 </style>
 </head>
 <body>
@@ -63,6 +65,10 @@
         <code>{{ agent.uid }}</code>
         {% for kv in agent.attributes %}<br><span class="muted">{{ kv.0 }}: {{ kv.1 }}</span>{% endfor %}
         {% for kv in agent.context %}<br><span class="muted">{{ kv.0 }}: {{ kv.1 }}</span>{% endfor %}
+        {% if !agent.capabilities.is_empty() %}<details><summary class="muted">capabilities ({{ agent.capabilities.len() }})</summary><pre>{% for c in agent.capabilities %}{{ c }}
+{% endfor %}</pre></details>{% endif %}
+        {% if !agent.components.is_empty() %}<details><summary class="muted">components{% if !agent.components_hash.is_empty() %} · {{ agent.components_hash }}{% endif %}</summary><pre>{% for g in agent.components %}{{ g.0 }}: {{ g.1|join(", ") }}
+{% endfor %}</pre></details>{% endif %}
       </td>
       <td>
         {% if !agent.health_reported %}<span class="pill muted">no report</span>
@@ -79,7 +85,9 @@
         {% if !agent.config_error.is_empty() %}<br><strong class="err">{{ agent.config_error }}</strong>{% endif %}
         {% if !agent.effective_config.is_empty() %}<details><summary class="muted">effective config</summary><pre>{{ agent.effective_config }}</pre></details>{% endif %}
       </td>
-      <td class="muted">{{ agent.last_seen }}</td>
+      <td class="muted">{{ agent.last_seen }}
+        {% if agent.accepts_restart %}<br><form class="inline" method="post" action="/agents/{{ agent.uid }}/restart"><button type="submit">restart</button></form>{% endif %}
+      </td>
     </tr>
   {% endfor %}
   </tbody>
