@@ -16,7 +16,8 @@ use tokio::sync::watch;
 
 use crate::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentRemoteConfig, AgentToServer,
-    AvailableComponents, ComponentHealth, RemoteConfigStatus, RemoteConfigStatuses,
+    AvailableComponents, ComponentHealth, PackageStatusEnum, PackageStatuses, RemoteConfigStatus,
+    RemoteConfigStatuses,
 };
 
 /// The empty-string key an agent's top-level configuration file is filed under (see
@@ -38,6 +39,10 @@ struct Agent {
     /// The components the agent last reported it can run (`ReportsAvailableComponents`), or `None` if it
     /// has not reported them.
     available_components: Option<AvailableComponents>,
+    /// The package statuses the agent last reported (`ReportsPackageStatuses`, ADR-0018), or `None` if it
+    /// has not reported any. Carries the agent's `server_provided_all_packages_hash`, which drives the
+    /// Server's package-offer comparison.
+    package_statuses: Option<PackageStatuses>,
     effective_config: String,
     /// When the last message from this agent arrived, or `None` before its first message.
     last_seen: Option<Instant>,
@@ -73,6 +78,9 @@ impl Agent {
         }
         if let Some(ac) = &msg.available_components {
             self.available_components = Some(ac.clone());
+        }
+        if let Some(ps) = &msg.package_statuses {
+            self.package_statuses = Some(ps.clone());
         }
         if let Some(ec) = &msg.effective_config {
             if ec.config_map.is_some() {
@@ -212,6 +220,7 @@ impl Agent {
                         .collect(),
                 }
             }),
+            packages: self.package_statuses.as_ref().map(package_statuses_dto),
             last_seen_seconds_ago: elapsed.map(|d| d.as_secs()),
             last_seen_unix: elapsed.and_then(|d| {
                 SystemTime::now()
@@ -287,6 +296,8 @@ pub struct AgentDto {
     pub accepts_restart: bool,
     /// The components the agent reports it can run, or `null` when it has not reported them.
     pub available_components: Option<AvailableComponentsDto>,
+    /// The packages the agent reports it has or is installing, or `null` when it reports none (ADR-0018).
+    pub packages: Option<PackageStatusesDto>,
     /// Seconds since the agent was last heard from, or `null` before its first message.
     pub last_seen_seconds_ago: Option<u64>,
     /// Absolute wall-clock time the agent was last heard from, Unix seconds, or `null`.
@@ -314,6 +325,59 @@ pub struct AvailableComponentsDto {
 pub struct ComponentGroupDto {
     pub name: String,
     pub components: Vec<String>,
+}
+
+/// The package statuses an agent reports, as the REST API serializes them (ADR-0018).
+#[derive(Serialize)]
+pub struct PackageStatusesDto {
+    /// The aggregate hash of the package set the agent last received, full hex.
+    pub all_packages_hash: String,
+    /// Each package's status, ordered by name so the view is stable.
+    pub packages: Vec<PackageStatusDto>,
+}
+
+/// One package's reported status in a [`PackageStatusesDto`].
+#[derive(Serialize)]
+pub struct PackageStatusDto {
+    pub name: String,
+    /// The version the agent currently has installed (empty if none).
+    pub agent_has_version: String,
+    /// The version the Server offered (empty if this package was installed locally, not offered).
+    pub server_offered_version: String,
+    /// The status name: `Installed`, `Installing`, `Downloading`, `InstallPending`, or `InstallFailed`.
+    pub status: String,
+    /// The failure reason when the status is `InstallFailed`, else empty.
+    pub error: String,
+}
+
+/// Projects the reported `PackageStatuses` into the API DTO, ordered by package name.
+fn package_statuses_dto(ps: &PackageStatuses) -> PackageStatusesDto {
+    let mut packages: Vec<PackageStatusDto> = ps
+        .packages
+        .values()
+        .map(|p| PackageStatusDto {
+            name: p.name.clone(),
+            agent_has_version: p.agent_has_version.clone(),
+            server_offered_version: p.server_offered_version.clone(),
+            status: package_status_name(p.status),
+            error: p.error_message.clone(),
+        })
+        .collect();
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    PackageStatusesDto {
+        all_packages_hash: hex::encode(&ps.server_provided_all_packages_hash),
+        packages,
+    }
+}
+
+/// Renders a `PackageStatusEnum` discriminant as its bare OpAMP name (`Installed`, `InstallFailed`, …).
+fn package_status_name(status: i32) -> String {
+    let name = PackageStatusEnum::try_from(status)
+        .unwrap_or(PackageStatusEnum::InstallPending)
+        .as_str_name();
+    name.strip_prefix("PackageStatusEnum_")
+        .unwrap_or(name)
+        .to_string()
 }
 
 /// The connected agents, keyed by an opaque per-connection id. One connection is one agent; the id is
@@ -374,6 +438,11 @@ impl Fleet {
             Folded {
                 config_hash: agent.config_hash.clone(),
                 report_full_state: gap,
+                package_all_hash: agent
+                    .package_statuses
+                    .as_ref()
+                    .map(|ps| ps.server_provided_all_packages_hash.clone())
+                    .unwrap_or_default(),
             }
         };
         self.notify_changed();
@@ -430,6 +499,9 @@ pub struct Folded {
     pub config_hash: Vec<u8>,
     /// Whether the server missed a message and must set the `ReportFullState` flag in its response.
     pub report_full_state: bool,
+    /// The aggregate `all_packages_hash` the agent last reported, empty if it reports no packages —
+    /// drives the Server's package-offer comparison (ADR-0018).
+    pub package_all_hash: Vec<u8>,
 }
 
 /// Flattens the config map an agent reports into something displayable. The agent may report several

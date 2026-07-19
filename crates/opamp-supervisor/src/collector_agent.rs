@@ -199,6 +199,24 @@ impl ManagedAgent for CollectorAgent {
         self.own_telemetry = settings;
         true
     }
+
+    /// A Collector runs a swappable binary, so it accepts top-level package updates (ADR-0018).
+    fn accepts_packages(&self) -> bool {
+        true
+    }
+
+    async fn install_package(&mut self, binary: &[u8]) -> Result<(), String> {
+        // Forget the previous process's health before swapping the binary, so the domain confirms the new
+        // binary's health from a fresh report rather than the outgoing collector's (ADR-0018, mirroring
+        // the config-apply health handling in ADR-0008).
+        self.link.clear_health();
+        self.collector.install_binary(binary).await
+    }
+
+    async fn rollback_package(&mut self) -> Result<(), String> {
+        self.link.clear_health();
+        self.collector.rollback_binary().await
+    }
 }
 
 /// Injects the collector's `opamp` and `health_check` extensions into a collector configuration and
@@ -642,6 +660,13 @@ mod tests {
             merge_own_telemetry(config, &OwnTelemetry::default()),
             config
         );
+    }
+
+    #[tokio::test]
+    async fn a_collector_accepts_package_updates() {
+        // A Collector runs a swappable binary, so it declares itself package-capable (ADR-0018).
+        let agent = agent_with_config_files(Vec::new()).await;
+        assert!(agent.accepts_packages());
     }
 
     #[tokio::test]

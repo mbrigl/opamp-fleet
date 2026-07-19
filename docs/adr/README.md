@@ -42,4 +42,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0015](0015-accepts-opamp-connection-settings.md) | The Supervisor accepts Server-offered OpAMP connection settings (re-pointing), with revert on failure | 🟢 accepted |
 | [0016](0016-mtls-client-certificate-issuance.md) | Mutual TLS with OpAMP client-certificate issuance (CertificateRequest), Server as a simple CA | 🟢 accepted |
 | [0017](0017-other-connection-settings.md) | `AcceptsOtherConnectionSettings` — deferred until a concrete consumer exists | 🟢 accepted |
+| [0018](0018-opamp-package-binary-distribution.md) | OpAMP package/binary distribution — Server offers the Collector binary, Supervisor downloads, hash-verifies, swaps, and rolls back | 🟢 accepted |
 

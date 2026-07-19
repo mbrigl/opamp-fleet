@@ -23,25 +23,44 @@ use tracing::{error, info};
 
 use crate::config::ConfigSource;
 use crate::fleet::{AgentState, Fleet};
+use crate::packages::PackageSource;
 use crate::server::FleetPush;
 
-/// Shared state for the UI: the fleet to display, the configuration to read and write, and the push
-/// channel a restart command is fanned out on (ADR-0011).
+/// Shared state for the UI: the fleet to display, the configuration to read and write, the push
+/// channel a restart command is fanned out on (ADR-0011), and the packages served for download (ADR-0018).
 #[derive(Clone)]
 pub struct UiState {
     pub fleet: Arc<Fleet>,
     pub config: Arc<ConfigSource>,
     pub pushes: broadcast::Sender<FleetPush>,
+    pub packages: Arc<PackageSource>,
 }
 
-/// The fleet UI router: the page at `/`, the configuration write at `POST /config`, and a per-agent
-/// restart at `POST /agents/{uid}/restart` (ADR-0011).
+/// The fleet UI router: the page at `/`, the configuration write at `POST /config`, a per-agent restart
+/// at `POST /agents/{uid}/restart` (ADR-0011), and the package download at `GET /packages/{name}`
+/// (ADR-0018).
 pub fn router(state: UiState) -> Router {
     Router::new()
         .route("/", get(show))
         .route("/config", post(save))
         .route("/agents/{uid}/restart", post(restart))
+        .route("/packages/{name}", get(download_package))
         .with_state(state)
+}
+
+/// `GET /packages/{name}` — serves a configured package's bytes for an agent to install (ADR-0018). The
+/// `download_url` in the offer points here; the whole `:4321` surface is gated by the shared token
+/// (ADR-0012), and the offer carries that token so the agent's download is authenticated. `404` if no
+/// package by that name is configured.
+async fn download_package(State(state): State<UiState>, Path(name): Path<String>) -> Response {
+    match state.packages.file(&name) {
+        Some(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes.to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "no such package").into_response(),
+    }
 }
 
 #[derive(Template)]

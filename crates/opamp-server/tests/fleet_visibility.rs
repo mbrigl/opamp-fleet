@@ -17,6 +17,7 @@ use opamp::api;
 use opamp::config::ConfigSource;
 use opamp::fleet::Fleet;
 use opamp::frame;
+use opamp::packages::PackageSource;
 use opamp::proto::{
     any_value, AgentDescription, AgentToServer, AnyValue, ComponentHealth, KeyValue,
     RemoteConfigStatus, RemoteConfigStatuses,
@@ -42,6 +43,7 @@ async fn a_connected_agent_appears_in_the_fleet_with_its_status() {
         fleet.clone(),
         pushes.clone(),
         ServerOffers::default(),
+        Arc::new(PackageSource::empty()),
         None,
     ));
 
@@ -101,6 +103,7 @@ async fn a_connected_agent_appears_in_the_fleet_with_its_status() {
         fleet: fleet.clone(),
         config: config.clone(),
         pushes: pushes.clone(),
+        packages: Arc::new(PackageSource::empty()),
     });
     let resp = api_router
         .oneshot(

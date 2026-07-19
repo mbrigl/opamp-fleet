@@ -20,6 +20,7 @@ use opamp::api;
 use opamp::auth;
 use opamp::config::ConfigSource;
 use opamp::fleet::Fleet;
+use opamp::packages::{PackageSource, PackageSpec};
 use opamp::server::{
     self, AppState, FleetPush, OpampConnectionOffer, ServerOffers, TelemetryOffer, LISTEN_PATH,
 };
@@ -41,6 +42,11 @@ struct Options {
     opamp_offer_endpoint: Option<String>,
     /// Optional headers attached to the OpAMP connection offer.
     opamp_offer_headers: Vec<(String, String)>,
+    /// Packages to offer agents for installation (ADR-0018): each `name:version:path`. Empty offers none.
+    packages: Vec<PackageSpec>,
+    /// The base URL agents download packages from (e.g. `http://dev:4321`); required when a package is
+    /// configured. The offer's `download_url` is `{base}/packages/{name}` (ADR-0018).
+    package_base_url: Option<String>,
     /// PEM certificate and key for TLS on both listeners (ADR-0012); `None` serves plain.
     tls_cert: Option<String>,
     tls_key: Option<String>,
@@ -61,6 +67,8 @@ impl Default for Options {
             own_telemetry_headers: Vec::new(),
             opamp_offer_endpoint: None,
             opamp_offer_headers: Vec::new(),
+            packages: Vec::new(),
+            package_base_url: None,
             tls_cert: None,
             tls_key: None,
             auth_token: None,
@@ -148,6 +156,30 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Load the packages to offer for installation (ADR-0018); none unless `-package` is given. A package
+    // needs a base URL agents can download from, and rides the same token as the rest of the surface.
+    let packages = {
+        let specs = std::mem::take(&mut opts.packages);
+        if specs.is_empty() {
+            Arc::new(PackageSource::empty())
+        } else {
+            let Some(base_url) = opts.package_base_url.take() else {
+                eprintln!("-package requires -package-base-url (e.g. http://dev:4321)");
+                std::process::exit(2);
+            };
+            match PackageSource::load(specs, base_url, auth_token.clone()) {
+                Ok(source) => {
+                    info!("offering packages for installation");
+                    Arc::new(source)
+                }
+                Err(e) => {
+                    error!(error = %e, "cannot load the configured packages");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
     let fleet = Arc::new(Fleet::new());
 
     // Announce the security posture. Without TLS and a token the server is only defensible on a trusted
@@ -166,6 +198,7 @@ async fn main() {
         fleet.clone(),
         pushes.clone(),
         offers,
+        packages.clone(),
         auth_token.clone(),
     ));
 
@@ -195,6 +228,7 @@ async fn main() {
         fleet,
         config,
         pushes,
+        packages,
     };
     let ui_router = ui::router(ui_state.clone())
         .merge(api::router(ui_state))
@@ -362,6 +396,8 @@ fn parse_args() -> Result<Options, String> {
             "own-telemetry-header" => opts.own_telemetry_headers.push(parse_header(&value()?)?),
             "opamp-offer-endpoint" => opts.opamp_offer_endpoint = Some(value()?),
             "opamp-offer-header" => opts.opamp_offer_headers.push(parse_header(&value()?)?),
+            "package" => opts.packages.push(parse_package(&value()?)?),
+            "package-base-url" => opts.package_base_url = Some(value()?),
             "tls-cert" => opts.tls_cert = Some(value()?),
             "tls-key" => opts.tls_key = Some(value()?),
             "auth-token" => opts.auth_token = Some(value()?),
@@ -388,6 +424,8 @@ usage: opamp-server [flags]
   -own-telemetry-header <k=v>   header for the own-telemetry offer; repeatable (e.g. Authorization=Bearer x)
   -opamp-offer-endpoint <url>   new OpAMP endpoint to offer accepting agents (re-point/rotate; default: none)
   -opamp-offer-header <k=v>     header for the OpAMP connection offer; repeatable
+  -package <name:version:path>  package (agent binary) to offer for installation; repeatable (default: none)
+  -package-base-url <url>       base URL agents download packages from, e.g. http://dev:4321 (needs -package)
   -tls-cert <pem>               PEM certificate for TLS on both listeners (needs -tls-key; default: plain)
   -tls-key <pem>                PEM private key for TLS on both listeners (needs -tls-cert)
   -auth-token <token|@file>     shared bearer token agents and UI/API clients must present (default: none)";
@@ -441,4 +479,27 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
         .map(|(key, value)| (key.trim().to_string(), value.to_string()))
         .filter(|(key, _)| !key.is_empty())
         .ok_or_else(|| format!("cannot parse header {s:?} (expected key=value)"))
+}
+
+/// Parses a `-package name:version:path` spec into a [`PackageSpec`] (ADR-0018). The type is `top_level`
+/// (the only kind this increment offers); the path is the remainder after the name and version, so a path
+/// containing `:` is preserved. An empty name, version, or path is rejected.
+fn parse_package(s: &str) -> Result<PackageSpec, String> {
+    let mut parts = s.splitn(3, ':');
+    let (Some(name), Some(version), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!(
+            "cannot parse package {s:?} (expected name:version:path)"
+        ));
+    };
+    if name.is_empty() || version.is_empty() || path.is_empty() {
+        return Err(format!(
+            "cannot parse package {s:?} (name, version, and path must all be set)"
+        ));
+    }
+    Ok(PackageSpec {
+        name: name.to_string(),
+        version: version.to_string(),
+        package_type: opamp::proto::PackageType::TopLevel,
+        path: path.into(),
+    })
 }

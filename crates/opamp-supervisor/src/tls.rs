@@ -43,6 +43,46 @@ pub fn connector(ca_cert: Option<&[u8]>, insecure: bool) -> Result<Option<Connec
     Ok(Some(Connector::Rustls(Arc::new(config))))
 }
 
+/// A rustls `ClientConfig` for the package-download client (ADR-0018): validated against a **custom CA**,
+/// **nothing** (the insecure development option), or the **bundled webpki roots** by default. Unlike
+/// [`connector`], this always returns a config — the download path builds its own TLS stream and has no
+/// tungstenite default to fall back on. The rustls crypto provider must already be installed.
+pub fn client_config(ca_cert: Option<&[u8]>, insecure: bool) -> Result<Arc<ClientConfig>, String> {
+    if insecure {
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth();
+        return Ok(Arc::new(config));
+    }
+    let mut roots = RootCertStore::empty();
+    match ca_cert {
+        Some(pem) => {
+            let mut added = 0;
+            for cert in rustls_pemfile::certs(&mut &pem[..]) {
+                let cert = cert.map_err(|e| format!("cannot read CA certificate: {e}"))?;
+                roots
+                    .add(cert)
+                    .map_err(|e| format!("cannot add CA certificate: {e}"))?;
+                added += 1;
+            }
+            if added == 0 {
+                return Err(
+                    "the configured TLS CA certificate contained no certificates".to_string(),
+                );
+            }
+        }
+        // No custom CA: trust the platform-independent Mozilla webpki roots, the same default the OpAMP
+        // `wss://` client uses.
+        None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    }
+    Ok(Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
 /// A certificate verifier that accepts anything — only for the `insecure` development option. Signature
 /// checks defer to the ring provider so the handshake still completes.
 #[derive(Debug)]

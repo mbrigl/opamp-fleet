@@ -15,8 +15,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use std::collections::HashMap;
+
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
@@ -27,11 +30,14 @@ use opamp_proto::frame;
 use opamp_proto::proto::{
     any_value, AgentCapabilities, AgentConfigFile, AgentConfigMap, AgentDescription,
     AgentRemoteConfig, AgentToServer, AnyValue, CommandType, ComponentHealth,
-    ConnectionSettingsOffers, EffectiveConfig, KeyValue, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerToAgent, ServerToAgentFlags, TelemetryConnectionSettings,
+    ConnectionSettingsOffers, EffectiveConfig, Headers, KeyValue, PackageAvailable, PackageStatus,
+    PackageStatusEnum, PackageStatuses, PackageType, PackagesAvailable, RemoteConfigStatus,
+    RemoteConfigStatuses, ServerToAgent, ServerToAgentFlags, TelemetryConnectionSettings,
 };
 
-use crate::agent::{liveness_health, ManagedAgent, OwnTelemetry, TelemetryDestination};
+use crate::agent::{
+    liveness_health, InstalledPackage, ManagedAgent, OwnTelemetry, TelemetryDestination,
+};
 
 /// The key a single-file agent's configuration is filed under in an OpAMP config map. The Server writes
 /// the config under the empty-string key (the specification's SHOULD for a single-file agent), so that
@@ -145,6 +151,21 @@ struct PersistedConnSettings {
     insecure: bool,
 }
 
+/// The installed-package state persisted across restarts, so the Supervisor resumes reporting the
+/// package it has and de-duplicates the next offer without re-installing (ADR-0018).
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedPackages {
+    /// The top-level package's name (the key it is reported under).
+    #[serde(default)]
+    name: String,
+    /// The last aggregate `all_packages_hash` the Server offered, hex-encoded.
+    #[serde(default)]
+    all_hash: String,
+    /// The installed top-level package, or `None` if none has been installed.
+    #[serde(default)]
+    installed: Option<InstalledPackage>,
+}
+
 /// The running supervisor: its identity, the [`ManagedAgent`] it drives, and the control-loop state it
 /// needs to avoid redundant reconfiguration.
 pub struct Supervisor<A: ManagedAgent> {
@@ -195,6 +216,18 @@ pub struct Supervisor<A: ManagedAgent> {
     /// is re-reported `FAILED` (and never re-applied) rather than restarting the agent again on a
     /// reconnect or a re-offer.
     rolled_back: Option<(Vec<u8>, String)>,
+    /// Whether this agent accepts top-level package (binary) updates — i.e. declares `AcceptsPackages` /
+    /// `ReportsPackageStatuses` and processes `PackagesAvailable` (ADR-0018).
+    packages_enabled: bool,
+    /// The top-level package currently installed (its version and Server-provided hash), or `None` if the
+    /// Server has not installed one yet. Persisted so a restart resumes without re-installing.
+    installed_package: Option<InstalledPackage>,
+    /// The aggregate `all_packages_hash` the Server last offered, echoed back in `PackageStatuses` so the
+    /// Server's hash comparison converges — whether the install succeeded or failed (ADR-0018).
+    package_all_hash: Vec<u8>,
+    /// The status of the top-level package to report, kept between messages (delta reporting) and rebuilt
+    /// on restart from the installed package.
+    package_status: Option<PackageStatus>,
 }
 
 impl<A: ManagedAgent> Supervisor<A> {
@@ -208,6 +241,14 @@ impl<A: ManagedAgent> Supervisor<A> {
             config.agent_version.as_deref(),
             &config.instance_uid,
         );
+        // Declare the package capabilities only when the agent can actually install a binary update — we
+        // never claim a capability we do not honour (ADR-0018).
+        let packages_enabled = agent.accepts_packages();
+        let mut capabilities = CAPABILITIES | config.own_telemetry_capabilities;
+        if packages_enabled {
+            capabilities |= AgentCapabilities::AcceptsPackages as u64
+                | AgentCapabilities::ReportsPackageStatuses as u64;
+        }
         Self {
             server_url: config.server_url,
             instance_uid: config.instance_uid.to_vec(),
@@ -217,7 +258,7 @@ impl<A: ManagedAgent> Supervisor<A> {
             agent_version: config.agent_version,
             agent_description,
             extra_attributes: config.extra_attributes,
-            capabilities: CAPABILITIES | config.own_telemetry_capabilities,
+            capabilities,
             agent,
             fallback: config.fallback,
             applied_hash: Vec::new(),
@@ -237,6 +278,10 @@ impl<A: ManagedAgent> Supervisor<A> {
             rollback_enabled: config.automatic_config_rollback,
             rollback_health_timeout: ROLLBACK_HEALTH_TIMEOUT,
             rolled_back: None,
+            packages_enabled,
+            installed_package: None,
+            package_all_hash: Vec::new(),
+            package_status: None,
         }
     }
 
@@ -256,6 +301,9 @@ impl<A: ManagedAgent> Supervisor<A> {
 
         // Resume on the OpAMP connection settings the Server last re-pointed us to (ADR-0015).
         self.load_conn_settings();
+
+        // Resume the installed-package state, so a restart reports what it has without re-installing (ADR-0018).
+        self.load_packages();
 
         if !self.resume_last_config().await {
             self.apply_fallback().await;
@@ -598,6 +646,14 @@ impl<A: ManagedAgent> Supervisor<A> {
         if telemetry_changed && !reconfigured {
             self.reapply_running_config(ws).await?;
         }
+
+        // Package offer (ADR-0018): download, hash-verify, swap the binary, and report the outcome. The
+        // Server sends this only when its aggregate package hash differs from what we last reported.
+        if let Some(available) = msg.packages_available {
+            if self.packages_enabled {
+                self.apply_packages(ws, available).await?;
+            }
+        }
         Ok(())
     }
 
@@ -782,6 +838,317 @@ impl<A: ManagedAgent> Supervisor<A> {
         self.send(ws, report).await
     }
 
+    /// Processes a `PackagesAvailable` offer for the single top-level package (the agent's binary,
+    /// ADR-0018): download, verify the content hash, install and restart onto it, confirm health (rolling
+    /// back a binary that does not become healthy), and report `PackageStatuses` at each step. The
+    /// aggregate `all_packages_hash` is echoed back whatever the outcome, so the Server's comparison
+    /// converges and a failed install is not re-offered in a loop.
+    async fn apply_packages(
+        &mut self,
+        ws: &mut Ws,
+        available: PackagesAvailable,
+    ) -> Result<(), String> {
+        self.package_all_hash = available.all_packages_hash.clone();
+
+        // First increment: exactly one top-level package; addons are out of scope (ADR-0018).
+        let Some((name, pkg)) = take_top_level(available.packages) else {
+            self.persist_packages();
+            let report = self.package_report();
+            return self.send(ws, report).await;
+        };
+        let version = pkg.version.clone();
+        let offered_hash = pkg.hash.clone();
+
+        // De-duplicate: an offer whose hash matches the installed package needs no work (ADR-0018) — this
+        // is what stops an unchanged re-offer from restarting the collector.
+        if self
+            .installed_package
+            .as_ref()
+            .is_some_and(|p| p.hash == offered_hash)
+        {
+            self.package_status = Some(self.package_status_for(
+                &name,
+                &version,
+                &offered_hash,
+                PackageStatusEnum::Installed,
+                String::new(),
+            ));
+            self.persist_packages();
+            let report = self.package_report();
+            return self.send(ws, report).await;
+        }
+
+        let Some(file) = pkg.file else {
+            return self
+                .fail_package(
+                    ws,
+                    &name,
+                    &version,
+                    &offered_hash,
+                    "the package carried no downloadable file".to_string(),
+                )
+                .await;
+        };
+
+        info!(package = %name, %version, "downloading offered package");
+        self.report_package_step(
+            ws,
+            &name,
+            &version,
+            &offered_hash,
+            PackageStatusEnum::Downloading,
+        )
+        .await?;
+
+        let headers = header_pairs(file.headers.as_ref());
+        let bytes = match crate::download::get(
+            &file.download_url,
+            &headers,
+            self.tls_ca.as_deref(),
+            self.tls_insecure,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return self
+                    .fail_package(
+                        ws,
+                        &name,
+                        &version,
+                        &offered_hash,
+                        format!("download failed: {e}"),
+                    )
+                    .await;
+            }
+        };
+
+        // Verify the content hash before the bytes are ever made executable (the spec's integrity check,
+        // ADR-0018). A mismatch aborts without touching the running collector.
+        if !file.content_hash.is_empty()
+            && Sha256::digest(&bytes).as_slice() != file.content_hash.as_slice()
+        {
+            return self
+                .fail_package(
+                    ws,
+                    &name,
+                    &version,
+                    &offered_hash,
+                    "downloaded package failed content-hash verification".to_string(),
+                )
+                .await;
+        }
+
+        info!(package = %name, %version, "installing offered package");
+        self.report_package_step(
+            ws,
+            &name,
+            &version,
+            &offered_hash,
+            PackageStatusEnum::Installing,
+        )
+        .await?;
+
+        let had_previous = self.installed_package.is_some();
+        if let Err(e) = self.agent.install_package(&bytes).await {
+            return self
+                .fail_package(
+                    ws,
+                    &name,
+                    &version,
+                    &offered_hash,
+                    format!("install failed: {e}"),
+                )
+                .await;
+        }
+
+        // Confirm the new binary becomes healthy before committing, when rollback is enabled and there is
+        // a previous binary to fall back to — mirroring config rollback (ADR-0008/0018).
+        if self.rollback_enabled && had_previous && !self.confirm_health().await {
+            let error = format!(
+                "package rolled back: the collector did not become healthy ({})",
+                self.current_health().last_error
+            );
+            warn!(package = %name, "installed package did not become healthy; rolling back to the previous binary");
+            if let Err(e) = self.agent.rollback_package().await {
+                error!(error = %e, "cannot roll back to the previous collector binary");
+            }
+            return self
+                .fail_package(ws, &name, &version, &offered_hash, error)
+                .await;
+        }
+
+        self.installed_package = Some(InstalledPackage {
+            version: version.clone(),
+            hash: offered_hash.clone(),
+        });
+        self.package_status = Some(self.package_status_for(
+            &name,
+            &version,
+            &offered_hash,
+            PackageStatusEnum::Installed,
+            String::new(),
+        ));
+        self.persist_packages();
+        info!(package = %name, %version, "package INSTALLED");
+        let mut report = self.package_report();
+        report.health = Some(self.current_health());
+        self.send(ws, report).await
+    }
+
+    /// Records and reports an in-progress package step (Downloading / Installing).
+    async fn report_package_step(
+        &mut self,
+        ws: &mut Ws,
+        name: &str,
+        version: &str,
+        offered_hash: &[u8],
+        status: PackageStatusEnum,
+    ) -> Result<(), String> {
+        self.package_status =
+            Some(self.package_status_for(name, version, offered_hash, status, String::new()));
+        let report = self.package_report();
+        self.send(ws, report).await
+    }
+
+    /// Records a failed package install and reports it (`InstallFailed` with the reason). The failed
+    /// offer's hash is *not* installed, and because we still echo the Server's `all_packages_hash` the
+    /// Server does not loop re-offering the same broken binary (ADR-0018).
+    async fn fail_package(
+        &mut self,
+        ws: &mut Ws,
+        name: &str,
+        version: &str,
+        offered_hash: &[u8],
+        error: String,
+    ) -> Result<(), String> {
+        error!(package = %name, %version, %error, "package InstallFailed");
+        self.package_status = Some(self.package_status_for(
+            name,
+            version,
+            offered_hash,
+            PackageStatusEnum::InstallFailed,
+            error,
+        ));
+        self.persist_packages();
+        let mut report = self.package_report();
+        report.health = Some(self.current_health());
+        self.send(ws, report).await
+    }
+
+    /// Builds a `PackageStatus` for the top-level package: what the agent currently has (the installed
+    /// package, or empty), what the Server offered, the status, and any error.
+    fn package_status_for(
+        &self,
+        name: &str,
+        offered_version: &str,
+        offered_hash: &[u8],
+        status: PackageStatusEnum,
+        error: String,
+    ) -> PackageStatus {
+        PackageStatus {
+            name: name.to_string(),
+            agent_has_version: self
+                .installed_package
+                .as_ref()
+                .map(|p| p.version.clone())
+                .unwrap_or_default(),
+            agent_has_hash: self
+                .installed_package
+                .as_ref()
+                .map(|p| p.hash.clone())
+                .unwrap_or_default(),
+            server_offered_version: offered_version.to_string(),
+            server_offered_hash: offered_hash.to_vec(),
+            status: status as i32,
+            error_message: error,
+            ..Default::default()
+        }
+    }
+
+    /// A report carrying the current `PackageStatuses`, for the Downloading/Installing/Installed steps.
+    fn package_report(&mut self) -> AgentToServer {
+        let mut report = self.next_report();
+        report.package_statuses = self.package_statuses();
+        report
+    }
+
+    /// The `PackageStatuses` to report — the top-level package's status and the aggregate hash the Server
+    /// last offered — or `None` for an agent that does not do packages (ADR-0018).
+    fn package_statuses(&self) -> Option<PackageStatuses> {
+        if !self.packages_enabled {
+            return None;
+        }
+        let mut packages = HashMap::new();
+        if let Some(status) = &self.package_status {
+            packages.insert(status.name.clone(), status.clone());
+        }
+        Some(PackageStatuses {
+            packages,
+            server_provided_all_packages_hash: self.package_all_hash.clone(),
+            error_message: String::new(),
+        })
+    }
+
+    /// Persists the installed-package state (its name, version, hash, and the last aggregate hash) so a
+    /// restart reports what it has and de-duplicates the next offer without re-installing (ADR-0018).
+    fn persist_packages(&self) {
+        if !self.packages_enabled {
+            return;
+        }
+        if let Err(e) = std::fs::create_dir_all(&self.storage_dir) {
+            warn!(error = %e, "cannot create the supervisor storage directory");
+            return;
+        }
+        let persisted = PersistedPackages {
+            name: self
+                .package_status
+                .as_ref()
+                .map(|s| s.name.clone())
+                .unwrap_or_default(),
+            all_hash: hex::encode(&self.package_all_hash),
+            installed: self.installed_package.clone(),
+        };
+        match serde_yaml::to_string(&persisted) {
+            Ok(yaml) => {
+                if let Err(e) = std::fs::write(self.storage_dir.join("packages.yaml"), yaml) {
+                    warn!(error = %e, "cannot persist the package state");
+                }
+            }
+            Err(e) => warn!(error = %e, "cannot serialize the package state"),
+        }
+    }
+
+    /// Loads the persisted installed-package state, so a restart resumes reporting it (ADR-0018).
+    fn load_packages(&mut self) {
+        if !self.packages_enabled {
+            return;
+        }
+        let Ok(bytes) = std::fs::read(self.storage_dir.join("packages.yaml")) else {
+            return;
+        };
+        let Ok(persisted) = serde_yaml::from_slice::<PersistedPackages>(&bytes) else {
+            return;
+        };
+        self.package_all_hash = hex::decode(persisted.all_hash.trim()).unwrap_or_default();
+        self.installed_package = persisted.installed;
+        // Rebuild the installed package's status so it is reported before any new offer arrives.
+        if let (Some(installed), false) = (&self.installed_package, persisted.name.is_empty()) {
+            self.package_status = Some(PackageStatus {
+                name: persisted.name,
+                agent_has_version: installed.version.clone(),
+                agent_has_hash: installed.hash.clone(),
+                server_offered_version: installed.version.clone(),
+                server_offered_hash: installed.hash.clone(),
+                status: PackageStatusEnum::Installed as i32,
+                ..Default::default()
+            });
+        }
+        if self.installed_package.is_some() {
+            info!("resumed the installed-package state");
+        }
+    }
+
     /// A report carrying the Agent's full state — identity, health, and the configuration it holds.
     fn full_state_report(&mut self) -> AgentToServer {
         let mut report = self.next_report();
@@ -797,6 +1164,7 @@ impl<A: ManagedAgent> Supervisor<A> {
             report.remote_config_status = Some(applied_status(self.applied_hash.clone()));
             report.effective_config = Some(self.effective_config());
         }
+        report.package_statuses = self.package_statuses();
         report
     }
 
@@ -1120,6 +1488,34 @@ fn heartbeat_override(msg: &ServerToAgent) -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
+/// Picks the single top-level package to install from an offer's package map (ADR-0018): the entry of
+/// `PackageType::TopLevel`, chosen deterministically by name so a repeated offer resolves the same way.
+/// Addons are ignored in this increment. `None` when no top-level package is offered.
+fn take_top_level(
+    mut packages: HashMap<String, PackageAvailable>,
+) -> Option<(String, PackageAvailable)> {
+    let mut names: Vec<String> = packages.keys().cloned().collect();
+    names.sort();
+    let name = names
+        .into_iter()
+        .find(|name| packages[name].r#type == PackageType::TopLevel as i32)?;
+    let pkg = packages.remove(&name)?;
+    Some((name, pkg))
+}
+
+/// The `(key, value)` header pairs from an offered `DownloadableFile.headers` (e.g. the `Authorization`
+/// the Server attached), for the download request (ADR-0018).
+fn header_pairs(headers: Option<&Headers>) -> Vec<(String, String)> {
+    headers
+        .map(|h| {
+            h.headers
+                .iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The offered config map as an ordered list of `(key, body)`, sorted by key — the order in which the
 /// files are merged into the applied config, matching the Go supervisor. Empty when nothing is offered.
 fn sorted_config_files(config: Option<AgentConfigMap>) -> Vec<(String, Vec<u8>)> {
@@ -1215,6 +1611,8 @@ mod tests {
         applied: Vec<Vec<u8>>,
         /// The health the agent reports about itself, for exercising the rollback health check.
         reported_health: Option<ComponentHealth>,
+        /// Whether this fake accepts package updates (ADR-0018).
+        accepts_packages: bool,
     }
 
     impl ManagedAgent for FakeAgent {
@@ -1236,6 +1634,9 @@ mod tests {
         }
         async fn supervise(&mut self) -> Option<String> {
             None
+        }
+        fn accepts_packages(&self) -> bool {
+            self.accepts_packages
         }
     }
 
@@ -1756,5 +2157,216 @@ mod tests {
         sup.restore_conn(snapshot);
         assert_eq!(sup.server_url, "ws://old/v1/opamp");
         assert!(sup.offered_headers.is_empty());
+    }
+
+    // --- Package distribution (ADR-0018) ---
+
+    use opamp_proto::proto::{DownloadableFile, Header, Headers, PackageAvailable};
+
+    fn package(version: &str, hash: &[u8], type_: PackageType) -> PackageAvailable {
+        PackageAvailable {
+            r#type: type_ as i32,
+            version: version.to_string(),
+            file: Some(DownloadableFile {
+                download_url: "http://dev:4321/packages/otelcol".to_string(),
+                content_hash: vec![1, 2, 3],
+                ..Default::default()
+            }),
+            hash: hash.to_vec(),
+        }
+    }
+
+    fn package_supervisor() -> Supervisor<FakeAgent> {
+        let seq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("opamp-sup-pkg-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sup = supervisor_with(FakeAgent {
+            accepts_packages: true,
+            ..Default::default()
+        });
+        sup.packages_enabled = true;
+        sup.storage_dir = dir;
+        sup
+    }
+
+    #[test]
+    fn a_package_capable_agent_declares_the_package_capabilities() {
+        let capable = Supervisor::new(
+            package_config(),
+            FakeAgent {
+                accepts_packages: true,
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            capable.capabilities & AgentCapabilities::AcceptsPackages as u64,
+            0
+        );
+        assert_ne!(
+            capable.capabilities & AgentCapabilities::ReportsPackageStatuses as u64,
+            0
+        );
+        // An agent that does not accept packages declares neither bit.
+        let plain = supervisor_with(FakeAgent::default());
+        assert_eq!(
+            plain.capabilities
+                & (AgentCapabilities::AcceptsPackages as u64
+                    | AgentCapabilities::ReportsPackageStatuses as u64),
+            0
+        );
+    }
+
+    fn package_config() -> Config {
+        Config {
+            server_url: "ws://localhost/v1/opamp".to_string(),
+            instance_uid: [0u8; 16],
+            uid_path: std::path::PathBuf::from("/tmp/opamp-sup-pkgcap-uid"),
+            storage_dir: std::path::PathBuf::from("/tmp/opamp-sup-pkgcap-store"),
+            service_name: "io.opentelemetry.collector".to_string(),
+            agent_version: None,
+            fallback: Vec::new(),
+            heartbeat: Duration::from_secs(30),
+            extra_attributes: Vec::new(),
+            own_telemetry_capabilities: 0,
+            automatic_config_rollback: false,
+            auth_token: None,
+            tls_ca: None,
+            tls_insecure: false,
+        }
+    }
+
+    #[test]
+    fn take_top_level_picks_the_top_level_package_ignoring_addons() {
+        let packages: HashMap<String, PackageAvailable> = [
+            (
+                "z-addon".to_string(),
+                package("1", b"a", PackageType::Addon),
+            ),
+            (
+                "otelcol".to_string(),
+                package("2", b"b", PackageType::TopLevel),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let (name, pkg) = take_top_level(packages).expect("a top-level package is picked");
+        assert_eq!(name, "otelcol");
+        assert_eq!(pkg.version, "2");
+
+        // No top-level entry → nothing to install.
+        let only_addon: HashMap<String, PackageAvailable> =
+            [("a".to_string(), package("1", b"a", PackageType::Addon))]
+                .into_iter()
+                .collect();
+        assert!(take_top_level(only_addon).is_none());
+    }
+
+    #[test]
+    fn header_pairs_extracts_offered_headers() {
+        let headers = Headers {
+            headers: vec![Header {
+                key: "Authorization".to_string(),
+                value: "Bearer x".to_string(),
+            }],
+        };
+        assert_eq!(
+            header_pairs(Some(&headers)),
+            vec![("Authorization".to_string(), "Bearer x".to_string())]
+        );
+        assert!(header_pairs(None).is_empty());
+    }
+
+    #[test]
+    fn package_statuses_reports_the_installed_package_and_all_hash() {
+        let mut sup = package_supervisor();
+        // Nothing installed yet, but enabled → an (empty) statuses message with the aggregate hash.
+        sup.package_all_hash = vec![9, 9];
+        let statuses = sup
+            .package_statuses()
+            .expect("enabled agents report statuses");
+        assert_eq!(statuses.server_provided_all_packages_hash, vec![9, 9]);
+        assert!(statuses.packages.is_empty());
+
+        // With an installed package and its status, it is reported under its name.
+        sup.installed_package = Some(InstalledPackage {
+            version: "2.0.0".to_string(),
+            hash: vec![7],
+        });
+        sup.package_status = Some(sup.package_status_for(
+            "otelcol",
+            "2.0.0",
+            &[7],
+            PackageStatusEnum::Installed,
+            String::new(),
+        ));
+        let statuses = sup.package_statuses().unwrap();
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::Installed as i32);
+        assert_eq!(status.agent_has_version, "2.0.0");
+        assert_eq!(status.server_offered_version, "2.0.0");
+
+        // A non-package agent reports no statuses at all.
+        let plain = supervisor_with(FakeAgent::default());
+        assert!(plain.package_statuses().is_none());
+    }
+
+    #[test]
+    fn package_status_for_carries_agent_has_and_server_offered() {
+        let mut sup = package_supervisor();
+        sup.installed_package = Some(InstalledPackage {
+            version: "1.0.0".to_string(),
+            hash: vec![1],
+        });
+        // A failed install of a newer version: agent still has 1.0.0, Server offered 2.0.0.
+        let status = sup.package_status_for(
+            "otelcol",
+            "2.0.0",
+            &[2],
+            PackageStatusEnum::InstallFailed,
+            "boom".to_string(),
+        );
+        assert_eq!(status.agent_has_version, "1.0.0");
+        assert_eq!(status.agent_has_hash, vec![1]);
+        assert_eq!(status.server_offered_version, "2.0.0");
+        assert_eq!(status.server_offered_hash, vec![2]);
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        assert_eq!(status.error_message, "boom");
+    }
+
+    #[test]
+    fn persist_and_load_packages_round_trips() {
+        let mut sup = package_supervisor();
+        let dir = sup.storage_dir.clone();
+        sup.package_all_hash = vec![0xaa, 0xbb];
+        sup.installed_package = Some(InstalledPackage {
+            version: "2.0.0".to_string(),
+            hash: vec![0xde, 0xad],
+        });
+        sup.package_status = Some(sup.package_status_for(
+            "otelcol",
+            "2.0.0",
+            &[0xde, 0xad],
+            PackageStatusEnum::Installed,
+            String::new(),
+        ));
+        sup.persist_packages();
+
+        // A fresh supervisor on the same storage dir resumes the installed package and its status.
+        let mut resumed = package_supervisor();
+        resumed.storage_dir = dir;
+        resumed.load_packages();
+        assert_eq!(resumed.package_all_hash, vec![0xaa, 0xbb]);
+        let installed = resumed
+            .installed_package
+            .expect("resumed the installed package");
+        assert_eq!(installed.version, "2.0.0");
+        assert_eq!(installed.hash, vec![0xde, 0xad]);
+        let status = resumed.package_status.expect("resumed the reported status");
+        assert_eq!(status.name, "otelcol");
+        assert_eq!(status.status, PackageStatusEnum::Installed as i32);
     }
 }

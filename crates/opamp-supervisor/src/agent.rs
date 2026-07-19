@@ -45,6 +45,31 @@ impl OwnTelemetry {
     }
 }
 
+/// The identity of the top-level package (the agent's binary) currently installed: its version and the
+/// Server-provided package hash it was installed from (ADR-0018). Persisted by the domain so a restart
+/// resumes without re-installing, and used to de-duplicate an unchanged offer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPackage {
+    pub version: String,
+    #[serde(with = "hex_bytes", default)]
+    pub hash: Vec<u8>,
+}
+
+/// Serializes a byte string as hex in persisted state, so [`InstalledPackage`] round-trips through YAML
+/// as a readable string rather than a byte sequence.
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// How long a graceful stop waits for a process to exit after SIGTERM before resorting to SIGKILL.
 pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -158,6 +183,33 @@ pub trait ManagedAgent: Send + 'static {
     /// does not report its own telemetry).
     fn set_own_telemetry(&mut self, _settings: OwnTelemetry) -> bool {
         false
+    }
+
+    /// Whether this adapter can install top-level package (binary) updates from the Server (ADR-0018).
+    /// The domain declares `AcceptsPackages` / `ReportsPackageStatuses` only when this is true. Default
+    /// `false` — an adapter with no swappable binary (a Foreign Agent, for now) does not accept packages.
+    fn accepts_packages(&self) -> bool {
+        false
+    }
+
+    /// Install a downloaded, hash-verified binary as the agent's top-level package and restart onto it,
+    /// **preserving the previously installed binary** so a failed update can be rolled back
+    /// ([`rollback_package`](ManagedAgent::rollback_package)). The domain has already verified the
+    /// content hash before calling this. `Err(message)` is reported as an `InstallFailed` package status.
+    /// Default: `Err` — an adapter that does not accept packages. Only called when
+    /// [`accepts_packages`](ManagedAgent::accepts_packages) is true (ADR-0018).
+    fn install_package(
+        &mut self,
+        _binary: &[u8],
+    ) -> impl Future<Output = Result<(), String>> + Send {
+        async { Err("this agent does not accept package updates".to_string()) }
+    }
+
+    /// Restore the binary replaced by the most recent successful
+    /// [`install_package`](ManagedAgent::install_package) and restart onto it — the domain's rollback when
+    /// a freshly installed binary does not become healthy (ADR-0018). Default: `Err`.
+    fn rollback_package(&mut self) -> impl Future<Output = Result<(), String>> + Send {
+        async { Err("this agent has no previous package to roll back to".to_string()) }
     }
 }
 

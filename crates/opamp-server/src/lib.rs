@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod fleet;
+pub mod packages;
 pub mod server;
 pub mod ui;
 

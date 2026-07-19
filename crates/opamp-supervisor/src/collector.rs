@@ -174,6 +174,81 @@ impl Collector {
         self.restart().await
     }
 
+    /// Where the previous executable is kept while a package update is in place, so a failed update can
+    /// be rolled back to it ([`Collector::rollback_binary`], ADR-0018).
+    fn backup_path(&self) -> PathBuf {
+        self.executable.with_extension("previous")
+    }
+
+    /// Replaces the collector executable with `binary` and restarts onto it, keeping the previous
+    /// executable as a backup so [`Collector::rollback_binary`] can revert (ADR-0018). The new binary is
+    /// staged in the executable's directory and swapped in with an atomic rename, so a reader never sees a
+    /// half-written file. The executable must live in a directory the supervisor can write — a bare
+    /// `PATH` name (no parent directory) is rejected, since there is nothing to swap in place. On any
+    /// failure the running collector is left untouched (the swap happens before the restart).
+    pub async fn install_binary(&mut self, binary: &[u8]) -> Result<(), String> {
+        let dir = self.executable.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| {
+            format!(
+                "cannot install a package for collector {}: it has no writable directory (configure an absolute path)",
+                self.executable.display()
+            )
+        })?;
+
+        let staged = self.executable.with_extension("incoming");
+        std::fs::write(&staged, binary).map_err(|e| {
+            format!(
+                "cannot stage the new collector binary in {}: {e}",
+                dir.display()
+            )
+        })?;
+        // A binary must be executable; mirror a typical 0755 so the supervisor (and only it, for write)
+        // can run the swapped-in collector.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            {
+                let _ = std::fs::remove_file(&staged);
+                return Err(format!(
+                    "cannot make the new collector binary executable: {e}"
+                ));
+            }
+        }
+
+        // Stop the current process before moving its executable aside, then swap the new binary in and
+        // start it. Keeping the old executable as a backup is what makes rollback possible.
+        self.stop().await;
+        let backup = self.backup_path();
+        if self.executable.exists() {
+            std::fs::rename(&self.executable, &backup).map_err(|e| {
+                let _ = std::fs::remove_file(&staged);
+                format!("cannot back up the current collector binary: {e}")
+            })?;
+        }
+        if let Err(e) = std::fs::rename(&staged, &self.executable) {
+            // Put the backup back so the collector can still start on its previous binary.
+            let _ = std::fs::rename(&backup, &self.executable);
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("cannot install the new collector binary: {e}"));
+        }
+        self.restart().await
+    }
+
+    /// Restores the executable backed up by the last [`Collector::install_binary`] and restarts onto it —
+    /// the rollback when a freshly installed binary does not become healthy (ADR-0018). `Err` if there is
+    /// no backup to restore.
+    pub async fn rollback_binary(&mut self) -> Result<(), String> {
+        let backup = self.backup_path();
+        if !backup.exists() {
+            return Err("no previous collector binary to roll back to".to_string());
+        }
+        self.stop().await;
+        std::fs::rename(&backup, &self.executable)
+            .map_err(|e| format!("cannot restore the previous collector binary: {e}"))?;
+        self.restart().await
+    }
+
     /// The path the collector is launched against — where the applied configuration lives on disk.
     pub fn config_path(&self) -> &Path {
         &self.config_path
@@ -333,6 +408,64 @@ mod tests {
             "the tail carries the error, got {tail:?}"
         );
         let _ = std::fs::remove_file(collector.log_path());
+    }
+
+    #[tokio::test]
+    async fn install_binary_swaps_backs_up_and_rollback_restores() {
+        let seq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("opamp-sup-binswap-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("collector");
+        let original = b"#!/bin/sh\nexit 0\n";
+        let updated = b"#!/bin/sh\nexit 3\n";
+        std::fs::write(&exe, original).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut collector = Collector::new(&exe, dir.join("config.yaml"));
+        collector
+            .install_binary(updated)
+            .await
+            .expect("install the new binary");
+        // The executable now carries the new bytes, and the previous one is kept for rollback.
+        assert_eq!(std::fs::read(&exe).unwrap(), updated);
+        assert_eq!(
+            std::fs::read(exe.with_extension("previous")).unwrap(),
+            original,
+            "the previous binary is backed up"
+        );
+
+        collector
+            .rollback_binary()
+            .await
+            .expect("roll back to the previous binary");
+        assert_eq!(
+            std::fs::read(&exe).unwrap(),
+            original,
+            "rollback restores the original"
+        );
+        collector.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn install_binary_rejects_a_bare_executable_name() {
+        // A bare PATH name has no writable directory to swap in — installing must fail cleanly.
+        let mut collector = Collector::new("otelcol-contrib", "/tmp/opamp-sup-bare.yaml");
+        assert!(collector.install_binary(b"x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rollback_binary_without_a_backup_errors() {
+        let mut collector = Collector::new("/tmp/opamp-sup-nobackup", "/tmp/opamp-sup-nb.yaml");
+        assert!(collector.rollback_binary().await.is_err());
     }
 
     #[tokio::test]

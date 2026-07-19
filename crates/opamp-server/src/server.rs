@@ -25,6 +25,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::ConfigSource;
 use crate::fleet::Fleet;
 use crate::frame::{self, MAX_MESSAGE_SIZE};
+use crate::packages::PackageSource;
 use crate::proto::{
     AgentCapabilities, AgentRemoteConfig, AgentToServer, CommandType, ConnectionSettingsOffers,
     Header, Headers, OpAmpConnectionSettings, RemoteConfigStatuses, ServerCapabilities,
@@ -36,13 +37,15 @@ use crate::proto::{
 pub const LISTEN_PATH: &str = "/v1/opamp";
 
 /// The capabilities this server advertises: it accepts status reports, offers remote configuration and
-/// connection settings (own-telemetry / heartbeat offers, ADR-0011), and accepts the effective config
-/// agents report back. The specification requires `AcceptsStatus` to be set, and it must appear in the
-/// first `ServerToAgent`. Package offers are deferred (ADR-0006).
+/// connection settings (own-telemetry / heartbeat offers, ADR-0011), offers packages and accepts package
+/// status (software distribution, ADR-0018), and accepts the effective config agents report back. The
+/// specification requires `AcceptsStatus` to be set, and it must appear in the first `ServerToAgent`.
 const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
     | ServerCapabilities::AcceptsEffectiveConfig as u64
-    | ServerCapabilities::OffersConnectionSettings as u64;
+    | ServerCapabilities::OffersConnectionSettings as u64
+    | ServerCapabilities::OffersPackages as u64
+    | ServerCapabilities::AcceptsPackagesStatus as u64;
 
 /// A message fanned out to the connections: a new configuration for the whole fleet, or a **restart
 /// command** targeted at one agent by its instance UID (ADR-0011). Every connection receives it; the
@@ -97,6 +100,8 @@ pub struct AppState {
     pub pushes: broadcast::Sender<FleetPush>,
     /// The control offers the Server makes to agents beyond config distribution (ADR-0011).
     pub offers: ServerOffers,
+    /// The packages the Server offers agents for installation (ADR-0018); empty offers none.
+    pub packages: Arc<PackageSource>,
     /// The shared bearer token an agent must present, or `None` to authenticate nobody (ADR-0012).
     pub auth_token: Option<String>,
     /// Hands out a unique id to each accepted connection.
@@ -109,6 +114,7 @@ impl AppState {
         fleet: Arc<Fleet>,
         pushes: broadcast::Sender<FleetPush>,
         offers: ServerOffers,
+        packages: Arc<PackageSource>,
         auth_token: Option<String>,
     ) -> Self {
         Self {
@@ -116,6 +122,7 @@ impl AppState {
             fleet,
             pushes,
             offers,
+            packages,
             auth_token,
             next_conn_id: AtomicU64::new(0),
         }
@@ -253,7 +260,33 @@ fn build_reply(state: &AppState, id: u64, msg: &AgentToServer) -> ServerToAgent 
     // settings on later reports is harmless.
     resp.connection_settings = connection_settings(&state.offers, msg.capabilities);
 
+    // Offer packages when the fleet's aggregate package hash differs from what we distribute, to an agent
+    // that declares it accepts packages and reports their status (ADR-0018). Like the config comparison,
+    // this is driven purely by the hash difference; the agent de-duplicates and reports back, so the
+    // comparison converges and a re-offer is harmless.
+    resp.packages_available =
+        packages_offer(&state.packages, &folded.package_all_hash, msg.capabilities);
+
     resp
+}
+
+/// Builds the `PackagesAvailable` offer for one agent, or `None` when there is nothing to offer: no
+/// packages configured, the agent does not declare both package capabilities, or it already reports the
+/// aggregate hash the Server distributes (ADR-0018).
+fn packages_offer(
+    packages: &PackageSource,
+    agent_all_hash: &[u8],
+    agent_capabilities: u64,
+) -> Option<crate::proto::PackagesAvailable> {
+    let accepts = AgentCapabilities::AcceptsPackages as u64
+        | AgentCapabilities::ReportsPackageStatuses as u64;
+    if packages.is_empty()
+        || agent_capabilities & accepts != accepts
+        || agent_all_hash == packages.all_packages_hash()
+    {
+        return None;
+    }
+    Some(packages.offer())
 }
 
 /// Builds the connection-settings offer for one agent from the Server's configured offers, including
@@ -457,6 +490,59 @@ mod tests {
     fn nothing_offered_when_the_agent_declares_nothing_relevant() {
         // Declares only ReportsStatus: heartbeat and own-telemetry are both gated out.
         assert!(connection_settings(&offers(), AgentCapabilities::ReportsStatus as u64).is_none());
+    }
+
+    fn package_source() -> PackageSource {
+        let dir = std::env::temp_dir().join(format!(
+            "opamp-srv-pkg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("otelcol");
+        std::fs::write(&path, b"BINARY").unwrap();
+        PackageSource::load(
+            vec![crate::packages::PackageSpec {
+                name: "otelcol".to_string(),
+                version: "2.0.0".to_string(),
+                package_type: crate::proto::PackageType::TopLevel,
+                path,
+            }],
+            "http://dev:4321".to_string(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn packages_offered_only_to_a_package_capable_agent_out_of_sync() {
+        let source = package_source();
+        let both = AgentCapabilities::AcceptsPackages as u64
+            | AgentCapabilities::ReportsPackageStatuses as u64;
+
+        // A capable agent reporting an empty (different) hash is offered the package.
+        let offer =
+            packages_offer(&source, &[], both).expect("out-of-sync capable agent is offered");
+        assert!(offer.packages.contains_key("otelcol"));
+        assert_eq!(offer.all_packages_hash, source.all_packages_hash());
+
+        // The same agent already reporting the current hash is offered nothing (converged).
+        assert!(packages_offer(&source, source.all_packages_hash(), both).is_none());
+
+        // An agent missing either capability bit is never offered, even when out of sync.
+        assert!(packages_offer(&source, &[], AgentCapabilities::AcceptsPackages as u64).is_none());
+        assert!(packages_offer(
+            &source,
+            &[],
+            AgentCapabilities::ReportsPackageStatuses as u64
+        )
+        .is_none());
+
+        // No packages configured → nothing offered to anyone.
+        assert!(packages_offer(&PackageSource::empty(), &[], both).is_none());
     }
 
     #[test]

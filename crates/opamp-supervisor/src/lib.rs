@@ -12,6 +12,7 @@ pub mod agent;
 pub mod collector;
 pub mod collector_agent;
 pub mod config;
+pub mod download;
 pub mod health;
 pub mod host;
 pub mod local_server;
