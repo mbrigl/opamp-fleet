@@ -1,0 +1,15 @@
+{
+  // Fallback for starting the server without the debugger: Terminal -> Run Task -> "run: opamp-server"
+  // (or make it the default build task). Works with just the Rust toolchain, no debug extension needed.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "run: opamp-server",
+      "type": "shell",
+      "command": "cargo run -p opamp-server",
+      "problemMatcher": ["$rustc"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    }
+  ]
+}

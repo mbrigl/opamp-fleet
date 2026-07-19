@@ -1,48 +1,64 @@
 name: CI
 
-# Language-neutral CI skeleton. Inert by default: it runs only on manual dispatch and does nothing
-# but confirm it is wired up, so the repository stays green before a toolchain exists. The base image
-# ships no language toolchain (see README) — this file is the place to add build/test/lint once you do.
-#
-# To activate for your project:
-#   1. Switch the trigger to pull_request + push (uncomment the block in `on:` below).
-#   2. Uncomment the `build-test-lint` job, add a setup step for your toolchain, and fill in the
-#      build/test/lint commands. These MUST match README.md → "Build, Test & Run", the single source
-#      of truth for those commands (AGENTS.md §6), and enforce the Definition of Done (AGENTS.md §5).
-#   3. Delete the `placeholder` job once real jobs run.
-#
-# Adding a language toolchain or a hard CI dependency is architecture-relevant — record it as an ADR
-# first (AGENTS.md §3).
+# Enforces the Definition of Done (AGENTS.md §5). The commands here MUST match README.md →
+# "Build, Test & Run", the single source of truth for them (AGENTS.md §6).
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
-  # pull_request:
-  # push:
-  #   branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  placeholder:
+  build-test-lint:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "CI skeleton is wired up. Fill in build/test/lint — see this file's header."
+      - uses: actions/checkout@v7
 
-  # build-test-lint:
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       os: [ubuntu-latest]
-  #       # version: [ ... ]   # e.g. language/runtime versions to test against
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #     # - name: Set up toolchain
-  #     #   run: ...            # install the language/runtime — the base image ships none
-  #     - name: Build
-  #       run: ...              # README → Build
-  #     - name: Test
-  #       run: ...              # README → Test (must pass — Definition of Done, AGENTS.md §4)
-  #     - name: Lint & format check
-  #       run: ...              # linter + formatter in check mode
+      # prost-build invokes protoc to generate the OpAMP types from the vendored schema
+      # (ADR-0004, ADR-0006).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # rust-toolchain.toml pins the channel and the rustfmt/clippy components; `rustup show`
+      # provisions exactly that toolchain on the runner (ADR-0004).
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+
+      # `--workspace` covers every crate: the server, the Supervisor Host, and the shared proto crate
+      # (ADR-0005).
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      # The integration suite drives the real server over a WebSocket; there is no external race
+      # detector, but tokio's runtime and `--all-targets` exercise the concurrent paths.
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+  # The upstream supervisor is alpha and its image ships no collector binary, so the sidecar image
+  # stitches two pinned upstream images together (ADR-0003). Building it here is what catches an
+  # upstream layout change before it breaks everyone's Dev Container.
+  opamp-agent-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the OpAMP agent sidecar image
+        run: docker build -t opamp-agent:ci .devcontainer/opamp-agent
+
+      # The collector binary must be executable inside this image — `agent.executable` in
+      # supervisor.yaml points at it, and a wrong path or architecture only surfaces at runtime.
+      - name: Verify the collector binary the supervisor will launch
+        run: docker run --rm --entrypoint /usr/local/bin/otelcol-contrib opamp-agent:ci --version
+
+      - name: Verify the supervisor binary is in place
+        run: docker run --rm --entrypoint /bin/sh opamp-agent:ci -c 'test -x /usr/local/bin/opampsupervisor'

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpAMP fleet</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 2rem 1.5rem; max-width: 68rem; }
+  h1 { margin: 0 0 .25rem; font-size: 1.4rem; }
+  h2 { margin: 2.5rem 0 .75rem; font-size: 1.1rem; }
+  .sub { margin: 0 0 1.5rem; opacity: .7; }
+  .banner { padding: .6rem .9rem; border-radius: 6px; border: 1px solid; margin-bottom: 1.5rem; }
+  .warn { border-color: #b45309; background: #fef3c7; color: #7c2d12; }
+  .bad { border-color: #b91c1c; background: #fee2e2; color: #7f1d1d; }
+  .good { border-color: #15803d; background: #dcfce7; color: #14532d; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid rgba(128,128,128,.35); vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; opacity: .65; }
+  code, pre, textarea { font-family: ui-monospace, monospace; }
+  pre { margin: 0; white-space: pre-wrap; font-size: .8rem; opacity: .8; }
+  .pill { display: inline-block; padding: .05rem .45rem; border-radius: 999px; font-size: .75rem; border: 1px solid currentColor; }
+  .ok { color: #15803d; }
+  .err { color: #b91c1c; }
+  .muted { opacity: .6; }
+  textarea { width: 100%; min-height: 22rem; padding: .75rem; font-size: .85rem; border-radius: 6px; border: 1px solid rgba(128,128,128,.5); background: transparent; color: inherit; }
+  button { margin-top: .75rem; padding: .5rem 1.1rem; font: inherit; border-radius: 6px; cursor: pointer; }
+  .empty { padding: 1.5rem; text-align: center; opacity: .6; border: 1px dashed rgba(128,128,128,.5); border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<h1>OpAMP fleet</h1>
+<p class="sub">Agents connected to this server, and the collector configuration they run.</p>
+
+<!-- Not decoration: this server authenticates nobody, and the form below can reconfigure every
+     collector in the fleet. See ADR-0007. -->
+<p class="banner warn">
+  <strong>Unauthenticated.</strong> Anyone who can reach this page can reconfigure the whole fleet.
+  This is a development server — do not expose it beyond a trusted network.
+</p>
+
+{% if let Some(err) = error %}<p class="banner bad">{{ err }}</p>{% endif %}
+{% if saved %}<p class="banner good">Configuration saved. The server distributes it to the fleet within one poll interval.</p>{% endif %}
+
+<h2>Agents ({{ agents.len() }})</h2>
+
+{% if agents.is_empty() %}
+<p class="empty">No agent is connected. Start the supervisor sidecar, or check that it can reach this server.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Health</th>
+      <th>Configuration</th>
+      <th>Last seen</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for agent in agents %}
+    <tr>
+      <td>
+        <code>{{ agent.uid }}</code>
+        {% for kv in agent.attributes %}<br><span class="muted">{{ kv.0 }}: {{ kv.1 }}</span>{% endfor %}
+        {% for kv in agent.context %}<br><span class="muted">{{ kv.0 }}: {{ kv.1 }}</span>{% endfor %}
+      </td>
+      <td>
+        {% if !agent.health_reported %}<span class="pill muted">no report</span>
+        {% else if agent.healthy %}<span class="pill ok">healthy</span>
+        {% else %}<span class="pill err">unhealthy</span>{% endif %}
+        {% if !agent.health_status.is_empty() %}<br><span class="muted">{{ agent.health_status }}</span>{% endif %}
+        {% if !agent.health_error.is_empty() %}<br><strong class="err">{{ agent.health_error }}</strong>{% endif %}
+      </td>
+      <td>
+        {% if agent.config_status == "FAILED" %}<span class="pill err">{{ agent.config_status }}</span>
+        {% else %}<span class="pill {% if agent.in_sync %}ok{% endif %}">{{ agent.config_status }}</span>{% endif %}
+        {% if !agent.in_sync %}<span class="pill muted">out of sync</span>{% endif %}
+        {% if !agent.config_hash.is_empty() %}<br><span class="muted">hash {{ agent.config_hash }}</span>{% endif %}
+        {% if !agent.config_error.is_empty() %}<br><strong class="err">{{ agent.config_error }}</strong>{% endif %}
+        {% if !agent.effective_config.is_empty() %}<details><summary class="muted">effective config</summary><pre>{{ agent.effective_config }}</pre></details>{% endif %}
+      </td>
+      <td class="muted">{{ agent.last_seen }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Collector configuration</h2>
+<p class="sub">
+  Saving writes <code>config/collector.yaml</code>. Nothing else: the server watches that file and
+  pushes the change to every agent — editing it here and editing it in your editor are the same act.
+  A configuration the collector cannot load comes back above as <code>FAILED</code>, with its reason.
+</p>
+
+<form method="post" action="/config">
+  <textarea name="config" spellcheck="false" aria-label="Collector configuration">{{ config }}</textarea>
+  <button type="submit">Save &amp; push to fleet</button>
+</form>
+
+</body>
+</html>

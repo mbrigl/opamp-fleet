@@ -27,6 +27,14 @@ services:
     # Dev Container Features are layered onto this image by the IDE. Without a long-running command the
     # container would exit immediately and there would be nothing to attach to.
     command: sleep infinity
+    # Publish the server's listeners to the host so a browser reaches the fleet UI + REST API at
+    # http://localhost:4321 (and the OpAMP endpoint at localhost:4320) directly, without depending on
+    # the IDE's port forwarding. Bound to 127.0.0.1 only — the server is unauthenticated, so it must not
+    # be exposed beyond the host's loopback. The sidecars still reach it over the Compose network by
+    # service name (ws://dev:4320); this only adds host-loopback access (ADR-0003).
+    ports:
+      - "127.0.0.1:4320:4320"
+      - "127.0.0.1:4321:4321"
     environment:
       CLAUDE_CONFIG_DIR: /home/vscode/.claude
     volumes:

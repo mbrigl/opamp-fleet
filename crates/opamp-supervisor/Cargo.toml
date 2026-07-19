@@ -1,0 +1,25 @@
+[package]
+name = "opamp-supervisor"
+description = "The Supervisor Host: a Rust process that hosts OpAMP supervisors as plugins (skeleton)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Library + binary, mirroring opamp-server: the host wiring lives in the library so its pure parts can
+# be unit-tested as the plugin/hexagonal structure grows (ADR-0005).
+[lib]
+name = "opamp_supervisor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opamp-supervisor"
+path = "src/main.rs"
+
+# Skeleton dependencies only. The OpAMP client loop and its wire layer (opamp-proto), the async
+# runtime (tokio), and the agent-lifecycle adapters arrive with the plugin/hexagonal implementation in
+# a later change (ADR-0005).
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true

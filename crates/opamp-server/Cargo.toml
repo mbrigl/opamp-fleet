@@ -1,0 +1,37 @@
+[package]
+name = "opamp-server"
+description = "The OpAMP Fleet Server: an OpAMP server for OpenTelemetry Collector fleets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The library keeps the crate name `opamp` so the binary refers to it as `opamp::…`. The package is
+# `opamp-server` (ADR-0005).
+[lib]
+name = "opamp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opamp-server"
+path = "src/main.rs"
+
+[dependencies]
+opamp-proto.workspace = true
+tokio.workspace = true
+axum.workspace = true
+prost.workspace = true
+askama.workspace = true
+serde.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+# Test-only: a WebSocket client to drive the OpAMP endpoint, and tower's `oneshot` to query the API
+# router without a second real listener.
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+tower = { version = "0.5", features = ["util"] }

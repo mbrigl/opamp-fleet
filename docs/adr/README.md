@@ -29,4 +29,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | ⚪ superseded by ADR-0003 |
 | [0003](0003-compose-dev-environment-with-opamp-sidecars.md) | Compose-based Dev Container with OpAMP sidecars | 🟢 accepted |
 | [0004](0004-rust-toolchain-dev-container.md) | Rust toolchain and build tooling in the Dev Container | 🟢 accepted |
+| [0005](0005-cargo-workspace-layout.md) | A Cargo workspace — `opamp-server`, `opamp-supervisor`, shared `opamp-proto` | 🟢 accepted |
+| [0006](0006-rust-opamp-server-from-spec.md) | Implement the OpAMP server side in Rust, from the specification | 🟢 accepted |
+| [0007](0007-rest-api-and-fleet-ui.md) | A JSON REST API (with SSE) and a minimal HTML fleet view | 🟢 accepted |
 

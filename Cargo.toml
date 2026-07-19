@@ -1,0 +1,29 @@
+# Cargo workspace (ADR-0005): the OpAMP Fleet Server and the Supervisor Host are two binaries that
+# share one protocol layer (`opamp-proto`). One workspace, one Cargo.lock, one pinned toolchain
+# (`rust-toolchain.toml`, ADR-0004), so every crate resolves the same compiler and dependency versions.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+# Versions are pinned once here and referenced from each crate with `<dep>.workspace = true`, so the
+# Server and the Supervisor Host never diverge on tokio, prost, or the OpAMP wire crate.
+[workspace.dependencies]
+opamp-proto = { path = "crates/opamp-proto" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
+axum = { version = "0.8", features = ["ws"] }
+prost = "0.14"
+prost-build = "0.14"
+askama = "0.16"
+serde = { version = "1", features = ["derive"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+hex = "0.4"

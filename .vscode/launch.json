@@ -1,0 +1,32 @@
+{
+  // Run/debug the workspace binaries. Uses CodeLLDB (`vadimcn.vscode-lldb`), which the Dev Container
+  // installs; its `cargo` integration builds the crate first, then launches the binary. `cwd` is the
+  // repository root so the server finds `config/collector.yaml` (a path relative to the working dir).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run opamp-server",
+      "cargo": {
+        "args": ["build", "--bin=opamp-server", "--package=opamp-server"],
+        "filter": { "name": "opamp-server", "kind": "bin" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": { "RUST_LOG": "info" }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run opamp-supervisor",
+      "cargo": {
+        "args": ["build", "--bin=opamp-supervisor", "--package=opamp-supervisor"],
+        "filter": { "name": "opamp-supervisor", "kind": "bin" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": { "RUST_LOG": "info" }
+    }
+  ]
+}

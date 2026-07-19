@@ -1,5 +1,6 @@
 # OpAMP Fleet
 
+[![CI](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml)
 [![Docs & ADR checks](https://github.com/mbrigl/opamp-fleet/actions/workflows/docs-check.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/docs-check.yml)
 
 **OpAMP Fleet** is a Rust implementation of OpenTelemetry [OpAMP](https://opentelemetry.io/docs/specs/opamp/)-based
@@ -120,20 +121,39 @@ Shared token, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.m
 
 ## Build, Test & Run
 
-<!-- Fill in once the toolchain is chosen. This section is the single source for build/test/run
-     commands — both humans and agents rely on it (AGENTS.md links here). -->
+A Cargo workspace ([ADR-0005](docs/adr/0005-cargo-workspace-layout.md)); the toolchain is pinned in
+`rust-toolchain.toml` and `protoc` is provided by the Dev Container ([ADR-0004](docs/adr/0004-rust-toolchain-dev-container.md)).
 
-- **Build:** TODO <!-- e.g. `make build` -->
-- **Test:** TODO <!-- e.g. `make test` -->
-- **Run:** TODO <!-- e.g. `make run` -->
+- **Build:** `cargo build --workspace --all-targets`
+- **Test:** `cargo test --workspace`
+- **Lint / format:** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
+- **Run the server:** `cargo run -p opamp-server` — serves the OpAMP endpoint on `:4320` and the fleet
+  REST API + UI on `:4321`, distributing [`config/collector.yaml`](config/collector.yaml).
+- **Run the Supervisor Host** (skeleton): `cargo run -p opamp-supervisor`.
 
 ## Usage
 
-<!-- Once there is something to use, show how to use the built software: the primary commands or
-     API, a minimal example, and the expected output. Keep build/test/run mechanics in the section
-     above — this section is about using the result, not producing it. -->
+Bring the environment up (**Reopen in Container**): the server runs in the `dev` container and the three
+OpAMP sidecars connect to it ([ADR-0003](docs/adr/0003-compose-dev-environment-with-opamp-sidecars.md)).
+Then:
 
-TODO — show a minimal example of using the project.
+```bash
+cargo run -p opamp-server          # in the dev container
+```
+
+- Open the **fleet UI** at <http://localhost:4321/> — each connected agent (the upstream OTel
+  Supervisor, Bindplane, Splunk) appears with its health, configuration status, and effective config.
+- Or read the fleet over the **REST API** ([ADR-0007](docs/adr/0007-rest-api-and-fleet-ui.md)):
+
+```bash
+curl -s localhost:4321/api/fleet | jq        # every connected agent and its status, as JSON
+curl -s localhost:4321/api/config            # the collector configuration being distributed
+curl -T new.yaml localhost:4321/api/config   # change it — the server pushes it to the fleet
+```
+
+> The `:4321` surface is **unauthenticated** — anyone who can reach it can reconfigure the whole fleet.
+> It is a development server; do not expose it beyond a trusted network
+> ([ADR-0006](docs/adr/0006-rust-opamp-server-from-spec.md), ADR-0007).
 
 ## Project Layout
 
@@ -142,7 +162,13 @@ README.md                     # overview & setup for humans
 AGENTS.md                     # single source of truth for coding agents
 docs/SPECIFICATION.md         # the specification: problem, goals, vocabulary
 docs/adr/                     # Architecture Decision Records (+ template)
+Cargo.toml                    # Cargo workspace (crates/*)
 rust-toolchain.toml           # pinned Rust channel (container + CI agree)
+config/collector.yaml         # the collector configuration the server distributes
+crates/
+  opamp-proto/                # shared OpAMP wire layer (vendored .proto + WS framing)
+  opamp-server/               # the OpAMP Fleet Server (OpAMP endpoint, REST API, UI)
+  opamp-supervisor/           # the Supervisor Host (skeleton)
 .devcontainer/
   devcontainer.json           # Compose-based Dev Container (dev service)
   docker-compose.yml          # dev + OpAMP agent sidecars
@@ -173,6 +199,11 @@ and connect back to `ws://dev:4320/v1/opamp`:
 
 The container mounts **no Docker socket and has no Docker CLI** — it cannot touch the host daemon; only
 the IDE, host-side, drives Compose.
+
+The server's listeners are **published to the host loopback** (`docker-compose.yml` → `dev.ports`,
+bound to `127.0.0.1`), so a browser reaches the fleet UI + REST API at <http://localhost:4321> and the
+OpAMP endpoint at `localhost:4320` directly — no IDE port-forwarding required. They are bound to
+loopback only because the server is unauthenticated and must not be exposed beyond the host.
 
 ### Managing the sidecars
 
