@@ -1,10 +1,15 @@
-//! The Supervisor Host: a single Rust process that hosts multiple **Supervisor** instances as
-//! **plugins** behind a hexagonal core (see [`SPECIFICATION.md`](../../docs/SPECIFICATION.md)).
+//! The Supervisor Host: a Rust process that hosts OpAMP supervisors (ADR-0008).
 //!
-//! This crate is a **skeleton**. It fixes the shape the specification calls for — a domain that talks
-//! to the Server over OpAMP through one port and to each Managed Agent through another, with plugins as
-//! the adapters — but implements no behaviour yet. The OpAMP client loop, the concrete Collector and
-//! Custom (foreign-agent) supervisor plugins, and the async runtime arrive in a later change (ADR-0005).
+//! Today it hosts one — the OpAMP-native **Collector Supervisor** ([`supervisor::Supervisor`]), which
+//! owns an OpenTelemetry Collector, applies the configuration the Server distributes, and reports the
+//! collector's real health and effective config back via a local OpAMP server ([`local_server`]). It
+//! is feature-compatible with the upstream Go OpAMP Supervisor, its behavioural oracle.
+//!
+//! The plugin/hexagonal generalization — running *many* supervisors, and Custom Supervisors for
+//! non-OpAMP Foreign Agents — is the next milestone (see [`SPECIFICATION.md`](../../docs/SPECIFICATION.md)).
 
+pub mod collector;
 pub mod host;
-pub mod ports;
+pub mod local_server;
+pub mod supervisor;
+pub mod uid;

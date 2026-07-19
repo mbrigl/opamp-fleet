@@ -1,51 +1,54 @@
-//! The Supervisor Host: holds the loaded Supervisor plugins (skeleton).
+//! The Supervisor Host: the process that runs the supervisors this project hosts (ADR-0008).
 //!
-//! One process, many Supervisors. For now the host only registers plugins and reports how many it
-//! holds; running them — each as its own OpAMP Agent against the Server — is a later change (ADR-0005).
+//! Today it hosts exactly one — the OpAMP-native [`Supervisor`] (the Collector Supervisor). Running
+//! *many* supervisors as plugins, and Custom Supervisors that bring non-OpAMP Foreign Agents into the
+//! same control loop, is the next milestone (its own ADR); this is the shape that grows into it.
 
-use crate::ports::Supervisor;
+use tracing::info;
 
-/// A single process that hosts multiple [`Supervisor`] plugins.
-#[derive(Default)]
+use crate::supervisor::Supervisor;
+
+/// The Supervisor Host process: it owns and runs its supervisors.
 pub struct SupervisorHost {
-    supervisors: Vec<Box<dyn Supervisor>>,
+    supervisor: Supervisor,
 }
 
 impl SupervisorHost {
-    /// A host with no plugins registered yet.
-    pub fn new() -> Self {
-        Self::default()
+    /// A host wrapping the one supervisor it runs today.
+    pub fn new(supervisor: Supervisor) -> Self {
+        Self { supervisor }
     }
 
-    /// Registers one Supervisor plugin with the host.
-    pub fn register(&mut self, supervisor: Box<dyn Supervisor>) {
-        self.supervisors.push(supervisor);
-    }
-
-    /// The Supervisor plugins currently registered.
-    pub fn supervisors(&self) -> &[Box<dyn Supervisor>] {
-        &self.supervisors
+    /// Runs the hosted supervisor until the process is asked to stop (Ctrl-C / SIGTERM). On shutdown
+    /// the collector the supervisor owns is torn down with it (`kill_on_drop`).
+    pub async fn run(mut self) {
+        tokio::select! {
+            _ = self.supervisor.run() => {}
+            _ = shutdown_signal() => info!("shutting down"),
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Completes when the process is asked to stop — Ctrl-C or SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
 
-    struct Dummy(&'static str);
-    impl Supervisor for Dummy {
-        fn name(&self) -> &str {
-            self.0
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
         }
-    }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
 
-    #[test]
-    fn registers_and_lists_plugins() {
-        let mut host = SupervisorHost::new();
-        assert_eq!(host.supervisors().len(), 0);
-        host.register(Box::new(Dummy("collector")));
-        host.register(Box::new(Dummy("custom:nginx")));
-        assert_eq!(host.supervisors().len(), 2);
-        assert_eq!(host.supervisors()[0].name(), "collector");
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }

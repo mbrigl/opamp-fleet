@@ -27,3 +27,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 hex = "0.4"
+# The OpAMP WebSocket client (supervisor -> server) and the supervisor's local server for the
+# collector's opamp extension (ADR-0008). Plain ws in dev; no TLS feature yet.
+tokio-tungstenite = "0.30"
+# Merging the opamp/health_check extensions into the collector config (ADR-0008).
+serde_yaml = "0.9"

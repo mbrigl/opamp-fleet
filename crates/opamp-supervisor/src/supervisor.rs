@@ -1,0 +1,1011 @@
+//! The OpAMP client loop: connect, report identity, apply what the Server sends, report the result.
+//!
+//! This is the Agent side of the control loop the Server drives. The Server compares the config hash
+//! the Agent last reported against the one it distributes and sends a configuration only when they
+//! differ ([ADR-0006](../../docs/adr/0006-rust-opamp-server-from-spec.md)); the Agent's job is to apply
+//! it and report the exact hash back so that comparison converges. Correctness is measured against the
+//! upstream Go Supervisor oracle: for the same configuration this Agent must reach the same hash and
+//! status ([ADR-0008](../../docs/adr/0008-collector-supervisor-go-reference-compat.md)).
+//!
+//! The initial supervisor is plain-`ws`, unauthenticated, and does not do package updates — matching
+//! the initial Server (ADR-0006). TLS + auth and package delivery are deferred to their own ADRs.
+
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{debug, error, info, warn};
+
+use opamp_proto::frame;
+use opamp_proto::proto::{
+    any_value, AgentCapabilities, AgentConfigFile, AgentConfigMap, AgentDescription,
+    AgentRemoteConfig, AgentToServer, AnyValue, CommandType, ComponentHealth, EffectiveConfig,
+    KeyValue, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent, ServerToAgentFlags,
+};
+
+use crate::collector::Collector;
+use crate::local_server::CollectorLink;
+
+/// The key a single-file agent's configuration is filed under in an OpAMP config map. The Server
+/// writes the collector config under the empty-string key (the specification's SHOULD for a
+/// single-file agent), so that is where the Agent reads it back from — the two must agree.
+const MAIN_CONFIG_KEY: &str = "";
+
+/// The content type the Server tags the collector config with, echoed back in effective config.
+const CONFIG_CONTENT_TYPE: &str = "text/yaml";
+
+/// A non-identifying attribute naming which supervisor manages the agent, so the fleet can tell this
+/// Rust Supervisor's agents apart from the upstream OpenTelemetry Supervisor's (which does not report
+/// it). Reported on every agent description this supervisor sends.
+const SUPERVISOR_ATTRIBUTE: &str = "opamp.supervisor";
+
+/// Reconnect backoff: start here, double after each failed attempt, capped at [`RECONNECT_MAX`], and
+/// reset to the base once a connection is established. So a briefly-down server is retried quickly
+/// while a long outage is not hammered.
+const RECONNECT_BASE: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// How often, between server messages, the supervisor checks that the collector process is still
+/// alive. A crash is noticed within this interval, which also rate-limits restart attempts so a
+/// crash-looping collector is not hammered.
+const SUPERVISION_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The capabilities this Agent declares. `ReportsStatus` MUST be set (all Agents report status); the
+/// rest are exactly the loop this Agent implements — accept remote config, report health, effective
+/// config, remote-config status, and periodic heartbeats. We do not claim capabilities we do not
+/// implement (own telemetry, package updates), per the specification's "be honest about what the
+/// ecosystem can do".
+const CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
+    | AgentCapabilities::AcceptsRemoteConfig as u64
+    | AgentCapabilities::ReportsEffectiveConfig as u64
+    | AgentCapabilities::ReportsHealth as u64
+    | AgentCapabilities::ReportsRemoteConfig as u64
+    | AgentCapabilities::ReportsHeartbeat as u64
+    | AgentCapabilities::AcceptsRestartCommand as u64
+    | AgentCapabilities::ReportsAvailableComponents as u64;
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Everything the [`Supervisor`] needs to identify itself and persist its identity.
+pub struct Config {
+    pub server_url: String,
+    pub instance_uid: [u8; 16],
+    /// Where the instance UID is persisted, so a Server-assigned UID survives a restart.
+    pub uid_path: PathBuf,
+    /// The reverse-FQDN agent type reported as `service.name`.
+    pub service_name: String,
+    /// The managed collector's version, reported as `service.version`; `None` if it could not be read.
+    pub collector_version: Option<String>,
+    /// A handle to what the collector reports over the local OpAMP server (ADR-0008): its real health
+    /// and effective config, used in place of the supervisor's assumptions when the collector connects.
+    pub collector_link: CollectorLink,
+    /// The WebSocket endpoint of the local OpAMP server, injected into the collector's config so its
+    /// `opamp` extension dials back in (ADR-0008).
+    pub local_opamp_endpoint: String,
+    pub fallback: Option<Vec<u8>>,
+    pub heartbeat: Duration,
+}
+
+/// The running Rust Supervisor: its identity, the collector it owns, and the control-loop state it
+/// needs to avoid redundant reconfiguration.
+pub struct Supervisor {
+    server_url: String,
+    instance_uid: Vec<u8>,
+    /// Where the instance UID is persisted (for a Server-assigned UID).
+    uid_path: PathBuf,
+    /// Kept so the agent description can be rebuilt when the Server assigns a new instance UID.
+    service_name: String,
+    collector_version: Option<String>,
+    /// The collector's self-reported health and effective config over the local OpAMP server.
+    collector_link: CollectorLink,
+    /// The local OpAMP server endpoint injected into the collector's config.
+    local_opamp_endpoint: String,
+    agent_description: AgentDescription,
+    collector: Collector,
+    /// Applied on startup so the collector runs even before the Server answers (mirrors the sidecar's
+    /// `startup_fallback_configs`). Taken once, on the first `run`.
+    fallback: Option<Vec<u8>>,
+    /// The server-provided hash of the configuration currently applied; empty means "none yet"
+    /// (including when only the fallback is running). Comparing against it is what prevents a spurious
+    /// collector restart on an unchanged push.
+    applied_hash: Vec<u8>,
+    /// The body of the configuration currently applied, echoed back as effective config.
+    applied_body: Vec<u8>,
+    sequence_num: u64,
+    start_time_unix_nano: u64,
+    /// How often to send a heartbeat (a minimal keepalive report) while connected.
+    heartbeat: Duration,
+    /// The current reconnect backoff, grown on failure and reset once connected.
+    reconnect_delay: Duration,
+}
+
+impl Supervisor {
+    pub fn new(config: Config, collector: Collector) -> Self {
+        let start_time_unix_nano = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let agent_description = agent_description(
+            &config.service_name,
+            config.collector_version.as_deref(),
+            &config.instance_uid,
+        );
+
+        Self {
+            server_url: config.server_url,
+            instance_uid: config.instance_uid.to_vec(),
+            uid_path: config.uid_path,
+            service_name: config.service_name,
+            collector_version: config.collector_version,
+            collector_link: config.collector_link,
+            local_opamp_endpoint: config.local_opamp_endpoint,
+            agent_description,
+            collector,
+            fallback: config.fallback,
+            applied_hash: Vec::new(),
+            applied_body: Vec::new(),
+            sequence_num: 0,
+            start_time_unix_nano,
+            heartbeat: config.heartbeat,
+            reconnect_delay: RECONNECT_BASE,
+        }
+    }
+
+    /// Runs until the process is stopped: bring the collector up (resuming the last applied config if
+    /// one is on disk, else the fallback), then keep an OpAMP session open, reconnecting with backoff.
+    pub async fn run(&mut self) {
+        if !self.resume_last_config().await {
+            if let Some(fallback) = self.fallback.take() {
+                // Inject the opamp extension into the fallback too, so the collector reports back even
+                // before the server answers (ADR-0008).
+                let fallback = merge_opamp_extension(&fallback, &self.local_opamp_endpoint);
+                match self.collector.apply(&fallback).await {
+                    Ok(()) => {
+                        // The fallback has no server hash: leave `applied_hash` empty so the Server's
+                        // configuration is applied as soon as it is offered.
+                        self.applied_body = fallback;
+                        info!("collector started on the fallback configuration");
+                    }
+                    Err(e) => {
+                        error!(error = %e, "cannot start collector on the fallback configuration")
+                    }
+                }
+            }
+        }
+
+        loop {
+            if let Err(e) = self.serve_once().await {
+                warn!(error = %e, delay_secs = self.reconnect_delay.as_secs(), "OpAMP session ended; reconnecting");
+            }
+            tokio::time::sleep(self.reconnect_delay).await;
+            self.reconnect_delay = (self.reconnect_delay * 2).min(RECONNECT_MAX);
+        }
+    }
+
+    /// Brings the collector up on the last configuration that applied, if it is recorded on disk, so a
+    /// supervisor restart does not re-apply — and needlessly restart the collector for — a config it is
+    /// already running. Returns whether it resumed. The config file and its hash are already present
+    /// from the last successful apply; the config was valid then, so it is not re-validated here.
+    async fn resume_last_config(&mut self) -> bool {
+        let config_path = self.collector.config_path().to_path_buf();
+        let hash_path = config_path.with_extension("hash");
+        let (Ok(body), Ok(hash_hex)) = (
+            std::fs::read(&config_path),
+            std::fs::read_to_string(&hash_path),
+        ) else {
+            return false;
+        };
+        let Ok(hash) = hex::decode(hash_hex.trim()) else {
+            return false;
+        };
+        // Re-inject the opamp extension so it points at *this* run's local OpAMP server: the port baked
+        // into the persisted config is from the previous run and is now stale. The merge overwrites the
+        // extension, so re-merging an already-merged config is idempotent apart from the endpoint.
+        let body = merge_opamp_extension(&body, &self.local_opamp_endpoint);
+        match self.collector.apply(&body).await {
+            Ok(()) => {
+                info!(hash = %short(&hash), "resumed collector on the last applied configuration");
+                self.applied_hash = hash;
+                self.applied_body = body;
+                true
+            }
+            Err(e) => {
+                error!(error = %e, "cannot resume collector on the last applied configuration");
+                false
+            }
+        }
+    }
+
+    /// One OpAMP session: connect, send the full state, then apply whatever the Server sends until the
+    /// connection closes or errors.
+    async fn serve_once(&mut self) -> Result<(), String> {
+        info!(server = %self.server_url, "connecting to OpAMP server");
+        let (mut ws, _) = tokio_tungstenite::connect_async(&self.server_url)
+            .await
+            .map_err(|e| format!("cannot connect to {}: {e}", self.server_url))?;
+        info!("connected to OpAMP server");
+        // A connection was established: reset the backoff so the next drop is retried promptly.
+        self.reconnect_delay = RECONNECT_BASE;
+
+        let first = self.full_state_report();
+        self.send(&mut ws, first).await?;
+
+        // A supervision tick drives collector-liveness checks between server messages, so a crash is
+        // noticed and reported on its own rather than only when the server next sends something.
+        let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
+        supervision.tick().await; // the first tick fires immediately; the collector was just started.
+
+        // A heartbeat is a minimal keepalive report, so the server knows the agent is still connected
+        // at the application layer even when nothing has changed (the ReportsHeartbeat capability).
+        let mut heartbeat = tokio::time::interval(self.heartbeat);
+        heartbeat.tick().await; // skip the immediate first tick; the full-state report just went out.
+
+        // A clone of the collector link so its change signal can be awaited in the select without
+        // borrowing `self` (the branch handlers need `&mut self`).
+        let collector_link = self.collector_link.clone();
+
+        loop {
+            // Pick up a server-dictated heartbeat interval change (see `handle`).
+            if heartbeat.period() != self.heartbeat {
+                heartbeat = tokio::time::interval(self.heartbeat);
+                heartbeat.tick().await; // consume the immediate first tick
+            }
+            tokio::select! {
+                incoming = ws.next() => {
+                    let Some(frame) = incoming else { return Ok(()); };
+                    match frame.map_err(|e| format!("websocket error: {e}"))? {
+                        Message::Binary(data) => {
+                            let msg: ServerToAgent = frame::decode(&data)
+                                .map_err(|e| format!("cannot decode ServerToAgent: {e}"))?;
+                            self.handle(&mut ws, msg).await?;
+                        }
+                        Message::Close(_) => {
+                            info!("server closed the connection");
+                            return Ok(());
+                        }
+                        // Text is not a valid OpAMP frame; ping/pong/raw frames are the transport's concern.
+                        Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                    }
+                }
+                _ = supervision.tick() => {
+                    self.supervise_collector(&mut ws).await?;
+                }
+                _ = heartbeat.tick() => {
+                    let beat = self.next_report();
+                    debug!(seq = beat.sequence_num, "sending heartbeat");
+                    self.send(&mut ws, beat).await?;
+                }
+                // The collector reported a health or effective-config change: forward it promptly so
+                // the fleet's view is live rather than stale until the next config change (ADR-0008).
+                _ = collector_link.changed() => {
+                    let report = self.collector_status_report();
+                    self.send(&mut ws, report).await?;
+                }
+            }
+        }
+    }
+
+    /// A report carrying the collector's current health, effective configuration, description, and
+    /// available components, sent when the collector reports a change over the local server.
+    fn collector_status_report(&mut self) -> AgentToServer {
+        let latest = self.collector_link.latest();
+        let mut report = self.next_report();
+        report.health = Some(self.current_health());
+        // Only forward what the collector actually reported, not the supervisor's own fallbacks.
+        if latest.effective_config.is_some() {
+            report.effective_config = Some(self.effective_config());
+        }
+        if latest.agent_description.is_some() {
+            report.agent_description = Some(self.report_description());
+        }
+        if latest.available_components.is_some() {
+            report.available_components = latest.available_components;
+        }
+        report
+    }
+
+    /// The agent description to report: the collector's own (collector-authoritative) when it has
+    /// reported one — with `service.instance.id` overridden to the supervisor's stable UID so the fleet
+    /// keys it consistently — falling back to the synthesized description until the collector connects.
+    fn report_description(&self) -> AgentDescription {
+        let mut description = match self.collector_link.latest().agent_description {
+            Some(mut collector) => {
+                set_string_attribute(
+                    &mut collector.identifying_attributes,
+                    "service.instance.id",
+                    &crate::uid::format(&self.instance_uid),
+                );
+                collector
+            }
+            None => self.agent_description.clone(),
+        };
+        // Mark which supervisor manages this agent, so the fleet can tell ours from the upstream one.
+        set_string_attribute(
+            &mut description.non_identifying_attributes,
+            SUPERVISOR_ATTRIBUTE,
+            &format!("opamp-supervisor/{} (rust)", env!("CARGO_PKG_VERSION")),
+        );
+        description
+    }
+
+    /// If the collector has crashed, reports it unhealthy and restarts it on the last good
+    /// configuration already on disk, reporting healthy again once it is back. Reporting the crash
+    /// rather than restarting silently is what makes a degraded collector visible (ADR-0008).
+    async fn supervise_collector(&mut self, ws: &mut Ws) -> Result<(), String> {
+        let Some(status) = self.collector.check_exited() else {
+            return Ok(());
+        };
+        warn!(%status, "collector exited unexpectedly; restarting on the last good configuration");
+
+        let mut down = self.next_report();
+        down.health = Some(self.health(false, format!("collector exited unexpectedly: {status}")));
+        self.send(ws, down).await?;
+
+        match self.collector.restart_current().await {
+            Ok(()) => {
+                let mut up = self.next_report();
+                up.health = Some(self.health(true, String::new()));
+                self.send(ws, up).await?;
+                info!("collector restarted after an unexpected exit");
+            }
+            Err(e) => {
+                error!(error = %e, "cannot restart the collector after it exited");
+                let mut still_down = self.next_report();
+                still_down.health = Some(self.health(false, e));
+                self.send(ws, still_down).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles one `ServerToAgent`: adopt a Server-assigned instance UID, honour a full-state request,
+    /// then apply an offered configuration.
+    async fn handle(&mut self, ws: &mut Ws, msg: ServerToAgent) -> Result<(), String> {
+        // Read the whole-message signals up front, before fields are moved out of `msg` below.
+        let full_state_requested = msg.flags & ServerToAgentFlags::ReportFullState as u64 != 0;
+        let restart_requested = is_restart_command(&msg);
+        let heartbeat_interval = heartbeat_override(&msg);
+
+        if let Some(id) = msg.agent_identification {
+            if id.new_instance_uid.len() == 16 && id.new_instance_uid != self.instance_uid {
+                self.adopt_instance_uid(id.new_instance_uid);
+                // Re-announce under the new identity so the Server's fleet view is consistent.
+                let report = self.full_state_report();
+                self.send(ws, report).await?;
+            }
+        }
+        // A server-dictated heartbeat interval (ReportsHeartbeat). The running ticker picks up the new
+        // period on the next loop iteration.
+        if let Some(interval) = heartbeat_interval {
+            if interval != self.heartbeat {
+                info!(
+                    seconds = interval.as_secs(),
+                    "server set the heartbeat interval"
+                );
+                self.heartbeat = interval;
+            }
+        }
+        if full_state_requested {
+            info!("server requested full state");
+            let report = self.full_state_report();
+            self.send(ws, report).await?;
+        }
+        if restart_requested {
+            info!("server requested a collector restart");
+            if let Err(e) = self.collector.restart_current().await {
+                error!(error = %e, "the requested collector restart failed");
+            }
+            let mut report = self.next_report();
+            report.health = Some(self.current_health());
+            self.send(ws, report).await?;
+        }
+        if let Some(remote) = msg.remote_config {
+            self.apply_remote_config(ws, remote).await?;
+        }
+        Ok(())
+    }
+
+    /// Adopts an instance UID the Server assigned (`ServerToAgent.agent_identification`): the
+    /// specification requires the Agent to switch to it for all further communication. It is persisted
+    /// so a restart keeps the assigned identity, and the agent description is rebuilt because
+    /// `service.instance.id` embeds the UID.
+    fn adopt_instance_uid(&mut self, new_uid: Vec<u8>) {
+        info!(uid = %crate::uid::format(&new_uid), "adopting the Server-assigned instance UID");
+        if let Err(e) = std::fs::write(&self.uid_path, &new_uid) {
+            warn!(error = %e, "cannot persist the Server-assigned instance UID");
+        }
+        self.instance_uid = new_uid;
+        self.agent_description = agent_description(
+            &self.service_name,
+            self.collector_version.as_deref(),
+            &self.instance_uid,
+        );
+    }
+
+    /// Applies a remote configuration and reports the outcome. Skips the work when the offered hash is
+    /// already the applied one, so an unchanged re-offer never restarts the collector.
+    async fn apply_remote_config(
+        &mut self,
+        ws: &mut Ws,
+        remote: AgentRemoteConfig,
+    ) -> Result<(), String> {
+        let hash = remote.config_hash;
+        if hash == self.applied_hash {
+            return Ok(());
+        }
+        let Some(body) = config_body(remote.config) else {
+            warn!("remote config carried no entry under the main key; ignoring");
+            return Ok(());
+        };
+        // Inject the opamp extension so the collector reports back over the local server (ADR-0008).
+        let body = merge_opamp_extension(&body, &self.local_opamp_endpoint);
+
+        info!(hash = %short(&hash), "applying remote configuration");
+        // Report APPLYING before the validate + restart work, so the transition is visible rather than
+        // a silent jump to APPLIED/FAILED.
+        let mut applying = self.next_report();
+        applying.remote_config_status = Some(RemoteConfigStatus {
+            last_remote_config_hash: hash.clone(),
+            status: RemoteConfigStatuses::Applying as i32,
+            error_message: String::new(),
+        });
+        self.send(ws, applying).await?;
+
+        let mut report = self.next_report();
+        match self.collector.apply(&body).await {
+            Ok(()) => {
+                self.applied_hash = hash.clone();
+                self.applied_body = body;
+                self.persist_applied_hash(&hash);
+                report.remote_config_status = Some(RemoteConfigStatus {
+                    last_remote_config_hash: hash,
+                    status: RemoteConfigStatuses::Applied as i32,
+                    error_message: String::new(),
+                });
+                report.effective_config = Some(self.effective_config());
+                report.health = Some(self.health(true, String::new()));
+                info!("remote configuration APPLIED");
+            }
+            Err(e) => {
+                error!(error = %e, "remote configuration FAILED");
+                report.remote_config_status = Some(RemoteConfigStatus {
+                    last_remote_config_hash: hash,
+                    status: RemoteConfigStatuses::Failed as i32,
+                    error_message: e,
+                });
+                report.health = Some(self.health(false, "collector failed to apply config".into()));
+            }
+        }
+        self.send(ws, report).await
+    }
+
+    /// A report carrying the Agent's full state — identity, health, and the configuration it holds.
+    /// Sent on connect and whenever the Server asks for full state after a sequence gap.
+    fn full_state_report(&mut self) -> AgentToServer {
+        let mut report = self.next_report();
+        report.agent_description = Some(self.report_description());
+        report.health = Some(self.current_health());
+        report.available_components = self.collector_link.latest().available_components;
+        if !self.applied_hash.is_empty() {
+            report.remote_config_status = Some(RemoteConfigStatus {
+                last_remote_config_hash: self.applied_hash.clone(),
+                status: RemoteConfigStatuses::Applied as i32,
+                error_message: String::new(),
+            });
+            report.effective_config = Some(self.effective_config());
+        }
+        report
+    }
+
+    /// The base of every message: identity, the next sequence number, and the mandatory capabilities.
+    /// The sequence number increments by exactly one per message so the Server can detect a gap.
+    fn next_report(&mut self) -> AgentToServer {
+        self.sequence_num += 1;
+        AgentToServer {
+            instance_uid: self.instance_uid.clone(),
+            sequence_num: self.sequence_num,
+            capabilities: CAPABILITIES,
+            ..Default::default()
+        }
+    }
+
+    /// Records the hash of the applied configuration next to the config file, so a restart can resume
+    /// on it without re-applying. Best-effort: a persistence failure is logged, not fatal.
+    fn persist_applied_hash(&self, hash: &[u8]) {
+        let hash_path = self.collector.config_path().with_extension("hash");
+        if let Err(e) = std::fs::write(&hash_path, hex::encode(hash)) {
+            warn!(error = %e, "cannot persist the applied config hash");
+        }
+    }
+
+    /// The effective configuration to report. Prefers the one the collector reports over the local
+    /// OpAMP server (ADR-0008) — its *actual* running config — and falls back to echoing the bytes we
+    /// wrote until the collector connects.
+    fn effective_config(&self) -> EffectiveConfig {
+        if let Some(effective) = self.collector_link.latest().effective_config {
+            return effective;
+        }
+        EffectiveConfig {
+            config_map: Some(AgentConfigMap {
+                config_map: [(
+                    MAIN_CONFIG_KEY.to_string(),
+                    AgentConfigFile {
+                        body: self.applied_body.clone(),
+                        content_type: CONFIG_CONTENT_TYPE.to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        }
+    }
+
+    /// The health to report. Prefers the collector's self-reported health over the local OpAMP server
+    /// (ADR-0008), falling back to process liveness until the collector connects.
+    fn current_health(&self) -> ComponentHealth {
+        if let Some(health) = self.collector_link.latest().health {
+            return health;
+        }
+        self.health(self.collector.is_running(), String::new())
+    }
+
+    fn health(&self, healthy: bool, last_error: String) -> ComponentHealth {
+        ComponentHealth {
+            healthy,
+            start_time_unix_nano: self.start_time_unix_nano,
+            last_error,
+            status: if healthy { "Running" } else { "Errored" }.to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn send(&mut self, ws: &mut Ws, msg: AgentToServer) -> Result<(), String> {
+        ws.send(Message::Binary(frame::encode(&msg).into()))
+            .await
+            .map_err(|e| format!("cannot send report: {e}"))
+    }
+}
+
+/// Injects the collector's `opamp` and `health_check` extensions into a collector configuration and
+/// lists them under `service.extensions` (ADR-0008). The `opamp` extension, pointed at the local OpAMP
+/// server, is what makes the collector connect back and report its real health and effective config;
+/// `health_check` exposes the collector's health for it to observe. Existing extensions and the rest of
+/// the configuration are preserved. If the configuration is not a YAML mapping, it is returned
+/// unchanged — validation will reject a genuinely broken config, and we do not want to mask that.
+fn merge_opamp_extension(config: &[u8], endpoint: &str) -> Vec<u8> {
+    let mut doc: serde_yaml::Value = match serde_yaml::from_slice(config) {
+        Ok(doc) => doc,
+        Err(_) => return config.to_vec(),
+    };
+    let Some(root) = doc.as_mapping_mut() else {
+        return config.to_vec();
+    };
+
+    // extensions.opamp: point the collector's opamp extension at the local server. Omitting
+    // instance_uid lets the extension generate its own; the local server correlates by connection, not
+    // by uid. `tls.insecure` because the local endpoint is a plain ws:// loopback.
+    let opamp = match serde_yaml::from_str::<serde_yaml::Value>(&format!(
+        "server:\n  ws:\n    endpoint: \"{endpoint}\"\n    tls:\n      insecure: true\n"
+    )) {
+        Ok(value) => value,
+        Err(_) => return config.to_vec(),
+    };
+    let extensions = root
+        .entry("extensions".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    let Some(extensions) = extensions.as_mapping_mut() else {
+        return config.to_vec();
+    };
+    // Always (re)point opamp at our server; leave an existing health_check config untouched, else add
+    // it with defaults.
+    extensions.insert("opamp".into(), opamp);
+    extensions
+        .entry("health_check".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+
+    // service.extensions: ensure both are enabled, preserving any already listed.
+    let service = root
+        .entry("service".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    if let Some(service) = service.as_mapping_mut() {
+        let enabled = service
+            .entry("extensions".into())
+            .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+        if let Some(list) = enabled.as_sequence_mut() {
+            for name in ["opamp", "health_check"] {
+                if !list.iter().any(|v| v.as_str() == Some(name)) {
+                    list.push(name.into());
+                }
+            }
+        }
+    }
+
+    serde_yaml::to_string(&doc)
+        .map(String::into_bytes)
+        .unwrap_or_else(|_| config.to_vec())
+}
+
+/// Whether the server asked the agent to restart the collector (`ServerToAgentCommand`, the
+/// AcceptsRestartCommand capability).
+fn is_restart_command(msg: &ServerToAgent) -> bool {
+    msg.command
+        .as_ref()
+        .is_some_and(|c| c.r#type == CommandType::Restart as i32)
+}
+
+/// A server-dictated heartbeat interval, if the server offered one greater than zero
+/// (`OpAMPConnectionSettings.heartbeat_interval_seconds`).
+fn heartbeat_override(msg: &ServerToAgent) -> Option<Duration> {
+    let seconds = msg
+        .connection_settings
+        .as_ref()?
+        .opamp
+        .as_ref()?
+        .heartbeat_interval_seconds;
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// Extracts the single-file config body from an offered `AgentConfigMap`, under the main key.
+fn config_body(config: Option<AgentConfigMap>) -> Option<Vec<u8>> {
+    config?
+        .config_map
+        .into_iter()
+        .find(|(key, _)| key == MAIN_CONFIG_KEY)
+        .map(|(_, file)| file.body)
+}
+
+/// The Agent's self-description: the identifying attributes an OpenTelemetry Agent SHOULD report, so
+/// the fleet UI can name it. `service.name` is the reverse-FQDN agent type; `service.version` is the
+/// managed collector's version (omitted rather than faked when it could not be read); the host and OS
+/// attributes describe where the Agent runs.
+fn agent_description(
+    service_name: &str,
+    collector_version: Option<&str>,
+    instance_uid: &[u8],
+) -> AgentDescription {
+    let mut identifying = vec![
+        key_value("service.name", service_name),
+        key_value("service.instance.id", &crate::uid::format(instance_uid)),
+    ];
+    if let Some(version) = collector_version {
+        identifying.push(key_value("service.version", version));
+    }
+    AgentDescription {
+        identifying_attributes: identifying,
+        non_identifying_attributes: host_attributes(),
+    }
+}
+
+/// Attributes describing where the Agent runs. `os.type`/`host.arch` come from the compile target;
+/// `host.name` is best-effort from the environment or `/etc/hostname`.
+fn host_attributes() -> Vec<KeyValue> {
+    let mut attrs = vec![
+        key_value("os.type", std::env::consts::OS),
+        key_value("host.arch", std::env::consts::ARCH),
+    ];
+    if let Some(name) = hostname() {
+        attrs.push(key_value("host.name", &name));
+    }
+    attrs
+}
+
+fn hostname() -> Option<String> {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn key_value(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.to_string())),
+        }),
+    }
+}
+
+/// Sets a string-valued identifying attribute, replacing any existing entry for `key`.
+fn set_string_attribute(attributes: &mut Vec<KeyValue>, key: &str, value: &str) {
+    let entry = key_value(key, value);
+    match attributes.iter_mut().find(|kv| kv.key == key) {
+        Some(existing) => *existing = entry,
+        None => attributes.push(entry),
+    }
+}
+
+/// A short, human-readable form of a hash for a log line; the full value is noise.
+fn short(bytes: &[u8]) -> String {
+    hex::encode(&bytes[..bytes.len().min(6)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_body_reads_the_main_key() {
+        let map = AgentConfigMap {
+            config_map: [(
+                MAIN_CONFIG_KEY.to_string(),
+                AgentConfigFile {
+                    body: b"receivers: {}\n".to_vec(),
+                    content_type: CONFIG_CONTENT_TYPE.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(config_body(Some(map)), Some(b"receivers: {}\n".to_vec()));
+    }
+
+    #[test]
+    fn config_body_is_none_when_absent() {
+        assert_eq!(config_body(None), None);
+        let empty = AgentConfigMap {
+            config_map: Default::default(),
+        };
+        assert_eq!(config_body(Some(empty)), None);
+    }
+
+    fn keys(d: &AgentDescription) -> Vec<&str> {
+        d.identifying_attributes
+            .iter()
+            .map(|kv| kv.key.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn agent_description_reports_identity_version_and_host() {
+        let d = agent_description("io.opentelemetry.collector", Some("0.156.0"), &[0u8; 16]);
+        let ids = keys(&d);
+        assert!(ids.contains(&"service.name"));
+        assert!(ids.contains(&"service.instance.id"));
+        assert!(ids.contains(&"service.version"));
+        // os.type / host.arch are always present.
+        assert!(!d.non_identifying_attributes.is_empty());
+    }
+
+    #[test]
+    fn agent_description_omits_version_when_unknown() {
+        let d = agent_description("x", None, &[0u8; 16]);
+        assert!(!keys(&d).contains(&"service.version"));
+    }
+
+    fn effective_body(ec: EffectiveConfig) -> Vec<u8> {
+        ec.config_map.unwrap().config_map[MAIN_CONFIG_KEY]
+            .body
+            .clone()
+    }
+
+    fn supervisor_with_link(link: crate::local_server::CollectorLink) -> Supervisor {
+        Supervisor::new(
+            Config {
+                server_url: "ws://localhost/v1/opamp".to_string(),
+                instance_uid: [0u8; 16],
+                uid_path: std::path::PathBuf::from("/tmp/opamp-sup-test-uid"),
+                service_name: "io.opentelemetry.collector".to_string(),
+                collector_version: None,
+                collector_link: link,
+                local_opamp_endpoint: "ws://127.0.0.1:0/v1/opamp".to_string(),
+                fallback: None,
+                heartbeat: Duration::from_secs(30),
+            },
+            Collector::new("/bin/true", "/tmp/opamp-sup-test.yaml"),
+        )
+    }
+
+    #[test]
+    fn merge_injects_the_opamp_extension_and_enables_it() {
+        let config = b"exporters:\n  debug: {}\nservice:\n  pipelines:\n    logs:\n      exporters: [debug]\n";
+        let merged = merge_opamp_extension(config, "ws://127.0.0.1:9999/v1/opamp");
+        let doc: serde_yaml::Value = serde_yaml::from_slice(&merged).unwrap();
+
+        // The opamp extension points at our local server.
+        let endpoint = doc["extensions"]["opamp"]["server"]["ws"]["endpoint"]
+            .as_str()
+            .unwrap();
+        assert_eq!(endpoint, "ws://127.0.0.1:9999/v1/opamp");
+        // Both opamp and health_check are injected and enabled in the service (ADR-0008).
+        assert!(!doc["extensions"]["health_check"].is_null());
+        let enabled: Vec<&str> = doc["service"]["extensions"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(enabled.contains(&"opamp"));
+        assert!(enabled.contains(&"health_check"));
+        // The original content survives.
+        assert!(doc["exporters"]["debug"].is_mapping() || doc["exporters"]["debug"].is_null());
+        assert!(doc["service"]["pipelines"]["logs"].is_mapping());
+    }
+
+    #[test]
+    fn merge_preserves_existing_extensions() {
+        let config = b"extensions:\n  health_check: {}\nservice:\n  extensions: [health_check]\n";
+        let merged = merge_opamp_extension(config, "ws://x/v1/opamp");
+        let doc: serde_yaml::Value = serde_yaml::from_slice(&merged).unwrap();
+        assert!(
+            doc["extensions"]["health_check"].is_mapping()
+                || doc["extensions"]["health_check"].is_null()
+        );
+        let enabled: Vec<&str> = doc["service"]["extensions"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(enabled.contains(&"health_check"));
+        assert!(enabled.contains(&"opamp"));
+    }
+
+    #[test]
+    fn merge_leaves_a_non_mapping_config_unchanged() {
+        let config = b"- just\n- a\n- list\n";
+        assert_eq!(merge_opamp_extension(config, "ws://x/v1/opamp"), config);
+    }
+
+    #[test]
+    fn effective_config_prefers_the_collectors_report() {
+        use crate::local_server::{CollectorLink, CollectorReport};
+        let reported = EffectiveConfig {
+            config_map: Some(AgentConfigMap {
+                config_map: [(
+                    MAIN_CONFIG_KEY.to_string(),
+                    AgentConfigFile {
+                        body: b"REPORTED-BY-COLLECTOR".to_vec(),
+                        content_type: CONFIG_CONTENT_TYPE.to_string(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        };
+        let link = CollectorLink::seeded(CollectorReport {
+            health: None,
+            effective_config: Some(reported),
+            ..Default::default()
+        });
+        let sup = supervisor_with_link(link);
+        assert_eq!(
+            effective_body(sup.effective_config()),
+            b"REPORTED-BY-COLLECTOR"
+        );
+    }
+
+    #[test]
+    fn effective_config_falls_back_to_written_bytes_without_a_report() {
+        use crate::local_server::{CollectorLink, CollectorReport};
+        let link = CollectorLink::seeded(CollectorReport::default());
+        let mut sup = supervisor_with_link(link);
+        sup.applied_body = b"WRITTEN-BY-SUPERVISOR".to_vec();
+        assert_eq!(
+            effective_body(sup.effective_config()),
+            b"WRITTEN-BY-SUPERVISOR"
+        );
+    }
+
+    #[test]
+    fn current_health_prefers_the_collectors_report() {
+        use crate::local_server::{CollectorLink, CollectorReport};
+        let link = CollectorLink::seeded(CollectorReport {
+            health: Some(ComponentHealth {
+                healthy: false,
+                last_error: "collector says so".to_string(),
+                ..Default::default()
+            }),
+            effective_config: None,
+            ..Default::default()
+        });
+        let sup = supervisor_with_link(link);
+        let health = sup.current_health();
+        assert!(!health.healthy);
+        assert_eq!(health.last_error, "collector says so");
+    }
+
+    #[test]
+    fn capabilities_declare_status_and_the_loop() {
+        for cap in [
+            AgentCapabilities::ReportsStatus,
+            AgentCapabilities::AcceptsRemoteConfig,
+            AgentCapabilities::ReportsEffectiveConfig,
+            AgentCapabilities::ReportsHealth,
+            AgentCapabilities::ReportsHeartbeat,
+            AgentCapabilities::AcceptsRestartCommand,
+            AgentCapabilities::ReportsAvailableComponents,
+        ] {
+            assert_ne!(CAPABILITIES & cap as u64, 0, "{cap:?} must be declared");
+        }
+        // We do not claim capabilities we do not implement yet (package updates are deferred).
+        assert_eq!(CAPABILITIES & AgentCapabilities::AcceptsPackages as u64, 0);
+    }
+
+    #[test]
+    fn restart_command_is_recognised() {
+        use opamp_proto::proto::ServerToAgentCommand;
+        let msg = ServerToAgent {
+            command: Some(ServerToAgentCommand {
+                r#type: CommandType::Restart as i32,
+            }),
+            ..Default::default()
+        };
+        assert!(is_restart_command(&msg));
+        assert!(!is_restart_command(&ServerToAgent::default()));
+    }
+
+    #[test]
+    fn heartbeat_override_reads_a_positive_interval() {
+        use opamp_proto::proto::{ConnectionSettingsOffers, OpAmpConnectionSettings};
+        let msg = ServerToAgent {
+            connection_settings: Some(ConnectionSettingsOffers {
+                opamp: Some(OpAmpConnectionSettings {
+                    heartbeat_interval_seconds: 45,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(heartbeat_override(&msg), Some(Duration::from_secs(45)));
+        // Zero or absent means "no override".
+        assert_eq!(heartbeat_override(&ServerToAgent::default()), None);
+    }
+
+    #[test]
+    fn report_description_prefers_the_collectors_and_pins_instance_id() {
+        use crate::local_server::{CollectorLink, CollectorReport};
+        let collector = AgentDescription {
+            identifying_attributes: vec![
+                key_value("service.name", "io.opentelemetry.collector"),
+                key_value("service.version", "0.156.0"),
+                key_value("service.instance.id", "collector-own-id"),
+            ],
+            non_identifying_attributes: vec![key_value("os.type", "linux")],
+        };
+        let link = CollectorLink::seeded(CollectorReport {
+            agent_description: Some(collector),
+            ..Default::default()
+        });
+        let sup = supervisor_with_link(link); // instance_uid is all-zero here
+        let description = sup.report_description();
+
+        let value = |key: &str| {
+            description
+                .identifying_attributes
+                .iter()
+                .find(|kv| kv.key == key)
+                .and_then(|kv| kv.value.as_ref())
+                .and_then(|v| v.value.as_ref())
+                .map(|v| match v {
+                    any_value::Value::StringValue(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(value("service.name"), "io.opentelemetry.collector");
+        assert_eq!(value("service.version"), "0.156.0");
+        // The collector's own instance id is overridden with the supervisor's stable UID.
+        assert_eq!(value("service.instance.id"), crate::uid::format(&[0u8; 16]));
+
+        // The supervisor tags itself, so the fleet can tell it apart from the upstream supervisor.
+        let supervisor = description
+            .non_identifying_attributes
+            .iter()
+            .find(|kv| kv.key == SUPERVISOR_ATTRIBUTE)
+            .and_then(|kv| kv.value.as_ref())
+            .and_then(|v| v.value.as_ref());
+        assert!(
+            matches!(supervisor, Some(any_value::Value::StringValue(s)) if s.contains("rust")),
+            "the report must carry an opamp.supervisor attribute naming this supervisor"
+        );
+    }
+}

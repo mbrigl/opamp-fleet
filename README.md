@@ -129,7 +129,11 @@ A Cargo workspace ([ADR-0005](docs/adr/0005-cargo-workspace-layout.md)); the too
 - **Lint / format:** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
 - **Run the server:** `cargo run -p opamp-server` — serves the OpAMP endpoint on `:4320` and the fleet
   REST API + UI on `:4321`, distributing [`config/collector.yaml`](config/collector.yaml).
-- **Run the Supervisor Host** (skeleton): `cargo run -p opamp-supervisor`.
+- **Run the Supervisor Host:** `cargo run -p opamp-supervisor -- -server ws://127.0.0.1:4320/v1/opamp
+  -collector otelcol-contrib -fallback config/collector.yaml` — the OpAMP-native **Collector
+  Supervisor** ([ADR-0008](docs/adr/0008-collector-supervisor-go-reference-compat.md)) connects to the
+  server, applies the configuration by restarting the collector, and reports its health and effective
+  config back (`-h` lists all flags).
 
 ## Usage
 
@@ -168,7 +172,7 @@ config/collector.yaml         # the collector configuration the server distribut
 crates/
   opamp-proto/                # shared OpAMP wire layer (vendored .proto + WS framing)
   opamp-server/               # the OpAMP Fleet Server (OpAMP endpoint, REST API, UI)
-  opamp-supervisor/           # the Supervisor Host (skeleton)
+  opamp-supervisor/           # the Supervisor Host (Collector Supervisor, ADR-0008)
 .devcontainer/
   devcontainer.json           # Compose-based Dev Container (dev service)
   docker-compose.yml          # dev + OpAMP agent sidecars

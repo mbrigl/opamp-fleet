@@ -32,4 +32,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0005](0005-cargo-workspace-layout.md) | A Cargo workspace — `opamp-server`, `opamp-supervisor`, shared `opamp-proto` | 🟢 accepted |
 | [0006](0006-rust-opamp-server-from-spec.md) | Implement the OpAMP server side in Rust, from the specification | 🟢 accepted |
 | [0007](0007-rest-api-and-fleet-ui.md) | A JSON REST API (with SSE) and a minimal HTML fleet view | 🟢 accepted |
+| [0008](0008-collector-supervisor-go-reference-compat.md) | Collector Supervisor, feature-compatible with the Go reference Supervisor | 🟢 accepted |
 
