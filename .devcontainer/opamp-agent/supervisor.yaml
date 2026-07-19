@@ -1,0 +1,34 @@
+# OpAMP Supervisor configuration for the development sidecar (ADR-0003).
+#
+# The supervisor connects to the OpAMP Fleet Server under development, which runs in the `dev` container
+# and is reachable by its Compose service name. Plain ws:// — this network exists only inside the
+# Compose project on the developer's machine.
+server:
+  endpoint: ws://dev:4320/v1/opamp
+
+capabilities:
+  accepts_remote_config: true
+  reports_remote_config: true
+  reports_effective_config: true
+  reports_health: true
+  reports_heartbeat: true
+  # Own telemetry stays off. Nothing in this environment consumes it yet, and enabling it makes the
+  # supervisor inject extra pipelines into the collector's effective config — which would obscure the
+  # very config the server is pushing.
+  reports_own_metrics: false
+  reports_own_logs: false
+  reports_own_traces: false
+
+agent:
+  executable: /usr/local/bin/otelcol-contrib
+  # Without a fallback the sidecar cannot start while the server under development is down — it would
+  # crash-loop through every code change. Used as-is (not merged) until the server is reachable.
+  startup_fallback_configs:
+    - /etc/otel/fallback.yaml
+
+storage:
+  directory: /var/lib/otelcol/supervisor
+
+telemetry:
+  logs:
+    encoding: console

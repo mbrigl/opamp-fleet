@@ -1,0 +1,39 @@
+# Splunk OTel Collector configuration for the conformance-breadth sidecar (ADR-0003).
+#
+# This runs the Splunk distribution as a *reporting* OpAMP client against the server under development:
+# the bundled `opampextension` connects to ws://dev:4320/v1/opamp and reports the collector's health and
+# effective configuration. It is deliberately observation-only — the opampextension reports state but
+# does not apply remote configuration the way a supervisor does.
+#
+# SPIKE-PENDING: this config is best-effort and unverified from inside the Dev Container, which has no
+# Docker (ADR-0003). Confirm on the HOST that the Splunk image speaks the WebSocket OpAMP transport and
+# that its distro bundles the opampextension. If it is HTTP-only, stop and raise an OpAMP HTTP transport
+# ADR rather than working around it (ADR-0003).
+extensions:
+  opamp:
+    server:
+      ws:
+        endpoint: ws://dev:4320/v1/opamp
+        tls:
+          insecure: true
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [opamp]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+  telemetry:
+    logs:
+      # Loud, like the OTel sidecar's fallback, so an unmanaged collector is easy to tell apart.
+      level: warn

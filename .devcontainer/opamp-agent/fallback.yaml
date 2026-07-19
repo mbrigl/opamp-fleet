@@ -1,0 +1,32 @@
+# Standalone collector configuration the supervisor falls back to while the OpAMP Fleet Server is
+# unreachable — for example whenever the server is restarted in the dev container. It is used as-is and
+# never merged with the configuration the server distributes.
+#
+# Deliberately minimal: it proves the collector process is alive, and its noisy `warn` log level makes
+# an unmanaged collector easy to tell apart from a configured one.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: warn

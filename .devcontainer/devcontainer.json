@@ -1,33 +1,38 @@
 {
   "name": "OpAMP Fleet DevContainer",
 
-  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  // The Dev Container is a service of the Compose project in `docker-compose.yml` (ADR-0003). The IDE
+  // starts that project on the HOST engine; the workspace container and the OpAMP agent sidecars land
+  // on one Compose network and reach each other by service name. Nothing here mounts a Docker socket:
+  // the container has no access to any Docker daemon (ADR-0003, preserving ADR-0002's binding rule).
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
   "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
 
   "remoteUser": "vscode",
-  "containerEnv": {
-    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
-  },
-  "mounts": [
-    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
-  ],
 
-  "shutdownAction": "stopContainer",
+  // Tears the whole Compose project down when the window closes — the sidecars must not outlive it.
+  "shutdownAction": "stopCompose",
 
-  // Runs on the host before the container is created. Ensures the bind-mount source for the agent
-  // config exists, so Docker does not auto-create it as a root-owned directory (which breaks
-  // credential writes inside the container).
+  // Runs on the host before the project is created. Ensures the bind-mount source for the agent config
+  // exists, so Docker does not auto-create it as a root-owned directory (which breaks credential
+  // writes inside the container).
   "initializeCommand": "mkdir -p ${localEnv:HOME}/.claude",
 
-  // DevContainer Features layered on top of the base image. The container intentionally has NO
-  // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
-  // from a host-side VS Code extension instead (README → "Host container management").
   "features": {
-    // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
-    // credential helper. Git writes still require explicit human approval (see AGENTS.md).
+    // Rust toolchain for the whole workspace — Server and Supervisor Host (ADR-0004). The Feature
+    // installs rustup only; the exact channel and the rustfmt/clippy components are pinned by
+    // `rust-toolchain.toml`, so the container and CI resolve the same compiler.
+    "ghcr.io/devcontainers/features/rust:1": {},
+    // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git credential
+    // helper. Git writes still require explicit human approval (see AGENTS.md).
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
+
+  // Installs protoc (prost-build generates the OpAMP types from the vendored schema) and a pinned
+  // otelcol-contrib for a Collector Supervisor to own locally (ADR-0004). Kept in a script so the two
+  // tools, and the pinned collector version, are visible and reviewable.
+  "onCreateCommand": "bash .devcontainer/install-tools.sh",
 
   "customizations": {
     // VS Code extensions installed inside the container
@@ -35,12 +40,26 @@
       "extensions": [
         "anthropic.claude-code",
         "mistralai.mistral-vibe-code",
-        "ms-vscode-remote.remote-containers"
+        "ms-vscode-remote.remote-containers",
+        "rust-lang.rust-analyzer"
       ]
     }
   },
 
-  "forwardPorts": [],
+  // 4320 is the OpAMP endpoint the sidecars connect to as ws://dev:4320/v1/opamp — they reach it over
+  // the Compose network and do not need the forward; forwarding only makes it reachable from the host
+  // too. 4321 is the fleet REST API, the one a human/UI opens.
+  "forwardPorts": [4320, 4321],
+  "portsAttributes": {
+    "4320": {
+      "label": "OpAMP server (WebSocket)",
+      "onAutoForward": "silent"
+    },
+    "4321": {
+      "label": "Fleet REST API (unauthenticated in dev)",
+      "onAutoForward": "notify"
+    }
+  },
 
   "hostRequirements": {
     "cpus": 2,

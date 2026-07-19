@@ -1,0 +1,4 @@
+# Pins the toolchain so the Dev Container and CI resolve the same compiler (ADR-0004).
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]

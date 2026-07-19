@@ -1,0 +1,91 @@
+# Development environment for OpAMP Fleet (ADR-0003).
+#
+# The IDE starts this project on the HOST Docker engine and attaches to the `dev` service. Consequence,
+# and the whole point of the design: the Dev Container needs no Docker socket and no Docker CLI, yet
+# real managed agents run right next to the code.
+#
+#   dev              the workspace container. The OpAMP Fleet Server (:4320 OpAMP, :4321 REST API) and
+#                    the Supervisor Host under development run here, as plain cargo processes.
+#   opamp-agent      the upstream OpenTelemetry OpAMP Supervisor, which owns an OpenTelemetry Collector
+#                    process and connects back to the server at ws://dev:4320/v1/opamp. It is the
+#                    behavioural oracle the project's own agents are checked against (ADR-0003).
+#   bindplane-agent  a real, independent third-party OpAMP agent — conformance breadth (ADR-0003).
+#   splunk-collector a second real product's OpAMP client — conformance breadth (ADR-0003).
+#
+# The two third-party sidecars are SPIKE-PENDING: because the Dev Container has no Docker (ADR-0003),
+# whether each image actually connects to our WebSocket server can only be confirmed by bringing this
+# project up on the HOST. Both are connect-first / observation-only for now; their images and config are
+# best-effort until the host-side connection spike confirms them. See README -> "Managing the sidecars".
+#
+# Because the Dev Container has no Docker access, `docker compose logs/restart <service>` must be run on
+# the HOST.
+name: opamp-fleet
+
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/base:debian
+    # Dev Container Features are layered onto this image by the IDE. Without a long-running command the
+    # container would exit immediately and there would be nothing to attach to.
+    command: sleep infinity
+    environment:
+      CLAUDE_CONFIG_DIR: /home/vscode/.claude
+    volumes:
+      - ..:/workspace:cached
+      # Agent credentials from the host. Assumes a POSIX host where $HOME is set (see README).
+      - ${HOME}/.claude:/home/vscode/.claude
+
+  opamp-agent:
+    build:
+      context: ./opamp-agent
+      args:
+        # Supervisor and collector are pinned to the same release. The supervisor is alpha: upgrade the
+        # two together and deliberately, never to `latest`/`nightly` (ADR-0003).
+        OTEL_VERSION: "0.156.0"
+    depends_on:
+      - dev
+    # The supervisor exits if it cannot reach the OpAMP server at startup; restarting lets the sidecar
+    # pick the server back up after it is (re)started in the dev container.
+    restart: unless-stopped
+    volumes:
+      # Supervisor state (agent instance UID, last remote config) must survive a restart, otherwise the
+      # collector re-registers as a new agent on every bounce.
+      - opamp-agent-storage:/var/lib/otelcol/supervisor
+
+  # ADR-0003 — Bindplane's agent for conformance breadth. Connect-first: it should appear in the fleet
+  # and report health/effective config. SPIKE-PENDING (ADR-0003 forbids running it from inside the
+  # container): confirm on the HOST that this image connects to our WS server, then pin the exact tag.
+  bindplane-agent:
+    image: ghcr.io/observiq/bindplane-agent:1.104.0
+    depends_on:
+      - dev
+    restart: unless-stopped
+    environment:
+      # Point the agent at our server under development, plain ws on the trusted Compose network. The
+      # server runs insecure here (no shared token), so no secret key is set.
+      OPAMP_ENDPOINT: ws://dev:4320/v1/opamp
+      MANAGER_YAML_PATH: /etc/otel/storage/manager.yaml
+    volumes:
+      - bindplane-agent-storage:/etc/otel/storage
+
+  # ADR-0003 — the Splunk OTel Collector for conformance breadth. It connects as a *reporting* OpAMP
+  # client via the bundled opampextension over WebSocket (observation only). SPIKE-PENDING and gated on
+  # the transport: if this image cannot speak the WebSocket transport, stop and raise an OpAMP HTTP
+  # transport ADR rather than working around it (ADR-0003).
+  splunk-collector:
+    image: quay.io/signalfx/splunk-otel-collector:0.130.0
+    depends_on:
+      - dev
+    restart: unless-stopped
+    # Run our own config (opampextension + a minimal pipeline), not Splunk's cloud default. The SPLUNK_*
+    # env below stop the image's entrypoint from demanding a Splunk realm/token.
+    command: ["--config=/etc/otel/splunk-opamp.yaml"]
+    environment:
+      SPLUNK_CONFIG: /etc/otel/splunk-opamp.yaml
+      SPLUNK_ACCESS_TOKEN: unused-on-a-trusted-dev-network
+      SPLUNK_REALM: none
+    volumes:
+      - ./splunk-collector/config.yaml:/etc/otel/splunk-opamp.yaml:ro
+
+volumes:
+  opamp-agent-storage:
+  bindplane-agent-storage:

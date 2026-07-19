@@ -138,31 +138,57 @@ TODO — show a minimal example of using the project.
 ## Project Layout
 
 ```
-README.md             # overview & setup for humans
-AGENTS.md             # single source of truth for coding agents
-docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
-docs/adr/             # Architecture Decision Records (+ template)
-.devcontainer/        # Dev Container definition (base image + Features)
-.vscode/              # shared editor settings
-.claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md
-.claude/settings.json # Claude Code permissions: prompt before git/gh writes
+README.md                     # overview & setup for humans
+AGENTS.md                     # single source of truth for coding agents
+docs/SPECIFICATION.md         # the specification: problem, goals, vocabulary
+docs/adr/                     # Architecture Decision Records (+ template)
+rust-toolchain.toml           # pinned Rust channel (container + CI agree)
+.devcontainer/
+  devcontainer.json           # Compose-based Dev Container (dev service)
+  docker-compose.yml          # dev + OpAMP agent sidecars
+  install-tools.sh            # protoc + pinned otelcol-contrib (onCreate)
+  opamp-agent/                # upstream OTel Supervisor + Collector sidecar (oracle)
+  splunk-collector/           # Splunk OTel Collector sidecar config
+.vscode/                      # shared editor settings
+.claude/CLAUDE.md             # pointer for Claude Code to read AGENTS.md
+.claude/settings.json         # Claude Code permissions: prompt before git/gh writes
 ```
 
 ## Dev Container
 
-The environment is defined entirely in [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json):
-it starts from a prebuilt base image and layers Dev Container Features and VS Code extensions on top —
-no Dockerfile or Compose file required. Customise the environment by adding Features, switching the
-base image, or adding extensions.
+The environment is a **Docker Compose** project defined in
+[`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml) and attached to by
+[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)
+([ADR-0003](docs/adr/0003-compose-dev-environment-with-opamp-sidecars.md)). The IDE starts the project
+on the **host** engine and attaches to the `dev` service, where the Rust toolchain
+([ADR-0004](docs/adr/0004-rust-toolchain-dev-container.md)) is installed and the OpAMP Fleet Server
+(`:4320` OpAMP, `:4321` REST API) runs. Three OpAMP agent sidecars run beside it on one Compose network
+and connect back to `ws://dev:4320/v1/opamp`:
 
-### Host container management
+- **`opamp-agent`** — the upstream OpenTelemetry OpAMP Supervisor and the Collector it owns, the
+  behavioural oracle the project's own agents are checked against.
+- **`bindplane-agent`** and **`splunk-collector`** — two independent third-party OpAMP clients, for
+  protocol-conformance breadth. Both are **spike-pending**: whether each image actually connects to the
+  server can only be confirmed by bringing the project up on the host (see below).
 
-The Dev Container deliberately has **no access to the host Docker daemon** — the socket is not mounted
-([ADR-0002](docs/adr/0002-dev-container-runtime.md)). To manage the host's containers from VS
-Code, run the **Container Tools** extension (`ms-azuretools.vscode-containers`) on the **host** side:
-install it in your host VS Code. [`.vscode/settings.json`](.vscode/settings.json) already pins it to
-run locally via `remote.extensionKind`, so it keeps talking to the host engine even when this folder
-is reopened in the container.
+The container mounts **no Docker socket and has no Docker CLI** — it cannot touch the host daemon; only
+the IDE, host-side, drives Compose.
+
+### Managing the sidecars
+
+Because the Dev Container has no Docker access, sidecar lifecycle is a **host-side** concern. From a
+terminal on the host, in the repository root, use the Compose project (named `opamp-fleet`):
+
+```
+docker compose -f .devcontainer/docker-compose.yml logs -f opamp-agent
+docker compose -f .devcontainer/docker-compose.yml restart opamp-agent
+```
+
+To manage the host's containers from VS Code instead, run the **Container Tools** extension
+(`ms-azuretools.vscode-containers`) on the **host** side.
+[`.vscode/settings.json`](.vscode/settings.json) already pins it to run locally via
+`remote.extensionKind`, so it keeps talking to the host engine even when this folder is reopened in the
+container.
 
 ## Coding Agents
 

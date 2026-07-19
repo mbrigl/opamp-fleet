@@ -1,6 +1,6 @@
 # ADR-0002: Debian Dev Container without host Docker access
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0003](0003-compose-dev-environment-with-opamp-sidecars.md)
 - **Date:** 2026-06-22
 - **Deciders:** Maintainer
 - **Note:** Records a decision already embodied in

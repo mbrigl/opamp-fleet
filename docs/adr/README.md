@@ -26,5 +26,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-agent-governance-model.md) | Specification + ADRs governed through a single `AGENTS.md` | 🟢 accepted |
-| [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | 🟢 accepted |
+| [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | ⚪ superseded by ADR-0003 |
+| [0003](0003-compose-dev-environment-with-opamp-sidecars.md) | Compose-based Dev Container with OpAMP sidecars | 🟢 accepted |
+| [0004](0004-rust-toolchain-dev-container.md) | Rust toolchain and build tooling in the Dev Container | 🟢 accepted |
 
