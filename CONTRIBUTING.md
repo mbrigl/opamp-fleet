@@ -41,6 +41,12 @@ Authority runs **specification → accepted ADRs → individual change**.
   [`scripts/check-docs.sh`](scripts/check-docs.sh). Run it locally with `scripts/check-docs.sh`
   before opening a pull request — it needs only bash and coreutils, already in the Dev Container.
 
+## License of contributions
+
+This project is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution, you
+agree that it is provided under the terms of that License, without any additional terms or conditions
+(Apache-2.0 §5). Do not submit code you are not authorised to license this way.
+
 ## Reporting security issues
 
 Do **not** open a public issue for vulnerabilities. Follow [`SECURITY.md`](SECURITY.md).

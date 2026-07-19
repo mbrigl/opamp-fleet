@@ -1,5 +1,5 @@
 {
-  "name": "NUC DevContainer",
+  "name": "OpAMP Fleet DevContainer",
 
   "image": "mcr.microsoft.com/devcontainers/base:debian",
   "workspaceFolder": "/workspace",
