@@ -73,11 +73,10 @@ impl ProcessAgent {
         Ok(())
     }
 
-    /// Terminates the current process, waiting for it to exit.
+    /// Terminates the current process gracefully (SIGTERM, then SIGKILL), waiting for it to exit.
     async fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            crate::agent::terminate(&mut child).await;
         }
     }
 
@@ -167,6 +166,10 @@ impl ManagedAgent for ProcessAgent {
         let status = self.child.as_mut()?.try_wait().ok()??;
         self.child = None;
         Some(status.to_string())
+    }
+
+    async fn shutdown(&mut self) {
+        self.stop().await;
     }
 }
 

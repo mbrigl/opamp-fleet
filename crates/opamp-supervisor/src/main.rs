@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use opamp_supervisor::agent::ManagedAgent;
 use opamp_supervisor::collector::Collector;
 use opamp_supervisor::collector_agent::CollectorAgent;
-use opamp_supervisor::config::{HostConfig, SupervisorConfig};
+use opamp_supervisor::config::{CollectorConfig, HostConfig, SupervisorConfig};
 use opamp_supervisor::host::SupervisorHost;
 use opamp_supervisor::local_server;
 use opamp_supervisor::process_agent::{ProcessAgent, ProcessConfig};
@@ -74,6 +74,12 @@ async fn main() {
         };
         info!(supervisor = %name, uid = %uid::format(&instance_uid), "supervisor instance UID");
 
+        let attributes: Vec<(String, String)> = entry
+            .attributes()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+
         match entry {
             SupervisorConfig::Collector(c) => {
                 let collector =
@@ -87,7 +93,9 @@ async fn main() {
                     }
                 };
                 let endpoint = format!("ws://{local_addr}/v1/opamp");
-                let agent = CollectorAgent::new(collector, link, endpoint);
+                let base_config = read_optional_config(c.base_config.as_deref());
+                let agent =
+                    CollectorAgent::new(collector, link, endpoint, &instance_uid, base_config);
                 spawn(
                     &mut host,
                     &name,
@@ -96,8 +104,10 @@ async fn main() {
                     uid_path,
                     storage_dir,
                     agent_version,
-                    read_fallback(c.fallback.as_deref()),
+                    read_optional_config(c.fallback.as_deref()),
                     heartbeat,
+                    attributes,
+                    own_telemetry_capabilities(c),
                     agent,
                 );
             }
@@ -116,8 +126,10 @@ async fn main() {
                     uid_path,
                     storage_dir,
                     None,
-                    read_fallback(c.fallback.as_deref()),
+                    read_optional_config(c.fallback.as_deref()),
                     heartbeat,
+                    attributes,
+                    0, // a Foreign Agent does not report its own telemetry
                     agent,
                 );
             }
@@ -144,6 +156,8 @@ fn spawn<A: ManagedAgent>(
     agent_version: Option<String>,
     fallback: Option<Vec<u8>>,
     heartbeat: Duration,
+    extra_attributes: Vec<(String, String)>,
+    own_telemetry_capabilities: u64,
     agent: A,
 ) {
     let supervisor = Supervisor::new(
@@ -156,19 +170,38 @@ fn spawn<A: ManagedAgent>(
             agent_version,
             fallback,
             heartbeat,
+            extra_attributes,
+            own_telemetry_capabilities,
         },
         agent,
     );
     host.spawn(supervisor);
 }
 
-/// Reads an optional fallback config file, warning (not failing) if it cannot be read.
-fn read_fallback(path: Option<&Path>) -> Option<Vec<u8>> {
+/// The `ReportsOwn{Metrics,Logs,Traces}` capability bits a collector supervisor declares, per its
+/// configuration toggles (ADR-0010).
+fn own_telemetry_capabilities(c: &CollectorConfig) -> u64 {
+    use opamp_proto::proto::AgentCapabilities;
+    let mut caps = 0;
+    if c.own_metrics {
+        caps |= AgentCapabilities::ReportsOwnMetrics as u64;
+    }
+    if c.own_logs {
+        caps |= AgentCapabilities::ReportsOwnLogs as u64;
+    }
+    if c.own_traces {
+        caps |= AgentCapabilities::ReportsOwnTraces as u64;
+    }
+    caps
+}
+
+/// Reads an optional config file (fallback, base config, …), warning (not failing) if it cannot be read.
+fn read_optional_config(path: Option<&Path>) -> Option<Vec<u8>> {
     let path = path?;
     match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) => {
-            warn!(path = %path.display(), error = %e, "cannot read the fallback config; ignoring");
+            warn!(path = %path.display(), error = %e, "cannot read config file; ignoring");
             None
         }
     }

@@ -5,6 +5,7 @@
 //! with its own Instance UID and storage subdirectory. Adding a kind of agent is a new entry type, not
 //! a change to the domain.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -52,6 +53,14 @@ impl SupervisorConfig {
         };
         own.as_deref().unwrap_or(default)
     }
+
+    /// Extra non-identifying attributes to attach to this supervisor's reported `AgentDescription`.
+    pub fn attributes(&self) -> &BTreeMap<String, String> {
+        match self {
+            SupervisorConfig::Collector(c) => &c.attributes,
+            SupervisorConfig::Custom(c) => &c.attributes,
+        }
+    }
 }
 
 /// A Collector supervisor entry.
@@ -63,8 +72,23 @@ pub struct CollectorConfig {
     pub collector: String,
     /// A config to run before the server answers (optional).
     pub fallback: Option<PathBuf>,
+    /// A base collector config merged *underneath* every remote config (remote keys win), so an
+    /// operator can pin local settings the Server's config is layered on top of (optional).
+    pub base_config: Option<PathBuf>,
     /// An OpAMP server URL overriding the host default (optional).
     pub server: Option<String>,
+    /// Extra non-identifying attributes for this agent's description (e.g. team, environment).
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+    /// Report the collector's own metrics to the destination the Server offers (ADR-0010). Default on.
+    #[serde(default = "default_true")]
+    pub own_metrics: bool,
+    /// Report the collector's own logs to the destination the Server offers (ADR-0010). Default on.
+    #[serde(default = "default_true")]
+    pub own_logs: bool,
+    /// Report the collector's own traces to the destination the Server offers (ADR-0010). Default on.
+    #[serde(default = "default_true")]
+    pub own_traces: bool,
 }
 
 /// A Custom (Foreign Agent) supervisor entry.
@@ -81,6 +105,9 @@ pub struct CustomConfig {
     pub fallback: Option<PathBuf>,
     /// An OpAMP server URL overriding the host default (optional).
     pub server: Option<String>,
+    /// Extra non-identifying attributes for this agent's description (e.g. team, environment).
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
 }
 
 fn default_server() -> String {
@@ -94,6 +121,9 @@ fn default_heartbeat() -> u64 {
 }
 fn default_collector() -> String {
     "otelcol-contrib".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl HostConfig {
@@ -125,6 +155,9 @@ supervisors:
   - type: collector
     name: otelcol
     fallback: config/collector.yaml
+    attributes:
+      team: telemetry
+      deployment.environment: staging
   - type: custom
     name: nginx
     command: ["/usr/sbin/nginx", "-g", "daemon off;"]
@@ -141,6 +174,15 @@ supervisors:
             }
             _ => panic!("first should be a collector"),
         }
+        // Configured attributes parse; a supervisor without an `attributes:` block gets an empty map.
+        assert_eq!(
+            config.supervisors[0]
+                .attributes()
+                .get("team")
+                .map(String::as_str),
+            Some("telemetry")
+        );
+        assert!(config.supervisors[1].attributes().is_empty());
         match &config.supervisors[1] {
             SupervisorConfig::Custom(c) => {
                 assert_eq!(c.name, "nginx");

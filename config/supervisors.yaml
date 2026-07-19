@@ -15,6 +15,19 @@ supervisors:
     name: otelcol
     collector: otelcol-contrib          # executable on PATH (installed by the Dev Container)
     fallback: config/collector.yaml      # run this until the server answers
+    # Optional base config merged underneath every remote config (remote keys win), to pin local
+    # settings the Server's config is layered on top of:
+    # base_config: config/collector-base.yaml
+    # Optional extra non-identifying attributes, added to this agent's reported description so a fleet
+    # UI can label it (team, environment, …):
+    # attributes:
+    #   team: telemetry
+    #   deployment.environment: staging
+    # Report the collector's own metrics/logs/traces to the destination the Server offers (ADR-0010);
+    # each defaults to true. Set to false to opt a signal out:
+    # own_metrics: true
+    # own_logs: true
+    # own_traces: true
 
   # A non-OpAMP Foreign Agent — the Custom Supervisor (ADR-0009). It writes the distributed config to
   # `config_path` and (re)starts the process; `reload:` runs a reload command instead of a restart.

@@ -34,4 +34,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0007](0007-rest-api-and-fleet-ui.md) | A JSON REST API (with SSE) and a minimal HTML fleet view | 🟢 accepted |
 | [0008](0008-collector-supervisor-go-reference-compat.md) | Collector Supervisor, feature-compatible with the Go reference Supervisor | 🟢 accepted |
 | [0009](0009-plugin-hexagonal-supervisor-host.md) | Plugin/hexagonal Supervisor Host — many supervisors behind a `ManagedAgent` port, with a Custom Supervisor | 🟢 accepted |
+| [0010](0010-collector-supervisor-own-telemetry.md) | Collector Supervisor reports the Collector's own telemetry from the Server's connection settings | 🟢 accepted |
 

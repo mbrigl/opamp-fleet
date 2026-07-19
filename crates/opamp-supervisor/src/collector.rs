@@ -165,12 +165,11 @@ impl Collector {
         Some(status)
     }
 
-    /// Terminates the current Collector process, waiting for it to exit so a restart does not race two
-    /// collectors writing the same telemetry.
+    /// Terminates the current Collector process gracefully (SIGTERM, then SIGKILL), waiting for it to
+    /// exit so a restart does not race two collectors writing the same telemetry.
     pub async fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            crate::agent::terminate(&mut child).await;
         }
     }
 }

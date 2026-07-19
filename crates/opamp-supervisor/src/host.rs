@@ -5,27 +5,45 @@
 //! agent is a new adapter behind the [`ManagedAgent`](crate::agent::ManagedAgent) port, not a change
 //! here.
 
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 use tracing::info;
 
-use crate::agent::ManagedAgent;
+use crate::agent::{ManagedAgent, GRACEFUL_SHUTDOWN_TIMEOUT};
 use crate::supervisor::Supervisor;
 
+/// A margin added to the per-process graceful-stop timeout, so the Host waits a little longer than any
+/// single agent's SIGTERM window before giving up on a clean shutdown and exiting.
+const SHUTDOWN_JOIN_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The Supervisor Host process: it owns and runs its supervisors.
-#[derive(Default)]
 pub struct SupervisorHost {
     handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Fired on process shutdown to cancel every supervisor's run loop so it can stop its agent
+    /// gracefully, rather than being aborted and hard-killed on drop.
+    shutdown: Arc<Notify>,
 }
 
 impl SupervisorHost {
     /// A host running no supervisors yet.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            handles: Vec::new(),
+            shutdown: Arc::new(Notify::new()),
+        }
     }
 
-    /// Spawns a supervisor as its own task; it runs its OpAMP loop until the host shuts down.
+    /// Spawns a supervisor as its own task; it runs its OpAMP loop until the host signals shutdown, then
+    /// stops its managed agent gracefully.
     pub fn spawn<A: ManagedAgent>(&mut self, mut supervisor: Supervisor<A>) {
+        let shutdown = self.shutdown.clone();
         self.handles.push(tokio::spawn(async move {
-            supervisor.run().await;
+            tokio::select! {
+                _ = supervisor.run() => {}
+                _ = shutdown.notified() => {}
+            }
+            supervisor.shutdown().await;
         }));
     }
 
@@ -39,14 +57,23 @@ impl SupervisorHost {
         self.handles.is_empty()
     }
 
-    /// Runs until the process is asked to stop (Ctrl-C / SIGTERM), then tears every supervisor down —
-    /// dropping each agent, whose `kill_on_drop` child processes are killed with it.
-    pub async fn run(self) {
+    /// Runs until the process is asked to stop (Ctrl-C / SIGTERM), then signals every supervisor to stop
+    /// its agent gracefully and waits, bounded, for them to finish.
+    pub async fn run(mut self) {
         shutdown_signal().await;
         info!(supervisors = self.handles.len(), "shutting down");
-        for handle in &self.handles {
-            handle.abort();
+        self.shutdown.notify_waiters();
+
+        let deadline = GRACEFUL_SHUTDOWN_TIMEOUT + SHUTDOWN_JOIN_MARGIN;
+        for handle in self.handles.drain(..) {
+            let _ = tokio::time::timeout(deadline, handle).await;
         }
+    }
+}
+
+impl Default for SupervisorHost {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

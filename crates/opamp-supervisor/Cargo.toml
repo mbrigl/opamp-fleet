@@ -27,3 +27,8 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 hex.workspace = true
+
+# Sending SIGTERM to a supervised child for graceful shutdown (tokio's Child only exposes SIGKILL).
+# Unix-only: Windows has no SIGTERM for another process and falls back to an immediate terminate.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

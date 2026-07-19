@@ -13,7 +13,7 @@
 //! the initial Server (ADR-0006). TLS + auth and package delivery are deferred to their own ADRs.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
@@ -22,11 +22,12 @@ use tracing::{debug, error, info, warn};
 use opamp_proto::frame;
 use opamp_proto::proto::{
     any_value, AgentCapabilities, AgentConfigFile, AgentConfigMap, AgentDescription,
-    AgentRemoteConfig, AgentToServer, AnyValue, CommandType, ComponentHealth, EffectiveConfig,
-    KeyValue, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent, ServerToAgentFlags,
+    AgentRemoteConfig, AgentToServer, AnyValue, CommandType, ComponentHealth,
+    ConnectionSettingsOffers, EffectiveConfig, KeyValue, RemoteConfigStatus, RemoteConfigStatuses,
+    ServerToAgent, ServerToAgentFlags, TelemetryConnectionSettings,
 };
 
-use crate::agent::{liveness_health, ManagedAgent};
+use crate::agent::{liveness_health, ManagedAgent, OwnTelemetry, TelemetryDestination};
 
 /// The key a single-file agent's configuration is filed under in an OpAMP config map. The Server writes
 /// the config under the empty-string key (the specification's SHOULD for a single-file agent), so that
@@ -48,8 +49,17 @@ const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// How often, between server messages, the supervisor checks that the managed agent is still alive.
 const SUPERVISION_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The capabilities this Agent declares. `ReportsStatus` MUST be set; the rest are exactly the loop
-/// this Agent implements. We do not claim capabilities we do not implement (own telemetry, packages).
+/// Crash-restart backoff: an agent that exits again within [`RESTART_STABLE`] of its last restart is
+/// treated as crash-looping and backed off — doubling from [`RESTART_BACKOFF_BASE`], capped at
+/// [`RESTART_BACKOFF_MAX`] — so a persistently broken agent is not restarted in a tight loop. An agent
+/// that stays up at least [`RESTART_STABLE`] is considered stable and resets the backoff to the base.
+const RESTART_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+const RESTART_STABLE: Duration = Duration::from_secs(60);
+
+/// The mandatory capabilities every Agent declares. `ReportsStatus` MUST be set; the rest are exactly
+/// the loop this Agent always implements. Own-telemetry bits (ADR-0010) are added per configuration on
+/// top of these; we still never claim a capability we do not implement (packages).
 const CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::AcceptsRemoteConfig as u64
     | AgentCapabilities::ReportsEffectiveConfig as u64
@@ -77,6 +87,12 @@ pub struct Config {
     pub agent_version: Option<String>,
     pub fallback: Option<Vec<u8>>,
     pub heartbeat: Duration,
+    /// Extra non-identifying attributes from the supervisor configuration, added to every reported
+    /// `AgentDescription` so an operator can label an agent (team, environment, …) from one place.
+    pub extra_attributes: Vec<(String, String)>,
+    /// The `ReportsOwn{Metrics,Logs,Traces}` capability bits this agent declares and honours (ADR-0010);
+    /// `0` for an agent that does not report its own telemetry (e.g. a Foreign Agent).
+    pub own_telemetry_capabilities: u64,
 }
 
 /// The running supervisor: its identity, the [`ManagedAgent`] it drives, and the control-loop state it
@@ -89,6 +105,10 @@ pub struct Supervisor<A: ManagedAgent> {
     service_name: String,
     agent_version: Option<String>,
     agent_description: AgentDescription,
+    /// Extra non-identifying attributes from configuration, added to every reported description.
+    extra_attributes: Vec<(String, String)>,
+    /// The capabilities this agent declares — the mandatory loop plus any own-telemetry bits (ADR-0010).
+    capabilities: u64,
     agent: A,
     /// Applied on startup so the agent runs even before the Server answers. Taken once, on `run`.
     fallback: Option<Vec<u8>>,
@@ -100,6 +120,10 @@ pub struct Supervisor<A: ManagedAgent> {
     start_time_unix_nano: u64,
     heartbeat: Duration,
     reconnect_delay: Duration,
+    /// Current crash-restart backoff, doubled on each rapid re-crash and reset when the agent is stable.
+    restart_backoff: Duration,
+    /// When the agent was last (re)started after a crash, to tell a crash loop from an isolated exit.
+    last_restart: Option<Instant>,
 }
 
 impl<A: ManagedAgent> Supervisor<A> {
@@ -121,6 +145,8 @@ impl<A: ManagedAgent> Supervisor<A> {
             service_name: config.service_name,
             agent_version: config.agent_version,
             agent_description,
+            extra_attributes: config.extra_attributes,
+            capabilities: CAPABILITIES | config.own_telemetry_capabilities,
             agent,
             fallback: config.fallback,
             applied_hash: Vec::new(),
@@ -129,12 +155,25 @@ impl<A: ManagedAgent> Supervisor<A> {
             start_time_unix_nano,
             heartbeat: config.heartbeat,
             reconnect_delay: RECONNECT_BASE,
+            restart_backoff: RESTART_BACKOFF_BASE,
+            last_restart: None,
         }
     }
 
     /// Runs until the process is stopped: bring the agent up (resuming the last applied config if one
     /// is on disk, else the fallback), then keep an OpAMP session open, reconnecting with backoff.
     pub async fn run(&mut self) {
+        // Learn the agent-authoritative identity before the first Server report (a no-op for adapters,
+        // e.g. a Foreign Agent, that have no discovery channel).
+        self.agent.bootstrap().await;
+
+        // Seed the agent with the last own-telemetry destination the Server offered, if any, so the
+        // resumed/fallback config already reports to it (ADR-0010).
+        let own_telemetry = self.load_own_telemetry();
+        if !own_telemetry.is_empty() {
+            self.agent.set_own_telemetry(own_telemetry);
+        }
+
         if !self.resume_last_config().await {
             if let Some(fallback) = self.fallback.take() {
                 let prepared = self.agent.prepare_config(fallback.clone());
@@ -157,6 +196,12 @@ impl<A: ManagedAgent> Supervisor<A> {
             tokio::time::sleep(self.reconnect_delay).await;
             self.reconnect_delay = (self.reconnect_delay * 2).min(RECONNECT_MAX);
         }
+    }
+
+    /// Gracefully stops the managed agent. Called by the Host once its run loop has been cancelled on
+    /// shutdown, so the agent terminates cleanly instead of being hard-killed on drop.
+    pub async fn shutdown(&mut self) {
+        self.agent.shutdown().await;
     }
 
     /// Brings the agent up on the last configuration that applied, if it is recorded in the storage dir,
@@ -285,6 +330,9 @@ impl<A: ManagedAgent> Supervisor<A> {
             SUPERVISOR_ATTRIBUTE,
             &format!("opamp-supervisor/{} (rust)", env!("CARGO_PKG_VERSION")),
         );
+        for (key, value) in &self.extra_attributes {
+            set_string_attribute(&mut description.non_identifying_attributes, key, value);
+        }
         description
     }
 
@@ -295,11 +343,28 @@ impl<A: ManagedAgent> Supervisor<A> {
         let Some(reason) = self.agent.supervise().await else {
             return Ok(());
         };
-        warn!(%reason, "agent exited unexpectedly; restarting on the last good configuration");
+
+        // Distinguish an isolated exit from a crash loop: an agent that dies again soon after its last
+        // restart is backed off (doubling) so it is not restarted in a tight loop; a stable one resets.
+        let rapid = self
+            .last_restart
+            .is_some_and(|t| t.elapsed() < RESTART_STABLE);
+        self.restart_backoff = escalate_backoff(self.restart_backoff, rapid);
+
+        warn!(
+            %reason,
+            backoff_secs = self.restart_backoff.as_secs(),
+            "agent exited unexpectedly; restarting on the last good configuration after backoff"
+        );
 
         let mut down = self.next_report();
         down.health = Some(self.health(false, format!("agent exited unexpectedly: {reason}")));
         self.send(ws, down).await?;
+
+        // The down report reaches the Server before we wait, so a crash-looping agent is visible even
+        // while it is being backed off.
+        tokio::time::sleep(self.restart_backoff).await;
+        self.last_restart = Some(Instant::now());
 
         match self.agent.restart().await {
             Ok(()) => {
@@ -355,10 +420,51 @@ impl<A: ManagedAgent> Supervisor<A> {
             report.health = Some(self.current_health());
             self.send(ws, report).await?;
         }
+        // Own-telemetry offer (ADR-0010): update the agent's reporting destination. If it changed, the
+        // running config must be re-applied to take effect — unless a remote config below already does.
+        let telemetry_changed = if let Some(cs) = &msg.connection_settings {
+            let offered = own_telemetry_from(cs, self.capabilities);
+            if self.agent.set_own_telemetry(offered.clone()) {
+                info!("server offered new own-telemetry connection settings");
+                self.persist_own_telemetry(&offered);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let mut reconfigured = false;
         if let Some(remote) = msg.remote_config {
-            self.apply_remote_config(ws, remote).await?;
+            reconfigured = self.apply_remote_config(ws, remote).await?;
+        }
+        if telemetry_changed && !reconfigured {
+            self.reapply_running_config(ws).await?;
         }
         Ok(())
+    }
+
+    /// Re-applies the configuration currently running so a change that is not carried by a new remote
+    /// config — an own-telemetry offer (ADR-0010) — takes effect. A no-op until something is running.
+    async fn reapply_running_config(&mut self, ws: &mut Ws) -> Result<(), String> {
+        if self.applied_body.is_empty() {
+            return Ok(());
+        }
+        let prepared = self.agent.prepare_config(self.applied_body.clone());
+        let mut report = self.next_report();
+        match self.agent.apply(&prepared).await {
+            Ok(()) => {
+                report.effective_config = Some(self.effective_config());
+                report.health = Some(self.current_health());
+                info!("re-applied the running configuration for updated own-telemetry settings");
+            }
+            Err(e) => {
+                error!(error = %e, "cannot re-apply the running configuration for own telemetry");
+                report.health = Some(self.health(false, "agent failed to re-apply config".into()));
+            }
+        }
+        self.send(ws, report).await
     }
 
     /// Adopts an instance UID the Server assigned: persisted so a restart keeps the assigned identity,
@@ -377,19 +483,22 @@ impl<A: ManagedAgent> Supervisor<A> {
     }
 
     /// Applies a remote configuration and reports the outcome. Skips the work when the offered hash is
-    /// already the applied one, so an unchanged re-offer never restarts the agent.
+    /// already the applied one, so an unchanged re-offer never restarts the agent. Returns whether the
+    /// agent was (re)configured — so the caller knows the running config already carries the current
+    /// own-telemetry settings and need not re-apply for them (ADR-0010).
     async fn apply_remote_config(
         &mut self,
         ws: &mut Ws,
         remote: AgentRemoteConfig,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let hash = remote.config_hash;
         if hash == self.applied_hash {
-            return Ok(());
+            return Ok(false);
         }
-        let Some(body) = config_body(remote.config) else {
-            warn!("remote config carried no entry under the main key; ignoring");
-            return Ok(());
+        let files = sorted_config_files(remote.config);
+        let Some(body) = self.agent.merge_config(&files) else {
+            warn!("remote config carried no usable config files; ignoring");
+            return Ok(false);
         };
         let prepared = self.agent.prepare_config(body.clone());
 
@@ -427,7 +536,8 @@ impl<A: ManagedAgent> Supervisor<A> {
                 report.health = Some(self.health(false, "agent failed to apply config".into()));
             }
         }
-        self.send(ws, report).await
+        self.send(ws, report).await?;
+        Ok(true)
     }
 
     /// A report carrying the Agent's full state — identity, health, and the configuration it holds.
@@ -453,7 +563,7 @@ impl<A: ManagedAgent> Supervisor<A> {
         AgentToServer {
             instance_uid: self.instance_uid.clone(),
             sequence_num: self.sequence_num,
-            capabilities: CAPABILITIES,
+            capabilities: self.capabilities,
             ..Default::default()
         }
     }
@@ -470,6 +580,36 @@ impl<A: ManagedAgent> Supervisor<A> {
         if let Err(e) = std::fs::write(self.storage_dir.join("applied.hash"), hex::encode(hash)) {
             warn!(error = %e, "cannot persist the applied config hash");
         }
+    }
+
+    /// The file the last Server-offered own-telemetry settings are persisted to (ADR-0010).
+    fn own_telemetry_path(&self) -> PathBuf {
+        self.storage_dir.join("own_telemetry.yaml")
+    }
+
+    /// Persists the last own-telemetry offer, so a supervisor restart resumes reporting to the same
+    /// destination without waiting for the Server to re-offer it (ADR-0010).
+    fn persist_own_telemetry(&self, settings: &OwnTelemetry) {
+        if let Err(e) = std::fs::create_dir_all(&self.storage_dir) {
+            warn!(error = %e, "cannot create the supervisor storage directory");
+            return;
+        }
+        match serde_yaml::to_string(settings) {
+            Ok(yaml) => {
+                if let Err(e) = std::fs::write(self.own_telemetry_path(), yaml) {
+                    warn!(error = %e, "cannot persist own-telemetry settings");
+                }
+            }
+            Err(e) => warn!(error = %e, "cannot serialize own-telemetry settings"),
+        }
+    }
+
+    /// Loads the last persisted own-telemetry offer, or an empty one if none is recorded (ADR-0010).
+    fn load_own_telemetry(&self) -> OwnTelemetry {
+        std::fs::read(self.own_telemetry_path())
+            .ok()
+            .and_then(|bytes| serde_yaml::from_slice(&bytes).ok())
+            .unwrap_or_default()
     }
 
     /// The effective configuration to report. Prefers what the agent reports (its *actual* running
@@ -510,12 +650,60 @@ impl<A: ManagedAgent> Supervisor<A> {
     }
 }
 
+/// The next crash-restart backoff: doubled (capped at [`RESTART_BACKOFF_MAX`]) when the agent is
+/// crash-looping, reset to [`RESTART_BACKOFF_BASE`] when it has been stable.
+fn escalate_backoff(current: Duration, rapid: bool) -> Duration {
+    if rapid {
+        (current * 2).min(RESTART_BACKOFF_MAX)
+    } else {
+        RESTART_BACKOFF_BASE
+    }
+}
+
 /// Whether the server asked the agent to restart (`ServerToAgentCommand`, the AcceptsRestartCommand
 /// capability).
 fn is_restart_command(msg: &ServerToAgent) -> bool {
     msg.command
         .as_ref()
         .is_some_and(|c| c.r#type == CommandType::Restart as i32)
+}
+
+/// The own-telemetry destinations from a `ConnectionSettingsOffers`, honouring only the signals this
+/// agent declares (ADR-0010): a disabled or un-offered signal is left unset.
+fn own_telemetry_from(cs: &ConnectionSettingsOffers, capabilities: u64) -> OwnTelemetry {
+    let for_signal = |offered: &Option<TelemetryConnectionSettings>, cap: AgentCapabilities| {
+        (capabilities & cap as u64 != 0)
+            .then(|| destination_from(offered.as_ref()))
+            .flatten()
+    };
+    OwnTelemetry {
+        metrics: for_signal(&cs.own_metrics, AgentCapabilities::ReportsOwnMetrics),
+        logs: for_signal(&cs.own_logs, AgentCapabilities::ReportsOwnLogs),
+        traces: for_signal(&cs.own_traces, AgentCapabilities::ReportsOwnTraces),
+    }
+}
+
+/// A [`TelemetryDestination`] from an offered `TelemetryConnectionSettings`, or `None` when no endpoint
+/// is offered (an empty endpoint means "no destination").
+fn destination_from(offered: Option<&TelemetryConnectionSettings>) -> Option<TelemetryDestination> {
+    let offered = offered?;
+    if offered.destination_endpoint.is_empty() {
+        return None;
+    }
+    let headers = offered
+        .headers
+        .as_ref()
+        .map(|h| {
+            h.headers
+                .iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(TelemetryDestination {
+        endpoint: offered.destination_endpoint.clone(),
+        headers,
+    })
 }
 
 /// A server-dictated heartbeat interval, if the server offered one greater than zero.
@@ -529,13 +717,19 @@ fn heartbeat_override(msg: &ServerToAgent) -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-/// Extracts the single-file config body from an offered `AgentConfigMap`, under the main key.
-fn config_body(config: Option<AgentConfigMap>) -> Option<Vec<u8>> {
-    config?
+/// The offered config map as an ordered list of `(key, body)`, sorted by key — the order in which the
+/// files are merged into the applied config, matching the Go supervisor. Empty when nothing is offered.
+fn sorted_config_files(config: Option<AgentConfigMap>) -> Vec<(String, Vec<u8>)> {
+    let Some(map) = config else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, Vec<u8>)> = map
         .config_map
         .into_iter()
-        .find(|(key, _)| key == MAIN_CONFIG_KEY)
-        .map(|(_, file)| file.body)
+        .map(|(key, file)| (key, file.body))
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 /// The Agent's self-description: the identifying attributes an OpenTelemetry Agent SHOULD report, so
@@ -648,9 +842,17 @@ mod tests {
                 agent_version: None,
                 fallback: None,
                 heartbeat: Duration::from_secs(30),
+                extra_attributes: Vec::new(),
+                own_telemetry_capabilities: 0,
             },
             agent,
         )
+    }
+
+    fn supervisor_with_attributes(attrs: Vec<(String, String)>) -> Supervisor<FakeAgent> {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.extra_attributes = attrs;
+        sup
     }
 
     fn effective_body(ec: EffectiveConfig) -> Vec<u8> {
@@ -659,25 +861,45 @@ mod tests {
             .clone()
     }
 
-    #[test]
-    fn config_body_reads_the_main_key() {
-        let map = AgentConfigMap {
-            config_map: [(
-                MAIN_CONFIG_KEY.to_string(),
-                AgentConfigFile {
-                    body: b"receivers: {}\n".to_vec(),
-                    content_type: CONFIG_CONTENT_TYPE.to_string(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-        assert_eq!(config_body(Some(map)), Some(b"receivers: {}\n".to_vec()));
+    fn config_file(body: &[u8]) -> AgentConfigFile {
+        AgentConfigFile {
+            body: body.to_vec(),
+            content_type: CONFIG_CONTENT_TYPE.to_string(),
+        }
     }
 
     #[test]
-    fn config_body_is_none_when_absent() {
-        assert_eq!(config_body(None), None);
+    fn sorted_config_files_orders_by_key() {
+        let map = AgentConfigMap {
+            config_map: [
+                ("zeta.yaml".to_string(), config_file(b"z")),
+                (MAIN_CONFIG_KEY.to_string(), config_file(b"main")),
+                ("alpha.yaml".to_string(), config_file(b"a")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let keys: Vec<String> = sorted_config_files(Some(map))
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, ["", "alpha.yaml", "zeta.yaml"]);
+    }
+
+    #[test]
+    fn sorted_config_files_is_empty_when_absent() {
+        assert!(sorted_config_files(None).is_empty());
+    }
+
+    #[test]
+    fn default_merge_config_prefers_the_main_key() {
+        let agent = FakeAgent::default();
+        let files = vec![
+            ("alpha.yaml".to_string(), b"a".to_vec()),
+            (MAIN_CONFIG_KEY.to_string(), b"main".to_vec()),
+        ];
+        assert_eq!(agent.merge_config(&files), Some(b"main".to_vec()));
+        assert_eq!(agent.merge_config(&[]), None);
     }
 
     fn keys(d: &AgentDescription) -> Vec<&str> {
@@ -820,6 +1042,104 @@ mod tests {
         };
         assert!(is_restart_command(&msg));
         assert!(!is_restart_command(&ServerToAgent::default()));
+    }
+
+    #[test]
+    fn escalate_backoff_doubles_when_rapid_and_resets_when_stable() {
+        // A crash loop doubles the backoff up to the cap.
+        let mut b = RESTART_BACKOFF_BASE;
+        b = escalate_backoff(b, true);
+        assert_eq!(b, RESTART_BACKOFF_BASE * 2);
+        for _ in 0..10 {
+            b = escalate_backoff(b, true);
+        }
+        assert_eq!(b, RESTART_BACKOFF_MAX, "backoff is capped");
+        // A stable agent resets to the base.
+        assert_eq!(escalate_backoff(b, false), RESTART_BACKOFF_BASE);
+    }
+
+    #[test]
+    fn report_description_includes_configured_attributes() {
+        let sup = supervisor_with_attributes(vec![
+            ("team".to_string(), "telemetry".to_string()),
+            ("deployment.environment".to_string(), "staging".to_string()),
+        ]);
+        let d = sup.report_description();
+        let has = |key: &str, val: &str| {
+            d.non_identifying_attributes.iter().any(|kv| {
+                kv.key == key
+                    && matches!(
+                        kv.value.as_ref().and_then(|v| v.value.as_ref()),
+                        Some(any_value::Value::StringValue(s)) if s == val
+                    )
+            })
+        };
+        assert!(has("team", "telemetry"));
+        assert!(has("deployment.environment", "staging"));
+        // The supervisor tag is still present alongside the configured attributes.
+        assert!(d
+            .non_identifying_attributes
+            .iter()
+            .any(|kv| kv.key == SUPERVISOR_ATTRIBUTE));
+    }
+
+    #[test]
+    fn own_telemetry_from_honours_only_declared_signals() {
+        use opamp_proto::proto::{Header, Headers};
+        let cs = ConnectionSettingsOffers {
+            own_metrics: Some(TelemetryConnectionSettings {
+                destination_endpoint: "https://otlp.example/v1/metrics".to_string(),
+                headers: Some(Headers {
+                    headers: vec![Header {
+                        key: "Authorization".to_string(),
+                        value: "Bearer x".to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }),
+            own_logs: Some(TelemetryConnectionSettings {
+                destination_endpoint: "https://otlp.example/v1/logs".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // With only metrics declared, the offered logs destination is ignored.
+        let caps = AgentCapabilities::ReportsOwnMetrics as u64;
+        let only_metrics = own_telemetry_from(&cs, caps);
+        let metrics = only_metrics.metrics.as_ref().unwrap();
+        assert_eq!(metrics.endpoint, "https://otlp.example/v1/metrics");
+        assert_eq!(
+            metrics.headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
+        assert!(only_metrics.logs.is_none());
+        assert!(only_metrics.traces.is_none());
+
+        // With metrics and logs declared, both are taken; traces was not offered.
+        let caps = AgentCapabilities::ReportsOwnMetrics as u64
+            | AgentCapabilities::ReportsOwnLogs as u64
+            | AgentCapabilities::ReportsOwnTraces as u64;
+        let both = own_telemetry_from(&cs, caps);
+        assert!(both.metrics.is_some());
+        assert!(both.logs.is_some());
+        assert!(both.traces.is_none());
+    }
+
+    #[test]
+    fn declared_capabilities_include_configured_own_telemetry_bits() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.capabilities = CAPABILITIES | AgentCapabilities::ReportsOwnMetrics as u64;
+        let report = sup.next_report();
+        assert_ne!(
+            report.capabilities & AgentCapabilities::ReportsOwnMetrics as u64,
+            0
+        );
+        // A signal not declared is not claimed.
+        assert_eq!(
+            report.capabilities & AgentCapabilities::ReportsOwnTraces as u64,
+            0
+        );
     }
 
     #[test]
