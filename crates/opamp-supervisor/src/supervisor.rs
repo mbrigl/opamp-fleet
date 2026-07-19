@@ -42,12 +42,21 @@ const CONFIG_CONTENT_TYPE: &str = "text/yaml";
 const SUPERVISOR_ATTRIBUTE: &str = "opamp.supervisor";
 
 /// Reconnect backoff: start here, double after each failed attempt, capped at [`RECONNECT_MAX`], and
-/// reset to the base once a connection is established.
+/// reset to the base once a connection is established. Each wait is jittered by [`RECONNECT_JITTER`] so a
+/// fleet of supervisors that lost the same Server does not reconnect in lockstep (a thundering herd).
 const RECONNECT_BASE: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// The randomization factor applied to each reconnect wait, matching the upstream opamp-go client: the
+/// actual wait is uniformly in `[(1 - f)·delay, (1 + f)·delay]`.
+const RECONNECT_JITTER: f64 = 0.5;
 
 /// How often, between server messages, the supervisor checks that the managed agent is still alive.
 const SUPERVISION_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long, with `automatic_config_rollback` enabled, the supervisor waits for the agent to report
+/// healthy on a freshly applied config before it reverts to the last good one. While it waits, the OpAMP
+/// loop pauses (no heartbeats go out) — acceptable because applying a config is a rare, bounded event.
+const ROLLBACK_HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Crash-restart backoff: an agent that exits again within [`RESTART_STABLE`] of its last restart is
 /// treated as crash-looping and backed off — doubling from [`RESTART_BACKOFF_BASE`], capped at
@@ -85,7 +94,9 @@ pub struct Config {
     pub service_name: String,
     /// The managed agent's version, reported as `service.version`; `None` if unknown.
     pub agent_version: Option<String>,
-    pub fallback: Option<Vec<u8>>,
+    /// The raw bodies of the startup fallback configs, in order — merged and applied before the Server
+    /// answers so the agent runs. Empty when none is configured.
+    pub fallback: Vec<Vec<u8>>,
     pub heartbeat: Duration,
     /// Extra non-identifying attributes from the supervisor configuration, added to every reported
     /// `AgentDescription` so an operator can label an agent (team, environment, …) from one place.
@@ -93,6 +104,9 @@ pub struct Config {
     /// The `ReportsOwn{Metrics,Logs,Traces}` capability bits this agent declares and honours (ADR-0010);
     /// `0` for an agent that does not report its own telemetry (e.g. a Foreign Agent).
     pub own_telemetry_capabilities: u64,
+    /// Revert to the last healthy configuration when a newly applied one does not make the agent healthy
+    /// (`automatic_config_rollback`, ADR-0008). Only useful for an agent that reports its own health.
+    pub automatic_config_rollback: bool,
 }
 
 /// The running supervisor: its identity, the [`ManagedAgent`] it drives, and the control-loop state it
@@ -110,8 +124,9 @@ pub struct Supervisor<A: ManagedAgent> {
     /// The capabilities this agent declares — the mandatory loop plus any own-telemetry bits (ADR-0010).
     capabilities: u64,
     agent: A,
-    /// Applied on startup so the agent runs even before the Server answers. Taken once, on `run`.
-    fallback: Option<Vec<u8>>,
+    /// The startup fallback config bodies, merged and applied so the agent runs before the Server
+    /// answers. Taken once, on `run`.
+    fallback: Vec<Vec<u8>>,
     /// The server-provided hash of the configuration currently applied; empty means "none yet".
     applied_hash: Vec<u8>,
     /// The raw (pre-`prepare_config`) body currently applied, echoed as effective config and persisted.
@@ -124,6 +139,14 @@ pub struct Supervisor<A: ManagedAgent> {
     restart_backoff: Duration,
     /// When the agent was last (re)started after a crash, to tell a crash loop from an isolated exit.
     last_restart: Option<Instant>,
+    /// Whether to revert to the last healthy config when a new one does not become healthy (ADR-0008).
+    rollback_enabled: bool,
+    /// How long to wait for a freshly applied config to report healthy before rolling back.
+    rollback_health_timeout: Duration,
+    /// The hash and failure reason of a config we rolled back from, if any. Kept so the same bad config
+    /// is re-reported `FAILED` (and never re-applied) rather than restarting the agent again on a
+    /// reconnect or a re-offer.
+    rolled_back: Option<(Vec<u8>, String)>,
 }
 
 impl<A: ManagedAgent> Supervisor<A> {
@@ -157,6 +180,9 @@ impl<A: ManagedAgent> Supervisor<A> {
             reconnect_delay: RECONNECT_BASE,
             restart_backoff: RESTART_BACKOFF_BASE,
             last_restart: None,
+            rollback_enabled: config.automatic_config_rollback,
+            rollback_health_timeout: ROLLBACK_HEALTH_TIMEOUT,
+            rolled_back: None,
         }
     }
 
@@ -175,25 +201,14 @@ impl<A: ManagedAgent> Supervisor<A> {
         }
 
         if !self.resume_last_config().await {
-            if let Some(fallback) = self.fallback.take() {
-                let prepared = self.agent.prepare_config(fallback.clone());
-                match self.agent.apply(&prepared).await {
-                    Ok(()) => {
-                        self.applied_body = fallback;
-                        info!("agent started on the fallback configuration");
-                    }
-                    Err(e) => {
-                        error!(error = %e, "cannot start agent on the fallback configuration")
-                    }
-                }
-            }
+            self.apply_fallback().await;
         }
 
         loop {
             if let Err(e) = self.serve_once().await {
                 warn!(error = %e, delay_secs = self.reconnect_delay.as_secs(), "OpAMP session ended; reconnecting");
             }
-            tokio::time::sleep(self.reconnect_delay).await;
+            tokio::time::sleep(jittered(self.reconnect_delay)).await;
             self.reconnect_delay = (self.reconnect_delay * 2).min(RECONNECT_MAX);
         }
     }
@@ -229,6 +244,33 @@ impl<A: ManagedAgent> Supervisor<A> {
                 error!(error = %e, "cannot resume agent on the last applied configuration");
                 false
             }
+        }
+    }
+
+    /// Applies the startup fallback configuration so the agent runs before the Server answers: the
+    /// configured files (one or more) are merged in order — the same way a multi-file remote config is —
+    /// then prepared and applied. A no-op when none is configured.
+    async fn apply_fallback(&mut self) {
+        if self.fallback.is_empty() {
+            return;
+        }
+        let files: Vec<(String, Vec<u8>)> = std::mem::take(&mut self.fallback)
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| (i.to_string(), body))
+            .collect();
+        let count = files.len();
+        let Some(body) = self.agent.merge_config(&files) else {
+            error!("the fallback configuration carried no usable files");
+            return;
+        };
+        let prepared = self.agent.prepare_config(body.clone());
+        match self.agent.apply(&prepared).await {
+            Ok(()) => {
+                self.applied_body = body;
+                info!(files = count, "agent started on the fallback configuration");
+            }
+            Err(e) => error!(error = %e, "cannot start agent on the fallback configuration"),
         }
     }
 
@@ -495,12 +537,28 @@ impl<A: ManagedAgent> Supervisor<A> {
         if hash == self.applied_hash {
             return Ok(false);
         }
+        // A config we already rolled back from is not applied again — that would just restart the agent
+        // onto the same broken config. Re-report it FAILED so the Server knows its latest config did not
+        // take, and do nothing else (ADR-0008 rollback).
+        if let Some((failed_hash, error)) = &self.rolled_back {
+            if &hash == failed_hash {
+                let status = failed_status(hash, error.clone());
+                let mut report = self.next_report();
+                report.remote_config_status = Some(status);
+                self.send(ws, report).await?;
+                return Ok(false);
+            }
+        }
         let files = sorted_config_files(remote.config);
         let Some(body) = self.agent.merge_config(&files) else {
             warn!("remote config carried no usable config files; ignoring");
             return Ok(false);
         };
         let prepared = self.agent.prepare_config(body.clone());
+
+        // Remember the config currently running, to roll back to if the new one does not become healthy.
+        let last_good_body = self.applied_body.clone();
+        let last_good_hash = self.applied_hash.clone();
 
         info!(hash = %short(&hash), "applying remote configuration");
         let mut applying = self.next_report();
@@ -514,30 +572,100 @@ impl<A: ManagedAgent> Supervisor<A> {
         let mut report = self.next_report();
         match self.agent.apply(&prepared).await {
             Ok(()) => {
-                self.applied_hash = hash.clone();
-                self.applied_body = body.clone();
-                self.persist_applied(&body, &hash);
-                report.remote_config_status = Some(RemoteConfigStatus {
-                    last_remote_config_hash: hash,
-                    status: RemoteConfigStatuses::Applied as i32,
-                    error_message: String::new(),
-                });
+                // With rollback enabled and a good config to fall back to, confirm the agent becomes
+                // healthy on the new config before committing; if it does not, revert (ADR-0008).
+                if self.rollback_enabled
+                    && !last_good_hash.is_empty()
+                    && !self.confirm_health().await
+                {
+                    self.rollback(ws, hash, last_good_body, last_good_hash)
+                        .await?;
+                    return Ok(true);
+                }
+                self.commit_applied(&body, &hash);
+                report.remote_config_status = Some(applied_status(hash));
                 report.effective_config = Some(self.effective_config());
                 report.health = Some(self.current_health());
                 info!("remote configuration APPLIED");
             }
             Err(e) => {
                 error!(error = %e, "remote configuration FAILED");
-                report.remote_config_status = Some(RemoteConfigStatus {
-                    last_remote_config_hash: hash,
-                    status: RemoteConfigStatuses::Failed as i32,
-                    error_message: e,
-                });
+                report.remote_config_status = Some(failed_status(hash, e));
                 report.health = Some(self.health(false, "agent failed to apply config".into()));
             }
         }
         self.send(ws, report).await?;
         Ok(true)
+    }
+
+    /// Waits for the agent to report itself healthy on the config just applied, up to
+    /// [`Supervisor::rollback_health_timeout`]. Returns `true` if it did, `false` if it timed out (never
+    /// reported, or stayed unhealthy). Reads the agent's *own* reported health — not the liveness
+    /// fallback — and only after the fresh collector has reported, because the adapter clears the
+    /// previous process's health on apply.
+    async fn confirm_health(&mut self) -> bool {
+        let signal = self.agent.change_signal();
+        let deadline = tokio::time::Instant::now() + self.rollback_health_timeout;
+        loop {
+            if self
+                .agent
+                .reported_health()
+                .is_some_and(|health| health.healthy)
+            {
+                return true;
+            }
+            tokio::select! {
+                _ = signal.changed() => {}
+                _ = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
+    }
+
+    /// Commits a successfully applied config: records it as the running config, persists it, and clears
+    /// any earlier rollback (a new good config supersedes the failure).
+    fn commit_applied(&mut self, body: &[u8], hash: &[u8]) {
+        self.applied_hash = hash.to_vec();
+        self.applied_body = body.to_vec();
+        self.persist_applied(body, hash);
+        self.rolled_back = None;
+    }
+
+    /// Reverts to the last healthy config after a new one failed to become healthy: re-applies the good
+    /// config, restores it as the running config, remembers the failed hash so it is not retried, and
+    /// reports the new config `FAILED` with the agent's health error (ADR-0008 rollback).
+    async fn rollback(
+        &mut self,
+        ws: &mut Ws,
+        failed_hash: Vec<u8>,
+        good_body: Vec<u8>,
+        good_hash: Vec<u8>,
+    ) -> Result<(), String> {
+        let error = format!(
+            "configuration rolled back: the collector did not become healthy ({})",
+            self.current_health().last_error
+        );
+        warn!(hash = %short(&failed_hash), "remote configuration did not become healthy; rolling back to the last good configuration");
+
+        let prepared = self.agent.prepare_config(good_body.clone());
+        let apply_result = self.agent.apply(&prepared).await;
+        self.applied_body = good_body;
+        self.applied_hash = good_hash;
+        self.persist_applied(&self.applied_body.clone(), &self.applied_hash.clone());
+        self.rolled_back = Some((failed_hash.clone(), error.clone()));
+
+        let mut report = self.next_report();
+        report.remote_config_status = Some(failed_status(failed_hash, error));
+        match apply_result {
+            Ok(()) => {
+                report.effective_config = Some(self.effective_config());
+                report.health = Some(self.current_health());
+            }
+            Err(e) => {
+                error!(error = %e, "cannot roll back to the last good configuration");
+                report.health = Some(self.health(false, format!("rollback failed: {e}")));
+            }
+        }
+        self.send(ws, report).await
     }
 
     /// A report carrying the Agent's full state — identity, health, and the configuration it holds.
@@ -546,12 +674,13 @@ impl<A: ManagedAgent> Supervisor<A> {
         report.agent_description = Some(self.report_description());
         report.health = Some(self.current_health());
         report.available_components = self.agent.status().available_components;
-        if !self.applied_hash.is_empty() {
-            report.remote_config_status = Some(RemoteConfigStatus {
-                last_remote_config_hash: self.applied_hash.clone(),
-                status: RemoteConfigStatuses::Applied as i32,
-                error_message: String::new(),
-            });
+        if let Some((failed_hash, error)) = &self.rolled_back {
+            // The Server's latest config failed and was rolled back; report that (not the good config's
+            // hash) so the Server does not keep re-sending it, and echo the good config as effective.
+            report.remote_config_status = Some(failed_status(failed_hash.clone(), error.clone()));
+            report.effective_config = Some(self.effective_config());
+        } else if !self.applied_hash.is_empty() {
+            report.remote_config_status = Some(applied_status(self.applied_hash.clone()));
             report.effective_config = Some(self.effective_config());
         }
         report
@@ -650,6 +779,29 @@ impl<A: ManagedAgent> Supervisor<A> {
     }
 }
 
+/// A reconnect wait randomized around `delay` by [`RECONNECT_JITTER`], using the process clock as the
+/// entropy source (no extra dependency) — enough to de-synchronize a fleet, not a cryptographic need.
+fn jittered(delay: Duration) -> Duration {
+    apply_jitter(delay, clock_fraction())
+}
+
+/// The pure jitter: scales `delay` by a factor uniformly in `[1 - f, 1 + f]` as `fraction` runs `0..1`
+/// (with `f` = [`RECONNECT_JITTER`]). Split out from the clock so the bounds are unit-testable.
+fn apply_jitter(delay: Duration, fraction: f64) -> Duration {
+    let factor = 1.0 - RECONNECT_JITTER + fraction.clamp(0.0, 1.0) * (2.0 * RECONNECT_JITTER);
+    delay.mul_f64(factor)
+}
+
+/// A pseudo-random fraction in `[0, 1)` from the sub-second part of the wall clock — sufficient entropy
+/// to spread reconnect waits across a fleet.
+fn clock_fraction() -> f64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos) / 1_000_000_000.0
+}
+
 /// The next crash-restart backoff: doubled (capped at [`RESTART_BACKOFF_MAX`]) when the agent is
 /// crash-looping, reset to [`RESTART_BACKOFF_BASE`] when it has been stable.
 fn escalate_backoff(current: Duration, rapid: bool) -> Duration {
@@ -657,6 +809,24 @@ fn escalate_backoff(current: Duration, rapid: bool) -> Duration {
         (current * 2).min(RESTART_BACKOFF_MAX)
     } else {
         RESTART_BACKOFF_BASE
+    }
+}
+
+/// An `APPLIED` remote-config status for a hash — the config took effect.
+fn applied_status(hash: Vec<u8>) -> RemoteConfigStatus {
+    RemoteConfigStatus {
+        last_remote_config_hash: hash,
+        status: RemoteConfigStatuses::Applied as i32,
+        error_message: String::new(),
+    }
+}
+
+/// A `FAILED` remote-config status for a hash, carrying the error the Server should see.
+fn failed_status(hash: Vec<u8>, error: String) -> RemoteConfigStatus {
+    RemoteConfigStatus {
+        last_remote_config_hash: hash,
+        status: RemoteConfigStatuses::Failed as i32,
+        error_message: error,
     }
 }
 
@@ -810,6 +980,8 @@ mod tests {
     struct FakeAgent {
         status: AgentStatus,
         applied: Vec<Vec<u8>>,
+        /// The health the agent reports about itself, for exercising the rollback health check.
+        reported_health: Option<ComponentHealth>,
     }
 
     impl ManagedAgent for FakeAgent {
@@ -823,11 +995,31 @@ mod tests {
         fn status(&self) -> AgentStatus {
             self.status.clone()
         }
+        fn reported_health(&self) -> Option<ComponentHealth> {
+            self.reported_health.clone()
+        }
         fn change_signal(&self) -> ChangeSignal {
             ChangeSignal::never()
         }
         async fn supervise(&mut self) -> Option<String> {
             None
+        }
+    }
+
+    fn healthy() -> ComponentHealth {
+        ComponentHealth {
+            healthy: true,
+            status: "Running".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn unhealthy(error: &str) -> ComponentHealth {
+        ComponentHealth {
+            healthy: false,
+            status: "Errored".to_string(),
+            last_error: error.to_string(),
+            ..Default::default()
         }
     }
 
@@ -840,10 +1032,11 @@ mod tests {
                 storage_dir: std::path::PathBuf::from("/tmp/opamp-sup-test-store"),
                 service_name: "io.opentelemetry.collector".to_string(),
                 agent_version: None,
-                fallback: None,
+                fallback: Vec::new(),
                 heartbeat: Duration::from_secs(30),
                 extra_attributes: Vec::new(),
                 own_telemetry_capabilities: 0,
+                automatic_config_rollback: false,
             },
             agent,
         )
@@ -1059,6 +1252,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_jitter_spans_the_randomization_band() {
+        let base = Duration::from_secs(10);
+        // fraction 0 → lower bound (1 - f)·base, 1 → upper bound (1 + f)·base, 0.5 → base itself.
+        assert_eq!(
+            apply_jitter(base, 0.0),
+            base.mul_f64(1.0 - RECONNECT_JITTER)
+        );
+        assert_eq!(
+            apply_jitter(base, 1.0),
+            base.mul_f64(1.0 + RECONNECT_JITTER)
+        );
+        assert_eq!(apply_jitter(base, 0.5), base);
+        // The live jitter (clock-driven) always stays inside the band, and never exceeds it.
+        for _ in 0..1000 {
+            let d = jittered(base);
+            assert!(d >= base.mul_f64(1.0 - RECONNECT_JITTER));
+            assert!(d <= base.mul_f64(1.0 + RECONNECT_JITTER));
+        }
+    }
+
+    #[test]
     fn report_description_includes_configured_attributes() {
         let sup = supervisor_with_attributes(vec![
             ("team".to_string(), "telemetry".to_string()),
@@ -1140,6 +1354,76 @@ mod tests {
             report.capabilities & AgentCapabilities::ReportsOwnTraces as u64,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn confirm_health_is_true_once_the_agent_reports_healthy() {
+        let mut sup = supervisor_with(FakeAgent {
+            reported_health: Some(healthy()),
+            ..Default::default()
+        });
+        sup.rollback_health_timeout = Duration::from_millis(50);
+        assert!(
+            sup.confirm_health().await,
+            "a healthy report confirms at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_health_times_out_when_the_agent_never_becomes_healthy() {
+        // Reported but unhealthy, and the fake never signals a change, so it can only time out.
+        let mut sup = supervisor_with(FakeAgent {
+            reported_health: Some(unhealthy("pipeline failed to start")),
+            ..Default::default()
+        });
+        sup.rollback_health_timeout = Duration::from_millis(50);
+        assert!(
+            !sup.confirm_health().await,
+            "an unhealthy agent is not confirmed"
+        );
+
+        // Never reported at all (no health, no signal) — also a timeout.
+        let mut never = supervisor_with(FakeAgent::default());
+        never.rollback_health_timeout = Duration::from_millis(50);
+        assert!(!never.confirm_health().await);
+    }
+
+    #[test]
+    fn commit_applied_records_the_config_and_clears_a_prior_rollback() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.rolled_back = Some((b"old-bad".to_vec(), "was rolled back".to_string()));
+        sup.commit_applied(b"body", b"good-hash");
+        assert_eq!(sup.applied_hash, b"good-hash");
+        assert_eq!(sup.applied_body, b"body");
+        assert!(
+            sup.rolled_back.is_none(),
+            "a new good config clears the rollback"
+        );
+    }
+
+    #[test]
+    fn full_state_reports_a_rolled_back_config_as_failed() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.applied_hash = b"good-hash".to_vec();
+        sup.applied_body = b"good-body".to_vec();
+        sup.rolled_back = Some((b"bad-hash".to_vec(), "did not become healthy".to_string()));
+        let report = sup.full_state_report();
+        let status = report.remote_config_status.expect("a status is reported");
+        // The Server sees the *failed* config's hash (not the good one), so it does not resend it.
+        assert_eq!(status.last_remote_config_hash, b"bad-hash");
+        assert_eq!(status.status, RemoteConfigStatuses::Failed as i32);
+        assert_eq!(status.error_message, "did not become healthy");
+    }
+
+    #[test]
+    fn full_state_reports_the_applied_config_when_nothing_was_rolled_back() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.applied_hash = b"good-hash".to_vec();
+        sup.applied_body = b"good-body".to_vec();
+        let report = sup.full_state_report();
+        let status = report.remote_config_status.expect("a status is reported");
+        assert_eq!(status.last_remote_config_hash, b"good-hash");
+        assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
     }
 
     #[test]

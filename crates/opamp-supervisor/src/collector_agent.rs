@@ -136,6 +136,9 @@ impl ManagedAgent for CollectorAgent {
     }
 
     async fn apply(&mut self, config: &[u8]) -> Result<(), String> {
+        // Forget the previous process's health before restarting, so the domain confirms the new
+        // config's health from a fresh report rather than the outgoing collector's (ADR-0008 rollback).
+        self.link.clear_health();
         self.collector.apply(config).await
     }
 
@@ -165,10 +168,20 @@ impl ManagedAgent for CollectorAgent {
         ChangeSignal::new(self.link.change_notify())
     }
 
+    fn reported_health(&self) -> Option<opamp_proto::proto::ComponentHealth> {
+        self.link.latest().health
+    }
+
     async fn supervise(&mut self) -> Option<String> {
-        self.collector
-            .check_exited()
-            .map(|status| status.to_string())
+        let status = self.collector.check_exited()?;
+        let mut reason = status.to_string();
+        // Enrich the crash report with the collector's own recent stderr, when capture is enabled
+        // (`collector_crash_log_snippet_kib`), so the fleet sees *why* it died, not just that it did.
+        if let Some(log) = self.collector.crash_log_tail() {
+            reason.push_str("; recent collector log:\n");
+            reason.push_str(&log);
+        }
+        Some(reason)
     }
 
     async fn shutdown(&mut self) {

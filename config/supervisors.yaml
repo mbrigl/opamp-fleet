@@ -9,15 +9,26 @@ server: ws://127.0.0.1:4320/v1/opamp
 # The base storage directory; each supervisor gets `storage/<name>`.
 storage: /tmp/opamp-supervisor
 
+# The Host's own logging. `encoding: console` (default) is human-readable; `json` is structured output.
+# telemetry:
+#   logs:
+#     encoding: console
+
 supervisors:
   # An OpAMP-native OpenTelemetry Collector — the Collector Supervisor (ADR-0008).
   - type: collector
     name: otelcol
     collector: otelcol-contrib          # executable on PATH (installed by the Dev Container)
-    fallback: config/collector.yaml      # run this until the server answers
+    fallback: config/collector.yaml      # run until the server answers (a single path, or a list merged in order)
     # Optional base config merged underneath every remote config (remote keys win), to pin local
     # settings the Server's config is layered on top of:
     # base_config: config/collector-base.yaml
+    # Include up to this many KiB of the collector's most recent stderr when it crashes (0 = off,
+    # the default; capped at 1024), so a crash report shows why it died:
+    # collector_crash_log_snippet_kib: 64
+    # Revert to the last healthy config when a newly applied one does not become healthy, reporting
+    # the new config FAILED (off by default):
+    # automatic_config_rollback: true
     # Optional extra non-identifying attributes, added to this agent's reported description so a fleet
     # UI can label it (team, environment, …):
     # attributes:

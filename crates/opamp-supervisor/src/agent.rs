@@ -128,6 +128,15 @@ pub trait ManagedAgent: Send + 'static {
     /// available components when the agent reports them).
     fn status(&self) -> AgentStatus;
 
+    /// The health the agent has reported *about itself*, or `None` if it has not reported any yet — as
+    /// opposed to [`status`](ManagedAgent::status), whose health falls back to process liveness. The
+    /// domain uses this to confirm a freshly applied config actually made the agent healthy before
+    /// committing it (`automatic_config_rollback`, ADR-0008). Default: `None` — an adapter with no
+    /// self-report channel cannot confirm health, so it never triggers a rollback.
+    fn reported_health(&self) -> Option<ComponentHealth> {
+        None
+    }
+
     /// A handle to await the agent's next meaningful status change, for prompt forwarding.
     fn change_signal(&self) -> ChangeSignal;
 

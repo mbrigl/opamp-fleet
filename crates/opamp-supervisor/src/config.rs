@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// The whole host configuration.
 #[derive(Debug, Deserialize)]
@@ -22,8 +22,38 @@ pub struct HostConfig {
     /// The default heartbeat interval, in seconds.
     #[serde(default = "default_heartbeat")]
     pub heartbeat: u64,
+    /// The Host's own observability settings (its logging), separate from the managed agents' telemetry.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
     /// The supervisors to run.
     pub supervisors: Vec<SupervisorConfig>,
+}
+
+/// The Supervisor Host's own telemetry (currently just how it encodes its logs), mirroring the Go
+/// supervisor's `telemetry` section.
+#[derive(Debug, Default, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub logs: LogsConfig,
+}
+
+/// The Host's log settings.
+#[derive(Debug, Default, Deserialize)]
+pub struct LogsConfig {
+    /// How the Host encodes its own log lines.
+    #[serde(default)]
+    pub encoding: LogEncoding,
+}
+
+/// The encoding of the Host's own logs: human-readable `console` (the default, for the dev environment)
+/// or structured `json`. The Go supervisor defaults to `json`; we default to `console` because these
+/// logs are read by an operator, not the Server, and readable output is the better local default.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogEncoding {
+    #[default]
+    Console,
+    Json,
 }
 
 /// One supervisor entry, tagged by `type`.
@@ -70,11 +100,22 @@ pub struct CollectorConfig {
     /// The collector executable (default `otelcol-contrib` on `PATH`).
     #[serde(default = "default_collector")]
     pub collector: String,
-    /// A config to run before the server answers (optional).
-    pub fallback: Option<PathBuf>,
+    /// Configs to run before the server answers — a single path or a list, merged in order (later files
+    /// win), matching the Go supervisor's `startup_fallback_configs`. Empty when none is configured.
+    #[serde(default, deserialize_with = "one_or_many_paths")]
+    pub fallback: Vec<PathBuf>,
     /// A base collector config merged *underneath* every remote config (remote keys win), so an
     /// operator can pin local settings the Server's config is layered on top of (optional).
     pub base_config: Option<PathBuf>,
+    /// How much of the collector's most recent stderr to include when it crashes, in KiB (0 disables it,
+    /// the default; clamped to 1024). Mirrors the Go supervisor's `collector_crash_log_snippet_kib`.
+    #[serde(default)]
+    pub collector_crash_log_snippet_kib: usize,
+    /// Revert to the last healthy configuration when a newly applied remote config does not make the
+    /// collector healthy, reporting the new config `FAILED` (ADR-0008). Off by default, matching the Go
+    /// supervisor's `automatic_config_rollback`.
+    #[serde(default)]
+    pub automatic_config_rollback: bool,
     /// An OpAMP server URL overriding the host default (optional).
     pub server: Option<String>,
     /// Extra non-identifying attributes for this agent's description (e.g. team, environment).
@@ -101,8 +142,10 @@ pub struct CustomConfig {
     pub config_path: PathBuf,
     /// A command to reload the agent in place after a config write; if absent, it is restarted.
     pub reload: Option<Vec<String>>,
-    /// A config to run before the server answers (optional).
-    pub fallback: Option<PathBuf>,
+    /// Configs to run before the server answers — a single path or a list, merged in order (later files
+    /// win), matching the Go supervisor's `startup_fallback_configs`. Empty when none is configured.
+    #[serde(default, deserialize_with = "one_or_many_paths")]
+    pub fallback: Vec<PathBuf>,
     /// An OpAMP server URL overriding the host default (optional).
     pub server: Option<String>,
     /// Extra non-identifying attributes for this agent's description (e.g. team, environment).
@@ -124,6 +167,25 @@ fn default_collector() -> String {
 }
 fn default_true() -> bool {
     true
+}
+
+/// Deserializes a `fallback` field that is either a single path (`fallback: a.yaml`) or a list
+/// (`fallback: [a.yaml, b.yaml]`) into a `Vec`, so a single fallback stays ergonomic while a list is
+/// supported (the Go supervisor's `startup_fallback_configs`).
+fn one_or_many_paths<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(PathBuf),
+        Many(Vec<PathBuf>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(path) => vec![path],
+        OneOrMany::Many(paths) => paths,
+    })
 }
 
 impl HostConfig {
@@ -196,6 +258,132 @@ supervisors:
             config.supervisors[0].server(&config.server),
             "ws://127.0.0.1:4320/v1/opamp"
         );
+    }
+
+    #[test]
+    fn telemetry_encoding_defaults_to_console_and_parses_json() {
+        // Absent telemetry section → console (the readable default).
+        let plain = HostConfig::parse(
+            br#"
+supervisors:
+  - type: custom
+    name: a
+    command: ["true"]
+    config_path: /tmp/a
+"#,
+        )
+        .unwrap();
+        assert_eq!(plain.telemetry.logs.encoding, LogEncoding::Console);
+
+        // An explicit `json` encoding is honoured.
+        let json = HostConfig::parse(
+            br#"
+telemetry:
+  logs:
+    encoding: json
+supervisors:
+  - type: custom
+    name: a
+    command: ["true"]
+    config_path: /tmp/a
+"#,
+        )
+        .unwrap();
+        assert_eq!(json.telemetry.logs.encoding, LogEncoding::Json);
+    }
+
+    #[test]
+    fn collector_crash_log_snippet_defaults_off_and_parses() {
+        let config = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: default-off
+  - type: collector
+    name: with-snippet
+    collector_crash_log_snippet_kib: 64
+"#,
+        )
+        .unwrap();
+        match &config.supervisors[0] {
+            SupervisorConfig::Collector(c) => assert_eq!(c.collector_crash_log_snippet_kib, 0),
+            _ => panic!("first should be a collector"),
+        }
+        match &config.supervisors[1] {
+            SupervisorConfig::Collector(c) => assert_eq!(c.collector_crash_log_snippet_kib, 64),
+            _ => panic!("second should be a collector"),
+        }
+    }
+
+    #[test]
+    fn automatic_config_rollback_defaults_off_and_parses() {
+        let config = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: default-off
+  - type: collector
+    name: rollback-on
+    automatic_config_rollback: true
+"#,
+        )
+        .unwrap();
+        match &config.supervisors[0] {
+            SupervisorConfig::Collector(c) => assert!(!c.automatic_config_rollback),
+            _ => panic!("first should be a collector"),
+        }
+        match &config.supervisors[1] {
+            SupervisorConfig::Collector(c) => assert!(c.automatic_config_rollback),
+            _ => panic!("second should be a collector"),
+        }
+    }
+
+    #[test]
+    fn fallback_accepts_a_single_path_a_list_or_nothing() {
+        let single = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: a
+    fallback: config/collector.yaml
+"#,
+        )
+        .unwrap();
+        let many = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: a
+    fallback:
+      - config/base.yaml
+      - config/extra.yaml
+"#,
+        )
+        .unwrap();
+        let none = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: a
+"#,
+        )
+        .unwrap();
+        let fallback = |c: &HostConfig| match &c.supervisors[0] {
+            SupervisorConfig::Collector(c) => c.fallback.clone(),
+            _ => panic!("expected a collector"),
+        };
+        assert_eq!(
+            fallback(&single),
+            vec![PathBuf::from("config/collector.yaml")]
+        );
+        assert_eq!(
+            fallback(&many),
+            vec![
+                PathBuf::from("config/base.yaml"),
+                PathBuf::from("config/extra.yaml"),
+            ]
+        );
+        assert!(fallback(&none).is_empty());
     }
 
     #[test]

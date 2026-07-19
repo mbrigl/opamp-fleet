@@ -2,6 +2,9 @@
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-07-19
+- **Amended:** 2026-07-19 — added **automatic configuration rollback** to the Decision (the Collector
+  Supervisor reverts to the last healthy config when a new one does not become healthy), matching the Go
+  supervisor's `automatic_config_rollback`.
 - **Deciders:** Maintainer
 
 ## Context
@@ -26,6 +29,8 @@ supervisor's behaviour):
 - Declare exactly the capabilities it implements, and report identity (`AgentDescription`).
 - Receive **remote configuration**, **validate** it, write it to disk, and **restart** the Collector
   to apply it; report `APPLYING` → `APPLIED`/`FAILED` with the collector's own error on rejection.
+  Optionally (`automatic_config_rollback`) **revert to the last healthy configuration** when a newly
+  applied one does not make the Collector healthy, reporting the new config `FAILED`.
 - Report the Collector's **actual health and effective configuration** — obtained by running a **local
   OpAMP server** the Collector's bundled `opamp` extension connects back to (the same mechanism the Go
   supervisor uses), rather than the supervisor's assumptions.
@@ -42,6 +47,14 @@ shared `opamp-proto` crate, and have the Supervisor Host process run it (one sup
   the collector's own `validate` subcommand against a throwaway copy (so a bad config is reported
   `FAILED` *without* taking the running collector down), then write the file and **restart** the
   process. Restart only on an actual hash change — a spurious restart is a spurious outage.
+- **Automatic configuration rollback (opt-in).** A config can pass validation yet still fail at
+  runtime — the Collector starts but never reports healthy. With `automatic_config_rollback` enabled,
+  after applying a new remote config the Supervisor **waits (bounded) for the Collector to report itself
+  healthy** over the local OpAMP server; if it does not, the Supervisor **re-applies the last healthy
+  config** and reports the new one `FAILED` with the Collector's health error. The failed hash is
+  remembered so it is not re-applied on a reconnect or re-offer (which would just restart the Collector
+  onto the same broken config). Off by default, matching the Go supervisor; a first config with no prior
+  healthy config to fall back to is applied as before (there is nothing to roll back to).
 - **A local OpAMP server for the Collector.** The supervisor injects the collector's `opamp` (pointed
   at a loopback local server) and `health_check` extensions into the distributed config, so the
   collector reports its real health and effective config back; the supervisor forwards those to the
@@ -103,7 +116,9 @@ shared `opamp-proto` crate, and have the Supervisor Host process run it (one sup
 - Negative / trade-offs: a second component to keep correct against a moving alpha oracle; the Agent
   side of OpAMP is now ours to own, with its own bugs. The supervisor runs a second (loopback) listener
   for the collector. Scope must be held to the oracle's real capabilities to avoid pretending to
-  features the ecosystem lacks.
+  features the ecosystem lacks. `automatic_config_rollback` adds a bounded health-confirmation wait
+  after a config apply, during which the OpAMP loop pauses (no heartbeats) — acceptable because a config
+  apply is a rare, bounded event, but it couples config-apply latency to the health-report timing.
 - Follow-ups, each its own ADR: authenticated/encrypted transport; OpAMP package/binary updates
   (with the separate-updater handoff to update the supervisor itself); and the **plugin/hexagonal
   generalization** — many supervisors in one Host, and **Custom Supervisors** bringing non-OpAMP

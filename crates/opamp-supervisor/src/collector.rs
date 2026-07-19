@@ -11,17 +11,28 @@
 //! collector down. This is how "a rejected configuration is visible" (specification goal 4) is met
 //! without the timing guesswork of watching a fresh process for an early crash.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::{Child, Command};
 use tracing::info;
+
+/// The largest crash-log snippet the supervisor will capture, in KiB — the same ceiling the Go
+/// supervisor caps `collector_crash_log_snippet_kib` at, so a huge log cannot flood a health report.
+pub const MAX_CRASH_LOG_KIB: usize = 1024;
 
 /// A supervised OpenTelemetry Collector: an executable and the config file it is launched against.
 pub struct Collector {
     executable: PathBuf,
     config_path: PathBuf,
     child: Option<Child>,
+    /// How much of the collector's most recent stderr to include in a crash report, in KiB. `0` (the
+    /// default, matching the Go supervisor) disables capture: the collector inherits the supervisor's
+    /// stderr as before. When non-zero, the collector's stderr is redirected to a log file next to its
+    /// config, truncated on each (re)start, and its tail is read back on an unexpected exit.
+    crash_log_kib: usize,
 }
 
 impl Collector {
@@ -30,7 +41,22 @@ impl Collector {
             executable: executable.into(),
             config_path: config_path.into(),
             child: None,
+            crash_log_kib: 0,
         }
+    }
+
+    /// Enables capturing up to `kib` KiB of the collector's stderr, included in the crash report when the
+    /// collector exits unexpectedly (`collector_crash_log_snippet_kib`, ADR-0008 Go-reference parity).
+    /// `0` disables it; the value is clamped to [`MAX_CRASH_LOG_KIB`].
+    pub fn with_crash_log_snippet(mut self, kib: usize) -> Self {
+        self.crash_log_kib = kib.min(MAX_CRASH_LOG_KIB);
+        self
+    }
+
+    /// Where the collector's stderr is captured when crash-log snippets are enabled: a file next to the
+    /// config it runs against.
+    fn log_path(&self) -> PathBuf {
+        self.config_path.with_extension("stderr.log")
     }
 
     /// Validates `config`, then writes it to the collector's config file and restarts the process so
@@ -97,22 +123,49 @@ impl Collector {
     /// Stops the current Collector process, if any, and starts a fresh one against the config file.
     async fn restart(&mut self) -> Result<(), String> {
         self.stop().await;
-        let child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .arg("--config")
             .arg(&self.config_path)
             // If the Supervisor exits, the Collector it owns must not outlive it.
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                format!(
-                    "cannot start collector {} --config {}: {e}",
-                    self.executable.display(),
-                    self.config_path.display()
-                )
-            })?;
+            .kill_on_drop(true);
+        // Capture stderr to a fresh log file when crash-log snippets are enabled, so its tail can be
+        // read back on an unexpected exit; otherwise the collector inherits the supervisor's stderr.
+        if self.crash_log_kib > 0 {
+            command.stderr(self.open_log_file()?);
+        }
+        let child = command.spawn().map_err(|e| {
+            format!(
+                "cannot start collector {} --config {}: {e}",
+                self.executable.display(),
+                self.config_path.display()
+            )
+        })?;
         info!(pid = child.id(), executable = %self.executable.display(), "collector started");
         self.child = Some(child);
         Ok(())
+    }
+
+    /// Opens (creating, truncating) the crash-log file for a fresh collector process, so the captured
+    /// stderr reflects only the current run. The parent directory is created by [`Collector::apply`].
+    fn open_log_file(&self) -> Result<Stdio, String> {
+        let path = self.log_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create log directory {}: {e}", dir.display()))?;
+        }
+        std::fs::File::create(&path)
+            .map(Stdio::from)
+            .map_err(|e| format!("cannot open collector log file {}: {e}", path.display()))
+    }
+
+    /// The tail of the collector's captured stderr — up to the configured KiB — for enriching a crash
+    /// report, or `None` when capture is disabled or nothing was captured (ADR-0008 Go-reference parity).
+    pub fn crash_log_tail(&self) -> Option<String> {
+        if self.crash_log_kib == 0 {
+            return None;
+        }
+        read_log_tail(&self.log_path(), self.crash_log_kib * 1024)
     }
 
     /// Restarts the collector against the configuration already on disk — the last one that applied.
@@ -174,6 +227,20 @@ impl Collector {
     }
 }
 
+/// Reads the last `max_bytes` bytes of a file as text, or `None` if it cannot be read or is empty.
+/// Bytes (not characters) are bounded — the collector's stderr may not split cleanly — so the result is
+/// decoded lossily, and any partial leading line is left in place (the tail is a best-effort snippet).
+fn read_log_tail(path: &Path, max_bytes: usize) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 /// The tail of a collector error message, bounded (by characters, so it never splits a UTF-8 boundary)
 /// so a huge validation dump does not fill a status report. The tail carries the actual error.
 fn tail(text: &str) -> String {
@@ -207,6 +274,65 @@ mod tests {
     fn check_exited_is_none_without_a_collector() {
         let mut collector = Collector::new("/bin/true", "/tmp/opamp-sup-none.yaml");
         assert!(collector.check_exited().is_none());
+    }
+
+    #[test]
+    fn read_log_tail_bounds_and_trims() {
+        let path = std::env::temp_dir().join("opamp-sup-tail-bounds.log");
+        std::fs::write(&path, b"  line-a\nline-b\nline-c\n  ").unwrap();
+        // The whole (trimmed) content fits under a generous bound.
+        assert_eq!(
+            read_log_tail(&path, 4096).as_deref(),
+            Some("line-a\nline-b\nline-c")
+        );
+        // A tight bound keeps only the trailing bytes (then trims) — cutting mid-line is fine, the tail
+        // is a best-effort snippet — and never the head.
+        let tail = read_log_tail(&path, 8).unwrap();
+        assert!(
+            tail.ends_with("ine-c"),
+            "kept the trailing bytes, got {tail:?}"
+        );
+        assert!(
+            !tail.contains("line-a") && !tail.contains("line-b"),
+            "dropped the head, got {tail:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_log_tail_is_none_for_missing_or_empty() {
+        assert!(read_log_tail(Path::new("/tmp/opamp-sup-tail-absent.log"), 4096).is_none());
+        let empty = std::env::temp_dir().join("opamp-sup-tail-empty.log");
+        std::fs::write(&empty, b"   \n").unwrap();
+        assert!(
+            read_log_tail(&empty, 4096).is_none(),
+            "whitespace-only is empty"
+        );
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    #[test]
+    fn crash_log_tail_is_none_when_capture_disabled() {
+        let collector = Collector::new("/bin/true", "/tmp/opamp-sup-nolog.yaml");
+        assert!(collector.crash_log_tail().is_none());
+    }
+
+    #[tokio::test]
+    async fn crash_log_tail_captures_a_failing_collectors_stderr() {
+        // `cat --config <path>` is rejected by GNU coreutils with an error on stderr and a non-zero
+        // exit — a stand-in for a collector that crashes after writing to its log.
+        let config = std::env::temp_dir().join("opamp-sup-crashlog.yaml");
+        let mut collector = Collector::new("cat", &config).with_crash_log_snippet(64);
+        collector.restart_current().await.expect("spawn");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let status = collector.check_exited().expect("the process has exited");
+        assert!(!status.success(), "an unknown flag makes it exit non-zero");
+        let tail = collector.crash_log_tail().expect("captured stderr");
+        assert!(
+            tail.contains("config"),
+            "the tail carries the error, got {tail:?}"
+        );
+        let _ = std::fs::remove_file(collector.log_path());
     }
 
     #[tokio::test]

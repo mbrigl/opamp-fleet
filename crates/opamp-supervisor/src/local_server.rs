@@ -59,6 +59,17 @@ impl CollectorLink {
     pub fn change_notify(&self) -> Arc<Notify> {
         self.changed.clone()
     }
+
+    /// Forgets the last health the collector reported, so that after a restart the previous process's
+    /// health is not mistaken for the new one's. The next report from the fresh collector repopulates it
+    /// — used by the Collector adapter on every apply so a config's health is confirmed from scratch
+    /// (`automatic_config_rollback`, ADR-0008).
+    pub fn clear_health(&self) {
+        self.latest
+            .lock()
+            .expect("collector report lock poisoned")
+            .health = None;
+    }
 }
 
 /// The capabilities this local server advertises to the collector: it accepts status reports and the
