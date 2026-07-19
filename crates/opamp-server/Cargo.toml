@@ -29,6 +29,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# TLS listener + shared-token auth (ADR-0012).
+axum-server.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 
 # Test-only: a WebSocket client to drive the OpAMP endpoint, and tower's `oneshot` to query the API
 # router without a second real listener.

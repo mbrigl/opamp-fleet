@@ -5,6 +5,7 @@
 //! the OpAMP server side ourselves and have no reference implementation to fall back on.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod fleet;
 pub mod server;

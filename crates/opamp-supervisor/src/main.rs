@@ -59,6 +59,46 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Install the rustls crypto provider (ring) once for the process, so a `wss://` connection uses it
+    // (ADR-0012).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Resolve the shared connection security once and apply it to every supervisor (ADR-0012): the
+    // bearer token (a literal or, with a leading `@`, a file) and the TLS CA / insecure option.
+    let auth_token = match host_config
+        .auth_token
+        .clone()
+        .map(resolve_token)
+        .transpose()
+    {
+        Ok(token) => token,
+        Err(e) => {
+            error!(error = %e, "cannot read the auth token");
+            std::process::exit(1);
+        }
+    };
+    let (tls_ca, tls_insecure) = match &host_config.tls {
+        Some(tls) => {
+            let ca = match &tls.ca_cert {
+                Some(path) => match std::fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        error!(path = %path.display(), error = %e, "cannot read the TLS CA certificate");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            (ca, tls.insecure)
+        }
+        None => (None, false),
+    };
+    let security = ConnSecurity {
+        auth_token,
+        tls_ca,
+        tls_insecure,
+    };
+
     let heartbeat = Duration::from_secs(host_config.heartbeat.max(1));
     let mut host = SupervisorHost::new();
 
@@ -112,6 +152,7 @@ async fn main() {
                     attributes,
                     own_telemetry_capabilities(c),
                     c.automatic_config_rollback,
+                    security.clone(),
                     agent,
                 );
             }
@@ -135,6 +176,7 @@ async fn main() {
                     attributes,
                     0,     // a Foreign Agent does not report its own telemetry
                     false, // and cannot confirm health, so it never rolls back
+                    security.clone(),
                     agent,
                 );
             }
@@ -145,6 +187,17 @@ async fn main() {
         error!("no supervisor could be started");
         std::process::exit(1);
     }
+
+    // The Host's own health-check endpoint, if configured (ADR-0013): reports whether the Host can
+    // persist state and read its configuration. Runs alongside the supervisors.
+    if let Some(hc) = &host_config.healthcheck {
+        tokio::spawn(opamp_supervisor::health::serve(
+            hc.endpoint.clone(),
+            host_config.storage.clone(),
+            config_path.clone(),
+        ));
+    }
+
     info!(supervisors = host.len(), "supervisor host running");
     host.run().await;
 }
@@ -176,6 +229,7 @@ fn spawn<A: ManagedAgent>(
     extra_attributes: Vec<(String, String)>,
     own_telemetry_capabilities: u64,
     automatic_config_rollback: bool,
+    security: ConnSecurity,
     agent: A,
 ) {
     let supervisor = Supervisor::new(
@@ -191,10 +245,32 @@ fn spawn<A: ManagedAgent>(
             extra_attributes,
             own_telemetry_capabilities,
             automatic_config_rollback,
+            auth_token: security.auth_token,
+            tls_ca: security.tls_ca,
+            tls_insecure: security.tls_insecure,
         },
         agent,
     );
     host.spawn(supervisor);
+}
+
+/// The shared connection security applied to every supervisor (ADR-0012): the bearer token and the TLS
+/// CA / insecure option, resolved once from the host configuration.
+#[derive(Clone)]
+struct ConnSecurity {
+    auth_token: Option<String>,
+    tls_ca: Option<Vec<u8>>,
+    tls_insecure: bool,
+}
+
+/// Resolves an auth token: a literal, or — with a leading `@` — the trimmed contents of a file (ADR-0012).
+fn resolve_token(spec: String) -> Result<String, String> {
+    match spec.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read auth token file {path}: {e}")),
+        None => Ok(spec),
+    }
 }
 
 /// The `ReportsOwn{Metrics,Logs,Traces}` capability bits a collector supervisor declares, per its

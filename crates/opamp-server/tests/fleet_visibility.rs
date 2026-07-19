@@ -42,6 +42,7 @@ async fn a_connected_agent_appears_in_the_fleet_with_its_status() {
         fleet.clone(),
         pushes.clone(),
         ServerOffers::default(),
+        None,
     ));
 
     // Serve the OpAMP endpoint on an ephemeral port and connect a WebSocket client to it.

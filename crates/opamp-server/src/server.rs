@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use tokio::sync::broadcast;
@@ -84,6 +85,8 @@ pub struct AppState {
     pub pushes: broadcast::Sender<FleetPush>,
     /// The control offers the Server makes to agents beyond config distribution (ADR-0011).
     pub offers: ServerOffers,
+    /// The shared bearer token an agent must present, or `None` to authenticate nobody (ADR-0012).
+    pub auth_token: Option<String>,
     /// Hands out a unique id to each accepted connection.
     next_conn_id: AtomicU64,
 }
@@ -94,12 +97,14 @@ impl AppState {
         fleet: Arc<Fleet>,
         pushes: broadcast::Sender<FleetPush>,
         offers: ServerOffers,
+        auth_token: Option<String>,
     ) -> Self {
         Self {
             config,
             fleet,
             pushes,
             offers,
+            auth_token,
             next_conn_id: AtomicU64::new(0),
         }
     }
@@ -116,7 +121,16 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Accepts the WebSocket upgrade and hands the socket to the per-connection loop. The message-size
 /// cap is enforced at the transport so an oversized frame is rejected before it reaches us.
-async fn upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+async fn upgrade(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    // Authenticate the connection before upgrading (ADR-0012); a no-op when no token is configured.
+    if !crate::auth::authorized(&state.auth_token, &headers) {
+        warn!("rejected an unauthenticated OpAMP connection");
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .on_upgrade(move |socket| serve_connection(socket, state))
 }

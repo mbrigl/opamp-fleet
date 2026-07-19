@@ -6,15 +6,18 @@
 //! The OpAMP endpoint and the fleet UI + REST API run on two listeners so the agent-facing and
 //! human-facing ports can be exposed, forwarded, and firewalled independently (ADR-0006, ADR-0007).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
+use axum_server::tls_rustls::RustlsConfig;
+use axum_server::Handle;
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use opamp::api;
+use opamp::auth;
 use opamp::config::ConfigSource;
 use opamp::fleet::Fleet;
 use opamp::server::{self, AppState, FleetPush, ServerOffers, TelemetryOffer, LISTEN_PATH};
@@ -32,6 +35,12 @@ struct Options {
     own_telemetry_endpoint: Option<String>,
     /// Optional headers attached to the own-telemetry offer (e.g. an auth token).
     own_telemetry_headers: Vec<(String, String)>,
+    /// PEM certificate and key for TLS on both listeners (ADR-0012); `None` serves plain.
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    /// The shared bearer token agents and UI/API clients must present (ADR-0012); `None` authenticates
+    /// nobody. A leading `@` means "read the token from this file".
+    auth_token: Option<String>,
 }
 
 impl Default for Options {
@@ -44,6 +53,9 @@ impl Default for Options {
             heartbeat_interval: None,
             own_telemetry_endpoint: None,
             own_telemetry_headers: Vec::new(),
+            tls_cert: None,
+            tls_key: None,
+            auth_token: None,
         }
     }
 }
@@ -56,12 +68,49 @@ async fn main() {
         )
         .init();
 
+    // Install the rustls crypto provider (ring) once for the whole process, so TLS on either listener
+    // uses it rather than a compiled-in default (ADR-0012).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut opts = match parse_args() {
         Ok(opts) => opts,
         Err(msg) => {
             eprintln!("{msg}");
             std::process::exit(2);
         }
+    };
+
+    // Resolve the auth token (a literal, or @file) and build the optional TLS configuration (ADR-0012).
+    let auth_token = match opts.auth_token.take().map(resolve_token).transpose() {
+        Ok(token) => token,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    let tls = match (opts.tls_cert.take(), opts.tls_key.take()) {
+        (Some(cert), Some(key)) => match RustlsConfig::from_pem_file(&cert, &key).await {
+            Ok(config) => Some(config),
+            Err(e) => {
+                eprintln!("cannot load TLS certificate/key ({cert}, {key}): {e}");
+                std::process::exit(1);
+            }
+        },
+        (None, None) => None,
+        _ => {
+            eprintln!("-tls-cert and -tls-key must be given together");
+            std::process::exit(2);
+        }
+    };
+    let scheme = if tls.is_some() {
+        "wss/https"
+    } else {
+        "ws/http"
+    };
+    let auth = if auth_token.is_some() {
+        "shared-token auth ON"
+    } else {
+        "UNAUTHENTICATED"
     };
 
     // The control offers the Server makes beyond config distribution (ADR-0011), from the flags above.
@@ -86,11 +135,12 @@ async fn main() {
 
     let fleet = Arc::new(Fleet::new());
 
-    // The initial server authenticates nobody; say so loudly, since it is only defensible on a trusted
-    // network / in the dev environment (ADR-0006).
-    info!(
-        "the OpAMP endpoint and the fleet UI/API are UNAUTHENTICATED (trusted-network / dev only)"
-    );
+    // Announce the security posture. Without TLS and a token the server is only defensible on a trusted
+    // network / in the dev environment (ADR-0006, ADR-0012).
+    info!(transport = scheme, auth, "server security posture");
+    if auth_token.is_none() {
+        info!("the server authenticates nobody — set -auth-token (and -tls-cert/-tls-key) before exposing it");
+    }
 
     // A bounded channel: a connection that falls this far behind recovers via the hash comparison on
     // its next report, so dropping stale pushes for a slow agent is safe.
@@ -101,6 +151,7 @@ async fn main() {
         fleet.clone(),
         pushes.clone(),
         offers,
+        auth_token.clone(),
     ));
 
     // One shutdown signal drives both listeners: a background task flips the watch, and each server
@@ -119,20 +170,29 @@ async fn main() {
         server::router(app_state),
         shutdown_rx.clone(),
         format!("OpAMP server listening (path {LISTEN_PATH})"),
+        tls.clone(),
     );
 
-    // The UI listener also serves the JSON REST API under /api (ADR-0007), plain. It holds the push
-    // channel too, so a restart request from the UI/API reaches the agent's connection (ADR-0011).
+    // The UI listener also serves the JSON REST API under /api (ADR-0007). It holds the push channel so
+    // a restart request reaches the agent's connection (ADR-0011), and the shared token gates every
+    // request (ADR-0012).
     let ui_state = UiState {
         fleet,
         config,
         pushes,
     };
+    let ui_router = ui::router(ui_state.clone())
+        .merge(api::router(ui_state))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_token.clone(),
+            auth::require_auth,
+        ));
     let ui = serve(
         &opts.ui_endpoint,
-        ui::router(ui_state.clone()).merge(api::router(ui_state)),
+        ui_router,
         shutdown_rx,
-        "fleet UI + REST API listening (unauthenticated — do not expose)".to_string(),
+        "fleet UI + REST API listening".to_string(),
+        tls,
     );
 
     // Bring both up; if either cannot bind, the whole server is broken, so report and exit non-zero.
@@ -143,29 +203,52 @@ async fn main() {
     info!("shutdown complete");
 }
 
-/// Binds `addr` and serves `router` until `shutdown` fires. Returns an error if binding fails.
+/// Binds `addr` and serves `router` — over TLS when `tls` is given (ADR-0012), plain otherwise — until
+/// `shutdown` fires. Returns an error if the address cannot be parsed or the listener cannot bind.
 async fn serve(
     addr: &str,
     router: axum::Router,
     mut shutdown: watch::Receiver<()>,
     announce: String,
+    tls: Option<RustlsConfig>,
 ) -> Result<(), ()> {
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
+    let socket: SocketAddr = match addr.parse() {
+        Ok(s) => s,
         Err(e) => {
-            error!(addr, error = %e, "cannot bind listener");
+            error!(addr, error = %e, "cannot parse listen address (expected IP:port)");
             return Err(());
         }
     };
-    info!(addr, "{announce}");
 
-    let result = axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
+    // axum-server drives graceful shutdown through a Handle rather than a shutdown future, so a small
+    // task turns the shutdown watch into a Handle signal, giving in-flight requests a moment to finish.
+    let handle = Handle::new();
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
             let _ = shutdown.changed().await;
-        })
-        .await;
+            handle.graceful_shutdown(Some(Duration::from_secs(2)));
+        }
+    });
+
+    info!(addr = %socket, tls = tls.is_some(), "{announce}");
+    let service = router.into_make_service();
+    let result = match tls {
+        Some(config) => {
+            axum_server::bind_rustls(socket, config)
+                .handle(handle)
+                .serve(service)
+                .await
+        }
+        None => {
+            axum_server::bind(socket)
+                .handle(handle)
+                .serve(service)
+                .await
+        }
+    };
     if let Err(e) = result {
-        error!(addr, error = %e, "server stopped with an error");
+        error!(addr = %socket, error = %e, "server stopped with an error");
         return Err(());
     }
     Ok(())
@@ -262,6 +345,9 @@ fn parse_args() -> Result<Options, String> {
             "heartbeat-interval" => opts.heartbeat_interval = Some(parse_duration(&value()?)?),
             "own-telemetry-endpoint" => opts.own_telemetry_endpoint = Some(value()?),
             "own-telemetry-header" => opts.own_telemetry_headers.push(parse_header(&value()?)?),
+            "tls-cert" => opts.tls_cert = Some(value()?),
+            "tls-key" => opts.tls_key = Some(value()?),
+            "auth-token" => opts.auth_token = Some(value()?),
             "help" | "h" => {
                 // Help is not an error: print usage to stdout and exit cleanly.
                 println!("{USAGE}");
@@ -282,7 +368,10 @@ usage: opamp-server [flags]
   -poll-interval <dur>          how often the file is checked for changes, e.g. 2s, 500ms (default 2s)
   -heartbeat-interval <dur>     heartbeat interval to offer agents, e.g. 30s (default: offer none)
   -own-telemetry-endpoint <url> OTLP/HTTP destination to offer for agents' own telemetry (default: none)
-  -own-telemetry-header <k=v>   header for the own-telemetry offer; repeatable (e.g. Authorization=Bearer x)";
+  -own-telemetry-header <k=v>   header for the own-telemetry offer; repeatable (e.g. Authorization=Bearer x)
+  -tls-cert <pem>               PEM certificate for TLS on both listeners (needs -tls-key; default: plain)
+  -tls-key <pem>                PEM private key for TLS on both listeners (needs -tls-cert)
+  -auth-token <token|@file>     shared bearer token agents and UI/API clients must present (default: none)";
 
 /// Parses a short duration string: an integer followed by `ms`, `s`, or `m`. Kept minimal on purpose
 /// — the only caller is the poll interval.
@@ -313,6 +402,17 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 
 fn bad_duration(s: &str) -> String {
     format!("cannot parse duration {s:?} (expected e.g. 2s, 500ms, 1m)")
+}
+
+/// Resolves an auth token: a literal, or — with a leading `@` — the trimmed contents of a file, so a
+/// secret need not appear in the process arguments (ADR-0012).
+fn resolve_token(spec: String) -> Result<String, String> {
+    match spec.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read auth token file {path}: {e}")),
+        None => Ok(spec),
+    }
 }
 
 /// Parses a `key=value` header for the own-telemetry offer (ADR-0011). The value may contain `=`; only

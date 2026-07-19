@@ -14,6 +14,19 @@ storage: /tmp/opamp-supervisor
 #   logs:
 #     encoding: console
 
+# Shared bearer token presented to the Server on every connection (ADR-0012); a literal, or `@path` to
+# read it from a file. Omit to connect unauthenticated. Use a `wss://` server URL above to secure the
+# transport, and set `tls:` below to validate it.
+# auth_token: "@/etc/opamp/token"
+# tls:
+#   ca_cert: /etc/opamp/ca.pem   # custom CA to validate the wss:// server (optional; default: platform roots)
+#   insecure: false              # skip certificate validation — DANGEROUS, development only
+
+# The Host's own health-check endpoint (ADR-0013); omit to disable. Answers 200 when the Host can persist
+# state and read its configuration, 503 otherwise — a liveness/readiness probe for a local orchestrator.
+# healthcheck:
+#   endpoint: 127.0.0.1:13133
+
 supervisors:
   # An OpAMP-native OpenTelemetry Collector — the Collector Supervisor (ADR-0008).
   - type: collector

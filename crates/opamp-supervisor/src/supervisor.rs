@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
@@ -107,6 +109,13 @@ pub struct Config {
     /// Revert to the last healthy configuration when a newly applied one does not make the agent healthy
     /// (`automatic_config_rollback`, ADR-0008). Only useful for an agent that reports its own health.
     pub automatic_config_rollback: bool,
+    /// The shared bearer token to present to the Server, or `None` for an unauthenticated connection
+    /// (ADR-0012).
+    pub auth_token: Option<String>,
+    /// A PEM CA certificate to validate a `wss://` Server against, instead of the platform roots (ADR-0012).
+    pub tls_ca: Option<Vec<u8>>,
+    /// Skip TLS certificate validation — dangerous, development only (ADR-0012).
+    pub tls_insecure: bool,
 }
 
 /// The running supervisor: its identity, the [`ManagedAgent`] it drives, and the control-loop state it
@@ -139,6 +148,11 @@ pub struct Supervisor<A: ManagedAgent> {
     restart_backoff: Duration,
     /// When the agent was last (re)started after a crash, to tell a crash loop from an isolated exit.
     last_restart: Option<Instant>,
+    /// The bearer token presented to the Server on connect, or `None` (ADR-0012).
+    auth_token: Option<String>,
+    /// A PEM CA to validate a `wss://` Server, and whether to skip validation entirely (ADR-0012).
+    tls_ca: Option<Vec<u8>>,
+    tls_insecure: bool,
     /// Whether to revert to the last healthy config when a new one does not become healthy (ADR-0008).
     rollback_enabled: bool,
     /// How long to wait for a freshly applied config to report healthy before rolling back.
@@ -180,6 +194,9 @@ impl<A: ManagedAgent> Supervisor<A> {
             reconnect_delay: RECONNECT_BASE,
             restart_backoff: RESTART_BACKOFF_BASE,
             last_restart: None,
+            auth_token: config.auth_token,
+            tls_ca: config.tls_ca,
+            tls_insecure: config.tls_insecure,
             rollback_enabled: config.automatic_config_rollback,
             rollback_health_timeout: ROLLBACK_HEALTH_TIMEOUT,
             rolled_back: None,
@@ -278,9 +295,24 @@ impl<A: ManagedAgent> Supervisor<A> {
     /// connection closes or errors.
     async fn serve_once(&mut self) -> Result<(), String> {
         info!(server = %self.server_url, "connecting to OpAMP server");
-        let (mut ws, _) = tokio_tungstenite::connect_async(&self.server_url)
-            .await
-            .map_err(|e| format!("cannot connect to {}: {e}", self.server_url))?;
+        // Build the handshake request so a bearer token can be attached, and a TLS connector so a
+        // `wss://` server is validated against the configured roots / CA (ADR-0012).
+        let mut request = self
+            .server_url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| format!("invalid server URL {}: {e}", self.server_url))?;
+        if let Some(token) = &self.auth_token {
+            let value = format!("Bearer {token}")
+                .parse()
+                .map_err(|e| format!("invalid auth token: {e}"))?;
+            request.headers_mut().insert(AUTHORIZATION, value);
+        }
+        let connector = crate::tls::connector(self.tls_ca.as_deref(), self.tls_insecure)?;
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
+                .await
+                .map_err(|e| format!("cannot connect to {}: {e}", self.server_url))?;
         info!("connected to OpAMP server");
         self.reconnect_delay = RECONNECT_BASE;
 
@@ -1037,6 +1069,9 @@ mod tests {
                 extra_attributes: Vec::new(),
                 own_telemetry_capabilities: 0,
                 automatic_config_rollback: false,
+                auth_token: None,
+                tls_ca: None,
+                tls_insecure: false,
             },
             agent,
         )

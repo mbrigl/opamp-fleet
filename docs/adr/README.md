@@ -36,4 +36,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0009](0009-plugin-hexagonal-supervisor-host.md) | Plugin/hexagonal Supervisor Host — many supervisors behind a `ManagedAgent` port, with a Custom Supervisor | 🟢 accepted |
 | [0010](0010-collector-supervisor-own-telemetry.md) | Collector Supervisor reports the Collector's own telemetry from the Server's connection settings | 🟢 accepted |
 | [0011](0011-server-agent-control-beyond-config.md) | Server drives Agents beyond config distribution — own-telemetry offers, a restart command, and a heartbeat interval | 🟢 accepted |
+| [0012](0012-tls-and-shared-token-auth.md) | TLS transport and shared-token authentication, opt-in, on both sides | 🟢 accepted |
+| [0013](0013-supervisor-host-health-check-endpoint.md) | An optional health-check endpoint on the Supervisor Host | 🟢 accepted |
 

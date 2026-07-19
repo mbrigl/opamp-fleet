@@ -25,8 +25,35 @@ pub struct HostConfig {
     /// The Host's own observability settings (its logging), separate from the managed agents' telemetry.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// The shared bearer token every supervisor presents to the Server (ADR-0012); a literal or, with a
+    /// leading `@`, a file to read it from. `None` connects unauthenticated.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// TLS settings for the OpAMP connection (ADR-0012); `None` uses the platform's default roots for a
+    /// `wss://` server and is irrelevant for plain `ws://`.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// An optional health-check endpoint for the Host itself (ADR-0013); `None` disables it.
+    #[serde(default)]
+    pub healthcheck: Option<HealthcheckConfig>,
     /// The supervisors to run.
     pub supervisors: Vec<SupervisorConfig>,
+}
+
+/// TLS settings for validating the Server's certificate on a `wss://` connection (ADR-0012).
+#[derive(Debug, Default, Deserialize)]
+pub struct TlsConfig {
+    /// A PEM CA certificate to validate the Server against, instead of the platform's default roots.
+    pub ca_cert: Option<PathBuf>,
+    /// Skip certificate validation entirely — **dangerous**, development only.
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+/// The Host's health-check endpoint (ADR-0013): an address like `127.0.0.1:13133` to serve `GET` on.
+#[derive(Debug, Deserialize)]
+pub struct HealthcheckConfig {
+    pub endpoint: String,
 }
 
 /// The Supervisor Host's own telemetry (currently just how it encodes its logs), mirroring the Go

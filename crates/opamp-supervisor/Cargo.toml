@@ -27,6 +27,9 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 hex.workspace = true
+# `wss://` transport and a custom-CA / insecure TLS config for the OpAMP client (ADR-0012).
+rustls.workspace = true
+rustls-pemfile.workspace = true
 
 # Sending SIGTERM to a supervised child for graceful shutdown (tokio's Child only exposes SIGKILL).
 # Unix-only: Windows has no SIGTERM for another process and falls back to an immediate terminate.
