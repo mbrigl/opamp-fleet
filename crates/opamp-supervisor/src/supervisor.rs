@@ -16,8 +16,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
@@ -78,6 +80,7 @@ const CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsRemoteConfig as u64
     | AgentCapabilities::ReportsHeartbeat as u64
     | AgentCapabilities::AcceptsRestartCommand as u64
+    | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
     | AgentCapabilities::ReportsAvailableComponents as u64;
 
 type Ws =
@@ -118,6 +121,30 @@ pub struct Config {
     pub tls_insecure: bool,
 }
 
+/// A snapshot of the OpAMP connection settings, kept so a freshly accepted offer can be reverted if it
+/// fails to connect (ADR-0015).
+#[derive(Clone)]
+struct ConnSnapshot {
+    server_url: String,
+    auth_token: Option<String>,
+    offered_headers: Vec<(String, String)>,
+    tls_ca: Option<Vec<u8>>,
+    tls_insecure: bool,
+}
+
+/// The accepted OpAMP connection settings persisted across restarts, so the Supervisor resumes on the
+/// endpoint the Server last re-pointed it to rather than the bootstrap one (ADR-0015).
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedConnSettings {
+    server_url: String,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    ca_pem: Option<String>,
+    #[serde(default)]
+    insecure: bool,
+}
+
 /// The running supervisor: its identity, the [`ManagedAgent`] it drives, and the control-loop state it
 /// needs to avoid redundant reconfiguration.
 pub struct Supervisor<A: ManagedAgent> {
@@ -153,6 +180,13 @@ pub struct Supervisor<A: ManagedAgent> {
     /// A PEM CA to validate a `wss://` Server, and whether to skip validation entirely (ADR-0012).
     tls_ca: Option<Vec<u8>>,
     tls_insecure: bool,
+    /// Headers sent on connect from an accepted OpAMP connection-settings offer (ADR-0015); empty means
+    /// use the configured bearer token instead.
+    offered_headers: Vec<(String, String)>,
+    /// Set when an accepted OpAMP connection-settings offer requires reconnecting to a new endpoint.
+    reconnect_requested: bool,
+    /// Connection settings to restore if a freshly accepted offer fails to connect (ADR-0015 revert).
+    pending_revert: Option<ConnSnapshot>,
     /// Whether to revert to the last healthy config when a new one does not become healthy (ADR-0008).
     rollback_enabled: bool,
     /// How long to wait for a freshly applied config to report healthy before rolling back.
@@ -197,6 +231,9 @@ impl<A: ManagedAgent> Supervisor<A> {
             auth_token: config.auth_token,
             tls_ca: config.tls_ca,
             tls_insecure: config.tls_insecure,
+            offered_headers: Vec::new(),
+            reconnect_requested: false,
+            pending_revert: None,
             rollback_enabled: config.automatic_config_rollback,
             rollback_health_timeout: ROLLBACK_HEALTH_TIMEOUT,
             rolled_back: None,
@@ -217,12 +254,32 @@ impl<A: ManagedAgent> Supervisor<A> {
             self.agent.set_own_telemetry(own_telemetry);
         }
 
+        // Resume on the OpAMP connection settings the Server last re-pointed us to (ADR-0015).
+        self.load_conn_settings();
+
         if !self.resume_last_config().await {
             self.apply_fallback().await;
         }
 
         loop {
-            if let Err(e) = self.serve_once().await {
+            let result = self.serve_once().await;
+
+            // An accepted OpAMP connection-settings offer re-points the connection: reconnect at once to
+            // the new endpoint, no backoff (ADR-0015).
+            if std::mem::take(&mut self.reconnect_requested) {
+                info!(server = %self.server_url, "reconnecting on newly offered OpAMP connection settings");
+                continue;
+            }
+
+            if let Err(e) = &result {
+                // If a freshly accepted offer failed to connect, revert to the previous settings so a
+                // bad offer cannot strand the agent off the fleet (ADR-0015).
+                if let Some(previous) = self.pending_revert.take() {
+                    warn!(error = %e, server = %previous.server_url, "offered OpAMP connection settings failed; reverting");
+                    self.restore_conn(previous);
+                    self.persist_conn_settings();
+                    continue;
+                }
                 warn!(error = %e, delay_secs = self.reconnect_delay.as_secs(), "OpAMP session ended; reconnecting");
             }
             tokio::time::sleep(jittered(self.reconnect_delay)).await;
@@ -302,7 +359,18 @@ impl<A: ManagedAgent> Supervisor<A> {
             .as_str()
             .into_client_request()
             .map_err(|e| format!("invalid server URL {}: {e}", self.server_url))?;
-        if let Some(token) = &self.auth_token {
+        // Headers from an accepted connection-settings offer take precedence over the configured bearer
+        // token (ADR-0015); otherwise the configured token is sent as a Bearer header (ADR-0012).
+        if !self.offered_headers.is_empty() {
+            for (key, value) in &self.offered_headers {
+                if let (Ok(name), Ok(value)) = (
+                    HeaderName::from_bytes(key.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    request.headers_mut().insert(name, value);
+                }
+            }
+        } else if let Some(token) = &self.auth_token {
             let value = format!("Bearer {token}")
                 .parse()
                 .map_err(|e| format!("invalid auth token: {e}"))?;
@@ -315,6 +383,8 @@ impl<A: ManagedAgent> Supervisor<A> {
                 .map_err(|e| format!("cannot connect to {}: {e}", self.server_url))?;
         info!("connected to OpAMP server");
         self.reconnect_delay = RECONNECT_BASE;
+        // The connection came up: a freshly accepted offer is confirmed, so there is nothing to revert.
+        self.pending_revert = None;
 
         let first = self.full_state_report();
         self.send(&mut ws, first).await?;
@@ -341,6 +411,11 @@ impl<A: ManagedAgent> Supervisor<A> {
                             let msg: ServerToAgent = frame::decode(&data)
                                 .map_err(|e| format!("cannot decode ServerToAgent: {e}"))?;
                             self.handle(&mut ws, msg).await?;
+                            // An accepted connection-settings offer ends this session so `run` reconnects
+                            // to the newly offered endpoint (ADR-0015).
+                            if self.reconnect_requested {
+                                return Ok(());
+                            }
                         }
                         Message::Close(_) => {
                             info!("server closed the connection");
@@ -493,6 +568,13 @@ impl<A: ManagedAgent> Supervisor<A> {
             let mut report = self.next_report();
             report.health = Some(self.current_health());
             self.send(ws, report).await?;
+        }
+        // OpAMP connection re-point (ADR-0015): if the Server offers new settings for our own OpAMP
+        // connection, adopt them; the session ends after this handler so `run` reconnects.
+        if let Some(cs) = &msg.connection_settings {
+            if self.apply_opamp_connection_offer(cs) {
+                info!(server = %self.server_url, "server offered new OpAMP connection settings");
+            }
         }
         // Own-telemetry offer (ADR-0010): update the agent's reporting destination. If it changed, the
         // running config must be re-applied to take effect — unless a remote config below already does.
@@ -771,6 +853,125 @@ impl<A: ManagedAgent> Supervisor<A> {
             .ok()
             .and_then(|bytes| serde_yaml::from_slice(&bytes).ok())
             .unwrap_or_default()
+    }
+
+    /// Applies an OpAMP connection-settings offer (ADR-0015). Re-points the connection when the offer
+    /// carries a non-empty endpoint and the effective settings (endpoint, headers, or TLS) differ from
+    /// the current ones: it snapshots the current settings for revert, adopts the offered ones, persists
+    /// them, and requests a reconnect. A heartbeat-only offer (empty endpoint) or an unchanged offer is
+    /// ignored. Returns whether it re-pointed.
+    fn apply_opamp_connection_offer(&mut self, cs: &ConnectionSettingsOffers) -> bool {
+        if self.capabilities & AgentCapabilities::AcceptsOpAmpConnectionSettings as u64 == 0 {
+            return false;
+        }
+        let Some(opamp) = &cs.opamp else {
+            return false;
+        };
+        if opamp.destination_endpoint.is_empty() {
+            return false; // a heartbeat-only offer carries no endpoint; not a re-point
+        }
+        let new_headers: Vec<(String, String)> = opamp
+            .headers
+            .as_ref()
+            .map(|h| {
+                h.headers
+                    .iter()
+                    .map(|kv| (kv.key.clone(), kv.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (new_ca, new_insecure) = match &opamp.tls {
+            Some(tls) => (
+                (!tls.ca_pem_contents.is_empty()).then(|| tls.ca_pem_contents.clone().into_bytes()),
+                tls.insecure_skip_verify,
+            ),
+            None => (self.tls_ca.clone(), self.tls_insecure),
+        };
+        if opamp.destination_endpoint == self.server_url
+            && new_headers == self.offered_headers
+            && new_ca == self.tls_ca
+            && new_insecure == self.tls_insecure
+        {
+            return false; // nothing actually changed
+        }
+
+        self.pending_revert = Some(self.conn_snapshot());
+        self.server_url = opamp.destination_endpoint.clone();
+        self.offered_headers = new_headers;
+        self.tls_ca = new_ca;
+        self.tls_insecure = new_insecure;
+        self.persist_conn_settings();
+        self.reconnect_requested = true;
+        true
+    }
+
+    /// A snapshot of the current OpAMP connection settings, for reverting a failed offer (ADR-0015).
+    fn conn_snapshot(&self) -> ConnSnapshot {
+        ConnSnapshot {
+            server_url: self.server_url.clone(),
+            auth_token: self.auth_token.clone(),
+            offered_headers: self.offered_headers.clone(),
+            tls_ca: self.tls_ca.clone(),
+            tls_insecure: self.tls_insecure,
+        }
+    }
+
+    /// Restores a connection-settings snapshot after a failed offer (ADR-0015).
+    fn restore_conn(&mut self, snapshot: ConnSnapshot) {
+        self.server_url = snapshot.server_url;
+        self.auth_token = snapshot.auth_token;
+        self.offered_headers = snapshot.offered_headers;
+        self.tls_ca = snapshot.tls_ca;
+        self.tls_insecure = snapshot.tls_insecure;
+    }
+
+    /// The file the accepted OpAMP connection settings are persisted to (ADR-0015).
+    fn conn_settings_path(&self) -> PathBuf {
+        self.storage_dir.join("opamp_connection.yaml")
+    }
+
+    /// Persists the accepted OpAMP connection settings so a restart resumes on the re-pointed endpoint.
+    fn persist_conn_settings(&self) {
+        if let Err(e) = std::fs::create_dir_all(&self.storage_dir) {
+            warn!(error = %e, "cannot create the supervisor storage directory");
+            return;
+        }
+        let persisted = PersistedConnSettings {
+            server_url: self.server_url.clone(),
+            headers: self.offered_headers.clone(),
+            ca_pem: self
+                .tls_ca
+                .as_ref()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+            insecure: self.tls_insecure,
+        };
+        match serde_yaml::to_string(&persisted) {
+            Ok(yaml) => {
+                if let Err(e) = std::fs::write(self.conn_settings_path(), yaml) {
+                    warn!(error = %e, "cannot persist the OpAMP connection settings");
+                }
+            }
+            Err(e) => warn!(error = %e, "cannot serialize the OpAMP connection settings"),
+        }
+    }
+
+    /// Loads the last accepted OpAMP connection settings, if any, so the Supervisor resumes on the
+    /// re-pointed endpoint rather than the configured one (ADR-0015).
+    fn load_conn_settings(&mut self) {
+        let Ok(bytes) = std::fs::read(self.conn_settings_path()) else {
+            return;
+        };
+        let Ok(persisted) = serde_yaml::from_slice::<PersistedConnSettings>(&bytes) else {
+            return;
+        };
+        if persisted.server_url.is_empty() {
+            return;
+        }
+        self.server_url = persisted.server_url;
+        self.offered_headers = persisted.headers;
+        self.tls_ca = persisted.ca_pem.map(String::into_bytes);
+        self.tls_insecure = persisted.insecure;
+        info!(server = %self.server_url, "resumed on the last accepted OpAMP connection settings");
     }
 
     /// The effective configuration to report. Prefers what the agent reports (its *actual* running
@@ -1252,6 +1453,7 @@ mod tests {
             AgentCapabilities::ReportsHealth,
             AgentCapabilities::ReportsHeartbeat,
             AgentCapabilities::AcceptsRestartCommand,
+            AgentCapabilities::AcceptsOpAmpConnectionSettings,
             AgentCapabilities::ReportsAvailableComponents,
         ] {
             assert_ne!(CAPABILITIES & cap as u64, 0, "{cap:?} must be declared");
@@ -1476,5 +1678,83 @@ mod tests {
         };
         assert_eq!(heartbeat_override(&msg), Some(Duration::from_secs(45)));
         assert_eq!(heartbeat_override(&ServerToAgent::default()), None);
+    }
+
+    fn opamp_offer(endpoint: &str, auth: Option<&str>) -> ConnectionSettingsOffers {
+        use opamp_proto::proto::{Header, Headers, OpAmpConnectionSettings};
+        ConnectionSettingsOffers {
+            opamp: Some(OpAmpConnectionSettings {
+                destination_endpoint: endpoint.to_string(),
+                headers: auth.map(|value| Headers {
+                    headers: vec![Header {
+                        key: "Authorization".to_string(),
+                        value: value.to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opamp_connection_offer_repoints_arms_revert_and_is_idempotent() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.server_url = "ws://old/v1/opamp".to_string();
+
+        let offer = opamp_offer("wss://new/v1/opamp", Some("Bearer rotated"));
+        assert!(
+            sup.apply_opamp_connection_offer(&offer),
+            "a new endpoint re-points"
+        );
+        assert_eq!(sup.server_url, "wss://new/v1/opamp");
+        assert_eq!(
+            sup.offered_headers,
+            vec![("Authorization".to_string(), "Bearer rotated".to_string())]
+        );
+        assert!(sup.reconnect_requested);
+        assert!(
+            sup.pending_revert.is_some(),
+            "the previous settings are armed for revert"
+        );
+
+        // Re-offering the identical settings changes nothing.
+        sup.reconnect_requested = false;
+        assert!(!sup.apply_opamp_connection_offer(&offer));
+        assert!(!sup.reconnect_requested);
+    }
+
+    #[test]
+    fn heartbeat_only_offer_does_not_repoint() {
+        use opamp_proto::proto::OpAmpConnectionSettings;
+        let mut sup = supervisor_with(FakeAgent::default());
+        let cs = ConnectionSettingsOffers {
+            opamp: Some(OpAmpConnectionSettings {
+                heartbeat_interval_seconds: 30,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!sup.apply_opamp_connection_offer(&cs));
+        assert!(!sup.reconnect_requested);
+    }
+
+    #[test]
+    fn opamp_connection_offer_ignored_without_the_capability() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.capabilities &= !(AgentCapabilities::AcceptsOpAmpConnectionSettings as u64);
+        assert!(!sup.apply_opamp_connection_offer(&opamp_offer("wss://new/", None)));
+    }
+
+    #[test]
+    fn revert_restores_the_previous_connection_settings() {
+        let mut sup = supervisor_with(FakeAgent::default());
+        sup.server_url = "ws://old/v1/opamp".to_string();
+        let snapshot = sup.conn_snapshot();
+        sup.server_url = "wss://new/".to_string();
+        sup.offered_headers = vec![("X".to_string(), "y".to_string())];
+        sup.restore_conn(snapshot);
+        assert_eq!(sup.server_url, "ws://old/v1/opamp");
+        assert!(sup.offered_headers.is_empty());
     }
 }

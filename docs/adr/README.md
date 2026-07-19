@@ -38,4 +38,8 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0011](0011-server-agent-control-beyond-config.md) | Server drives Agents beyond config distribution — own-telemetry offers, a restart command, and a heartbeat interval | 🟢 accepted |
 | [0012](0012-tls-and-shared-token-auth.md) | TLS transport and shared-token authentication, opt-in, on both sides | 🟢 accepted |
 | [0013](0013-supervisor-host-health-check-endpoint.md) | An optional health-check endpoint on the Supervisor Host | 🟢 accepted |
+| [0014](0014-local-config-files-in-composition.md) | Local regular configuration files in the config composition, restored after reconnect | 🟢 accepted |
+| [0015](0015-accepts-opamp-connection-settings.md) | The Supervisor accepts Server-offered OpAMP connection settings (re-pointing), with revert on failure | 🟢 accepted |
+| [0016](0016-mtls-client-certificate-issuance.md) | Mutual TLS with OpAMP client-certificate issuance (CertificateRequest), Server as a simple CA | 🟢 accepted |
+| [0017](0017-other-connection-settings.md) | `AcceptsOtherConnectionSettings` — deferred until a concrete consumer exists | 🟢 accepted |
 

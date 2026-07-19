@@ -36,6 +36,11 @@ supervisors:
     # Optional base config merged underneath every remote config (remote keys win), to pin local
     # settings the Server's config is layered on top of:
     # base_config: config/collector-base.yaml
+    # Local regular config files — a single path or a list — deep-merged in order as the base layer under
+    # every remote config, always part of the composition (ADR-0014). `base_config` is the first entry.
+    # config_files:
+    #   - config/receivers.yaml
+    #   - config/pipelines.yaml
     # Include up to this many KiB of the collector's most recent stderr when it crashes (0 = off,
     # the default; capped at 1024), so a crash report shows why it died:
     # collector_crash_log_snippet_kib: 64

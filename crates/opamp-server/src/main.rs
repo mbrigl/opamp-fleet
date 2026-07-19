@@ -20,7 +20,9 @@ use opamp::api;
 use opamp::auth;
 use opamp::config::ConfigSource;
 use opamp::fleet::Fleet;
-use opamp::server::{self, AppState, FleetPush, ServerOffers, TelemetryOffer, LISTEN_PATH};
+use opamp::server::{
+    self, AppState, FleetPush, OpampConnectionOffer, ServerOffers, TelemetryOffer, LISTEN_PATH,
+};
 use opamp::ui::{self, UiState};
 
 /// The command-line configuration, mirroring the flags the README documents.
@@ -35,6 +37,10 @@ struct Options {
     own_telemetry_endpoint: Option<String>,
     /// Optional headers attached to the own-telemetry offer (e.g. an auth token).
     own_telemetry_headers: Vec<(String, String)>,
+    /// New OpAMP endpoint to offer accepting agents, e.g. to migrate or rotate a token (ADR-0015).
+    opamp_offer_endpoint: Option<String>,
+    /// Optional headers attached to the OpAMP connection offer.
+    opamp_offer_headers: Vec<(String, String)>,
     /// PEM certificate and key for TLS on both listeners (ADR-0012); `None` serves plain.
     tls_cert: Option<String>,
     tls_key: Option<String>,
@@ -53,6 +59,8 @@ impl Default for Options {
             heartbeat_interval: None,
             own_telemetry_endpoint: None,
             own_telemetry_headers: Vec::new(),
+            opamp_offer_endpoint: None,
+            opamp_offer_headers: Vec::new(),
             tls_cert: None,
             tls_key: None,
             auth_token: None,
@@ -122,6 +130,13 @@ async fn main() {
             .map(|endpoint| TelemetryOffer {
                 endpoint,
                 headers: std::mem::take(&mut opts.own_telemetry_headers),
+            }),
+        opamp_connection: opts
+            .opamp_offer_endpoint
+            .take()
+            .map(|endpoint| OpampConnectionOffer {
+                endpoint,
+                headers: std::mem::take(&mut opts.opamp_offer_headers),
             }),
     };
 
@@ -345,6 +360,8 @@ fn parse_args() -> Result<Options, String> {
             "heartbeat-interval" => opts.heartbeat_interval = Some(parse_duration(&value()?)?),
             "own-telemetry-endpoint" => opts.own_telemetry_endpoint = Some(value()?),
             "own-telemetry-header" => opts.own_telemetry_headers.push(parse_header(&value()?)?),
+            "opamp-offer-endpoint" => opts.opamp_offer_endpoint = Some(value()?),
+            "opamp-offer-header" => opts.opamp_offer_headers.push(parse_header(&value()?)?),
             "tls-cert" => opts.tls_cert = Some(value()?),
             "tls-key" => opts.tls_key = Some(value()?),
             "auth-token" => opts.auth_token = Some(value()?),
@@ -369,6 +386,8 @@ usage: opamp-server [flags]
   -heartbeat-interval <dur>     heartbeat interval to offer agents, e.g. 30s (default: offer none)
   -own-telemetry-endpoint <url> OTLP/HTTP destination to offer for agents' own telemetry (default: none)
   -own-telemetry-header <k=v>   header for the own-telemetry offer; repeatable (e.g. Authorization=Bearer x)
+  -opamp-offer-endpoint <url>   new OpAMP endpoint to offer accepting agents (re-point/rotate; default: none)
+  -opamp-offer-header <k=v>     header for the OpAMP connection offer; repeatable
   -tls-cert <pem>               PEM certificate for TLS on both listeners (needs -tls-key; default: plain)
   -tls-key <pem>                PEM private key for TLS on both listeners (needs -tls-cert)
   -auth-token <token|@file>     shared bearer token agents and UI/API clients must present (default: none)";

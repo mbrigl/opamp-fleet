@@ -61,6 +61,9 @@ pub struct ServerOffers {
     pub heartbeat_interval_seconds: u64,
     /// The destination the Server offers for agents' own telemetry, or `None` to offer none.
     pub own_telemetry: Option<TelemetryOffer>,
+    /// New OpAMP connection settings to offer — a re-point endpoint and optional headers, e.g. to rotate
+    /// a token or migrate the fleet (ADR-0015); `None` offers none.
+    pub opamp_connection: Option<OpampConnectionOffer>,
 }
 
 /// An OTLP/HTTP destination the Server offers for an agent's own telemetry (ADR-0011).
@@ -70,9 +73,18 @@ pub struct TelemetryOffer {
     pub headers: Vec<(String, String)>,
 }
 
+/// New OpAMP connection settings the Server offers to agents that accept them (ADR-0015).
+#[derive(Clone)]
+pub struct OpampConnectionOffer {
+    pub endpoint: String,
+    pub headers: Vec<(String, String)>,
+}
+
 impl ServerOffers {
     fn is_empty(&self) -> bool {
-        self.heartbeat_interval_seconds == 0 && self.own_telemetry.is_none()
+        self.heartbeat_interval_seconds == 0
+            && self.own_telemetry.is_none()
+            && self.opamp_connection.is_none()
     }
 }
 
@@ -267,6 +279,28 @@ fn connection_settings(
         any = true;
     }
 
+    // A re-point offer only to an agent that accepts OpAMP connection settings (ADR-0015). Merges into
+    // the same `opamp` settings as the heartbeat, if any.
+    if let Some(conn) = &offers.opamp_connection {
+        if declares(AgentCapabilities::AcceptsOpAmpConnectionSettings) {
+            let opamp = cs.opamp.get_or_insert_with(Default::default);
+            opamp.destination_endpoint = conn.endpoint.clone();
+            if !conn.headers.is_empty() {
+                opamp.headers = Some(Headers {
+                    headers: conn
+                        .headers
+                        .iter()
+                        .map(|(key, value)| Header {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                });
+            }
+            any = true;
+        }
+    }
+
     // Own-telemetry is offered per signal, only for the signals the agent reports it will ship.
     if let Some(offer) = &offers.own_telemetry {
         if declares(AgentCapabilities::ReportsOwnMetrics) {
@@ -387,6 +421,7 @@ mod tests {
                 endpoint: "https://otlp.example/v1".to_string(),
                 headers: vec![("Authorization".to_string(), "Bearer x".to_string())],
             }),
+            opamp_connection: None,
         }
     }
 
@@ -422,5 +457,27 @@ mod tests {
     fn nothing_offered_when_the_agent_declares_nothing_relevant() {
         // Declares only ReportsStatus: heartbeat and own-telemetry are both gated out.
         assert!(connection_settings(&offers(), AgentCapabilities::ReportsStatus as u64).is_none());
+    }
+
+    #[test]
+    fn opamp_repoint_offered_only_to_an_accepting_agent() {
+        let offers = ServerOffers {
+            opamp_connection: Some(OpampConnectionOffer {
+                endpoint: "wss://new/v1/opamp".to_string(),
+                headers: vec![("Authorization".to_string(), "Bearer rotated".to_string())],
+            }),
+            ..Default::default()
+        };
+        // An agent that accepts OpAMP connection settings gets the re-point endpoint and headers.
+        let cs = connection_settings(
+            &offers,
+            AgentCapabilities::AcceptsOpAmpConnectionSettings as u64,
+        )
+        .expect("offered");
+        let opamp = cs.opamp.expect("opamp settings");
+        assert_eq!(opamp.destination_endpoint, "wss://new/v1/opamp");
+        assert_eq!(opamp.headers.unwrap().headers[0].value, "Bearer rotated");
+        // An agent that does not accept them gets nothing.
+        assert!(connection_settings(&offers, AgentCapabilities::ReportsStatus as u64).is_none());
     }
 }

@@ -136,9 +136,15 @@ async fn main() {
                     }
                 };
                 let endpoint = format!("ws://{local_addr}/v1/opamp");
-                let base_config = read_optional_config(c.base_config.as_deref());
+                // The local config layer (ADR-0014): base_config, if set, is the first entry, then the
+                // config_files list — deep-merged under every remote config.
+                let mut config_files = Vec::new();
+                if let Some(base) = read_optional_config(c.base_config.as_deref()) {
+                    config_files.push(base);
+                }
+                config_files.extend(read_config_list(&c.config_files));
                 let agent =
-                    CollectorAgent::new(collector, link, endpoint, &instance_uid, base_config);
+                    CollectorAgent::new(collector, link, endpoint, &instance_uid, config_files);
                 spawn(
                     &mut host,
                     &name,

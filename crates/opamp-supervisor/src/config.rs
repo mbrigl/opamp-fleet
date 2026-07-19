@@ -132,8 +132,15 @@ pub struct CollectorConfig {
     #[serde(default, deserialize_with = "one_or_many_paths")]
     pub fallback: Vec<PathBuf>,
     /// A base collector config merged *underneath* every remote config (remote keys win), so an
-    /// operator can pin local settings the Server's config is layered on top of (optional).
+    /// operator can pin local settings the Server's config is layered on top of (optional). Sugar for a
+    /// first entry of `config_files` (ADR-0014).
     pub base_config: Option<PathBuf>,
+    /// Local regular config files, a single path or a list, deep-merged in order as the base layer under
+    /// every remote config (remote wins), and always part of the composition — so a reconnect never
+    /// strands the collector without them (`config_files`, ADR-0014). `base_config`, if set, is the first
+    /// entry.
+    #[serde(default, deserialize_with = "one_or_many_paths")]
+    pub config_files: Vec<PathBuf>,
     /// How much of the collector's most recent stderr to include when it crashes, in KiB (0 disables it,
     /// the default; clamped to 1024). Mirrors the Go supervisor's `collector_crash_log_snippet_kib`.
     #[serde(default)]
@@ -411,6 +418,39 @@ supervisors:
             ]
         );
         assert!(fallback(&none).is_empty());
+    }
+
+    #[test]
+    fn config_files_accept_a_single_path_or_a_list() {
+        let config = HostConfig::parse(
+            br#"
+supervisors:
+  - type: collector
+    name: single
+    config_files: config/local.yaml
+  - type: collector
+    name: many
+    config_files:
+      - config/a.yaml
+      - config/b.yaml
+  - type: collector
+    name: none
+"#,
+        )
+        .unwrap();
+        let files = |i: usize| match &config.supervisors[i] {
+            SupervisorConfig::Collector(c) => c.config_files.clone(),
+            _ => panic!("expected a collector"),
+        };
+        assert_eq!(files(0), vec![PathBuf::from("config/local.yaml")]);
+        assert_eq!(
+            files(1),
+            vec![
+                PathBuf::from("config/a.yaml"),
+                PathBuf::from("config/b.yaml")
+            ]
+        );
+        assert!(files(2).is_empty());
     }
 
     #[test]

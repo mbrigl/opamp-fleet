@@ -32,9 +32,10 @@ pub struct CollectorAgent {
     /// when the UID is not a valid UUIDv7 (e.g. an unusual Server-assigned UID), in which case the
     /// extension is left to generate its own and the supervisor keeps overriding `service.instance.id`.
     instance_uid: Option<String>,
-    /// A base collector config merged underneath every remote config (remote keys win), so an operator
-    /// can pin local settings the Server's config is layered on top of. `None` when not configured.
-    base_config: Option<Vec<u8>>,
+    /// Local regular config files, deep-merged in order as the base layer under every remote config
+    /// (remote keys win), so an operator can pin local settings the Server's config is layered on top of
+    /// (`config_files`, ADR-0014). Empty when none are configured.
+    config_files: Vec<Vec<u8>>,
     /// The destinations the Server offered for the collector's own telemetry, injected into the
     /// collector's `service.telemetry` when the config is prepared (ADR-0010).
     own_telemetry: OwnTelemetry,
@@ -47,7 +48,7 @@ impl CollectorAgent {
         link: CollectorLink,
         local_opamp_endpoint: String,
         instance_uid: &[u8],
-        base_config: Option<Vec<u8>>,
+        config_files: Vec<Vec<u8>>,
     ) -> Self {
         let start_time_unix_nano = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -58,7 +59,7 @@ impl CollectorAgent {
             link,
             local_opamp_endpoint,
             instance_uid: uuidv7_string(instance_uid),
-            base_config,
+            config_files,
             own_telemetry: OwnTelemetry::default(),
             start_time_unix_nano,
         }
@@ -79,27 +80,30 @@ impl ManagedAgent for CollectorAgent {
     }
 
     /// Deep-merge the offered config files (already in sorted-key order) into one collector config, so a
-    /// multi-file remote config reaches the same effective config as the Go supervisor. A configured base
-    /// config is placed underneath the remote files (remote keys win). Without a base config a single file
-    /// is passed through unchanged; a file that is not a YAML mapping is skipped in the merge.
+    /// multi-file remote config reaches the same effective config as the Go supervisor. Local
+    /// `config_files` (ADR-0014) are placed underneath the remote files (remote keys win). Without any
+    /// config_files a single remote file is passed through unchanged; a file that is not a YAML mapping is
+    /// skipped in the merge.
     fn merge_config(&self, files: &[(String, Vec<u8>)]) -> Option<Vec<u8>> {
         if files.is_empty() {
             return None;
         }
-        match &self.base_config {
-            Some(base) => {
-                // Base first, remote files on top: later entries win, so the remote config overrides the
-                // base, matching the Go supervisor's config layering.
-                let mut layered = Vec::with_capacity(files.len() + 1);
-                layered.push((String::new(), base.clone()));
-                layered.extend(files.iter().cloned());
-                Some(deep_merge_yaml(&layered))
-            }
-            None => match files {
+        if self.config_files.is_empty() {
+            return match files {
                 [(_, body)] => Some(body.clone()),
                 _ => Some(deep_merge_yaml(files)),
-            },
+            };
         }
+        // Local config_files first (in order), remote files on top: later entries win, so the remote
+        // config overrides the local layer, matching the Go supervisor's config layering (ADR-0014).
+        let mut layered: Vec<(String, Vec<u8>)> = self
+            .config_files
+            .iter()
+            .enumerate()
+            .map(|(i, body)| (format!("config-file-{i}"), body.clone()))
+            .collect();
+        layered.extend(files.iter().cloned());
+        Some(deep_merge_yaml(&layered))
     }
 
     /// Start the collector on a minimal config whose only job is to run the `opamp` extension pointed at
@@ -528,7 +532,7 @@ mod tests {
         );
     }
 
-    async fn agent_with_base(base: Option<Vec<u8>>) -> CollectorAgent {
+    async fn agent_with_config_files(config_files: Vec<Vec<u8>>) -> CollectorAgent {
         let (link, _addr) = crate::local_server::start("127.0.0.1:0")
             .await
             .expect("bind local server");
@@ -537,19 +541,50 @@ mod tests {
             link,
             "ws://127.0.0.1:0/v1/opamp".to_string(),
             &[0u8; 16],
-            base,
+            config_files,
         )
     }
 
     #[tokio::test]
-    async fn merge_config_passes_a_single_file_through_without_a_base() {
-        let agent = agent_with_base(None).await;
+    async fn merge_config_passes_a_single_file_through_without_config_files() {
+        let agent = agent_with_config_files(Vec::new()).await;
         let files = vec![("".to_string(), b"receivers: {}\n".to_vec())];
         assert_eq!(
             agent.merge_config(&files),
             Some(b"receivers: {}\n".to_vec())
         );
         assert_eq!(agent.merge_config(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn merge_config_layers_multiple_config_files_in_order_under_remote() {
+        // Two local config files plus a remote config; all deep-merged, later layers winning.
+        let agent = agent_with_config_files(vec![
+            b"receivers:\n  otlp: {}\nservice:\n  telemetry:\n    logs:\n      level: warn\n"
+                .to_vec(),
+            b"processors:\n  batch: {}\nservice:\n  telemetry:\n    logs:\n      level: info\n"
+                .to_vec(),
+        ])
+        .await;
+        let remote = vec![(
+            "".to_string(),
+            b"exporters:\n  debug: {}\nservice:\n  telemetry:\n    logs:\n      level: debug\n"
+                .to_vec(),
+        )];
+        let doc: serde_yaml::Value =
+            serde_yaml::from_slice(&agent.merge_config(&remote).unwrap()).unwrap();
+        // Keys from every layer survive.
+        assert!(doc["receivers"]["otlp"].is_mapping(), "first config file");
+        assert!(
+            doc["processors"]["batch"].is_mapping(),
+            "second config file"
+        );
+        assert!(doc["exporters"]["debug"].is_mapping(), "remote");
+        // Order: second config file wins over the first, remote wins over both.
+        assert_eq!(
+            doc["service"]["telemetry"]["logs"]["level"].as_str(),
+            Some("debug")
+        );
     }
 
     #[test]
@@ -611,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_own_telemetry_reports_only_real_changes() {
-        let mut agent = agent_with_base(None).await;
+        let mut agent = agent_with_config_files(Vec::new()).await;
         let settings = OwnTelemetry {
             metrics: Some(TelemetryDestination {
                 endpoint: "https://otlp.example/v1/metrics".to_string(),
@@ -634,10 +669,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_config_layers_the_base_under_the_remote_config() {
+    async fn merge_config_layers_a_single_config_file_under_the_remote_config() {
         let base =
             b"processors:\n  batch: {}\nservice:\n  telemetry:\n    logs:\n      level: warn\n";
-        let agent = agent_with_base(Some(base.to_vec())).await;
+        let agent = agent_with_config_files(vec![base.to_vec()]).await;
         // Remote config shares a key with the base (the log level) and adds its own.
         let remote = vec![(
             "".to_string(),
