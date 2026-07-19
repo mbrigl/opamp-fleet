@@ -1,0 +1,48 @@
+name: CI
+
+# Language-neutral CI skeleton. Inert by default: it runs only on manual dispatch and does nothing
+# but confirm it is wired up, so the repository stays green before a toolchain exists. The base image
+# ships no language toolchain (see README) — this file is the place to add build/test/lint once you do.
+#
+# To activate for your project:
+#   1. Switch the trigger to pull_request + push (uncomment the block in `on:` below).
+#   2. Uncomment the `build-test-lint` job, add a setup step for your toolchain, and fill in the
+#      build/test/lint commands. These MUST match README.md → "Build, Test & Run", the single source
+#      of truth for those commands (AGENTS.md §6), and enforce the Definition of Done (AGENTS.md §5).
+#   3. Delete the `placeholder` job once real jobs run.
+#
+# Adding a language toolchain or a hard CI dependency is architecture-relevant — record it as an ADR
+# first (AGENTS.md §3).
+
+on:
+  workflow_dispatch:
+  # pull_request:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI skeleton is wired up. Fill in build/test/lint — see this file's header."
+
+  # build-test-lint:
+  #   runs-on: ${{ matrix.os }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       os: [ubuntu-latest]
+  #       # version: [ ... ]   # e.g. language/runtime versions to test against
+  #   steps:
+  #     - uses: actions/checkout@v7
+  #     # - name: Set up toolchain
+  #     #   run: ...            # install the language/runtime — the base image ships none
+  #     - name: Build
+  #       run: ...              # README → Build
+  #     - name: Test
+  #       run: ...              # README → Test (must pass — Definition of Done, AGENTS.md §4)
+  #     - name: Lint & format check
+  #       run: ...              # linter + formatter in check mode

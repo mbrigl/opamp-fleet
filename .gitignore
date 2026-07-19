@@ -1,0 +1,16 @@
+# Dev Container
+.devcontainer/devcontainer-lock.json
+
+# Build artifacts
+/dist/
+/build/
+/target/
+
+# Environment files
+/.env
+/.env.local
+/.env.*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
