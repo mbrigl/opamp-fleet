@@ -26,7 +26,14 @@
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
     // credential helper. Git writes still require explicit human approval (see AGENTS.md).
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
+    // toolchain, chosen in ADR-0003. The build chain needs no system protoc (ADR-0004 uses
+    // the pure-Rust protox), so no extra system packages are required here.
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "latest",
+      "profile": "default"
+    }
   },
 
   "customizations": {
@@ -35,12 +42,18 @@
       "extensions": [
         "anthropic.claude-code",
         "mistralai.mistral-vibe-code",
-        "ms-vscode-remote.remote-containers"
+        "ms-vscode-remote.remote-containers",
+        // Rust development: language server, debugger, and Cargo.toml support (ADR-0003).
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml"
       ]
     }
   },
 
-  "forwardPorts": [],
+  // The Server serves both the OpAMP HTTP endpoint and the rudimentary UI on this port
+  // (ADR-0004 / ADR-0005).
+  "forwardPorts": [4320],
 
   "hostRequirements": {
     "cpus": 2,

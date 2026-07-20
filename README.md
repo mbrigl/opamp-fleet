@@ -121,12 +121,22 @@ means writing another plugin against the same ports — the core does not change
 
 ## Build, Test & Run
 
-<!-- Fill in once the toolchain is chosen. This section is the single source for build/test/run
-     commands — both humans and agents rely on it (AGENTS.md links here). -->
+The toolchain is **Rust stable**, provided by the Dev Container ([ADR-0003](docs/adr/0003-rust-toolchain-and-workspace.md));
+the code is one Cargo workspace with three crates — `opamp` (shared library), `server`, and
+`supervisor` (the Supervisor Host). This section is the single source for build/test/run commands —
+both humans and agents rely on it (AGENTS.md links here).
 
-- **Build:** TODO <!-- e.g. `make build` -->
-- **Test:** TODO <!-- e.g. `make test` -->
-- **Run:** TODO <!-- e.g. `make run` -->
+- **Build:** `cargo build --workspace`
+- **Test:** `cargo test --workspace`
+- **Format check:** `cargo fmt --all --check`
+- **Lint:** `cargo clippy --workspace --all-targets -- -D warnings`
+- **Run the Server:** `cargo run -p server`
+- **Run the Supervisor Host:** `cargo run -p supervisor`
+
+> The two binaries are currently scaffolds (ADR-0003). The OpAMP HTTP endpoint and client
+> ([ADR-0004](docs/adr/0004-opamp-wire-contract-and-transport.md)) and the Server runtime + UI
+> ([ADR-0005](docs/adr/0005-server-runtime-and-rudimentary-ui.md)) are added next; the **Usage**
+> section below is filled in once the control loop runs.
 
 ## Usage
 
@@ -143,6 +153,11 @@ README.md             # overview & setup for humans
 AGENTS.md             # single source of truth for coding agents
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/adr/             # Architecture Decision Records (+ template)
+Cargo.toml            # Cargo workspace (ADR-0003): shared dependency versions
+rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
+crates/opamp/         # shared library: OpAMP wire contract + domain helpers
+crates/server/        # the Server binary (API-first control plane)
+crates/supervisor/    # the Supervisor Host binary (runs many Supervisors)
 .devcontainer/        # Dev Container definition (base image + Features)
 .vscode/              # shared editor settings
 .claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md

@@ -1,0 +1,12 @@
+[package]
+name = "opamp"
+description = "Shared OpAMP wire contract and domain helpers for OpAMP Fleet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The OpAMP wire types (prost-generated from the vendored proto) and the shared domain helpers
+# (Instance UID, Config hash, Capabilities) are added by ADR-0004.

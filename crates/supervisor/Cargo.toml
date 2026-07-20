@@ -1,0 +1,17 @@
+[package]
+name = "supervisor"
+description = "OpAMP Fleet Supervisor Host — one client process running many Supervisors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "supervisor-host"
+path = "src/main.rs"
+
+[dependencies]
+opamp = { workspace = true }
+# The tokio runtime, the OpAMP HTTP client, and the Supervisor report loop (ADR-0004) are added
+# in the following steps.

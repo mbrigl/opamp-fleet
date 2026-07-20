@@ -1,0 +1,13 @@
+[package]
+name = "server"
+description = "OpAMP Fleet Server — API-first control plane (Linux)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+opamp = { workspace = true }
+# The axum + tokio runtime, in-memory fleet state, and the rudimentary UI are added by ADR-0005;
+# the OpAMP HTTP endpoint by ADR-0004.

@@ -1,0 +1,53 @@
+# Cargo workspace for OpAMP Fleet (ADR-0003).
+#
+# Three crates: the shared `opamp` library (the OpAMP wire contract + shared domain helpers),
+# the `server` binary (the Server), and the `supervisor` binary (the Supervisor Host).
+[workspace]
+resolver = "2"
+members = ["crates/opamp", "crates/server", "crates/supervisor"]
+
+# Metadata inherited by every crate via `<field>.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/mbrigl/opamp-fleet"
+rust-version = "1.85"
+
+# Single source of truth for shared dependency versions. Crates opt in with
+# `<dep> = { workspace = true }`; the concrete features live at each use site. The wire/runtime
+# dependencies (prost/protox, axum, reqwest, …) are introduced by ADR-0004 and ADR-0005.
+[workspace.dependencies]
+# Shared library
+opamp = { path = "crates/opamp" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "sync"] }
+
+# OpAMP wire contract (ADR-0004): protobuf codegen without a system protoc.
+prost = "0.13"
+prost-build = "0.13"
+protox = "0.7"
+bytes = "1"
+
+# Server runtime + rudimentary UI (ADR-0005)
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+# Supervisor Host HTTP client (ADR-0004)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Shared domain helpers
+uuid = { version = "1", features = ["v7"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Diagnostics
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Slightly smaller, faster release binaries for the two deployables.
+[profile.release]
+strip = true
