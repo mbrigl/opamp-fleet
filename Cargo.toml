@@ -22,7 +22,7 @@ rust-version = "1.85"
 opamp = { path = "crates/opamp" }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "sync", "net"] }
 
 # OpAMP wire contract (ADR-0004): protobuf codegen without a system protoc.
 prost = "0.13"

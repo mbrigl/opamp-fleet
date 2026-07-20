@@ -1,0 +1,39 @@
+{
+  // Debug/run launchers for the two deployables (ADR-0003/0005). These use CodeLLDB
+  // (vadimcn.vscode-lldb), preinstalled in the Dev Container; its `cargo` field builds the binary
+  // and resolves the executable automatically.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run Server",
+      "cargo": {
+        "args": ["build", "--bin=server", "--package=server"],
+        "filter": { "name": "server", "kind": "bin" }
+      },
+      "args": [],
+      "env": { "RUST_LOG": "info" },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run Supervisor Host",
+      "cargo": {
+        "args": ["build", "--bin=supervisor-host", "--package=supervisor"],
+        "filter": { "name": "supervisor-host", "kind": "bin" }
+      },
+      "args": [],
+      "env": { "RUST_LOG": "info" },
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Server + Supervisor Host",
+      "configurations": ["Run Server", "Run Supervisor Host"],
+      "stopAll": true
+    }
+  ]
+}

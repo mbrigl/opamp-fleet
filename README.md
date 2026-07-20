@@ -130,21 +130,50 @@ both humans and agents rely on it (AGENTS.md links here).
 - **Test:** `cargo test --workspace`
 - **Format check:** `cargo fmt --all --check`
 - **Lint:** `cargo clippy --workspace --all-targets -- -D warnings`
-- **Run the Server:** `cargo run -p server`
+- **Run the Server:** `cargo run -p server` (OpAMP endpoint + UI on `http://localhost:4320`)
 - **Run the Supervisor Host:** `cargo run -p supervisor`
 
-> The two binaries are currently scaffolds (ADR-0003). The OpAMP HTTP endpoint and client
-> ([ADR-0004](docs/adr/0004-opamp-wire-contract-and-transport.md)) and the Server runtime + UI
-> ([ADR-0005](docs/adr/0005-server-runtime-and-rudimentary-ui.md)) are added next; the **Usage**
-> section below is filled in once the control loop runs.
+In VS Code you can also use the **Run Server**, **Run Supervisor Host**, or the compound
+**Server + Supervisor Host** launch configurations (`.vscode/launch.json`).
 
 ## Usage
 
-<!-- Once there is something to use, show how to use the built software: the primary commands or
-     API, a minimal example, and the expected output. Keep build/test/run mechanics in the section
-     above — this section is about using the result, not producing it. -->
+The first version closes the OpAMP control loop for one Agent: start the Server, start the
+Supervisor Host, then distribute a configuration and watch the Agent apply it.
 
-TODO — show a minimal example of using the project.
+1. **Start the Server** (holds fleet state in memory, serves the OpAMP endpoint and the UI):
+
+   ```sh
+   cargo run -p server
+   ```
+
+2. **Start the Supervisor Host** (connects and reports on an interval; it generates and persists an
+   Instance UID under `./supervisor-state/`):
+
+   ```sh
+   cargo run -p supervisor
+   ```
+
+3. **Open the UI** at <http://localhost:4320> — the Agent appears with its Instance UID, health, and
+   sequence number.
+
+4. **Distribute a configuration** — paste it into the UI and click *Distribute to fleet*, or via the
+   API directly:
+
+   ```sh
+   curl -X PUT --data $'receivers:\n  otlp: {}' http://localhost:4320/api/config
+   ```
+
+   Within one poll the Agent reports `remote_config_status: APPLIED` with the matching config hash,
+   and its effective configuration updates in the UI. An unchanged configuration is never re-sent
+   (the config-hash gate). Read the fleet as JSON any time:
+
+   ```sh
+   curl http://localhost:4320/api/agents
+   ```
+
+Configurable via environment: `OPAMP_PORT` (Server), and `OPAMP_SERVER_URL`, `OPAMP_STATE_DIR`,
+`OPAMP_POLL_SECONDS` (Supervisor Host).
 
 ## Project Layout
 

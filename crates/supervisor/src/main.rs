@@ -35,7 +35,12 @@ async fn main() -> Result<()> {
     let mut supervisor = Supervisor::new(instance_uid, config_path, effective_config);
     let client = OpampHttpClient::new(endpoint).context("creating the OpAMP client")?;
 
-    run(&mut supervisor, &client, DEFAULT_POLL).await
+    let poll = std::env::var("OPAMP_POLL_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(DEFAULT_POLL, std::time::Duration::from_secs);
+
+    run(&mut supervisor, &client, poll).await
 }
 
 /// The report loop: report, apply any offered config, re-report immediately if it changed, sleep.
