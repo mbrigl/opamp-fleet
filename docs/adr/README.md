@@ -27,4 +27,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 |-----|-------|--------|
 | [0001](0001-agent-governance-model.md) | Specification + ADRs governed through a single `AGENTS.md` | 🟢 accepted |
 | [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | 🟢 accepted |
+| [0003](0003-rust-toolchain-and-workspace.md) | Rust toolchain and a three-crate Cargo workspace | 🟢 accepted |
+| [0004](0004-opamp-wire-contract-and-transport.md) | OpAMP wire contract from vendored proto, plain-HTTP transport first | 🟢 accepted |
+| [0005](0005-server-runtime-and-rudimentary-ui.md) | Server on axum with in-memory fleet state and a rudimentary UI | 🟢 accepted |
 
