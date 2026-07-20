@@ -6,6 +6,9 @@
 /build/
 /target/
 
+# Supervisor Host runtime state (Instance UID + effective config)
+/supervisor-state/
+
 # Environment files
 /.env
 /.env.local

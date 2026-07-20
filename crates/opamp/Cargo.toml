@@ -8,5 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# The OpAMP wire types (prost-generated from the vendored proto) and the shared domain helpers
-# (Instance UID, Config hash, Capabilities) are added by ADR-0004.
+prost = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+
+[build-dependencies]
+# protox compiles the vendored .proto in pure Rust (no system protoc), producing a
+# FileDescriptorSet that prost-build turns into Rust types (ADR-0004).
+prost-build = { workspace = true }
+protox = { workspace = true }
