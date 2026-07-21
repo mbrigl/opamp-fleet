@@ -1,6 +1,6 @@
 # ADR-0008: Release pipeline with tag-derived strict SemVer and per-platform archives
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-21
 - **Deciders:** Maintainer
 
