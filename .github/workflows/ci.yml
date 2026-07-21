@@ -3,6 +3,14 @@ name: CI
 # Rust build/test/lint for the Cargo workspace (ADR-0003). The commands mirror README.md →
 # "Build, Test & Run", the single source of truth (AGENTS.md §6), and enforce the Definition of
 # Done (AGENTS.md §5). The Rust toolchain choice itself is recorded in ADR-0003.
+#
+# Two jobs, by design (ADR-0006):
+#   - Linux runs the FULL workspace (opamp + server + supervisor), including fmt.
+#   - macOS and Windows build/test/lint the AGENT ONLY (opamp + supervisor). The Supervisor Host is
+#     built for all three platforms; the Server targets Linux only (specification), so it is never
+#     built off Linux. This is what first compiles and lints the Windows SCM shim (windows-service)
+#     and the macOS service paths that the Linux job never touches. Correct service *runtime*
+#     behaviour (SCM/launchd/self-update swap) is only observable on real hosts, not in CI.
 
 on:
   pull_request:
@@ -16,7 +24,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-test-lint:
+  workspace-linux:
+    name: Workspace (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -32,3 +41,24 @@ jobs:
         run: cargo build --workspace
       - name: Test
         run: cargo test --workspace
+
+  agent-cross-platform:
+    name: Agent (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust (stable + clippy)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      # Agent only: the Supervisor Host (and its shared opamp library). Not the Server (Linux only).
+      - name: Lint
+        run: cargo clippy -p supervisor -p opamp --all-targets -- -D warnings
+      - name: Build
+        run: cargo build -p supervisor -p opamp --all-targets
+      - name: Test
+        run: cargo test -p supervisor -p opamp
