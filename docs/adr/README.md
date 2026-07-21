@@ -32,4 +32,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0005](0005-server-runtime-and-rudimentary-ui.md) | Server on axum with in-memory fleet state and a rudimentary UI | 🟢 accepted |
 | [0006](0006-supervisor-host-os-service-and-cli.md) | Supervisor Host as a cross-platform OS service with a subcommand CLI | 🟢 accepted |
 | [0007](0007-in-place-self-update-with-rollback.md) | Self-update of the Supervisor Host via versioned installs with rollback (the Updater) | 🟢 accepted |
+| [0008](0008-release-pipeline-and-versioning.md) | Release pipeline with tag-derived strict SemVer and per-platform archives | 🟡 proposed |
 
