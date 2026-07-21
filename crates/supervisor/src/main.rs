@@ -7,14 +7,18 @@
 
 mod cli;
 mod service;
+mod update;
+
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
-use cli::{Cli, Command, ConfigArgs, RunArgs, ServiceAction};
+use cli::{Cli, Command, ConfigArgs, RunArgs, ServiceAction, UpdateArgs};
 use service::runtime::RuntimeConfig;
 use service::{manager, NativeService, ServiceControl, ServiceLevel};
+use update::layout::Layout;
 
 fn main() -> Result<()> {
     init_tracing();
@@ -22,6 +26,7 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or_else(default_command) {
         Command::Run(args) => run(args),
         Command::Service { action } => run_service_action(action),
+        Command::Update(args) => run_update_command(args),
     }
 }
 
@@ -57,7 +62,11 @@ fn run_service_action(action: ServiceAction) -> Result<()> {
         ServiceAction::Install(args) => {
             let level = level_of(args.scope.user);
             let config = RuntimeConfig::resolve(args.config);
-            manager::install(level, &config)?;
+            // Lay out the versioned install and point the service at `current` (ADR-0007), so a
+            // later self-update is a pointer switch rather than a reinstall.
+            let layout = Layout::new(&config.state_dir);
+            let program = update::install_layout(&layout)?;
+            manager::install(level, &config, &program)?;
             info!("service installed");
             Ok(())
         }
@@ -82,6 +91,18 @@ fn run_service_action(action: ServiceAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_update_command(args: UpdateArgs) -> Result<()> {
+    let level = level_of(args.scope.user);
+    let config = RuntimeConfig::resolve(args.config);
+    update::run_update(
+        &config,
+        level,
+        &args.new_binary,
+        args.hash.as_deref(),
+        Duration::from_secs(args.settle_seconds),
+    )
 }
 
 fn level_of(user: bool) -> ServiceLevel {

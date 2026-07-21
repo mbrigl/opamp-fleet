@@ -6,7 +6,7 @@
 //! (a `current` pointer once ADR-0007 lands), started with the `run --service` marker argument.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use service_manager::{
@@ -60,18 +60,17 @@ fn service_args() -> Vec<OsString> {
     vec![OsString::from("run"), OsString::from("--service")]
 }
 
-/// Register the Supervisor Host as a service, capturing `config` into the unit.
+/// Register the Supervisor Host as a service running `program` (the `current` pointer, so ADR-0007's
+/// self-update is a pointer switch), capturing `config` into the unit.
 ///
 /// # Errors
-/// Returns an error if the current executable cannot be resolved or the manager rejects the install
-/// (commonly: not running as root/Administrator for a system-level service).
-pub fn install(level: ServiceLevel, config: &RuntimeConfig) -> Result<()> {
-    let program: PathBuf =
-        std::env::current_exe().context("resolving the current executable path")?;
+/// Returns an error if the manager rejects the install (commonly: not running as root/Administrator
+/// for a system-level service).
+pub fn install(level: ServiceLevel, config: &RuntimeConfig, program: &Path) -> Result<()> {
     manager(level)?
         .install(ServiceInstallCtx {
             label: label()?,
-            program,
+            program: program.to_path_buf(),
             args: service_args(),
             contents: None,
             username: None,
@@ -146,6 +145,7 @@ impl ServiceControl for NativeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn sample_config() -> RuntimeConfig {

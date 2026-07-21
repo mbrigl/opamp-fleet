@@ -1556,6 +1556,8 @@ dependencies = [
  "clap",
  "opamp",
  "reqwest",
+ "serde",
+ "serde_json",
  "service-manager",
  "sha2",
  "tokio",

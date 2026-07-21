@@ -146,6 +146,11 @@ supervisor-host service install     # register as a service (captures the curren
 supervisor-host service start        # start | stop | status | uninstall
 ```
 
+An installed Supervisor Host can replace its own binary in place
+([ADR-0007](docs/adr/0007-in-place-self-update-with-rollback.md)): versions are kept side by side and
+an atomic `current` pointer is switched, with a health-gated automatic rollback. Apply a new binary
+with `supervisor-host update --new-binary <path> [--hash <sha256>]`.
+
 ## Usage
 
 The first version closes the OpAMP control loop for one Agent: start the Server, start the

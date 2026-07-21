@@ -33,6 +33,29 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Apply a new binary as a self-update (ADR-0007): stage, verify, stop, switch, restart, and
+    /// roll back on failure.
+    Update(UpdateArgs),
+}
+
+/// Arguments for `update`.
+#[derive(Debug, clap::Args)]
+pub struct UpdateArgs {
+    /// Path to the new binary to apply.
+    #[arg(long)]
+    pub new_binary: PathBuf,
+    /// Expected SHA-256 (hex) of the new binary; verified before applying.
+    #[arg(long)]
+    pub hash: Option<String>,
+    /// Seconds to wait for the new version to prove healthy before rolling back.
+    #[arg(long, default_value_t = 60)]
+    pub settle_seconds: u64,
+    /// Target the user-level service instead of the system service.
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Runtime configuration (state directory + endpoint) locating the install layout.
+    #[command(flatten)]
+    pub config: ConfigArgs,
 }
 
 /// Service-lifecycle actions (`service install|uninstall|start|stop|status`).

@@ -16,6 +16,9 @@ use supervisor::{OpampHttpClient, Supervisor, DEFAULT_POLL};
 use tracing::{info, warn};
 
 use crate::cli::ConfigArgs;
+use crate::update::health::HealthWriter;
+use crate::update::layout::Layout;
+use crate::update::{resume_if_pending, ResumeOutcome};
 
 /// Resolved runtime configuration for the daemon: the CLI/env inputs turned into concrete values.
 #[derive(Debug, Clone)]
@@ -68,6 +71,19 @@ pub async fn run_until_shutdown<S: Future<Output = ()>>(
     config: RuntimeConfig,
     shutdown: S,
 ) -> Result<()> {
+    // Recover from an update interrupted by a crash before serving (ADR-0007).
+    let layout = Layout::new(&config.state_dir);
+    match resume_if_pending(&layout) {
+        Ok(ResumeOutcome::Committed) => {
+            info!("resumed an interrupted update: the switch had completed")
+        }
+        Ok(ResumeOutcome::Aborted) => {
+            warn!("recovered from an interrupted update: the switch had not completed");
+        }
+        Ok(ResumeOutcome::Nothing) => {}
+        Err(err) => warn!(error = format!("{err:#}"), "update resume check failed"),
+    }
+
     let instance_uid = load_or_create_instance_uid(&config.state_dir)?;
     let config_path = config.state_dir.join("effective-config.txt");
     let effective_config = std::fs::read(&config_path).unwrap_or_default();
@@ -79,9 +95,25 @@ pub async fn run_until_shutdown<S: Future<Output = ()>>(
         OpampHttpClient::new(config.endpoint.clone()).context("creating the OpAMP client")?;
     let uid = supervisor.instance_uid();
 
+    // Publish the local health signal the self-update gate reads (ADR-0007): healthy as soon as the
+    // loop is up, and `server_reported` once a round-trip has succeeded.
+    let health = HealthWriter::new(layout.health_file());
+    let mut server_reported = false;
+    if let Err(err) = health.publish(server_reported) {
+        warn!(
+            error = format!("{err:#}"),
+            "failed to publish initial health"
+        );
+    }
+
     tokio::pin!(shutdown);
     loop {
-        report_once(&mut supervisor, &client, &uid).await;
+        if report_once(&mut supervisor, &client, &uid).await {
+            server_reported = true;
+        }
+        if let Err(err) = health.publish(server_reported) {
+            warn!(error = format!("{err:#}"), "failed to publish health");
+        }
         tokio::select! {
             () = &mut shutdown => {
                 info!("shutdown requested; stopping the Supervisor Host");
@@ -93,7 +125,12 @@ pub async fn run_until_shutdown<S: Future<Output = ()>>(
     Ok(())
 }
 
-async fn report_once(supervisor: &mut Supervisor, client: &OpampHttpClient, uid: &InstanceUid) {
+/// Send one report. Returns whether the Server was successfully reached (a completed round-trip).
+async fn report_once(
+    supervisor: &mut Supervisor,
+    client: &OpampHttpClient,
+    uid: &InstanceUid,
+) -> bool {
     let message = supervisor.build_message();
     match client.send(uid, &message).await {
         Ok(reply) => {
@@ -107,11 +144,15 @@ async fn report_once(supervisor: &mut Supervisor, client: &OpampHttpClient, uid:
                     );
                 }
             }
+            true
         }
-        Err(err) => warn!(
-            error = format!("{err:#}"),
-            "status report failed; will retry"
-        ),
+        Err(err) => {
+            warn!(
+                error = format!("{err:#}"),
+                "status report failed; will retry"
+            );
+            false
+        }
     }
 }
 
