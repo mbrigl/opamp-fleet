@@ -30,4 +30,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0003](0003-rust-toolchain-and-workspace.md) | Rust toolchain and a three-crate Cargo workspace | 🟢 accepted |
 | [0004](0004-opamp-wire-contract-and-transport.md) | OpAMP wire contract from vendored proto, plain-HTTP transport first | 🟢 accepted |
 | [0005](0005-server-runtime-and-rudimentary-ui.md) | Server on axum with in-memory fleet state and a rudimentary UI | 🟢 accepted |
+| [0006](0006-supervisor-host-os-service-and-cli.md) | Supervisor Host as a cross-platform OS service with a subcommand CLI | 🟢 accepted |
+| [0007](0007-in-place-self-update-with-rollback.md) | Self-update of the Supervisor Host via versioned installs with rollback (the Updater) | 🟢 accepted |
 
