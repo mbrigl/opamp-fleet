@@ -190,6 +190,27 @@ Supervisor Host, then distribute a configuration and watch the Agent apply it.
 Configurable via environment: `OPAMP_PORT` (Server), and `OPAMP_SERVER_URL`, `OPAMP_STATE_DIR`,
 `OPAMP_POLL_SECONDS` (Supervisor Host).
 
+## Releasing
+
+Releases are cut by the manually triggered **Release** workflow
+([ADR-0008](docs/adr/0008-release-pipeline-and-versioning.md)):
+
+1. **Tag the version** on the branch you want to release. The tag must be `version/` followed by a
+   strict SemVer `MAJOR.MINOR.PATCH`; either `.` or `/` may separate the numbers, and the version is
+   always normalised to dots. So `version/1.2.3`, `version/1/2/3`, and `version/1.2/3` all mean
+   `1.2.3`. Pre-release and build metadata are rejected, as are leading zeros.
+2. **Run the workflow** (Actions → *Release* → *Run workflow*) against that branch. It resolves the
+   nearest reachable `version/*` tag; a missing or malformed tag fails the run rather than guessing.
+   The resolved version is exported as `OPAMP_FLEET_VERSION` and compiled into the binaries, so
+   `supervisor-host --version` and the version reported over OpAMP show the release version.
+3. **Dry run by default.** Without the `publish` input the archives and checksums are uploaded as
+   workflow-run artifacts only. With `publish` they are attached to a GitHub Release under a
+   normalised `v<version>` tag, giving stable download URLs.
+
+Each build produces `opamp-fleet-<binary>-<version>-<target>` as `.tar.gz` (Linux, macOS) or `.zip`
+(Windows), plus a `.sha256` — the digest `supervisor-host update --hash` verifies. The Supervisor Host
+ships for Linux, macOS (x86_64 and arm64), and Windows; the Server for Linux only.
+
 ## Project Layout
 
 ```

@@ -13,7 +13,8 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "supervisor-host",
-    version,
+    // The release version baked in at build time (ADR-0008), falling back to the crate version.
+    version = supervisor::version(),
     about = "OpAMP Fleet Supervisor Host — runs standalone or as a native OS service (ADR-0006)"
 )]
 pub struct Cli {

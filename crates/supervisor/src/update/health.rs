@@ -41,7 +41,7 @@ impl HealthWriter {
         Self {
             path,
             pid: std::process::id(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: supervisor::version().to_string(),
         }
     }
 

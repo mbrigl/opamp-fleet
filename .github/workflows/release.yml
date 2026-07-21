@@ -1,0 +1,160 @@
+name: Release
+
+# Release pipeline (ADR-0008). Manually triggered; the version is derived from the most recent
+# `version/*` tag reachable from the ref this workflow runs on, parsed under strict SemVer and
+# normalised to a dot-separated MAJOR.MINOR.PATCH used everywhere (env var, artifact names, release
+# tag). Dry run by default: without `publish` the archives are uploaded as workflow-run artifacts
+# only; with it they are attached to a GitHub Release under a normalised `v<version>` tag.
+#
+# The Supervisor Host ships for Linux, macOS (x86_64 + arm64), and Windows; the Server for Linux
+# only (specification). Each archive gets a .sha256 — the digest ADR-0007's self-update
+# (`update --hash`) and future OpAMP package delivery verify against.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release (off = build and upload run artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags and history are needed to resolve the nearest version/* tag
+      - name: Resolve and normalise the version from the nearest version/* tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          # Match every accepted tag spelling: version/1.2.3, version/1.2/3, version/1/2/3.
+          if ! tag="$(git describe --tags --abbrev=0 \
+                --match 'version/*' --match 'version/*/*' --match 'version/*/*/*' 2>/dev/null)"; then
+            echo "::error::No version/* tag is reachable from this ref. Create one first, e.g. 'version/1.0.0'."
+            exit 1
+          fi
+          echo "Resolved tag: $tag"
+          # Strict SemVer: exactly three non-negative integers, no leading zeros, no pre-release or
+          # build metadata. The separator may be '.' or '/' (mixed permitted).
+          pattern='^version/(0|[1-9][0-9]*)[./](0|[1-9][0-9]*)[./](0|[1-9][0-9]*)$'
+          if [[ ! "$tag" =~ $pattern ]]; then
+            echo "::error::Tag '$tag' is not a strict SemVer version/MAJOR.MINOR.PATCH tag (separator '.' or '/', no leading zeros, no pre-release or build metadata)."
+            exit 1
+          fi
+          # Normalise: whatever separator the tag used, the version is always dot-separated.
+          version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Normalised version: $version"
+
+  build:
+    name: ${{ matrix.bin }} (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Supervisor Host — every supported platform (ADR-0006).
+          - { package: supervisor, bin: supervisor-host, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
+          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz }
+          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
+          - { package: supervisor, bin: supervisor-host, os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
+          # Server — Linux only (specification).
+          - { package: server, bin: server, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust (stable + target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: Build
+        env:
+          # The tag-derived version, compiled into the binary via option_env! (ADR-0008).
+          OPAMP_FLEET_VERSION: ${{ needs.version.outputs.version }}
+        run: >
+          cargo build --release --locked
+          -p ${{ matrix.package }} --bin ${{ matrix.bin }} --target ${{ matrix.target }}
+      - name: Package archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.version.outputs.version }}"
+          name="opamp-fleet-${{ matrix.bin }}-${version}-${{ matrix.target }}"
+          binary="${{ matrix.bin }}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+
+          mkdir -p "dist/$name" artifacts
+          cp "target/${{ matrix.target }}/release/$binary" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+
+          asset="$name.${{ matrix.archive }}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            (cd dist && 7z a -tzip "../artifacts/$asset" "$name" > /dev/null)
+          else
+            tar -czf "artifacts/$asset" -C dist "$name"
+          fi
+
+          # The digest ADR-0007's `update --hash` and future package delivery verify against.
+          cd artifacts
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          cat "$asset.sha256"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.bin }}-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    if: ${{ inputs.publish }}
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creating the release tag and the release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the normalised release tag
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.version.outputs.version }}"
+          # Released versions are immutable: never re-tag an existing one.
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            echo "::error::Tag $tag already exists — version ${{ needs.version.outputs.version }} has been released. Bump the version/* tag."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+      - name: Publish the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          files: artifacts/*
+          fail_on_unmatched_files: true
