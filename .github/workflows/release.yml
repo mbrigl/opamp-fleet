@@ -1,6 +1,6 @@
 name: Release
 
-# Release pipeline (ADR-0008). Manually triggered; the version is derived from the most recent
+# Release pipeline (ADR-0008, extended by ADR-0009). Manually triggered; the version is derived from the most recent
 # `version/*` tag reachable from the ref this workflow runs on, parsed under strict SemVer and
 # normalised to a dot-separated MAJOR.MINOR.PATCH used everywhere (env var, artifact names, release
 # tag). Dry run by default: without `publish` the archives are uploaded as workflow-run artifacts
@@ -9,6 +9,12 @@ name: Release
 # The Supervisor Host ships for Linux, macOS (x86_64 + arm64), and Windows; the Server for Linux
 # only (specification). Each archive gets a .sha256 — the digest ADR-0007's self-update
 # (`update --hash`) and future OpAMP package delivery verify against.
+#
+# The Supervisor Host additionally ships as native installer packages (ADR-0009): .deb and .rpm
+# (Linux), .msi (Windows), and .pkg (macOS, per architecture), each with its own .sha256. They are
+# payload-only — they install the binary and never register an OS service — so `service install`
+# (ADR-0006) and the versioned install root it lays out (ADR-0007) keep sole ownership of the
+# service, and self-update works the same whether the binary came from a package or an archive.
 
 on:
   workflow_dispatch:
@@ -65,13 +71,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Supervisor Host — every supported platform (ADR-0006).
-          - { package: supervisor, bin: supervisor-host, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
-          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz }
-          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
-          - { package: supervisor, bin: supervisor-host, os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
-          # Server — Linux only (specification).
-          - { package: server, bin: server, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
+          # Supervisor Host — every supported platform (ADR-0006). `installer` selects the native
+          # package format built alongside the archive (ADR-0009); the Server is not packaged.
+          - { package: supervisor, bin: supervisor-host, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz, installer: linux }
+          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz, installer: macos, pkgarch: x86_64 }
+          - { package: supervisor, bin: supervisor-host, os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz, installer: macos, pkgarch: arm64 }
+          - { package: supervisor, bin: supervisor-host, os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip, installer: windows }
+          # Server — Linux only (specification), archive only (ADR-0009).
+          - { package: server, bin: server, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz, installer: none }
     steps:
       - uses: actions/checkout@v7
       - name: Set up Rust (stable + target)
@@ -116,6 +123,96 @@ jobs:
             shasum -a 256 "$asset" > "$asset.sha256"
           fi
           cat "$asset.sha256"
+
+      # ----------------------------------------------------------------------------------------
+      # Native installer packages for the Supervisor Host (ADR-0009). Each is payload-only and
+      # service-neutral: it installs the binary and its documentation and never registers an OS
+      # service, so `service install` (ADR-0006) and the `current` pointer it lays out (ADR-0007)
+      # stay the sole owners of what the service runs. All of them are built from the binary this
+      # job already produced, and are checksummed exactly like the archives.
+      # ----------------------------------------------------------------------------------------
+      - name: Build .deb and .rpm
+        if: ${{ matrix.installer == 'linux' }}
+        env:
+          NFPM_VERSION: "2.43.0"
+          # nfpm expands this into the package metadata; the payload path is literal in the config.
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          base="opamp-fleet-${{ matrix.bin }}-${VERSION}-x86_64"
+          nfpm pkg --config packaging/nfpm.yaml --packager deb --target "artifacts/${base}.deb"
+          nfpm pkg --config packaging/nfpm.yaml --packager rpm --target "artifacts/${base}.rpm"
+
+      - name: Build .msi
+        if: ${{ matrix.installer == 'windows' }}
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # WiX v3 is preinstalled on windows-latest but is not on PATH; $env:WIX points at it.
+          $candle = Join-Path $env:WIX 'bin\candle.exe'
+          $light = Join-Path $env:WIX 'bin\light.exe'
+          # Absolute paths, so the .wxs never depends on candle's working directory.
+          $repoDir = $PWD.Path
+          $binDir = Join-Path $repoDir 'target\${{ matrix.target }}\release'
+          $asset = Join-Path $repoDir "artifacts\opamp-fleet-${{ matrix.bin }}-$env:VERSION-x86_64.msi"
+          New-Item -ItemType Directory -Force -Path obj | Out-Null
+
+          & $candle -nologo -arch x64 `
+            "-dVersion=$env:VERSION" "-dBinDir=$binDir" "-dRepoDir=$repoDir" `
+            -out obj\ packaging\wix\main.wxs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $light -nologo -out $asset obj\main.wixobj
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build .pkg
+        if: ${{ matrix.installer == 'macos' }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Stage a filesystem root so --install-location / places each file at its final path.
+          root="pkgroot"
+          rm -rf "$root"
+          mkdir -p "$root/usr/local/bin" "$root/usr/local/share/doc/opamp-fleet-supervisor-host"
+          install -m 0755 "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$root/usr/local/bin/"
+          install -m 0644 README.md LICENSE "$root/usr/local/share/doc/opamp-fleet-supervisor-host/"
+
+          # No --scripts: the package carries no pre/postinstall script, so nothing can touch a
+          # service. A component package is directly installable with `installer -pkg`, so
+          # productbuild is not needed.
+          pkgbuild \
+            --root "$root" \
+            --identifier io.github.mbrigl.opamp-fleet.supervisor-host \
+            --version "$VERSION" \
+            --install-location / \
+            --ownership recommended \
+            "artifacts/opamp-fleet-${{ matrix.bin }}-${VERSION}-${{ matrix.pkgarch }}.pkg"
+
+      - name: Checksum installer packages
+        if: ${{ matrix.installer != 'none' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          shopt -s nullglob
+          packages=(*.deb *.rpm *.msi *.pkg)
+          if ((${#packages[@]} == 0)); then
+            echo "::error::No installer package was produced for ${{ matrix.target }}."
+            exit 1
+          fi
+          for asset in "${packages[@]}"; do
+            if command -v sha256sum > /dev/null; then
+              sha256sum "$asset" > "$asset.sha256"
+            else
+              shasum -a 256 "$asset" > "$asset.sha256"
+            fi
+            cat "$asset.sha256"
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -211,6 +211,36 @@ Each build produces `opamp-fleet-<binary>-<version>-<target>` as `.tar.gz` (Linu
 (Windows), plus a `.sha256` — the digest `supervisor-host update --hash` verifies. The Supervisor Host
 ships for Linux, macOS (x86_64 and arm64), and Windows; the Server for Linux only.
 
+### Installer packages
+
+The Supervisor Host additionally ships as a native installer package per platform
+([ADR-0009](docs/adr/0009-native-installer-packages.md)) — `.deb` and `.rpm` (x86_64), `.msi`
+(x86_64), and `.pkg` (x86_64 and arm64) — each with its own `.sha256`. The Server is not packaged.
+
+```bash
+sudo dpkg -i  opamp-fleet-supervisor-host-<version>-x86_64.deb   # or: apt install ./<file>.deb
+sudo rpm -i   opamp-fleet-supervisor-host-<version>-x86_64.rpm   # or: dnf install ./<file>.rpm
+sudo installer -pkg opamp-fleet-supervisor-host-<version>-arm64.pkg -target /
+msiexec /i opamp-fleet-supervisor-host-<version>-x86_64.msi      # Windows, elevated
+```
+
+> **Installing a package does not start a service.** The packages install the binary only — they
+> deliberately register no service, so that the versioned install root the self-update repoints
+> ([ADR-0007](docs/adr/0007-in-place-self-update-with-rollback.md)) has exactly one owner. Installing
+> is therefore two steps, and uninstalling is two steps in reverse:
+>
+> ```bash
+> sudo supervisor-host service install     # after installing the package
+> sudo supervisor-host service uninstall   # before removing the package
+> ```
+>
+> Self-update works the same way regardless of whether the binary came from a package or an archive.
+
+The packages are **not signed** (no GPG, Authenticode, or notarization) — the `.sha256` files are the
+integrity bar for now. Windows therefore shows a SmartScreen warning and an unknown publisher in the
+UAC prompt; on macOS, install from the terminal with `installer` as shown above, since a
+browser-downloaded unsigned `.pkg` is blocked by Gatekeeper on double-click.
+
 ## Project Layout
 
 ```
@@ -223,6 +253,7 @@ rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 crates/opamp/         # shared library: OpAMP wire contract + domain helpers
 crates/server/        # the Server binary (API-first control plane)
 crates/supervisor/    # the Supervisor Host binary (runs many Supervisors)
+packaging/            # installer package sources (ADR-0009): nfpm.yaml, wix/main.wxs
 .devcontainer/        # Dev Container definition (base image + Features)
 .vscode/              # shared editor settings
 .claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md

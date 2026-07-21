@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX v3 source for the Supervisor Host's MSI (ADR-0009).
+
+  Payload-only and service-neutral by design: this installer places supervisor-host.exe under
+  "%ProgramFiles%\OpAMP Fleet\bin", adds that directory to the system PATH, and installs the
+  documentation. It deliberately contains **no ServiceInstall or ServiceControl element** — the
+  service is registered exclusively by `supervisor-host service install` (ADR-0006), which lays out
+  and owns the versioned install root that self-update repoints (ADR-0007). An MSI-registered
+  service would bind the SCM to this fixed path and break that mechanism.
+
+  Built directly with WiX v3's candle.exe/light.exe (preinstalled on the windows-latest runner) —
+  see .github/workflows/release.yml. Three preprocessor variables must be supplied; all source paths
+  are built from them so nothing depends on candle's working directory:
+    -dVersion=<MAJOR.MINOR.PATCH>   the tag-derived version (ADR-0008)
+    -dBinDir=<dir>                  directory holding the already-built supervisor-host.exe
+    -dRepoDir=<dir>                 repository root, holding README.md and LICENSE
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+      Id="*"
+      Name="OpAMP Fleet Supervisor Host"
+      UpgradeCode="6E5B6A1C-9E0B-4F6D-9A2C-4E4D8B7A1F30"
+      Manufacturer="OpAMP Fleet"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="OpAMP Fleet Supervisor Host $(var.Version)"
+        Manufacturer="OpAMP Fleet"
+        InstallerVersion="450"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        SummaryCodepage="1252" />
+
+    <!-- Replace any previously installed version; block downgrades with a clear message. -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first." />
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="APPLICATIONFOLDER" Name="OpAMP Fleet">
+
+          <Directory Id="Bin" Name="bin">
+            <!--
+              This component has no file to act as its key path, so its GUID must be stable and
+              hand-assigned rather than auto-generated with '*'.
+            -->
+            <Component Id="Path" Guid="B3A4C7D2-51F8-4C3E-8D6A-2B9F0E5C7A41" KeyPath="yes">
+              <Environment
+                  Id="PATH"
+                  Name="PATH"
+                  Value="[Bin]"
+                  Permanent="no"
+                  Part="last"
+                  Action="set"
+                  System="yes" />
+            </Component>
+
+            <Component Id="SupervisorHostExe" Guid="*">
+              <File
+                  Id="SupervisorHostExe"
+                  Name="supervisor-host.exe"
+                  DiskId="1"
+                  Source="$(var.BinDir)\supervisor-host.exe"
+                  KeyPath="yes" />
+            </Component>
+          </Directory>
+
+          <Directory Id="Docs" Name="docs">
+            <Component Id="Readme" Guid="*">
+              <File Id="ReadmeMd" Name="README.md" DiskId="1"
+                    Source="$(var.RepoDir)\README.md" KeyPath="yes" />
+            </Component>
+            <Component Id="License" Guid="*">
+              <File Id="LicenseFile" Name="LICENSE" DiskId="1"
+                    Source="$(var.RepoDir)\LICENSE" KeyPath="yes" />
+            </Component>
+          </Directory>
+
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature
+        Id="Binaries"
+        Title="Supervisor Host"
+        Description="The supervisor-host executable and its documentation."
+        Level="1"
+        AllowAdvertise="no"
+        Absent="disallow">
+      <ComponentRef Id="SupervisorHostExe" />
+      <ComponentRef Id="Readme" />
+      <ComponentRef Id="License" />
+
+      <Feature
+          Id="Environment"
+          Title="PATH Environment Variable"
+          Description="Add the install location to the PATH system environment variable, so supervisor-host can be called from any shell."
+          Level="1"
+          AllowAdvertise="no"
+          Absent="allow">
+        <ComponentRef Id="Path" />
+      </Feature>
+    </Feature>
+
+    <!-- No ARPPRODUCTICON: the project ships no .ico, and pointing it at the executable would tie
+         the Add/Remove Programs entry to a build-output path for purely cosmetic gain. -->
+    <Property Id="ARPHELPLINK" Value="https://github.com/mbrigl/opamp-fleet" />
+
+    <!--
+      No <UIRef>: this is a silent/basic-UI installer. A licence-acceptance dialog would require an
+      RTF rendering of LICENSE committed solely for the installer, and the licence already ships as
+      a payload file. Installing interactively still shows the standard MSI progress UI.
+    -->
+  </Product>
+</Wix>

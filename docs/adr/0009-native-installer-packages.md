@@ -75,10 +75,12 @@ ADR-0007's `current`-pointer layout stays the single owner of what the service r
 - **Build tooling.** Linux packages are built with **`nfpm`** — a single static Go binary, one YAML
   config producing both `.deb` and `.rpm`, no `dpkg`/`rpmbuild` on the runner, and, decisively, no
   opinion about how the payload binary was produced, so it consumes ADR-0008's already-built,
-  target-specific, `OPAMP_FLEET_VERSION`-stamped artifact directly. Windows uses **`cargo-wix` with
-  WiX v3**, the variant preinstalled on the `windows-latest` runner. macOS uses **`pkgbuild`**, part of
-  the Xcode command line tools already present on the macOS runner. No tool is added to the Rust
-  toolchain of ADR-0003; all three are CI-only.
+  target-specific, `OPAMP_FLEET_VERSION`-stamped artifact directly. Windows uses **WiX v3's
+  `candle.exe`/`light.exe` directly against a committed `wix/main.wxs`**, using the toolset
+  preinstalled on the `windows-latest` runner (reached via the `WIX` environment variable, as it is not
+  on `PATH`). macOS uses **`pkgbuild`**, part of the Xcode command line tools already present on the
+  macOS runner. Only `nfpm` is downloaded; nothing is added to the Rust toolchain of ADR-0003, and all
+  packaging tooling is CI-only.
 - **Naming and checksums.** Packages follow ADR-0008's scheme and are checksummed the same way:
   `opamp-fleet-supervisor-host-<version>-<arch>.deb` / `.rpm`, `-<version>-x86_64.msi`, and
   `-<version>-<arch>.pkg`, each with a `.sha256` sidecar. Package versions use ADR-0008's normalised
@@ -127,6 +129,14 @@ that target is added.
   `nfpm`'s plain `src → dst` mapping consumes that artifact with no coaxing, and one YAML file replaces
   two tool configurations for two formats. `cargo-generate-rpm`'s built-in `--signing_key` is a real
   advantage we forgo, but signing is deferred regardless.
+- **`cargo-wix` instead of calling WiX directly** — the idiomatic Rust choice, and genuinely valuable
+  for *generating* a sound `main.wxs` (upgrade logic, `PlatformProgramFilesFolder`, the `PATH`
+  component). But that value is one-time and is captured by running `cargo wix init` once and
+  committing the result. In CI, with the binary already built, it degrades to a wrapper that passes
+  `-d` variables to `candle`/`light` while requiring a slow `cargo install cargo-wix` from source and
+  the subtle `--no-build` + `--target-bin-dir` pairing — omit the latter and it silently rebuilds or
+  looks in the wrong target directory. Calling `candle`/`light` against the committed `.wxs` removes
+  the tool, the build step, and that failure mode without losing anything.
 - **WiX v4/v5/v6 instead of v3** — newer and better documented, but not on the `windows-latest` image
   (which ships WiX 3.14.1), so it needs a `dotnet tool install` step, and **WiX v6 binaries carry an
   Open Source Maintenance Fee for organisations above $10k annual revenue**. v3 supports everything a

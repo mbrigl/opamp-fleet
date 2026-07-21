@@ -6,6 +6,11 @@
 /build/
 /target/
 
+# Release packaging scratch space (ADR-0008 archives, ADR-0009 installer packages)
+/artifacts/
+/pkgroot/
+/obj/
+
 # Supervisor Host runtime state (Instance UID + effective config)
 /supervisor-state/
 

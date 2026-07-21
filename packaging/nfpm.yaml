@@ -1,0 +1,51 @@
+# nfpm configuration for the Supervisor Host's Linux packages (ADR-0009).
+#
+# Produces both the .deb and the .rpm from this single file; nfpm maps the Go-style `arch: amd64`
+# to `amd64` (deb) and `x86_64` (rpm) automatically.
+#
+# The package is deliberately **payload-only and service-neutral**: it installs the binary and its
+# documentation and nothing else. There is no `scripts:` block, so no maintainer script is emitted
+# and nothing registers, starts, or removes an OS service. Service lifecycle belongs exclusively to
+# `supervisor-host service install|uninstall` (ADR-0006), which lays out and owns the versioned
+# install root that self-update repoints (ADR-0007). A package that registered the service would
+# bind it to this fixed path and break that mechanism.
+#
+# `${VERSION}` is expanded from the environment by nfpm at package time; the release workflow sets
+# it from the tag-derived version (ADR-0008). Note that nfpm expands environment variables in the
+# metadata fields only, **not** in `contents.src` — the payload path is therefore written out
+# literally below, matching the single Linux target of the release matrix.
+
+name: opamp-fleet-supervisor-host
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: "1"
+maintainer: Markus Brigl <markus.brigl@gmail.com>
+homepage: https://github.com/mbrigl/opamp-fleet
+license: Apache-2.0
+section: utils
+priority: optional
+description: |
+  OpAMP Fleet Supervisor Host — one client process running many Supervisors.
+  This package installs the supervisor-host binary only; it does not register or start a
+  system service. To run it as a service, install it with:
+    sudo supervisor-host service install
+  Remove the service with `sudo supervisor-host service uninstall` before removing this package.
+
+contents:
+  - src: ./target/x86_64-unknown-linux-gnu/release/supervisor-host
+    dst: /usr/bin/supervisor-host
+    file_info:
+      mode: 0755
+
+  # Plain files, deliberately not nfpm's `doc`/`license` content types: those are RPM concepts that
+  # the deb packager silently drops, which removes both files from the .deb without any error.
+  - src: ./README.md
+    dst: /usr/share/doc/opamp-fleet-supervisor-host/README.md
+    file_info:
+      mode: 0644
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/opamp-fleet-supervisor-host/LICENSE
+    file_info:
+      mode: 0644
