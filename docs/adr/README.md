@@ -34,4 +34,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0007](0007-in-place-self-update-with-rollback.md) | Self-update of the Supervisor Host via versioned installs with rollback (the Updater) | 🟢 accepted |
 | [0008](0008-release-pipeline-and-versioning.md) | Release pipeline with tag-derived strict SemVer and per-platform archives | 🟢 accepted |
 | [0009](0009-native-installer-packages.md) | Native installer packages for the Supervisor Host, payload-only and service-neutral | 🟡 proposed |
+| [0010](0010-msix-channel-os-managed-service-and-updates.md) | MSIX channel for the Supervisor Host with OS-managed service and App Installer updates | 🟡 proposed |
 
