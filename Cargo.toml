@@ -37,6 +37,13 @@ tower-http = { version = "0.6", features = ["fs", "trace"] }
 # Supervisor Host HTTP client (ADR-0004)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+# Supervisor Host CLI + OS-service lifecycle (ADR-0006). `service-manager` abstracts install/
+# start/stop/uninstall over systemd/launchd/Windows SCM; `windows-service` is the Windows-only SCM
+# runtime shim (target-gated at each use site).
+clap = { version = "4", features = ["derive", "env"] }
+service-manager = "0.11"
+windows-service = "0.8"
+
 # Shared domain helpers
 uuid = { version = "1", features = ["v7"] }
 sha2 = "0.10"

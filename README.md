@@ -131,10 +131,20 @@ both humans and agents rely on it (AGENTS.md links here).
 - **Format check:** `cargo fmt --all --check`
 - **Lint:** `cargo clippy --workspace --all-targets -- -D warnings`
 - **Run the Server:** `cargo run -p server` (OpAMP endpoint + UI on `http://localhost:4320`)
-- **Run the Supervisor Host:** `cargo run -p supervisor`
+- **Run the Supervisor Host:** `cargo run -p supervisor` (foreground; a bare invocation defaults to `run`)
 
 In VS Code you can also use the **Run Server**, **Run Supervisor Host**, or the compound
 **Server + Supervisor Host** launch configurations (`.vscode/launch.json`).
+
+The Supervisor Host is a subcommand CLI ([ADR-0006](docs/adr/0006-supervisor-host-os-service-and-cli.md))
+and can install and manage itself as a native OS service (systemd / launchd / Windows SCM) — run
+`supervisor-host --help`. A system-level install needs root/Administrator; add `--user` for a
+per-user service:
+
+```sh
+supervisor-host service install     # register as a service (captures the current OPAMP_* config)
+supervisor-host service start        # start | stop | status | uninstall
+```
 
 ## Usage
 

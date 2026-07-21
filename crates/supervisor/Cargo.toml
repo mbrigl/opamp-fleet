@@ -22,3 +22,13 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# ADR-0006: subcommand CLI and cross-platform OS-service lifecycle.
+clap = { workspace = true }
+service-manager = { workspace = true }
+# ADR-0007: content-hash verification for self-update (mechanism lands in Stage 2).
+sha2 = { workspace = true }
+
+# ADR-0006: the Windows-only SCM runtime shim (windows-service), so the daemon runs under the
+# Service Control Manager. Not compiled on Linux/macOS.
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true }
