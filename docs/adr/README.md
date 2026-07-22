@@ -18,6 +18,10 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
    filter active ones via the Status column. To curb sprawl, supersede — do not consolidate. (The
    template itself may still consolidate its own seed ADRs before any project builds on them, since
    nothing external references those numbers yet.)
+7. **Never reference an ADR number that does not exist yet.** Every `ADR-NNNN` reference must point
+   to a file that is already present in this directory. Anticipated follow-up decisions are
+   described by topic (e.g., "a follow-up ADR on session storage") in the Consequences section —
+   the concrete number is cited only once that ADR file exists.
 
 ## Index
 

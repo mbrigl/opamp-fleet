@@ -37,7 +37,8 @@ Authority runs **specification → accepted ADRs → individual change**.
 - Use the **project vocabulary** from the specification consistently.
 - Build, test, and formatting commands: see the **Build, Test & Run** section in
   [`README.md`](README.md).
-- **Documentation consistency is checked in CI** (ADR index integrity and relative links) via
+- **Documentation consistency is checked in CI** (ADR index integrity, relative links, and
+  §-section references into `AGENTS.md`) via
   [`scripts/check-docs.sh`](scripts/check-docs.sh). Run it locally with `scripts/check-docs.sh`
   before opening a pull request — it needs only bash and coreutils, already in the Dev Container.
 

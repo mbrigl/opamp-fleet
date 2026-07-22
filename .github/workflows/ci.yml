@@ -43,6 +43,6 @@ jobs:
   #     - name: Build
   #       run: ...              # README → Build
   #     - name: Test
-  #       run: ...              # README → Test (must pass — Definition of Done, AGENTS.md §4)
+  #       run: ...              # README → Test (must pass — Definition of Done, AGENTS.md §5)
   #     - name: Lint & format check
   #       run: ...              # linter + formatter in check mode

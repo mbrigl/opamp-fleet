@@ -24,7 +24,7 @@ security posture:
   host-side VS Code extension (see the README), keeping that capability outside the container's reach.
   The container is still not a strong security boundary, so run only agents and code you trust in it.
 - **Git and GitHub writes require explicit human approval.** The agent must get a go-ahead before
-  each commit, push, or `gh` action ([`AGENTS.md`](AGENTS.md) §4). For Claude Code this is enforced,
+  each commit, push, or `gh` action ([`AGENTS.md`](AGENTS.md) §6). For Claude Code this is enforced,
   not just documented: [`.claude/settings.json`](.claude/settings.json) prompts on `git add`,
   `git commit`, `git push`, and `gh`. Authentication uses `gh`'s web flow with no stored tokens.
 

@@ -10,6 +10,12 @@
 #      in the index matches the **Status:** line inside each ADR.
 #   2. Relative-link integrity: every relative Markdown link in every tracked .md file resolves
 #      to a file or directory that exists.
+#   3. Section-reference integrity: every section reference (the section sign followed by a
+#      number, e.g. in "AGENTS.md, section 6") matches a numbered '## N.' heading in AGENTS.md —
+#      the only numbered document in this repository; extend the check if another one appears.
+#   4. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) names an ADR
+#      file that exists in docs/adr/ — anticipated follow-ups are described by topic, never by
+#      a number that does not exist yet (docs/adr/README.md, process rule 7).
 #
 # Pure bash + coreutils/grep/sed only — present in the Dev Container base image, so running it
 # adds no toolchain and no dependency that would require an ADR.
@@ -172,8 +178,69 @@ check_relative_links() {
   done < <(find "$ROOT" -type f -name '*.md' -not -path '*/.git/*' | sort)
 }
 
+# Section references point into AGENTS.md, whose sections are numbered '## N.' headings.
+# Inserting or removing a section renumbers the ones after it and silently invalidates such
+# references — so verify that every referenced number still names an existing section. A matching
+# number can still mean the wrong section; renumbering AGENTS.md requires re-checking references
+# by hand.
+check_section_refs() {
+  local agents="$ROOT/AGENTS.md"
+  if [[ ! -f "$agents" ]]; then
+    add_error "AGENTS.md not found in the repository root"
+    return
+  fi
+
+  local valid_sections=()
+  local n
+  while IFS= read -r n; do
+    valid_sections+=("$n")
+  done < <(sed -nE 's/^## ([0-9]+)\..*/\1/p' "$agents")
+  if ((${#valid_sections[@]} == 0)); then
+    add_error "AGENTS.md: no numbered '## N.' section headings found"
+    return
+  fi
+
+  local f rel lineno match
+  while IFS= read -r f; do
+    rel="${f#"$ROOT"/}"
+    # Superseded ADRs are immutable historical record — skip, as in check_relative_links.
+    if [[ "$f" == "$ADR_DIR"/* ]] && grep -m1 -F '**Status:**' "$f" | grep -q '⚪'; then
+      continue
+    fi
+    while IFS=: read -r lineno match; do
+      n="${match#§}"
+      if ! _contains "$n" "${valid_sections[@]}"; then
+        add_error "$rel:$lineno: reference '$match' matches no numbered section in AGENTS.md"
+      fi
+    done < <(grep -noE '§[0-9]+' "$f")
+  done < <(find "$ROOT" -type f \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -not -path '*/.git/*' | sort)
+}
+
+# Every 'ADR-NNNN' reference (with digits — the literal 'ADR-NNNN' placeholder never matches)
+# must name an ADR file that already exists. Anticipated follow-up decisions are described by
+# topic, not by a reserved number (docs/adr/README.md, process rule 7).
+check_adr_refs() {
+  local f rel lineno match number
+  while IFS= read -r f; do
+    rel="${f#"$ROOT"/}"
+    [[ "$f" == "$ADR_DIR/template.md" ]] && continue
+    # Superseded ADRs are immutable historical record — skip, as in check_relative_links.
+    if [[ "$f" == "$ADR_DIR"/* ]] && grep -m1 -F '**Status:**' "$f" | grep -q '⚪'; then
+      continue
+    fi
+    while IFS=: read -r lineno match; do
+      number="${match#ADR-}"
+      if ! compgen -G "$ADR_DIR/$number-*.md" > /dev/null; then
+        add_error "$rel:$lineno: reference '$match' matches no ADR file in docs/adr/"
+      fi
+    done < <(grep -noE 'ADR-[0-9]{4}' "$f")
+  done < <(find "$ROOT" -type f \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -not -path '*/.git/*' | sort)
+}
+
 check_adr_index
 check_relative_links
+check_section_refs
+check_adr_refs
 
 if ((${#errors[@]} > 0)); then
   echo "Documentation checks FAILED:"
