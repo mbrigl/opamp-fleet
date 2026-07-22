@@ -1,7 +1,8 @@
 name: Docs & ADR checks
 
 # Enforces the documentation rules from AGENTS.md and docs/adr/README.md as CI:
-# ADR index integrity (every ADR listed, statuses in sync) and relative-link integrity.
+# ADR index integrity (every ADR listed, statuses in sync), relative-link integrity, and
+# section-reference integrity (§N references match AGENTS.md's numbered headings).
 # Pure bash + coreutils — nothing is installed.
 
 on:

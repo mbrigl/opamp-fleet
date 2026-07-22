@@ -10,13 +10,25 @@
 #      in the index matches the **Status:** line inside each ADR.
 #   2. Relative-link integrity: every relative Markdown link in every tracked .md file resolves
 #      to a file or directory that exists.
+#   3. Section-reference integrity: every section reference (the section sign followed by a
+#      number, e.g. in "AGENTS.md, section 6") matches a numbered '## N.' heading in AGENTS.md —
+#      the only numbered document in this repository; extend the check if another one appears.
+#   4. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) names an ADR
+#      file that exists in docs/adr/ — anticipated follow-ups are described by topic, never by
+#      a number that does not exist yet (docs/adr/README.md, process rule 7).
+#   5. Protocol Baseline currency: the pinned OpAMP specification version in docs/CONFORMANCE.md
+#      is compared against the latest upstream release. A divergence is a *warning*, never an
+#      error — an upstream release is not a defect in this repository, and failing here would
+#      turn CI red for something outside it. Requires network; silently skipped without one, so
+#      every other check stays usable offline.
 #
 # Pure bash + coreutils/grep/sed only — present in the Dev Container base image, so running it
-# adds no toolchain and no dependency that would require an ADR.
+# adds no toolchain and no dependency that would require an ADR. Check 5 additionally uses curl
+# when it is available, and degrades to a skip when it is not.
 #
 # Usage:
 #     scripts/check-docs.sh        (or: bash scripts/check-docs.sh)
-# Exit code 0 when all checks pass, 1 otherwise.
+# Exit code 0 when all checks pass, 1 otherwise. Warnings do not affect the exit code.
 
 set -uo pipefail
 
@@ -24,8 +36,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADR_DIR="$ROOT/docs/adr"
 ADR_INDEX="$ADR_DIR/README.md"
 
+CONFORMANCE="$ROOT/docs/CONFORMANCE.md"
+
 errors=()
 add_error() { errors+=("$1"); }
+
+# Warnings report drift that is outside this repository's control (see check 5). They are
+# printed but never affect the exit code.
+warnings=()
+add_warning() { warnings+=("$1"); }
 
 # Print the first legend status emoji (🟢 🟡 🔴 ⚪) read from stdin, if any.
 first_status_emoji() { grep -oE '🟢|🟡|🔴|⚪' | head -n1; }
@@ -172,8 +191,120 @@ check_relative_links() {
   done < <(find "$ROOT" -type f -name '*.md' -not -path '*/.git/*' | sort)
 }
 
+# Section references point into AGENTS.md, whose sections are numbered '## N.' headings.
+# Inserting or removing a section renumbers the ones after it and silently invalidates such
+# references — so verify that every referenced number still names an existing section. A matching
+# number can still mean the wrong section; renumbering AGENTS.md requires re-checking references
+# by hand.
+check_section_refs() {
+  local agents="$ROOT/AGENTS.md"
+  if [[ ! -f "$agents" ]]; then
+    add_error "AGENTS.md not found in the repository root"
+    return
+  fi
+
+  local valid_sections=()
+  local n
+  while IFS= read -r n; do
+    valid_sections+=("$n")
+  done < <(sed -nE 's/^## ([0-9]+)\..*/\1/p' "$agents")
+  if ((${#valid_sections[@]} == 0)); then
+    add_error "AGENTS.md: no numbered '## N.' section headings found"
+    return
+  fi
+
+  local f rel lineno match
+  while IFS= read -r f; do
+    rel="${f#"$ROOT"/}"
+    # Superseded ADRs are immutable historical record — skip, as in check_relative_links.
+    if [[ "$f" == "$ADR_DIR"/* ]] && grep -m1 -F '**Status:**' "$f" | grep -q '⚪'; then
+      continue
+    fi
+    while IFS=: read -r lineno match; do
+      n="${match#§}"
+      if ! _contains "$n" "${valid_sections[@]}"; then
+        add_error "$rel:$lineno: reference '$match' matches no numbered section in AGENTS.md"
+      fi
+    done < <(grep -noE '§[0-9]+' "$f")
+  done < <(find "$ROOT" -type f \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -not -path '*/.git/*' | sort)
+}
+
+# Every 'ADR-NNNN' reference (with digits — the literal 'ADR-NNNN' placeholder never matches)
+# must name an ADR file that already exists. Anticipated follow-up decisions are described by
+# topic, not by a reserved number (docs/adr/README.md, process rule 7).
+check_adr_refs() {
+  local f rel lineno match number
+  while IFS= read -r f; do
+    rel="${f#"$ROOT"/}"
+    [[ "$f" == "$ADR_DIR/template.md" ]] && continue
+    # Superseded ADRs are immutable historical record — skip, as in check_relative_links.
+    if [[ "$f" == "$ADR_DIR"/* ]] && grep -m1 -F '**Status:**' "$f" | grep -q '⚪'; then
+      continue
+    fi
+    while IFS=: read -r lineno match; do
+      number="${match#ADR-}"
+      if ! compgen -G "$ADR_DIR/$number-*.md" > /dev/null; then
+        add_error "$rel:$lineno: reference '$match' matches no ADR file in docs/adr/"
+      fi
+    done < <(grep -noE 'ADR-[0-9]{4}' "$f")
+  done < <(find "$ROOT" -type f \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -not -path '*/.git/*' | sort)
+}
+
+# The Protocol Baseline — the pinned upstream opamp-spec version all protocol code is written
+# against (ADR-0004) — must stay a deliberate choice. This compares the pin against the latest
+# upstream release and warns on divergence, so falling behind is noticed rather than discovered.
+# Deliberately not an error: upstream tagging a release says nothing about this repository being
+# wrong, and a check that reddens CI for that would simply be disabled.
+check_protocol_baseline() {
+  if [[ ! -f "$CONFORMANCE" ]]; then
+    add_error "Protocol Baseline: docs/CONFORMANCE.md not found"
+    return
+  fi
+
+  # The pin lives in a machine-readable marker so this check never has to parse prose.
+  local pinned
+  pinned="$(sed -nE 's/^<!--[[:space:]]*protocol-baseline:[[:space:]]*([^[:space:]]+)[[:space:]]*-->.*/\1/p' \
+    "$CONFORMANCE" | head -n1)"
+  if [[ -z "$pinned" ]]; then
+    add_error "docs/CONFORMANCE.md: no '<!-- protocol-baseline: vX.Y.Z -->' marker found"
+    return
+  fi
+
+  if ! command -v curl > /dev/null 2>&1; then
+    echo "Note: curl unavailable — skipping the Protocol Baseline currency check."
+    return
+  fi
+
+  # The newest entry of the releases list, not the 'releases/latest' endpoint: opamp-spec marks
+  # no release as "latest", so that endpoint answers 404.
+  local latest
+  latest="$(curl -fsS --max-time 10 \
+    "https://api.github.com/repos/open-telemetry/opamp-spec/releases?per_page=1" 2>/dev/null \
+    | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+  if [[ -z "$latest" ]]; then
+    # Offline, rate-limited, or the API changed shape. Say so rather than passing silently —
+    # a check that quietly does nothing is worse than one that admits it did nothing.
+    echo "Note: could not reach the opamp-spec release API — skipping the Protocol Baseline currency check."
+    return
+  fi
+
+  if [[ "$pinned" != "$latest" ]]; then
+    add_warning "Protocol Baseline is $pinned, but open-telemetry/opamp-spec has released $latest. Moving the Baseline is a deliberate change: review the upstream changelog, then update docs/CONFORMANCE.md and the code."
+  fi
+}
+
 check_adr_index
 check_relative_links
+check_section_refs
+check_adr_refs
+check_protocol_baseline
+
+if ((${#warnings[@]} > 0)); then
+  echo "Warnings:"
+  echo
+  for w in "${warnings[@]}"; do echo "  - $w"; done
+  echo
+fi
 
 if ((${#errors[@]} > 0)); then
   echo "Documentation checks FAILED:"

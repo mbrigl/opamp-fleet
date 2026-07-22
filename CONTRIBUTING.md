@@ -37,9 +37,16 @@ Authority runs **specification → accepted ADRs → individual change**.
 - Use the **project vocabulary** from the specification consistently.
 - Build, test, and formatting commands: see the **Build, Test & Run** section in
   [`README.md`](README.md).
-- **Documentation consistency is checked in CI** (ADR index integrity and relative links) via
+- **Documentation consistency is checked in CI** (ADR index integrity, relative links, and
+  §-section references into `AGENTS.md`) via
   [`scripts/check-docs.sh`](scripts/check-docs.sh). Run it locally with `scripts/check-docs.sh`
   before opening a pull request — it needs only bash and coreutils, already in the Dev Container.
+
+## License of contributions
+
+This project is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution, you
+agree that it is provided under the terms of that License, without any additional terms or conditions
+(Apache-2.0 §5). Do not submit code you are not authorised to license this way.
 
 ## Reporting security issues
 

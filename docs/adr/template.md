@@ -28,4 +28,5 @@ comparable systems. `AGENTS.md` requires capturing and citing what informed the 
 
 - Positive: what becomes easier or possible.
 - Negative / trade-offs: what becomes harder, what we accept.
-- Follow-ups: new questions or ADRs this decision triggers.
+- Follow-ups: new questions or follow-up ADRs this decision triggers. Describe them by topic —
+  never cite an ADR number that does not exist yet.
