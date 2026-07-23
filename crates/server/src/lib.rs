@@ -6,6 +6,7 @@
 //! both transports on `/v1/opamp` — arrives with ADR-0007.
 
 pub mod api;
+pub mod config;
 pub mod fleet;
 
 use std::sync::Arc;

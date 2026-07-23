@@ -1,0 +1,9 @@
+# OpAMP Fleet Server configuration (ADR-0008). Every setting is optional; the values shown are the
+# defaults. Start with: cargo run -p server -- --config config/server.toml
+
+# The single listener (ADR-0005): OpAMP endpoint (/v1/opamp), REST API (/api/*), and UI (/) share it.
+# Port 4320 is the protocol's default.
+listen = "0.0.0.0:4320"
+
+# Where the desired remote configuration is persisted across Server restarts.
+fleet_config_file = "fleet-config.yaml"

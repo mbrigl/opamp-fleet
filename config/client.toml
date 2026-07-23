@@ -1,0 +1,16 @@
+# OpAMP Fleet Client configuration (ADR-0008). Every setting is optional; the values shown are the
+# defaults. Start with: cargo run -p client -- --config config/client.toml
+
+# The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0007):
+#   ws:// or wss://    → WebSocket (the default: Server pushes changes within seconds)
+#   http:// or https:// → plain HTTP polling (see poll_interval_secs)
+endpoint = "ws://127.0.0.1:4320/v1/opamp"
+
+# The Agent's service.name — its human identity in the fleet UI and API.
+name = "opamp-fleet-client"
+
+# Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
+poll_interval_secs = 30
+
+# Where the Client persists its instance_uid and the received remote configuration.
+state_dir = "client-state"
