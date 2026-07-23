@@ -28,8 +28,8 @@
     // credential helper. Git writes still require explicit human approval (see AGENTS.md).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
-    // toolchain, chosen in ADR-0003. The build chain needs no system protoc (ADR-0004 uses
-    // the pure-Rust protox), so no extra system packages are required here.
+    // toolchain (ADR-0005). The build chain needs no system protoc (ADR-0006 uses the
+    // pure-Rust protox), so no extra system packages are required here.
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 

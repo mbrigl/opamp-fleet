@@ -33,4 +33,8 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | 🟢 accepted |
 | [0003](0003-client-modes-and-connection-multiplexing.md) | One Client binary with two composable modes, multiplexing Agents over a connection pool | 🟢 accepted |
 | [0004](0004-protocol-baseline-and-conformance-tracking.md) | Pin the protocol to a Baseline version and track conformance in a dedicated document | 🟢 accepted |
+| [0005](0005-workspace-and-server-runtime.md) | Three-crate Cargo workspace; tokio runtime; axum serves OpAMP, REST API, and the bundled UI on one port | 🟢 accepted |
+| [0006](0006-proto-vendoring-and-codegen.md) | Vendor the Baseline's protobuf schema and compile it with prost via protox (no system protoc) | 🟢 accepted |
+| [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
+| [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
 
