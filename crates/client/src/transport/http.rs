@@ -10,11 +10,16 @@ use tracing::{info, warn};
 
 use crate::agent::Agent;
 use crate::config::ClientConfig;
+use crate::service::runtime::Shutdown;
 
 /// The media type the Baseline requires the Client to set.
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
-pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> {
+pub async fn run(
+    mut agent: Agent,
+    config: &ClientConfig,
+    shutdown: &mut Shutdown,
+) -> Result<(), String> {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .timeout(Duration::from_secs(30));
@@ -44,7 +49,7 @@ pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> 
                 if let Some(delay) = handled.retry_after {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
-                        _ = tokio::signal::ctrl_c() => break,
+                        _ = shutdown.requested() => break,
                     }
                     continue;
                 }
@@ -61,7 +66,7 @@ pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> 
         }
         tokio::select! {
             _ = tokio::time::sleep(poll) => {}
-            _ = tokio::signal::ctrl_c() => break,
+            _ = shutdown.requested() => break,
         }
     }
 

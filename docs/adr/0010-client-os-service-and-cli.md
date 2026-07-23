@@ -1,6 +1,6 @@
 # ADR-0010: Client as a multi-instance OS service — clap subcommand CLI, per-instance identity, versioned install layout
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 

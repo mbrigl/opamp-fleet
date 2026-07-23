@@ -46,3 +46,12 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 # only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
 # build script only opens the local checkout.
 git2 = { version = "0.20", default-features = false }
+# The Client's subcommand CLI (ADR-0010). No `env` feature: the Client is file-configured
+# (ADR-0008), never configured through environment variables.
+clap = { version = "4", features = ["derive"] }
+# Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
+# (ADR-0010). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0007) holds.
+service-manager = "0.11"
+# The Windows-only SCM runtime shim (ADR-0010): status reporting and the stop control handler,
+# without which the SCM kills the service with error 1053. Compiled on Windows targets only.
+windows-service = "0.8"

@@ -38,5 +38,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
 | [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
 | [0009](0009-version-derivation-and-baking.md) | Version computed from git in `build.rs` — strict SemVer from `version/*` tags, `-dev` pre-release for non-release builds, commit-hash build metadata | 🟢 accepted |
-| [0010](0010-client-os-service-and-cli.md) | Client as a multi-instance OS service — clap subcommand CLI, per-instance identity, versioned install layout | 🟡 proposed |
+| [0010](0010-client-os-service-and-cli.md) | Client as a multi-instance OS service — clap subcommand CLI, per-instance identity, versioned install layout | 🟢 accepted |
 
