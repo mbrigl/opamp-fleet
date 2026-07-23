@@ -6,6 +6,10 @@
 /build/
 /target/
 
+# Local runtime state (default paths of server.toml / client.toml)
+/fleet-config.yaml
+/client-state/
+
 # Environment files
 /.env
 /.env.local

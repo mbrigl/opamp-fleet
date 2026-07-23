@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Server",
+      "cargo": {
+        "args": ["build", "--bin", "server", "--package", "server"],
+        "filter": { "name": "server", "kind": "bin" }
+      },
+      "args": ["--config", "config/server.toml"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Client",
+      "cargo": {
+        "args": ["build", "--bin", "client", "--package", "client"],
+        "filter": { "name": "client", "kind": "bin" }
+      },
+      "args": ["--config", "config/client.toml"],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Server + Client",
+      "configurations": ["Server", "Client"],
+      "stopAll": true
+    }
+  ]
+}
