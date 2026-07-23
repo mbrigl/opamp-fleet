@@ -4,9 +4,6 @@
 //! state machine, so transport is carriage, never semantics. The Client currently presents one
 //! Agent — itself; the n-Agents-over-m-connections shape of ADR-0003 arrives with the Supervisors.
 
-// Consumed by the transports that arrive with ADR-0007; unit-tested below.
-#![allow(dead_code)]
-
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{

@@ -48,7 +48,11 @@
     }
   },
 
-  "forwardPorts": [],
+  // The Server's single listener (ADR-0005): OpAMP endpoint, REST API, and UI share port 4320.
+  "forwardPorts": [4320],
+  "portsAttributes": {
+    "4320": { "label": "OpAMP Fleet Server (OpAMP + REST + UI)" }
+  },
 
   "hostRequirements": {
     "cpus": 2,

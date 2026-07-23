@@ -171,19 +171,45 @@ it (AGENTS.md links here).
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
-- **Run:** TODO <!-- filled in once the binaries take their configuration files (ADR-0008) -->
+- **Run the Server:** `cargo run -p server -- --config config/server.toml`
+- **Run the Client:** `cargo run -p client -- --config config/client.toml`
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these build/test/lint
-commands and additionally release-builds the Client for Linux, Windows, and macOS and the Server
-for Linux.
+Both binaries read a TOML configuration file ([ADR-0008](docs/adr/0008-toml-configuration.md));
+every setting has a default, so they also start with no file at all. The annotated examples live in
+[`config/`](config/). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these
+build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
+and the Server for Linux.
 
 ## Usage
 
-<!-- Once there is something to use, show how to use the built software: the primary commands or
-     API, a minimal example, and the expected output. Keep build/test/run mechanics in the section
-     above — this section is about using the result, not producing it. -->
+A minimal closed control loop on one machine:
 
-TODO — show a minimal example of using the project.
+1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves
+   everything on one port (default `4320`): the OpAMP endpoint at `/v1/opamp` (plain HTTP **and**
+   WebSocket, [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)), the REST API under `/api/`, and
+   the bundled UI at `/`.
+2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
+   WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
+   appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
+   instead.
+3. **Open the UI** at <http://127.0.0.1:4320/> — the Agent is listed as *Connected*. Press
+   **Distribute config**, enter any configuration text, and save.
+4. **Watch the loop close:** a WebSocket Client receives the configuration within a second, an HTTP
+   Client on its next poll. The Agent stores it (under its `state_dir`), reports it **Applied** with
+   the matching hash, and its effective configuration shows up in the table. Distributing the same
+   configuration again sends nothing — the config-hash comparison gates every push.
+
+The same operations are available to any portal through the REST API:
+
+```console
+$ curl http://127.0.0.1:4320/api/agents            # the fleet as JSON
+$ curl http://127.0.0.1:4320/api/config            # the desired configuration + hash
+$ curl -X PUT --data-binary @my-config.yaml \
+       http://127.0.0.1:4320/api/config            # distribute a configuration
+```
+
+For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
+`https://` endpoint — plus `ca_file` under `[tls]` when the certificate comes from a private CA.
 
 ## Project Layout
 
@@ -194,6 +220,7 @@ docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/adr/             # Architecture Decision Records (+ template)
 crates/               # Cargo workspace: opamp (shared) · server · client
+config/               # annotated example configuration files (server.toml, client.toml)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 .devcontainer/        # Dev Container definition (base image + Features)

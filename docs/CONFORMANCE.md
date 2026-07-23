@@ -123,9 +123,9 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 
 | Capability | Bit | Maturity | Requirement | Status | Note |
 |---|---|---|---|---|---|
-| `ReportsStatus` | `0x0001` | stable | **required** | planned | MUST be set by every Agent. |
-| `AcceptsRemoteConfig` | `0x0002` | stable | optional | planned | Core of the control loop (goal 1). |
-| `ReportsEffectiveConfig` | `0x0004` | stable | optional | planned | Core of the control loop (goal 2). |
+| `ReportsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Agent. |
+| `AcceptsRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
+| `ReportsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `AcceptsPackages` | `0x0008` | Beta | optional | planned | Software distribution (goal 10). |
 | `ReportsPackageStatuses` | `0x0010` | Beta | optional | planned | Software distribution (goal 10). |
 | `ReportsOwnTraces` | `0x0020` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
@@ -134,8 +134,8 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | planned | Needed for Server-driven credential rotation (goal 17). |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
 | `AcceptsRestartCommand` | `0x0400` | Beta | optional | planned | Server-initiated restart of a Managed Process. |
-| `ReportsHealth` | `0x0800` | stable | optional | planned | Core of the control loop (goal 2). |
-| `ReportsRemoteConfig` | `0x1000` | stable | optional | planned | Reports acceptance or rejection (goals 3 and 4). |
+| `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
+| `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
 | `ReportsHeartbeat` | `0x2000` | Development | optional | planned | Liveness independent of message traffic. |
 | `ReportsAvailableComponents` | `0x4000` | Development | optional | planned | Also reported by the Collector's `opampextension`. |
 | `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | planned | Reports the outcome of a connection-settings offer. |
@@ -146,9 +146,9 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 
 | Capability | Bit | Maturity | Requirement | Status | Note |
 |---|---|---|---|---|---|
-| `AcceptsStatus` | `0x0001` | stable | **required** | planned | MUST be set by every Server. |
-| `OffersRemoteConfig` | `0x0002` | stable | optional | planned | Core of the control loop (goal 1). |
-| `AcceptsEffectiveConfig` | `0x0004` | stable | optional | planned | Core of the control loop (goal 2). |
+| `AcceptsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Server. |
+| `OffersRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
+| `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `OffersPackages` | `0x0008` | Beta | optional | planned | Software distribution (goal 10). |
 | `AcceptsPackagesStatus` | `0x0010` | Beta | optional | planned | Software distribution (goal 10). |
 | `OffersConnectionSettings` | `0x0020` | Beta | optional | planned | Server-driven credential rotation (goal 17). |
@@ -161,25 +161,25 @@ separately because conformance depends on them just as much.
 
 | Area | Requirement | Status | Note |
 |---|---|---|---|
-| WebSocket transport | Servers SHOULD accept it; Clients MAY choose either | planned | Varint header followed by the Protobuf message. |
-| Plain HTTP transport | Servers SHOULD accept it; Clients MAY choose either | planned | *"Server implementations SHOULD accept both plain HTTP connections and WebSocket connections. OpAMP Client implementations may choose to support either."* The Client polls, by default every 30 s. |
-| Default endpoint | Port 4320, path `/v1/opamp` | planned | Both MAY be configurable. |
-| gzip on HTTP | The Server MUST honour `Content-Encoding` | planned | Must accept both compressed and uncompressed bodies. |
-| `Content-Type` header | The Client MUST set `application/x-protobuf` on plain HTTP | planned | Doubles as the Server's transport detection: with the header it SHOULD treat the request as plain HTTP transport, without it as a WebSocket initiation. |
-| `instance_uid` | MUST be 16 bytes, SHOULD be UUID v7 | planned | SHOULD be self-generated and stay unchanged for the process lifetime. The routing key across connection boundaries. |
-| `sequence_num` | Incremented per `AgentToServer` | planned | |
-| Unchanged fields omitted | SHOULD be unset when unchanged | planned | Applies to description, health, effective config, remote config status, package statuses. |
-| `ReportFullState` | The Agent MUST report full state when requested | planned | `ServerToAgent.flags`; the recovery path for the row above — a Server that lost state MUST set this flag. |
-| `agent_disconnect` | MUST be set in the final message | planned | |
-| `AgentIdentification` | The Agent MUST adopt a new `instance_uid` | planned | The Server may reassign identity. |
-| `RequestInstanceUid` | Server-generated identity on request | planned | `AgentToServer.flags`; an Agent MAY ask the Server for its `instance_uid` at first start, setting a temporary value and this flag. |
-| Connection multiplexing | Distinguish Agents by `instance_uid` | planned | Required by goals 14 and 15; the Server must never key state on the connection. |
+| WebSocket transport | Servers SHOULD accept it; Clients MAY choose either | implemented | Varint header followed by the Protobuf message (`opamp::frame`); both ends (ADR-0007). The Client uses it by default; the Server pushes config changes over it. |
+| Plain HTTP transport | Servers SHOULD accept it; Clients MAY choose either | implemented | *"Server implementations SHOULD accept both plain HTTP connections and WebSocket connections. OpAMP Client implementations may choose to support either."* Both ends (ADR-0007). The Client polls, by default every 30 s, with an immediate follow-up after a config outcome. |
+| Default endpoint | Port 4320, path `/v1/opamp` | implemented | Both defaults in place; address/endpoint configurable on both ends (ADR-0008). |
+| gzip on HTTP | The Server MUST honour `Content-Encoding` | implemented | The Server accepts gzip and identity request bodies (decompression capped at the message size limit). Response compression (a SHOULD) is not done yet. |
+| `Content-Type` header | The Client MUST set `application/x-protobuf` on plain HTTP | implemented | The Client sets it; the Server requires it on POST (`415` otherwise) and takes a WebSocket upgrade as the other transport. |
+| `instance_uid` | MUST be 16 bytes, SHOULD be UUID v7 | implemented | Generated as UUID v7, persisted across restarts (`opamp::uid`); the Server rejects other lengths with `bad_request`. |
+| `sequence_num` | Incremented per `AgentToServer` | implemented | The Server detects gaps and requests full state. |
+| Unchanged fields omitted | SHOULD be unset when unchanged | implemented | Routine Client polls carry identity and sequence number only; status fields are sent when they change, everything after (re)connect or on demand. |
+| `ReportFullState` | The Agent MUST report full state when requested | implemented | The Client complies immediately; the Server sets the flag on sequence gaps and unknown Agents. |
+| `agent_disconnect` | MUST be set in the final message | implemented | The Client sends it on shutdown on both transports; the Server marks the Agent disconnected (also on abrupt WebSocket loss). |
+| `AgentIdentification` | The Agent MUST adopt a new `instance_uid` | implemented | The Client adopts and persists the new identity. |
+| `RequestInstanceUid` | Server-generated identity on request | implemented | The Server mints a UUID v7 and re-keys the Agent. The Client does not use the flag (it self-generates), which the protocol permits. |
+| Connection multiplexing | Distinguish Agents by `instance_uid` | implemented | The Server keys all state on `instance_uid` and serves n Agents over one WebSocket connection (tested). The Client presents one Agent today; n-over-m arrives with the Supervisors (ADR-0003). |
 | Duplicate `instance_uid` | Detection and handling | planned | |
 | Duplicate WebSocket connections | Handling defined by the spec | planned | |
-| Undefined capability bits | MUST be zero | planned | |
+| Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
 | Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | planned | `[Beta]`. Basic or Bearer, applied before the WebSocket upgrade. Underpins goal 17. |
-| Capability negotiation | Each side MUST stop using capabilities the peer lacks | planned | *"Interoperability of Partial Implementations"* — binding in both directions. |
-| Retrying, throttling, bad request | Defined error and backoff behaviour | planned | |
+| Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | The Server offers configuration only to Agents declaring `AcceptsRemoteConfig`; the Client stops reporting effective config to a Server without `AcceptsEffectiveConfig`. |
+| Retrying, throttling, bad request | Defined error and backoff behaviour | implemented | The Server answers malformed input with `BAD_REQUEST` error responses; the Client honours `UNAVAILABLE` retry hints and reconnects with capped exponential backoff. The Server does not yet emit throttling itself. |
 | Custom messages | `CustomCapabilities` / `CustomMessage` exchange | planned | `[Development]`. Outside the capability bitmask: each side lists supported custom capabilities as reverse-FQDN strings; a `CustomMessage` for an unsupported capability can be ignored. |
 
 ## Deviations
@@ -190,10 +190,14 @@ resolving one by inventing semantics of this project's own.
 
 | Deviation | Reason |
 |---|---|
-| *(none yet)* | No code exists yet, so nothing has diverged. |
+| *(none yet)* | Nothing implemented diverges from the Baseline's MUSTs. Two SHOULDs are consciously not taken up yet and noted in the matrix: response compression on plain HTTP, and Server-side throttling. |
 
 ## Status summary
 
-No protocol code has been written yet; every row above reads *planned*. This document therefore
-doubles as the implementation work list, and its first real revision comes with the first capability
-that actually ships.
+The base control loop is implemented on both ends and on both transports (ADR-0005 through
+ADR-0008): status reporting, remote configuration gated by the config hash, effective-configuration
+and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
+recovery via `ReportFullState`, disconnect handling, and TLS. Every remaining *planned* row —
+packages, connection settings, own telemetry, restart command, heartbeats, available components,
+custom messages, authentication, duplicate handling — is future work; the rows above double as that
+work list.

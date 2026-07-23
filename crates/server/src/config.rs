@@ -20,6 +20,17 @@ pub struct ServerConfig {
     /// the fleet should be running. Missing file means: no configuration to offer yet.
     #[serde(default = "default_fleet_config_file")]
     pub fleet_config_file: PathBuf,
+    /// Optional TLS; when present the listener serves HTTPS/WSS (ADR-0007).
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM certificate chain.
+    pub cert_file: PathBuf,
+    /// PEM private key.
+    pub key_file: PathBuf,
 }
 
 fn default_listen() -> SocketAddr {
@@ -35,6 +46,7 @@ impl Default for ServerConfig {
         ServerConfig {
             listen: default_listen(),
             fleet_config_file: default_fleet_config_file(),
+            tls: None,
         }
     }
 }
@@ -62,16 +74,21 @@ mod tests {
             r#"
             listen = "127.0.0.1:9999"
             fleet_config_file = "cfg.yaml"
+            [tls]
+            cert_file = "cert.pem"
+            key_file = "key.pem"
             "#,
         )
         .expect("parse");
         assert_eq!(cfg.listen.port(), 9999);
+        assert!(cfg.tls.is_some());
     }
 
     #[test]
     fn defaults_apply_to_an_empty_file() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen.port(), 4320);
+        assert!(cfg.tls.is_none());
     }
 
     #[test]

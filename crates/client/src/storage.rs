@@ -5,9 +5,6 @@
 //! The remote configuration is stored losslessly as the received protobuf, plus one plain file per
 //! config-map entry so an operator (and, later, a Managed Process) can read it off disk.
 
-// Consumed by the transports that arrive with ADR-0007; unit-tested below.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::PathBuf;
 

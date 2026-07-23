@@ -14,3 +14,7 @@ poll_interval_secs = 30
 
 # Where the Client persists its instance_uid and the received remote configuration.
 state_dir = "client-state"
+
+# Optional TLS trust override (ADR-0007) for wss:// / https:// against a private CA:
+# [tls]
+# ca_file = "ca.pem"

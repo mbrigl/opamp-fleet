@@ -1,6 +1,6 @@
 [package]
 name = "server"
-description = "OpAMP Fleet Server: fleet state, REST API, and bundled UI (ADR-0005)"
+description = "OpAMP Fleet Server: dual-transport OpAMP endpoint, REST API, and bundled UI (ADR-0005, ADR-0007)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ publish.workspace = true
 opamp.workspace = true
 tokio.workspace = true
 axum.workspace = true
+axum-server.workspace = true
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -18,3 +20,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 sha2.workspace = true
 hex.workspace = true
+flate2.workspace = true
+rustls.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+tempfile = "3"

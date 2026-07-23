@@ -23,6 +23,15 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Optional TLS trust override for `wss://` / `https://` endpoints.
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
+    pub ca_file: PathBuf,
 }
 
 /// The transport the endpoint's scheme selects (ADR-0007).
@@ -56,6 +65,7 @@ impl Default for ClientConfig {
             name: default_name(),
             poll_interval_secs: default_poll_interval_secs(),
             state_dir: default_state_dir(),
+            tls: None,
         }
     }
 }

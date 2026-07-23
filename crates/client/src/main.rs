@@ -1,14 +1,16 @@
-//! Entry point: load `client.toml`, restore the Agent's identity and state. The transports that
-//! put the Agent on the wire — selected by the endpoint's URL scheme — arrive with ADR-0007.
+//! Entry point: load `client.toml`, restore the Agent's identity, run the transport the endpoint
+//! selects (ADR-0007) until interrupted.
 
 mod agent;
 mod config;
 mod storage;
+mod tls;
+mod transport;
 
 use std::path::PathBuf;
 
 use agent::Agent;
-use config::ClientConfig;
+use config::{ClientConfig, TransportKind};
 use storage::Storage;
 
 fn usage() -> ! {
@@ -44,8 +46,14 @@ async fn main() {
         )
         .init();
 
+    // One TLS provider for the whole process (ADR-0007): ring, never a system library.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install the rustls ring provider");
+
     let config_path = parse_args();
-    if let Err(e) = run(&config_path).await {
+    let result = run(&config_path).await;
+    if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -59,13 +67,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     let agent = Agent::new(config.name.clone(), storage)
         .map_err(|e| format!("cannot restore the agent state: {e}"))?;
-    tracing::info!(
-        agent = %agent.uid(),
-        name = %config.name,
-        endpoint = %config.endpoint,
-        transport = ?transport,
-        poll_interval_secs = config.poll_interval_secs,
-        "agent identity ready; the transports arrive with ADR-0007"
-    );
-    Ok(())
+    tracing::info!(agent = %agent.uid(), name = %config.name, "starting");
+
+    match transport {
+        TransportKind::WebSocket => transport::ws::run(agent, &config).await,
+        TransportKind::Http => transport::http::run(agent, &config).await,
+    }
 }

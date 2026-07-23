@@ -7,3 +7,8 @@ listen = "0.0.0.0:4320"
 
 # Where the desired remote configuration is persisted across Server restarts.
 fleet_config_file = "fleet-config.yaml"
+
+# Optional TLS (ADR-0007): with a certificate and key the listener serves HTTPS/WSS instead.
+# [tls]
+# cert_file = "cert.pem"
+# key_file = "key.pem"
