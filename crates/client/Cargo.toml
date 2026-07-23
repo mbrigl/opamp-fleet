@@ -1,0 +1,26 @@
+[package]
+name = "client"
+description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0003)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+opamp.workspace = true
+tokio.workspace = true
+prost.workspace = true
+serde.workspace = true
+toml.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex.workspace = true
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

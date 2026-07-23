@@ -6,7 +6,7 @@ Please report security vulnerabilities **privately** — do not open a public is
 
 - Use GitHub's [private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
   (**Security → Report a vulnerability**) if enabled, or
-- email the maintainer: <!-- TODO: add a security contact address -->.
+- email the maintainer: [security@hivevm.org](mailto:security@hivevm.org).
 
 Please include enough detail to reproduce the issue (affected version/commit, steps, and impact).
 We aim to acknowledge reports within a reasonable time frame and will coordinate a fix and
@@ -14,7 +14,7 @@ disclosure with you.
 
 ## Dev Container & agent execution
 
-This template runs coding agents inside the Dev Container defined in
+OpAMP Fleet runs coding agents inside the Dev Container defined in
 [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json). Two properties shape its
 security posture:
 
@@ -31,4 +31,4 @@ security posture:
 ## Supported versions
 
 <!-- TODO: document which versions/branches receive security fixes once the project has releases. -->
-This is a template; define a support policy when the project reaches its first release.
+The project is pre-release; a support policy will be defined once it reaches its first release.
