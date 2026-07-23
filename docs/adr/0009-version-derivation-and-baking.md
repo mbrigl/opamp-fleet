@@ -1,6 +1,6 @@
 # ADR-0009: Version computed from git in `build.rs` — strict SemVer from `version/*` tags, `-dev` pre-release for non-release builds, commit-hash build metadata
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 

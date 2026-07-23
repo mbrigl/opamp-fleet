@@ -6,6 +6,7 @@ mod config;
 mod storage;
 mod tls;
 mod transport;
+mod version;
 
 use std::path::PathBuf;
 
@@ -28,7 +29,8 @@ fn parse_args() -> PathBuf {
                 None => usage(),
             },
             "--version" => {
-                println!("client {}", env!("CARGO_PKG_VERSION"));
+                // The git-derived build version (ADR-0009), never the static crate version.
+                println!("client {}", version::version());
                 std::process::exit(0);
             }
             _ => usage(),

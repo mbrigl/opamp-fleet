@@ -214,7 +214,7 @@ impl Agent {
         AgentDescription {
             identifying_attributes: vec![
                 string_attr("service.name", &self.name),
-                string_attr("service.version", env!("CARGO_PKG_VERSION")),
+                string_attr("service.version", crate::version::version()),
                 string_attr("service.instance.id", &self.uid.to_string()),
             ],
             non_identifying_attributes: vec![

@@ -24,3 +24,7 @@ rustls-pemfile.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+# ADR-0009: build.rs derives the version from git tags and bakes it in at compile time.
+[build-dependencies]
+git2.workspace = true

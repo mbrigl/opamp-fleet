@@ -42,3 +42,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# Reads the repository in build.rs to compute the baked-in version (ADR-0009). Build-dependency
+# only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
+# build script only opens the local checkout.
+git2 = { version = "0.20", default-features = false }
