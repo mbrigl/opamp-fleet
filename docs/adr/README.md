@@ -37,4 +37,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0006](0006-proto-vendoring-and-codegen.md) | Vendor the Baseline's protobuf schema and compile it with prost via protox (no system protoc) | 🟢 accepted |
 | [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
 | [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
+| [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟢 accepted |
+| [0010](0010-client-os-service.md) | The Client as a multi-instance native OS service, installed and run through its own CLI | 🟢 accepted |
 

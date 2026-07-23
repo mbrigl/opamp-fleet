@@ -29,6 +29,25 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  # ADR-0010: the client carries platform-specific service paths (the Windows SCM shim, launchd
+  # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
+  # real platforms. Actual service registration still needs the manual smoke checklist
+  # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
+  client-platform-check:
+    name: client checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -p client --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p client --locked
+
   # The Client ships on Linux, macOS, and Windows; the Server on Linux only.
   release-build:
     name: release (${{ matrix.name }})

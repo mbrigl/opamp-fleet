@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use crate::agent::Agent;
 use crate::config::ClientConfig;
+use crate::service::runtime::Shutdown;
 use crate::transport::Backoff;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -24,7 +25,11 @@ enum Served {
     ConnectionLost,
 }
 
-pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> {
+pub async fn run(
+    mut agent: Agent,
+    config: &ClientConfig,
+    shutdown: &mut Shutdown,
+) -> Result<(), String> {
     let connector = match &config.tls {
         Some(tls) => Some(Connector::Rustls(crate::tls::rustls_config_with_ca(
             &tls.ca_file,
@@ -39,7 +44,7 @@ pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> 
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, &mut agent).await {
+                match serve(socket, &mut agent, shutdown).await {
                     Served::Shutdown => return Ok(()),
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
@@ -50,12 +55,12 @@ pub async fn run(mut agent: Agent, config: &ClientConfig) -> Result<(), String> 
         let delay = backoff.advance();
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = shutdown.requested() => return Ok(()),
         }
     }
 }
 
-async fn serve(mut socket: Socket, agent: &mut Agent) -> Served {
+async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -> Served {
     // A (re)connected Server may know nothing about us: start from a full snapshot.
     agent.force_full();
     if send(&mut socket, agent).await.is_err() {
@@ -83,7 +88,7 @@ async fn serve(mut socket: Socket, agent: &mut Agent) -> Served {
                             let _ = socket.close(None).await;
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {}
-                                _ = tokio::signal::ctrl_c() => return Served::Shutdown,
+                                _ = shutdown.requested() => return Served::Shutdown,
                             }
                             return Served::ConnectionLost;
                         }
@@ -96,7 +101,7 @@ async fn serve(mut socket: Socket, agent: &mut Agent) -> Served {
                     _ => {}
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown.requested() => {
                 // The Baseline: the final message sets agent_disconnect.
                 let goodbye = agent.disconnect_message();
                 let _ = socket
