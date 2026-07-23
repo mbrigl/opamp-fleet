@@ -1,0 +1,16 @@
+[package]
+name = "opamp"
+description = "Shared OpAMP wire layer: generated protobuf types and WebSocket framing (ADR-0006)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

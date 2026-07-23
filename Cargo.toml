@@ -1,0 +1,44 @@
+# Cargo workspace (ADR-0005): the Server and the Client are two binaries sharing one wire layer
+# (`opamp`). One workspace, one lockfile, one pinned toolchain (`rust-toolchain.toml`), so both ends
+# resolve the same compiler and dependency versions and cannot drift apart on the wire format.
+[workspace]
+resolver = "2"
+members = ["crates/opamp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+# Versions are pinned once here and referenced from each crate with `<dep>.workspace = true`.
+[workspace.dependencies]
+opamp = { path = "crates/opamp" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+axum = { version = "0.8", features = ["ws"] }
+prost = "0.14"
+prost-build = "0.14"
+# Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0006).
+protox = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v7"] }
+# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007).
+flate2 = "1"
+# The Client's WebSocket transport; rustls enables `wss://` (ADR-0007).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# The Client's plain-HTTP(S) polling transport (ADR-0007).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+# TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0007).
+# The provider is installed once at each binary's startup.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+# Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
