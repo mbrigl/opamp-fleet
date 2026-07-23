@@ -3,7 +3,7 @@
 # resolve the same compiler and dependency versions and cannot drift apart on the wire format.
 [workspace]
 resolver = "2"
-members = ["crates/opamp"]
+members = ["crates/opamp", "crates/server", "crates/client"]
 
 [workspace.package]
 version = "0.1.0"

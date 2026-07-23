@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agents · OpAMP Fleet</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --border: #e3e6ea;
+        --border-strong: #d3d8de;
+        --text: #1c2b39;
+        --muted: #64748b;
+        --link: #2563eb;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --row-hover: #f5f8ff;
+        --chip-bg: #eef1f4;
+        --chip-fg: #475569;
+        --ok-bg: #16a34a;
+        --ok-fg: #ffffff;
+        --soft-green-bg: #e7f6ed;
+        --soft-green-fg: #0f7a3d;
+        --soft-gray-bg: #eef1f4;
+        --soft-gray-fg: #5b6673;
+        --soft-amber-bg: #fdf3e2;
+        --soft-amber-fg: #b7791f;
+        --soft-red-bg: #fdecec;
+        --soft-red-fg: #c0362c;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1116;
+          --panel: #161a21;
+          --border: #262c36;
+          --border-strong: #333a45;
+          --text: #e6e8ec;
+          --muted: #96a0ad;
+          --link: #7aa2ff;
+          --primary: #3b82f6;
+          --primary-hover: #2f6fe0;
+          --row-hover: #1a1f28;
+          --chip-bg: #232a34;
+          --chip-fg: #b7c0cc;
+          --ok-bg: #1a9553;
+          --ok-fg: #ffffff;
+          --soft-green-bg: #113123;
+          --soft-green-fg: #57d98a;
+          --soft-gray-bg: #232a34;
+          --soft-gray-fg: #aab3bf;
+          --soft-amber-bg: #33260f;
+          --soft-amber-fg: #e0ad5b;
+          --soft-red-bg: #331719;
+          --soft-red-fg: #f28b82;
+        }
+      }
+      :root[data-theme="light"] { color-scheme: light; }
+      :root[data-theme="dark"] { color-scheme: dark; }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 28px 48px; }
+
+      .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+      .page-head h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+      .page-head p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+
+      .btn {
+        border: 0; border-radius: 8px; padding: 9px 16px;
+        font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+      }
+      .btn-primary { background: var(--primary); color: #fff; }
+      .btn-primary:hover { background: var(--primary-hover); }
+      .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
+      .btn-ghost:hover { background: var(--row-hover); }
+
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+
+      /* Config editor (revealed by the primary button) */
+      .config { padding: 16px; margin-bottom: 20px; display: none; }
+      .config.open { display: block; }
+      .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+      textarea {
+        width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
+        border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+        font-family: var(--mono); font-size: 13px; resize: vertical;
+      }
+      .config-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+      .hash { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+      /* Filter bar */
+      .filters { display: flex; align-items: stretch; gap: 0; padding: 10px; margin-bottom: 16px; }
+      .filters .dropdown {
+        display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px;
+        border: 1px solid var(--border-strong); border-radius: 8px; color: var(--muted);
+        font-size: 13px; background: var(--panel); white-space: nowrap;
+      }
+      .filters input {
+        flex: 1; margin-left: 10px; padding: 8px 12px; border: 1px solid var(--border-strong);
+        border-radius: 8px; background: var(--panel); color: var(--text); font-size: 13px;
+        font-family: var(--mono);
+      }
+      .filters input::placeholder { color: var(--muted); font-family: var(--mono); }
+
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+      thead th {
+        text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border);
+        color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; user-select: none;
+      }
+      thead th.sortable { cursor: pointer; }
+      thead th.sortable:hover { color: var(--text); }
+      th .arrow { opacity: .55; font-size: 10px; }
+      tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      tbody tr:last-child td { border-bottom: 0; }
+      tbody tr:hover { background: var(--row-hover); }
+      td.chk, th.chk { width: 34px; }
+      input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
+
+      .name { color: var(--link); font-weight: 600; text-decoration: none; }
+      .name:hover { text-decoration: underline; }
+      .sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 2px; }
+
+      .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .pill.solid-green { background: var(--ok-bg); color: var(--ok-fg); }
+      .pill.green { background: var(--soft-green-bg); color: var(--soft-green-fg); }
+      .pill.gray { background: var(--soft-gray-bg); color: var(--soft-gray-fg); }
+      .pill.amber { background: var(--soft-amber-bg); color: var(--soft-amber-fg); }
+      .pill.red { background: var(--soft-red-bg); color: var(--soft-red-fg); }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+      .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+      .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+      .num { font-variant-numeric: tabular-nums; color: var(--muted); }
+      .empty { padding: 40px 0; text-align: center; color: var(--muted); }
+      .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="page-head">
+        <div>
+          <h1>Agents</h1>
+          <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s)</p>
+        </div>
+        <button id="toggle-config" class="btn btn-primary">Distribute config</button>
+      </div>
+
+      <section id="config-card" class="card config">
+        <h2>Remote configuration</h2>
+        <textarea id="config" placeholder="Enter the configuration to distribute to the fleet…"></textarea>
+        <div class="config-actions">
+          <button id="save" class="btn btn-primary">Distribute to fleet</button>
+          <button id="cancel" class="btn btn-ghost">Cancel</button>
+          <span class="hash">config hash: <span id="confighash">—</span></span>
+        </div>
+      </section>
+
+      <div class="card filters">
+        <span class="dropdown">Filters ▾</span>
+        <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+      </div>
+
+      <div class="card table-wrap">
+        <table>
+          <thead>
+            <tr id="head-row">
+              <th class="chk"><input type="checkbox" id="select-all" /></th>
+              <th class="sortable" data-key="name">Name <span class="arrow"></span></th>
+              <th class="sortable" data-key="connected">Status <span class="arrow"></span></th>
+              <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
+              <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
+              <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
+              <th>Effective config</th>
+              <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
+              <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
+              <th>Labels</th>
+            </tr>
+          </thead>
+          <tbody id="agents"></tbody>
+        </table>
+        <div id="empty" class="empty">No agents connected yet. Start a Client.</div>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let agents = [];
+      let filterText = "";
+      let sortKey = "name";
+      let sortDir = 1;
+      let configDirty = false;
+
+      const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      const shortHash = (h) => (h ? h.slice(0, 12) : "—");
+      function ago(ms) {
+        const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+        if (s < 60) return s + "s ago";
+        if (s < 3600) return Math.round(s / 60) + "m ago";
+        return Math.round(s / 3600) + "h ago";
+      }
+
+      const sortVal = {
+        name: (a) => a.service_name || a.instance_uid,
+        connected: (a) => (a.connected ? 1 : 0),
+        config: (a) => a.remote_config_status,
+        version: (a) => a.service_version,
+        os: (a) => a.os,
+        seq: (a) => a.sequence_num,
+        seen: (a) => a.last_seen_ms,
+      };
+
+      function statusPill(a) {
+        return a.connected
+          ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
+          : `<span class="pill gray"><span class="dot"></span>Disconnected</span>`;
+      }
+      function configPill(a) {
+        if (a.remote_config_status === "FAILED")
+          return `<span class="pill red">Failed</span>${a.remote_config_error ? `<div class="err">${esc(a.remote_config_error)}</div>` : ""}`;
+        if (!a.in_sync) return `<span class="pill amber">Syncing…</span>`;
+        if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
+        return `<span class="pill gray">Unset</span>`;
+      }
+      function labels(a) {
+        const chips = [];
+        if (a.transport) chips.push(`transport: ${esc(a.transport)}`);
+        if (a.health_status) chips.push(`status: ${esc(a.health_status)}`);
+        return `<div class="chips">${chips.map((c) => `<span class="chip">${c}</span>`).join("")}</div>`;
+      }
+
+      function matches(a) {
+        if (!filterText) return true;
+        const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+          .join(" ").toLowerCase();
+        return hay.includes(filterText);
+      }
+
+      function render() {
+        const rows = agents.filter(matches).sort((x, y) => {
+          const f = sortVal[sortKey] || sortVal.name;
+          const a = f(x), b = f(y);
+          return (a < b ? -1 : a > b ? 1 : 0) * sortDir;
+        });
+        $("count").textContent = agents.length;
+        $("empty").style.display = rows.length ? "none" : "block";
+        $("agents").innerHTML = rows.map((a) => `
+          <tr>
+            <td class="chk"><input type="checkbox" /></td>
+            <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
+            <td>${statusPill(a)}</td>
+            <td>${configPill(a)}</td>
+            <td class="num">${esc(a.service_version) || "—"}</td>
+            <td>${esc(a.os) || "—"}</td>
+            <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
+            <td class="num">${a.sequence_num}</td>
+            <td class="num">${ago(a.last_seen_ms)}</td>
+            <td>${labels(a)}</td>
+          </tr>`).join("");
+        document.querySelectorAll("th.sortable").forEach((th) => {
+          const arrow = th.querySelector(".arrow");
+          arrow.textContent = th.dataset.key === sortKey ? (sortDir === 1 ? "▲" : "▼") : "";
+        });
+      }
+
+      document.querySelectorAll("th.sortable").forEach((th) => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.key;
+          if (sortKey === key) sortDir *= -1;
+          else { sortKey = key; sortDir = 1; }
+          render();
+        });
+      });
+      $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
+      $("select-all").addEventListener("change", (e) => {
+        document.querySelectorAll('#agents input[type="checkbox"]').forEach((c) => (c.checked = e.target.checked));
+      });
+
+      // Config editor
+      $("config").addEventListener("input", () => { configDirty = true; });
+      const closeConfig = () => $("config-card").classList.remove("open");
+      $("toggle-config").addEventListener("click", () => $("config-card").classList.toggle("open"));
+      $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); refreshConfig(); });
+      $("save").addEventListener("click", async () => {
+        const res = await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "text/plain" }, body: $("config").value });
+        const cfg = await res.json();
+        configDirty = false;
+        $("confighash").textContent = shortHash(cfg.hash);
+        closeConfig();
+        refreshAgents();
+      });
+
+      async function refreshAgents() {
+        try { agents = await (await fetch("/api/agents")).json(); } catch { return; }
+        render();
+      }
+      async function refreshConfig() {
+        let cfg = { config: "", hash: "" };
+        try { cfg = await (await fetch("/api/config")).json(); } catch { return; }
+        $("confighash").textContent = cfg.hash ? shortHash(cfg.hash) : "—";
+        if (!configDirty) $("config").value = cfg.config;
+      }
+
+      refreshConfig();
+      refreshAgents();
+      setInterval(refreshAgents, 2000);
+      setInterval(refreshConfig, 5000);
+    </script>
+  </body>
+</html>

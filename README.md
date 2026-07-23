@@ -1,5 +1,6 @@
 # OpAMP Fleet
 
+[![CI](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml)
 [![Docs & ADR checks](https://github.com/mbrigl/opamp-fleet/actions/workflows/docs-check.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/docs-check.yml)
 
 **OpAMP Fleet** is a Rust implementation of OpenTelemetry [OpAMP](https://opentelemetry.io/docs/specs/opamp/)-based
@@ -167,9 +168,14 @@ with three crates — `opamp` (shared library), `server`, and `client` (the Clie
 This section is the single source for build/test/run commands — both humans and agents rely on 
 it (AGENTS.md links here).
 
-- **Build:** TODO <!-- e.g. `make build` -->
-- **Test:** TODO <!-- e.g. `make test` -->
-- **Run:** TODO <!-- e.g. `make run` -->
+- **Build:** `cargo build --workspace`
+- **Test:** `cargo test --workspace`
+- **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Run:** TODO <!-- filled in once the binaries take their configuration files (ADR-0008) -->
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these build/test/lint
+commands and additionally release-builds the Client for Linux, Windows, and macOS and the Server
+for Linux.
 
 ## Usage
 
