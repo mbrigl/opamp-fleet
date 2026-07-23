@@ -1,6 +1,8 @@
 [package]
 name = "client"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0003)"
+# The test stub (src/bin/stub_agent.rs) is a second binary; `cargo run -p client` means this one.
+default-run = "client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +28,11 @@ reqwest.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 
+# ADR-0011: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# which has no SIGTERM equivalent (there, kill is the stop).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # ADR-0010: the SCM runtime shim, so the daemon runs under the Windows Service Control Manager.
 # Not compiled on Linux/macOS.
 [target.'cfg(windows)'.dependencies]
@@ -33,6 +40,9 @@ windows-service.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.
+server = { path = "../server" }
+axum.workspace = true
 
 # ADR-0009: build.rs derives the version from git tags and bakes it in at compile time.
 [build-dependencies]

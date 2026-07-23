@@ -1,6 +1,10 @@
 //! The plain-HTTP(S) transport (ADR-0007): one POST per exchange, polling at the configured
 //! interval (the Baseline's default: 30 seconds), with an immediate follow-up when something
 //! changed — so a config outcome is acknowledged now, not a poll later.
+//!
+//! Every Agent the [`Engine`] holds is polled each cycle — one exchange per Agent, since a
+//! plain-HTTP exchange carries exactly one `AgentToServer`; the shared connection pool of the
+//! HTTP client is the m = 1 of ADR-0003 here.
 
 use std::time::Duration;
 
@@ -8,15 +12,15 @@ use opamp::proto::{AgentToServer, ServerToAgent};
 use prost::Message;
 use tracing::{info, warn};
 
-use crate::agent::Agent;
 use crate::config::ClientConfig;
+use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
 
 /// The media type the Baseline requires the Client to set.
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 pub async fn run(
-    mut agent: Agent,
+    mut engine: Engine,
     config: &ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<(), String> {
@@ -38,41 +42,50 @@ pub async fn run(
 
     let poll = Duration::from_secs(config.poll_interval_secs.max(1));
     info!(endpoint = %config.endpoint, interval = ?poll, "polling");
-    agent.force_full();
+    engine.force_full_all();
 
-    loop {
-        let report = agent.next_report();
-        let mut immediately = false;
-        match exchange(&client, &config.endpoint, report).await {
-            Ok(reply) => {
-                let handled = agent.handle(&reply);
-                if let Some(delay) = handled.retry_after {
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = shutdown.requested() => break,
+    'poll: loop {
+        // The routine cycle, then immediate follow-ups until no Agent owes a report — a config
+        // outcome is acknowledged now, not a poll later.
+        let mut reports = engine.poll_reports();
+        loop {
+            for report in reports {
+                match exchange(&client, &config.endpoint, report).await {
+                    Ok(reply) => {
+                        let handled = engine.handle(&reply);
+                        if let Some(delay) = handled.retry_after {
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                _ = shutdown.requested() => break 'poll,
+                            }
+                            continue 'poll;
+                        }
                     }
-                    continue;
+                    Err(e) => {
+                        warn!(error = %e, "exchange failed");
+                        // A report was lost; full snapshots so the Server can rebuild.
+                        engine.force_full_all();
+                    }
                 }
-                immediately = handled.send_report;
             }
-            Err(e) => {
-                warn!(error = %e, "exchange failed");
-                // The report was lost; make the next one a full snapshot so the Server can rebuild.
-                agent.force_full();
+            reports = engine.owed_reports();
+            if reports.is_empty() {
+                break;
             }
-        }
-        if immediately {
-            continue;
         }
         tokio::select! {
             _ = tokio::time::sleep(poll) => {}
+            // A Managed Process changed some Agent's state: exchange now, not at the next poll.
+            _ = engine.changed() => {}
             _ = shutdown.requested() => break,
         }
     }
 
-    // The Baseline: the final message sets agent_disconnect.
-    let goodbye = agent.disconnect_message();
-    let _ = exchange(&client, &config.endpoint, goodbye).await;
+    // Managed Processes stop first; then the Baseline's final messages, one per Agent.
+    engine.shutdown_processes().await;
+    for goodbye in engine.disconnect_messages() {
+        let _ = exchange(&client, &config.endpoint, goodbye).await;
+    }
     info!("disconnected");
     Ok(())
 }

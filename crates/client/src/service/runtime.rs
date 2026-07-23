@@ -10,9 +10,8 @@ use std::path::PathBuf;
 
 use tokio::sync::watch;
 
-use crate::agent::Agent;
 use crate::config::{ClientConfig, TransportKind};
-use crate::storage::Storage;
+use crate::supervisor;
 use crate::transport;
 
 /// What a daemon run needs to know: where the configuration file is, and an optional state-dir
@@ -72,8 +71,8 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
     })
 }
 
-/// Load the configuration, restore the Agent, and run the transport the endpoint selects
-/// (ADR-0007) until `shutdown` fires.
+/// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
+/// none are), and run the transport the endpoint selects (ADR-0007) until `shutdown` fires.
 ///
 /// # Errors
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.
@@ -85,15 +84,14 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     }
     let transport = config.transport()?;
 
-    let storage = Storage::new(config.state_dir.clone())
-        .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
-    let agent = Agent::new(config.name.clone(), storage)
-        .map_err(|e| format!("cannot restore the agent state: {e}"))?;
-    tracing::info!(agent = %agent.uid(), name = %config.name, "starting");
+    let engine = supervisor::build_engine(&config, &shutdown)?;
+    for uid in engine.uids() {
+        tracing::info!(agent = %uid, "starting");
+    }
 
     match transport {
-        TransportKind::WebSocket => transport::ws::run(agent, &config, &mut shutdown).await,
-        TransportKind::Http => transport::http::run(agent, &config, &mut shutdown).await,
+        TransportKind::WebSocket => transport::ws::run(engine, &config, &mut shutdown).await,
+        TransportKind::Http => transport::http::run(engine, &config, &mut shutdown).await,
     }
 }
 

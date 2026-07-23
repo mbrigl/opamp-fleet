@@ -1,8 +1,10 @@
-//! The Agent core: builds `AgentToServer` reports and reacts to `ServerToAgent` replies.
+//! One Agent's state machine: builds `AgentToServer` reports and reacts to `ServerToAgent`
+//! replies.
 //!
 //! Transport-agnostic on purpose (ADR-0007): the WebSocket and plain-HTTP loops feed the same
-//! state machine, so transport is carriage, never semantics. The Client currently presents one
-//! Agent — itself; the n-Agents-over-m-connections shape of ADR-0003 arrives with the Supervisors.
+//! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
+//! carries n of these over one connection (ADR-0003, ADR-0011) — a Supervisor-backed Agent and
+//! the self-Agent fallback are the same state machine.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,13 +36,14 @@ pub struct Handled {
     pub retry_after: Option<Duration>,
 }
 
-pub struct Agent {
+pub struct AgentState {
     uid: InstanceUid,
     sequence_num: u64,
     name: String,
     start_time_ns: u64,
     storage: Storage,
-    /// The last stored remote configuration; what `effective_config` echoes.
+    /// The last stored remote configuration; what `effective_config` echoes unless the Managed
+    /// Process reported its own.
     applied: Option<AgentRemoteConfig>,
     status: Option<RemoteConfigStatus>,
     /// The Server's declared Capability Set, once a reply carried it. Capability negotiation is
@@ -48,9 +51,22 @@ pub struct Agent {
     server_capabilities: Option<u64>,
     send_full: bool,
     send_status: bool,
+    /// A Managed Process stands behind this Agent: a received configuration is acknowledged
+    /// `APPLYING` and handed to the process adapter; `APPLIED`/`FAILED` follow its outcome.
+    managed: bool,
+    /// A received configuration awaiting dispatch to the process adapter.
+    pending_apply: Option<AgentRemoteConfig>,
+    /// The Managed Process's health — derived or self-reported (ADR-0011). Absent for the
+    /// self-Agent, whose health is being alive.
+    process_health: Option<ComponentHealth>,
+    send_health: bool,
+    /// The Managed Process's self-reported description, folded into ours (goal 16).
+    process_description: Option<AgentDescription>,
+    /// The Managed Process's self-reported effective configuration; replaces the echo.
+    process_effective_config: Option<EffectiveConfig>,
 }
 
-impl Agent {
+impl AgentState {
     /// Restores identity and configuration from storage, so a restart reports the same Agent with
     /// the same applied config hash — and is therefore not reconfigured redundantly.
     pub fn new(name: String, storage: Storage) -> std::io::Result<Self> {
@@ -62,7 +78,7 @@ impl Agent {
             error_message: String::new(),
         });
         info!(agent = %uid, "agent identity ready");
-        Ok(Agent {
+        Ok(AgentState {
             uid,
             sequence_num: 0,
             name,
@@ -73,11 +89,67 @@ impl Agent {
             server_capabilities: None,
             send_full: true,
             send_status: false,
+            managed: false,
+            pending_apply: None,
+            process_health: None,
+            send_health: false,
+            process_description: None,
+            process_effective_config: None,
         })
+    }
+
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011).
+    pub fn supervised(name: String, storage: Storage) -> std::io::Result<Self> {
+        let mut state = Self::new(name, storage)?;
+        state.managed = true;
+        Ok(state)
     }
 
     pub fn uid(&self) -> InstanceUid {
         self.uid
+    }
+
+    /// A configuration stored `APPLYING` and not yet handed to the process adapter, if any.
+    pub fn take_pending_apply(&mut self) -> Option<AgentRemoteConfig> {
+        self.pending_apply.take()
+    }
+
+    /// The process adapter's verdict on an [`ApplyConfig`](super::ports::ProcessCommand): closes
+    /// the `APPLYING` → `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
+    pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
+        self.status = Some(match result {
+            Ok(()) => RemoteConfigStatus {
+                last_remote_config_hash: hash,
+                status: RemoteConfigStatuses::Applied as i32,
+                error_message: String::new(),
+            },
+            Err(error) => RemoteConfigStatus {
+                last_remote_config_hash: hash,
+                status: RemoteConfigStatuses::Failed as i32,
+                error_message: error,
+            },
+        });
+        self.send_status = true;
+    }
+
+    /// The Managed Process's health changed — derived or self-reported.
+    pub fn set_process_health(&mut self, health: ComponentHealth) {
+        self.process_health = Some(health);
+        self.send_health = true;
+    }
+
+    /// The Managed Process reported its own description (through the Supervisor Endpoint); fold
+    /// it into ours — identity stays the Supervisor's (goal 16).
+    pub fn set_process_description(&mut self, description: AgentDescription) {
+        self.process_description = Some(description);
+        self.send_full = true;
+    }
+
+    /// The Managed Process reported its own effective configuration; report that instead of
+    /// echoing the written files.
+    pub fn set_process_effective_config(&mut self, config: EffectiveConfig) {
+        self.process_effective_config = Some(config);
+        self.send_status = true;
     }
 
     /// The next report starts from a full status snapshot again — after (re)connecting, after an
@@ -100,18 +172,24 @@ impl Agent {
         };
         if self.send_full {
             msg.agent_description = Some(self.describe());
+        }
+        if self.send_full || self.send_health {
             msg.health = Some(self.health());
         }
         if self.send_full || self.send_status {
             msg.remote_config_status = self.status.clone();
             if self.server_accepts_effective_config() {
-                msg.effective_config = Some(EffectiveConfig {
-                    config_map: self.applied.as_ref().and_then(|c| c.config.clone()),
+                msg.effective_config = Some(match &self.process_effective_config {
+                    Some(reported) => reported.clone(),
+                    None => EffectiveConfig {
+                        config_map: self.applied.as_ref().and_then(|c| c.config.clone()),
+                    },
                 });
             }
         }
         self.send_full = false;
         self.send_status = false;
+        self.send_health = false;
         msg
     }
 
@@ -177,10 +255,22 @@ impl Agent {
         handled
     }
 
-    /// Applies an offered configuration: store it, report the outcome — success and failure alike,
-    /// with the hash the status refers to (a rejected configuration is a report, not a silence).
+    /// Takes an offered configuration in: store it, then either acknowledge it directly (the
+    /// self-Agent: storing *is* applying) or report `APPLYING` and leave it pending for the
+    /// process adapter, whose outcome closes the lifecycle. Success and failure alike carry the
+    /// hash the status refers to (a rejected configuration is a report, not a silence).
     fn apply(&mut self, config: &AgentRemoteConfig) {
         match self.storage.store_remote_config(config) {
+            Ok(()) if self.managed => {
+                info!(hash = %hex::encode(&config.config_hash), "remote configuration stored; applying");
+                self.applied = Some(config.clone());
+                self.status = Some(RemoteConfigStatus {
+                    last_remote_config_hash: config.config_hash.clone(),
+                    status: RemoteConfigStatuses::Applying as i32,
+                    error_message: String::new(),
+                });
+                self.pending_apply = Some(config.clone());
+            }
             Ok(()) => {
                 info!(hash = %hex::encode(&config.config_hash), "remote configuration applied");
                 self.applied = Some(config.clone());
@@ -211,7 +301,7 @@ impl Agent {
     }
 
     fn describe(&self) -> AgentDescription {
-        AgentDescription {
+        let mut description = AgentDescription {
             identifying_attributes: vec![
                 string_attr("service.name", &self.name),
                 string_attr("service.version", crate::version::version()),
@@ -221,17 +311,47 @@ impl Agent {
                 string_attr("os.type", os_type()),
                 string_attr("host.arch", std::env::consts::ARCH),
             ],
+        };
+        // Fold in what the Managed Process reported about itself — except its identity: the
+        // Agent the Server sees is the Supervisor, keyed by the Supervisor's uid (goal 16).
+        if let Some(reported) = &self.process_description {
+            for attr in &reported.identifying_attributes {
+                if attr.key != "service.instance.id" {
+                    upsert_attr(&mut description.identifying_attributes, attr);
+                }
+            }
+            for attr in &reported.non_identifying_attributes {
+                upsert_attr(&mut description.non_identifying_attributes, attr);
+            }
         }
+        description
     }
 
     fn health(&self) -> ComponentHealth {
-        ComponentHealth {
-            healthy: true,
-            start_time_unix_nano: self.start_time_ns,
-            status: "running".to_string(),
-            status_time_unix_nano: now_ns(),
-            ..Default::default()
+        match &self.process_health {
+            Some(health) => health.clone(),
+            None if self.managed => ComponentHealth {
+                healthy: false,
+                status: "starting".to_string(),
+                status_time_unix_nano: now_ns(),
+                ..Default::default()
+            },
+            // The self-Agent's health is being alive.
+            None => ComponentHealth {
+                healthy: true,
+                start_time_unix_nano: self.start_time_ns,
+                status: "running".to_string(),
+                status_time_unix_nano: now_ns(),
+                ..Default::default()
+            },
         }
+    }
+}
+
+fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
+    match attrs.iter_mut().find(|existing| existing.key == attr.key) {
+        Some(existing) => existing.value = attr.value.clone(),
+        None => attrs.push(attr.clone()),
     }
 }
 
@@ -266,9 +386,9 @@ mod tests {
     use opamp::proto::{AgentConfigFile, AgentConfigMap};
     use std::collections::HashMap;
 
-    fn make_agent(dir: &std::path::Path) -> Agent {
+    fn make_agent(dir: &std::path::Path) -> AgentState {
         let storage = Storage::new(dir.to_path_buf()).expect("storage");
-        Agent::new("test-agent".to_string(), storage).expect("agent")
+        AgentState::new("test-agent".to_string(), storage).expect("agent")
     }
 
     fn remote_config(body: &[u8], hash: &[u8]) -> AgentRemoteConfig {
