@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::Backoff;
+use crate::transport::{Backoff, RunOutcome};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -29,13 +29,15 @@ enum Served {
     Shutdown,
     /// The connection is gone; reconnect with backoff and report full state again.
     ConnectionLost,
+    /// Verified connection settings took effect (ADR-0014); the runtime reconnects with them.
+    Reconfigured,
 }
 
 pub async fn run(
-    mut engine: Engine,
+    engine: &mut Engine,
     config: &ClientConfig,
     shutdown: &mut Shutdown,
-) -> Result<(), String> {
+) -> Result<RunOutcome, String> {
     let connector = match &config.tls {
         Some(tls) => Some(Connector::Rustls(crate::tls::rustls_config_with_ca(
             &tls.ca_file,
@@ -43,12 +45,11 @@ pub async fn run(
         None => None,
     };
 
-    // The Authorization header (ADR-0013) rides the upgrade request — the server checks it
-    // before the WebSocket comes up.
-    let authorization = match &config.auth {
-        Some(auth) => {
-            let value: tokio_tungstenite::tungstenite::http::HeaderValue = auth
-                .authorization()?
+    // The Authorization header (ADR-0013, rotated per ADR-0014) rides the upgrade request — the
+    // server checks it before the WebSocket comes up.
+    let authorization = match config.authorization_value()? {
+        Some(value) => {
+            let value: tokio_tungstenite::tungstenite::http::HeaderValue = value
                 .parse()
                 .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
             if config.sends_credentials_in_cleartext() {
@@ -76,12 +77,13 @@ pub async fn run(
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, &mut engine, config, shutdown).await {
+                match serve(socket, engine, config, shutdown).await {
                     Served::Shutdown => {
                         // Usually already stopped before the goodbyes went out; idempotent.
                         engine.shutdown_processes().await;
-                        return Ok(());
+                        return Ok(RunOutcome::Shutdown);
                     }
+                    Served::Reconfigured => return Ok(RunOutcome::Reconfigured),
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
             }
@@ -101,7 +103,7 @@ pub async fn run(
                 // Stopped while disconnected: no goodbyes to send, but the Managed Processes
                 // still stop before the runtime goes away.
                 engine.shutdown_processes().await;
-                return Ok(());
+                return Ok(RunOutcome::Shutdown);
             }
         }
     }
@@ -162,6 +164,38 @@ async fn serve(
                         }
                         if send_all(&mut socket, engine.owed_reports()).await.is_err() {
                             return Served::ConnectionLost;
+                        }
+                        // A connection-settings offer (ADR-0014): the APPLYING acknowledgement
+                        // just went out with the owed reports; now verify by actually
+                        // connecting. Success persists the settings and reconnects with them;
+                        // failure reports FAILED and stays on the working connection.
+                        if let Some(offer) = engine.take_connection_offer() {
+                            let settings = offer.opamp.clone().unwrap_or_default();
+                            let probe = || engine.probe_report();
+                            match crate::connection::verify(&settings, config, probe).await {
+                                Ok(()) => {
+                                    engine.connection_settings_outcome(&offer.hash, Ok(()));
+                                    let merged = crate::connection::merge(
+                                        crate::connection::load(&config.state_dir).as_ref(),
+                                        &offer,
+                                    );
+                                    if let Err(e) =
+                                        crate::connection::store(&config.state_dir, &merged)
+                                    {
+                                        warn!(error = %e, "cannot persist the connection settings");
+                                    }
+                                    info!("connection settings verified; reconnecting with them");
+                                    let _ = socket.close(None).await;
+                                    return Served::Reconfigured;
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "offered connection settings failed verification");
+                                    engine.connection_settings_outcome(&offer.hash, Err(&e));
+                                    if send_all(&mut socket, engine.owed_reports()).await.is_err() {
+                                        return Served::ConnectionLost;
+                                    }
+                                }
+                            }
                         }
                     }
                     Message::Close(_) => return Served::ConnectionLost,

@@ -19,15 +19,27 @@ pub struct TestServer {
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn() -> TestServer {
-    spawn_with_auth(None).await
+    spawn_with(None, None).await
 }
 
 /// The same real router, with the OpAMP endpoint's credential check active (ADR-0013).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_auth(auth: Option<server::transport::OpampAuth>) -> TestServer {
+    spawn_with(auth, None).await
+}
+
+/// The full shape: optional credential check (ADR-0013) and optional connection-settings offer
+/// (ADR-0014).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with(
+    auth: Option<server::transport::OpampAuth>,
+    offer: Option<server::fleet::ConnectionOffer>,
+) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("open the configuration store")
+            .with_connection_offer(offer),
     );
     let app = server::app(state.clone(), auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

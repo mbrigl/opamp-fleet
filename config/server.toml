@@ -22,3 +22,14 @@ config_dir = "fleet-configs"
 # bearer_tokens = ["a-long-random-token"]
 # [auth.basic_users]
 # fleet = "a-strong-password"
+
+# Optional connection settings offered to the fleet (ADR-0014): every Agent declaring
+# AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and
+# switches only on success. Any subset of the keys works, but not an empty section. To rotate
+# credentials: add the new token to [auth] (old and new both accepted), point the offer at it,
+# restart the Server, and drop the old token once the fleet has migrated. Unless endpoint points
+# to another Server, the offered credential must be in the [auth] accepted set.
+# [connection_offer]
+# bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
+# heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
+# endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint

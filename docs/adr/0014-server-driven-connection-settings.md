@@ -39,10 +39,11 @@ taken for `ReportsHeartbeat` and `ReportsAvailableComponents`.
 We will implement Server-driven OpAMP connection settings, scoped to what the fleet can use today:
 
 - **Server** (`OffersConnectionSettings`). A new optional `[connection_offer]` section in
-  `server.toml` names the **canonical client credential** — `bearer_token`, or `username` and
-  `password` (exactly one scheme, as in the Client's `[auth]`) — plus an optional
-  `heartbeat_interval_secs` and an optional `endpoint` (`ws(s)://` or `http(s)://`, e.g. for a
-  Server move). The section compiles into one `OpAMPConnectionSettings` whose SHA-256 hash gates
+  `server.toml` names any of: the **canonical client credential** — `bearer_token`, or `username`
+  and `password` (exactly one scheme, as in the Client's `[auth]`) — an optional
+  `heartbeat_interval_secs`, and an optional `endpoint` (`ws(s)://` or `http(s)://`, e.g. for a
+  Server move). At least one must be present — an empty section fails loudly (ADR-0008); a
+  credential-less offer legitimately retunes only heartbeat or endpoint. The section compiles into one `OpAMPConnectionSettings` whose SHA-256 hash gates
   delivery: the Server compares each Agent's reported `last_connection_settings_hash` and
   includes the offer on mismatch, only for Agents declaring `AcceptsOpAMPConnectionSettings`.
   Unless `endpoint` points elsewhere, the offered credential MUST be in the `[auth]` accepted

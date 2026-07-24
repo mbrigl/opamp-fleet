@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use tokio::sync::watch;
 
 use crate::config::{ClientConfig, TransportKind};
+use crate::connection;
 use crate::supervisor;
-use crate::transport;
+use crate::transport::{self, RunOutcome};
 
 /// What a daemon run needs to know: where the configuration file is, and an optional state-dir
 /// override (`--state-dir`, baked into installed units so they never depend on a relative path).
@@ -78,21 +79,56 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.
 pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result<(), String> {
     heal_torn_pointer();
-    let mut config = ClientConfig::load(&spec.config_path)?;
-    if let Some(state_dir) = spec.state_dir {
-        config.state_dir = state_dir;
-    }
-    let transport = config.transport()?;
+    let mut config = load_effective_config(&spec)?;
 
-    let engine = supervisor::build_engine(&config, &shutdown)?;
+    let mut engine = supervisor::build_engine(&config, &shutdown)?;
+    if let Some(stored) = connection::load(&config.state_dir) {
+        // A restarted Client reports the persisted settings APPLIED, so the Server does not
+        // re-offer what it already runs (ADR-0014).
+        engine.adopt_connection_settings(&stored.hash);
+    }
     for uid in engine.uids() {
         tracing::info!(agent = %uid, "starting");
     }
 
-    match transport {
-        TransportKind::WebSocket => transport::ws::run(engine, &config, &mut shutdown).await,
-        TransportKind::Http => transport::http::run(engine, &config, &mut shutdown).await,
+    loop {
+        let outcome = match config.transport()? {
+            TransportKind::WebSocket => {
+                transport::ws::run(&mut engine, &config, &mut shutdown).await?
+            }
+            TransportKind::Http => {
+                transport::http::run(&mut engine, &config, &mut shutdown).await?
+            }
+        };
+        match outcome {
+            RunOutcome::Shutdown => return Ok(()),
+            // Verified connection settings took effect (ADR-0014): re-resolve the effective
+            // configuration — endpoint, credential, intervals, possibly the other transport —
+            // and reconnect. The Engine (and its Managed Processes) carries on.
+            RunOutcome::Reconfigured => {
+                config = load_effective_config(&spec)?;
+                if config.heartbeat_interval_secs > 0 {
+                    // An offered interval may enable what the file had disabled; the capability
+                    // follows (the reverse never happens — 0 means "not offered").
+                    engine
+                        .declare_capability_all(opamp::proto::AgentCapabilities::ReportsHeartbeat);
+                }
+            }
+        }
     }
+}
+
+/// The configuration in force: `client.toml` (ADR-0008), the `--state-dir` override, and the
+/// persisted Server-offered connection settings on top (ADR-0014).
+fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
+    let mut config = ClientConfig::load(&spec.config_path)?;
+    if let Some(state_dir) = &spec.state_dir {
+        config.state_dir = state_dir.clone();
+    }
+    if let Some(stored) = connection::load(&config.state_dir) {
+        connection::apply(&mut config, &stored);
+    }
+    Ok(config)
 }
 
 /// ADR-0010 self-heal: when running from a versioned install layout, make sure `current`

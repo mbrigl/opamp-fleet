@@ -27,6 +27,78 @@ pub struct ServerConfig {
     pub tls: Option<TlsConfig>,
     /// Optional authentication on the OpAMP endpoint (ADR-0013); absent means open, as before.
     pub auth: Option<AuthConfig>,
+    /// Optional connection settings offered to the fleet (ADR-0014); absent means none.
+    pub connection_offer: Option<ConnectionOfferConfig>,
+}
+
+/// The `[connection_offer]` section (ADR-0014): what every Agent declaring
+/// `AcceptsOpAMPConnectionSettings` is offered — a canonical credential (`bearer_token`, or
+/// `username`/`password`, exactly one scheme), a heartbeat interval, an endpoint. Any subset,
+/// but never none of them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionOfferConfig {
+    pub bearer_token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// Offered heartbeat interval — on plain HTTP the polling interval (the Baseline's MUST).
+    pub heartbeat_interval_secs: Option<u64>,
+    /// Offered OpAMP endpoint, e.g. for a Server move; `ws(s)://` or `http(s)://`.
+    pub endpoint: Option<String>,
+}
+
+impl ConnectionOfferConfig {
+    /// The offered `Authorization` header value, `None` for a credential-less offer.
+    pub fn authorization(&self) -> Result<Option<String>, String> {
+        match (&self.bearer_token, &self.username, &self.password) {
+            (None, None, None) => Ok(None),
+            (Some(token), None, None) => Ok(Some(format!("Bearer {token}"))),
+            (None, Some(user), Some(password)) => {
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                Ok(Some(format!("Basic {encoded}")))
+            }
+            (Some(_), _, _) => Err(
+                "[connection_offer] must set either bearer_token or username/password, not both"
+                    .to_string(),
+            ),
+            _ => Err("[connection_offer] needs username and password together".to_string()),
+        }
+    }
+
+    /// Loud validation (ADR-0008): a well-formed credential, at least one offered field, a sane
+    /// endpoint — and, unless the offer points at another Server, a credential this Server's own
+    /// `[auth]` accepts, so a rotation cannot lock the fleet out.
+    fn check(&self, auth: Option<&AuthConfig>) -> Result<(), String> {
+        let authorization = self.authorization()?;
+        if authorization.is_none()
+            && self.heartbeat_interval_secs.is_none()
+            && self.endpoint.is_none()
+        {
+            return Err(
+                "a [connection_offer] section needs a credential, heartbeat_interval_secs, or endpoint"
+                    .to_string(),
+            );
+        }
+        if let Some(endpoint) = &self.endpoint {
+            let scheme = endpoint.split("://").next().unwrap_or("");
+            if !matches!(scheme, "ws" | "wss" | "http" | "https") {
+                return Err(format!(
+                    "connection_offer endpoint {endpoint} must start with ws://, wss://, http:// or https://"
+                ));
+            }
+        }
+        if let (Some(offered), Some(auth), None) = (&authorization, auth, self.endpoint.as_ref()) {
+            if !auth.accepted_headers().contains(offered) {
+                return Err(
+                    "the [connection_offer] credential is not in the [auth] accepted set — \
+                     this rotation would lock the fleet out"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `[auth]` section (ADR-0013): the credentials the OpAMP endpoint accepts. Any listed
@@ -105,6 +177,7 @@ impl Default for ServerConfig {
             config_dir: default_config_dir(),
             tls: None,
             auth: None,
+            connection_offer: None,
         }
     }
 }
@@ -122,6 +195,11 @@ impl ServerConfig {
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         if let Some(auth) = &config.auth {
             auth.check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(offer) = &config.connection_offer {
+            offer
+                .check(config.auth.as_ref())
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         Ok(config)
@@ -193,5 +271,65 @@ mod tests {
         assert!(empty.check().is_err());
         // Unknown keys fail loudly, as everywhere (ADR-0008).
         assert!(toml::from_str::<ServerConfig>("[auth]\nbearer_token = \"tok\"").is_err());
+    }
+
+    #[test]
+    fn a_connection_offer_yields_the_expected_authorization() {
+        let bearer: ConnectionOfferConfig =
+            toml::from_str("bearer_token = \"tok\"").expect("parse");
+        assert_eq!(
+            bearer.authorization().expect("value"),
+            Some("Bearer tok".to_string())
+        );
+
+        let basic: ConnectionOfferConfig =
+            toml::from_str("username = \"fleet\"\npassword = \"secret\"").expect("parse");
+        assert_eq!(
+            basic.authorization().expect("value"),
+            Some("Basic ZmxlZXQ6c2VjcmV0".to_string())
+        );
+
+        // Heartbeat-only: no credential, still valid.
+        let heartbeat_only: ConnectionOfferConfig =
+            toml::from_str("heartbeat_interval_secs = 15").expect("parse");
+        assert_eq!(heartbeat_only.authorization().expect("value"), None);
+    }
+
+    #[test]
+    fn a_connection_offer_needs_at_least_one_field() {
+        let empty: ConnectionOfferConfig =
+            toml::from_str("").expect("parses; emptiness is semantic");
+        assert!(empty.check(None).is_err());
+    }
+
+    #[test]
+    fn a_connection_offer_rejects_a_bad_endpoint_scheme() {
+        let bad: ConnectionOfferConfig =
+            toml::from_str("endpoint = \"ftp://x/v1/opamp\"").expect("parse");
+        assert!(bad.check(None).is_err());
+        let good: ConnectionOfferConfig =
+            toml::from_str("endpoint = \"wss://x/v1/opamp\"").expect("parse");
+        assert!(good.check(None).is_ok());
+    }
+
+    #[test]
+    fn a_credential_offer_must_be_accepted_by_auth_unless_the_endpoint_moves() {
+        let auth: AuthConfig = toml::from_str("bearer_tokens = [\"new\"]").expect("parse");
+
+        // Offering a credential [auth] does not accept would lock the fleet out.
+        let stranger: ConnectionOfferConfig =
+            toml::from_str("bearer_token = \"other\"").expect("parse");
+        assert!(stranger.check(Some(&auth)).is_err());
+
+        // Offering the accepted credential is fine.
+        let matching: ConnectionOfferConfig =
+            toml::from_str("bearer_token = \"new\"").expect("parse");
+        assert!(matching.check(Some(&auth)).is_ok());
+
+        // A move to another Server is exempt — the destination validates its own credential.
+        let moved: ConnectionOfferConfig =
+            toml::from_str("bearer_token = \"other\"\nendpoint = \"wss://elsewhere/v1/opamp\"")
+                .expect("parse");
+        assert!(moved.check(Some(&auth)).is_ok());
     }
 }

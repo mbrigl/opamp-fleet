@@ -41,6 +41,10 @@ pub struct ClientConfig {
     /// Optional authentication toward the Server (ADR-0013); absent means no `Authorization`
     /// header, as before.
     pub auth: Option<AuthConfig>,
+    /// A Server-rotated `Authorization` value (ADR-0014), applied from the persisted connection
+    /// settings at startup — never from the file, and it wins over `[auth]`.
+    #[serde(skip)]
+    pub authorization_override: Option<String>,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -245,6 +249,7 @@ impl Default for ClientConfig {
             attributes: BTreeMap::new(),
             tls: None,
             auth: None,
+            authorization_override: None,
             supervisors: Vec::new(),
         }
     }
@@ -292,11 +297,20 @@ impl ClientConfig {
         merged
     }
 
+    /// The `Authorization` value this Client sends, if any: a Server-rotated credential
+    /// (ADR-0014) wins over the `[auth]` block (ADR-0013).
+    pub fn authorization_value(&self) -> Result<Option<String>, String> {
+        if let Some(rotated) = &self.authorization_override {
+            return Ok(Some(rotated.clone()));
+        }
+        self.auth.as_ref().map(|a| a.authorization()).transpose()
+    }
+
     /// Basic and Bearer are cleartext without TLS: sending them beyond the loopback over `ws://`
     /// or `http://` deserves a warning (ADR-0013) — ultimately the operator's choice, so never
     /// an error.
     pub fn sends_credentials_in_cleartext(&self) -> bool {
-        if self.auth.is_none() {
+        if self.auth.is_none() && self.authorization_override.is_none() {
             return false;
         }
         let Some((scheme, rest)) = self.endpoint.split_once("://") else {
