@@ -133,7 +133,7 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | planned | Needed for Server-driven credential rotation (goal 17). |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
-| `AcceptsRestartCommand` | `0x0400` | Beta | optional | planned | Server-initiated restart of a Managed Process. |
+| `AcceptsRestartCommand` | `0x0400` | Beta | optional | implemented | Declared by Supervisor-backed Agents only — the self-Agent has no process to restart. Queued via `POST /api/v1/agents/{uid}/restart`, delivered as the Baseline's command-only message on both transports (pushed over WebSocket, on the next poll over plain HTTP). |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
 | `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval arrives with `AcceptsOpAMPConnectionSettings`. |

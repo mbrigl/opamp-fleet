@@ -150,6 +150,19 @@ async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     break;
                 }
                 for uid in &seen {
+                    // A queued restart goes first, as its own frame — the Baseline's command
+                    // message is never combined with an offer.
+                    if let Some(command) = state.restart_command_for(uid) {
+                        debug!(agent = %uid, "pushing a restart command");
+                        if socket
+                            .send(Message::Binary(frame::encode(&command).into()))
+                            .await
+                            .is_err()
+                        {
+                            state.mark_disconnected(&seen);
+                            return;
+                        }
+                    }
                     if let Some(offer) = state.offer_for(uid) {
                         debug!(agent = %uid, "pushing a configuration offer");
                         if socket

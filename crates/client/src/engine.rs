@@ -125,7 +125,7 @@ impl Engine {
                         agent.state.config_applied(
                             match e.into_inner() {
                                 ProcessCommand::ApplyConfig { config } => config.config_hash,
-                                ProcessCommand::Shutdown => Vec::new(),
+                                ProcessCommand::Restart | ProcessCommand::Shutdown => Vec::new(),
                             },
                             Err("the supervisor is not accepting commands".to_string()),
                         );
@@ -135,6 +135,18 @@ impl Engine {
                 None => {
                     warn!(agent = %uid, "a configuration is pending but no process adapter exists")
                 }
+            }
+        }
+        // A Server-commanded restart goes the same way; its outcome is the health cycle the
+        // stop/spawn emits, so a dropped command only needs the warning.
+        if agent.state.take_pending_restart() {
+            match &agent.commands {
+                Some(commands) => {
+                    if let Err(e) = commands.try_send(ProcessCommand::Restart) {
+                        warn!(agent = %uid, error = %e, "cannot hand the restart to the supervisor");
+                    }
+                }
+                None => warn!(agent = %uid, "a restart is pending but no process adapter exists"),
             }
         }
         handled

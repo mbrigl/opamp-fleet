@@ -169,6 +169,32 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
 }
 
 #[tokio::test]
+async fn a_restart_is_pushed_to_a_connected_agent_as_its_own_frame() {
+    let server = spawn().await;
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "restartable", 1);
+    report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    send(&mut socket, &report).await;
+    recv(&mut socket).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 202);
+
+    let pushed = recv(&mut socket).await;
+    let command = pushed.command.expect("the pushed restart command");
+    assert_eq!(command.r#type, opamp::proto::CommandType::Restart as i32);
+    assert!(pushed.remote_config.is_none(), "command-only frame");
+}
+
+#[tokio::test]
 async fn agent_disconnect_and_socket_loss_mark_the_agent_disconnected() {
     let server = spawn().await;
 

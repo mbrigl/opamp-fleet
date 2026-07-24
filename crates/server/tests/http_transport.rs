@@ -122,6 +122,92 @@ async fn the_offer_is_gated_by_the_config_hash() {
 }
 
 #[tokio::test]
+async fn a_queued_restart_is_delivered_once_as_a_command_only_reply() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    // The agent declares AcceptsRestartCommand on top of the usual set.
+    let mut report = full_report(&uid, "restartable", 1);
+    report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    exchange(&client, &url, &report).await;
+
+    // A configuration is pending too — the command must never be combined with the offer.
+    distribute(server.addr, "fleet", &[], "receivers: {}\n").await;
+    let restart = client
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(restart.status(), 202);
+
+    // The next exchange carries the command and nothing else; the offer follows afterwards.
+    // (A real client always reports its full capability mask, so the follow-ups carry the
+    // restart bit too — the Server caches the last non-zero mask.)
+    let follow_up = |sequence_num| {
+        let mut report = compressed_report(&uid, sequence_num);
+        report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+        report
+    };
+    let reply = exchange(&client, &url, &follow_up(2)).await;
+    let command = reply.command.expect("the restart command");
+    assert_eq!(command.r#type, opamp::proto::CommandType::Restart as i32);
+    assert!(reply.remote_config.is_none(), "command-only message");
+    assert_eq!(reply.flags, 0);
+
+    let reply = exchange(&client, &url, &follow_up(3)).await;
+    assert!(reply.command.is_none(), "delivered exactly once");
+    assert!(reply.remote_config.is_some(), "the deferred offer arrives");
+}
+
+#[tokio::test]
+async fn restart_requests_are_validated_against_the_fleet() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+
+    // Malformed uid.
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/nonsense/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 400);
+
+    // Unknown agent.
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/{}/restart",
+            server.addr,
+            InstanceUid::default()
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 404);
+
+    // Known agent without the capability: refused, not silently dropped.
+    let uid = InstanceUid::default();
+    exchange(&client, &url, &full_report(&uid, "fixed", 1)).await;
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 409);
+}
+
+#[tokio::test]
 async fn gzip_request_bodies_are_accepted() {
     let server = spawn().await;
     let client = reqwest::Client::new();

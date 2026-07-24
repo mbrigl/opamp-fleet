@@ -65,6 +65,11 @@ impl Runner {
                             .send(ProcessEvent::ConfigApplied { hash: config.config_hash, result })
                             .await;
                     }
+                    Some(ProcessCommand::Restart) => {
+                        stop(&mut child, self.stop_timeout, &self.name).await;
+                        backoff.reset();
+                        child = self.spawn_if_due().await;
+                    }
                     Some(ProcessCommand::Shutdown) | None => break,
                 },
                 status = exited => {
@@ -442,6 +447,30 @@ mod tests {
         let health = next_health(&mut harness.events).await;
         assert!(!health.healthy);
         assert_eq!(health.status, "awaiting configuration");
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_command_cycles_the_process_without_a_config_ack() {
+        let mut harness = start(|| Some(sh("sleep 600")));
+        let first = next_health(&mut harness.events).await;
+        assert!(first.healthy);
+
+        harness
+            .commands
+            .send(ProcessCommand::Restart)
+            .await
+            .expect("send the restart");
+
+        // The respawned process reports healthy again — and nothing acknowledges a config,
+        // because none changed.
+        let respawned = next_health(&mut harness.events).await;
+        assert!(respawned.healthy);
+        assert!(
+            harness.events.try_recv().is_err(),
+            "a restart must not emit a ConfigApplied"
+        );
         harness.shutdown_tx.send(true).expect("signal shutdown");
         let _ = harness.task.await;
     }

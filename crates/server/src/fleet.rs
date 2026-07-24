@@ -52,6 +52,18 @@ pub struct AgentRecord {
     pub transport: Transport,
     pub connected: bool,
     pub last_seen_ms: u64,
+    /// An operator-requested restart not yet delivered. Lives on the record, not a connection,
+    /// so it reaches the Agent on its next exchange whichever transport carries it.
+    pub restart_pending: bool,
+}
+
+/// Why a restart request was refused (`POST /api/v1/agents/{uid}/restart`).
+pub enum RestartError {
+    /// No Agent of that identity is known.
+    UnknownAgent,
+    /// The Agent does not declare `AcceptsRestartCommand` — capability negotiation is binding,
+    /// so the Server refuses rather than sending a command the Agent would ignore.
+    NoCapability,
 }
 
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
@@ -112,6 +124,34 @@ impl AppState {
         Ok(())
     }
 
+    /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so
+    /// a connected Agent hears it now; a polling one picks it up on its next exchange.
+    pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid).ok_or(RestartError::UnknownAgent)?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64 == 0
+        {
+            return Err(RestartError::NoCapability);
+        }
+        record.restart_pending = true;
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "restart requested");
+        Ok(())
+    }
+
+    /// The queued restart for this Agent as the Baseline's command-only message, taken exactly
+    /// once — `None` when nothing is queued (or the Agent went away).
+    pub fn restart_command_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid)?;
+        if !record.restart_pending || !record.connected {
+            return None;
+        }
+        record.restart_pending = false;
+        Some(restart_command(uid))
+    }
+
     /// Deletes a Configuration and wakes every WebSocket loop; `false` when none of that name
     /// exists. Agents that applied it keep running it — narrowing never revokes (ADR-0012).
     pub fn delete_configuration(&self, name: &str) -> Result<bool, String> {
@@ -169,6 +209,7 @@ impl AppState {
                 transport,
                 connected: true,
                 last_seen_ms: now_ms(),
+                restart_pending: false,
             }
         });
 
@@ -205,6 +246,25 @@ impl AppState {
         if disconnected {
             info!(agent = %uid, "agent disconnected");
             record.connected = false;
+        }
+
+        // A queued restart goes out as the Baseline's command-only message: nothing but
+        // identity, capabilities, and the command. Anything else the reply would carry —
+        // an identity reassignment, a demanded full report — defers the command to the next
+        // exchange instead of being combined with it.
+        if record.restart_pending
+            && !disconnected
+            && identification.is_none()
+            && reply_flags == 0
+            && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
+                != 0
+        {
+            record.restart_pending = false;
+            return Processed {
+                reply: restart_command(&uid),
+                uid: Some(uid),
+                disconnected: false,
+            };
         }
 
         // The config offer — composed from the Configurations whose Selectors match this Agent
@@ -462,6 +522,18 @@ impl AgentView {
             sequence_num: record.sequence_num,
             last_seen_ms: record.last_seen_ms,
         }
+    }
+}
+
+/// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
+fn restart_command(uid: &InstanceUid) -> ServerToAgent {
+    ServerToAgent {
+        instance_uid: uid.as_bytes().to_vec(),
+        capabilities: SERVER_CAPABILITIES,
+        command: Some(opamp::proto::ServerToAgentCommand {
+            r#type: opamp::proto::CommandType::Restart as i32,
+        }),
+        ..Default::default()
     }
 }
 

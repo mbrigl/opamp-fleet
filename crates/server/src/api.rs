@@ -19,7 +19,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec};
-use crate::fleet::{AgentView, AppState};
+use crate::fleet::{AgentView, AppState, RestartError};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -38,6 +38,7 @@ struct ApiDoc;
 pub fn router(state: Arc<AppState>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
+        .routes(routes!(restart_agent))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
@@ -93,6 +94,40 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 )]
 async fn agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentView>> {
     Json(state.snapshot())
+}
+
+/// Queues a restart of the Agent's Managed Process, delivered as the protocol's restart command
+/// on the Agent's next exchange — immediately over WebSocket, on the next poll over plain HTTP.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{instance_uid}/restart",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    responses(
+        (status = 202, description = "Restart queued"),
+        (status = 400, description = "Malformed Instance UID", body = ErrorBody),
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "The Agent does not declare AcceptsRestartCommand", body = ErrorBody)
+    )
+)]
+async fn restart_agent(
+    State(state): State<Arc<AppState>>,
+    Path(instance_uid): Path<String>,
+) -> Response {
+    let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{instance_uid:?} is not an Instance UID"),
+        );
+    };
+    match state.request_restart(&uid) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(RestartError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(RestartError::NoCapability) => error(
+            StatusCode::CONFLICT,
+            format!("agent {uid} does not declare AcceptsRestartCommand"),
+        ),
+    }
 }
 
 /// All Configurations, in name order.
