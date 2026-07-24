@@ -1,38 +1,21 @@
-//! Reading certificates and a private key out of PEM bytes (ADR-0005).
+//! Reading certificates and a private key out of PEM bytes (ADR-0011).
 //!
 //! Both ends parse PEM: the Client for its trust file and its own identity, the Server for the
 //! listener's certificate and the client CA that turns mutual TLS on
-//! ([ADR-0013](../../../docs/adr/0013-opamp-endpoint-admission.md)).
+//! ([ADR-0017](../../../docs/adr/0017-admission-and-authentication.md)).
 //! The parsing is one thing written twice; what the file *means* is not, so this module takes bytes
 //! and each end keeps its own path-based wrapper — the error naming a trust anchor, a listener's
 //! key or a client CA is written where that is known.
 
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Every certificate in `pem`, in the order it appears — a chain, or a bundle of trust anchors.
 ///
 /// An empty file is an error rather than an empty chain: a trust bundle that parsed to nothing
 /// would configure a TLS stack that trusts nobody, and it would do it silently.
-///
-/// The PEM reader is `rustls-pki-types`' own (the crate `rustls::pki_types` re-exports), which
-/// absorbed `rustls-pemfile` when that was retired (RUSTSEC-2025-0134) — so the parsing stays the
-/// one rustls itself uses, without the unmaintained dependency.
 pub fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
-    let certs: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(pem).collect();
-    let certs = certs.map_err(|e| format!("cannot parse a certificate: {e}"))?;
-    if certs.is_empty() {
-        return Err("no certificates".to_string());
     }
-    Ok(certs)
-}
-
 /// The first private key in `pem`, in any of the encodings rustls accepts (PKCS#8, PKCS#1, SEC1).
-///
-/// A file with no key in it is an error, not an absence: the `NoItemsFound` case and a malformed
-/// key both surface as `Err`, which the path-based callers wrap with what the file was meant to be.
 pub fn private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, String> {
-    PrivateKeyDer::from_pem_slice(pem).map_err(|e| format!("cannot parse a private key: {e}"))
 }
 
 #[cfg(test)]

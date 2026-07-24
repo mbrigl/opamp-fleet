@@ -1,9 +1,9 @@
 //! The OpAMP endpoint's protocol shell — what any server-side of this protocol must do with a
-//! request body, framework-free (ADR-0005).
+//! request body, framework-free (ADR-0011).
 //!
 //! There are two OpAMP server endpoints in this project: the Server's, and the Client's own when it
 //! runs as a Gateway — downstream, a Gateway *is* an OpAMP server
-//! ([ADR-0024](../../../docs/adr/0024-gateway-mode.md)). Both accept the same path, the same media
+//! ([ADR-0009](../../../docs/adr/0009-client-modes-and-the-gateway.md)). Both accept the same path, the same media
 //! type and the same bodies, and both were written separately. The Baseline's gzip MUST, and with
 //! it the rule that the size limit applies *after* decompression, ended up in exactly one of them.
 //!

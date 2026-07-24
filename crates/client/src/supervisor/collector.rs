@@ -1,4 +1,4 @@
-//! The `collector` plugin: the Collector Supervisor (ADR-0011). It owns an OpenTelemetry
+//! The `collector` plugin: the Collector Supervisor (ADR-0015). It owns an OpenTelemetry
 //! Collector: spawns the configured binary with one `--config` flag per written config-map
 //! entry — the Collector merges multiple configs itself, so no YAML is touched here — and
 //! restarts it when a new remote configuration arrives. Until a configuration exists nothing
@@ -16,12 +16,8 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
-///
-/// `binary` is not among them: the core takes it out and resolves it (ADR-0018), and what arrives
-/// here is [`SupervisorContext::program`].
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0011.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectorSettings {
@@ -30,7 +26,7 @@ struct CollectorSettings {
     args: Vec<String>,
     /// Additional environment for the Collector process. Environment is not a `command`-only
     /// feature — a Collector's config reads `${env:VAR}` too — so it is honoured here just as the
-    /// command plugin honours it, values expanded through the same placeholders (ADR-0018).
+    /// command plugin honours it, values expanded through the same placeholders (ADR-0022).
     #[serde(default)]
     env: BTreeMap<String, String>,
 }
@@ -44,7 +40,7 @@ fn collector_spec(
     extra_args: &[String],
     env: &[(String, String)],
 ) -> Option<ProcessSpec> {
-    // Only the entries that *are* configuration: supplementary content (ADR-0012) sits in the same
+    // Only the entries that *are* configuration: supplementary content (ADR-0016) sits in the same
     // directory for the Collector to read by path, and handing it over as `--config` is exactly
     // what the role exists to prevent.
     let entries = crate::storage::config_entries(config_dir);
@@ -72,8 +68,6 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
-        // One process, no worker of its own — signalling a group would gain nothing (ADR-0033).
-        own_process_group: false,
         // A Collector writes nothing outside what the install and the config
         // directory already provide.
         ensure_dirs: Vec::new(),
@@ -87,11 +81,7 @@ impl Plugin for CollectorPlugin {
         "collector"
     }
 
-    fn program_key(&self) -> &'static str {
-        "binary"
-    }
-
-    /// Nothing: a Collector's distribution is a decision the block states (ADR-0037), and a
+    /// Nothing: a Collector's distribution is a decision the block states (ADR-0015), and a
     /// Foreign Agent is by definition one nobody has written a wrapper for.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults {
@@ -109,7 +99,7 @@ impl Plugin for CollectorPlugin {
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         // Everything the operator wrote about *where* things are goes through the placeholders
-        // (ADR-0018) — the same for the Collector's extra args and its environment as for a command.
+        // (ADR-0022) — the same for the Collector's extra args and its environment as for a command.
         let extra_args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
         let env: Vec<(String, String)> = settings
             .env
@@ -117,42 +107,13 @@ impl Plugin for CollectorPlugin {
             .map(|(k, v)| (k.clone(), ctx.expand(v)))
             .collect();
         let config_dir = ctx.config_dir;
-        let binary = ctx.program;
-        let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
-            retain_previous: ctx.retain_previous,
-            // A package (ADR-0015) swaps this Collector's program — one file, or a whole tree.
-            install: Some(install),
-            archive_key: ctx.archive_key.clone(),
-            // The Collector states its version on `--version`, so even one without the
-            // opampextension (which never self-reports) shows its own version rather than none.
-            // The Runner asks at startup and again after every swap; an extension's self-report
-            // overwrites the probed value.
-            version_probe: Some(VersionProbe {
-                // The Collector's banner is strict SemVer; the default read is the right one.
-                parse: None,
-                program: binary.clone(),
-                args: vec!["--version".to_string()],
-            }),
-            // The same `--version`, asked of the *staged* program before the running one is
-            // stopped (ADR-0033). It is the same question the probe above asks and the same cost,
-            // so the only thing that was ever missing here was asking it early: until now the swap
-            // itself was the first thing to try a new binary, and a build the host cannot run —
-            // one linked against a libc newer than this host's — paid for that with a stop, a
-            // swap, a failed start and a rollback instead of a refusal that touches nothing.
-            //
-            // No environment: the probe already invokes the live program bare, so a Collector that
-            // needs one to answer `--version` would report no version today either.
-            preflight: Some(Preflight {
-                args: vec!["--version".to_string()],
-                env: Vec::new(),
-            }),
             // The Collector has no reload convention — a configuration is applied by restart,
-            // the generic behaviour (ADR-0011), which is also what the reference supervisor does.
+            // the generic behaviour (ADR-0015), which is also what the reference supervisor does.
             reload_signal: None,
             events: ctx.events,
             commands: command_rx,
@@ -161,28 +122,16 @@ impl Plugin for CollectorPlugin {
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
     }
-
-    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        let _: CollectorSettings = settings
-            .try_into()
-            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `binary` is gone from these settings — the core resolves it (ADR-0018) — so a block that
-    /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
-        let table: toml::Table = toml::from_str("args = [\"--feature-gates=x\"]\n").expect("table");
         let settings: CollectorSettings = table.try_into().expect("settings");
-        assert_eq!(settings.args, vec!["--feature-gates=x".to_string()]);
 
-        let typo: toml::Table = toml::from_str("arg = [\"--x\"]").expect("table");
         assert!(typo.try_into::<CollectorSettings>().is_err());
     }
 

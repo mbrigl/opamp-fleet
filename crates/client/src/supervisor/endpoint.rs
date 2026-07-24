@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (ADR-0003, ADR-0011): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (ADR-0009, ADR-0015): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -265,12 +265,10 @@ mod tests {
             assert_eq!(index, 0);
             kinds.push(match event {
                 ProcessEvent::Description(_) => "description",
-                ProcessEvent::Pid(_) => "pid",
                 ProcessEvent::Health(_) => "health",
                 ProcessEvent::EffectiveConfig(_) => "effective",
                 ProcessEvent::AvailableComponents(_) => "components",
                 ProcessEvent::ConfigApplied { .. } => "applied",
-                ProcessEvent::PackageApplied { .. } => "package",
                 ProcessEvent::Uninstalled { .. } => "uninstalled",
             });
         }

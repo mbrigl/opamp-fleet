@@ -1,16 +1,10 @@
 # OpAMP Fleet Client configuration. Every setting is optional; the values shown are the
-# defaults. Start with: cargo run -p client -- --config config/supervisor.toml
 
 # The Server's OpAMP endpoint. The URL scheme selects the transport:
 #   ws:// or wss://    → WebSocket (the default: Server pushes changes within seconds)
 #   http:// or https:// → plain HTTP polling (see poll_interval_secs)
 endpoint = "ws://127.0.0.1:4320/v1/opamp"
 
-# The Agent's service.instance.name — the operator's name for *this* Client, shown in the fleet UI
-# and matchable by a Selector. Its service.name is the constant type `supervisor`, the same on every
-# host, which is what a package or Configuration aimed at every Client matches. The default below is
-# a display name, not an identifier — give this one a name of yours: it is what tells Clients apart.
-name = "Supervisor Agent"
 
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
 poll_interval_secs = 30
@@ -24,11 +18,8 @@ heartbeat_interval_secs = 30
 # message past it is never sent, and an oversized one from the Server is refused.
 max_message_size_bytes = 67108864
 
-# Where the Client persists its instance_uid, the received remote configuration, and any
 # Server-offered connection settings. Persisted connection settings override
-# endpoint, [auth], and the intervals above; delete <state_dir>/connection-settings.pb to revert.
 # A package for the Client itself is streamed to <state_dir>/packages/ first, so this
-# directory needs room for one agent binary.
 state_dir = "client-state"
 
 # The Client's own log on disk, written **only while it runs as a service** — in the
@@ -44,15 +35,6 @@ state_dir = "client-state"
 # keep = 7                  # daily files kept, then deleted. A bound, not a switch: 0 is refused
 
 # Where the per-Supervisor directories live; the default is <state_dir>/supervisors.
-# Each Supervisor owns everything under its own directory — its identity, the received
-# configuration, its program/, and the artifact staging its updates go through:
-#
-#   <supervisor_dir>/<name>/instance-uid, remote-config.pb, config/, program/, packages/
-#
-# Set this when the programs must not live where the state does: /var/lib is often mounted
-# noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
-# supervisor_dir = "/opt/opamp-fleet/supervisors"
-
 # Operator-defined attributes describing this *host*, reported by every Agent this Client presents
 # so the Server's Selectors can target them. They are what a fresh Agent carries into its very
 # first message, before the Server has ever seen it.
@@ -60,9 +42,6 @@ state_dir = "client-state"
 # To tag one Agent among several on this host, use a Server label instead (PUT
 # /api/v1/agents/<uid>/labels): it is keyed by that Agent's uid, matched by the same Selectors, and
 # takes effect without editing a file here.
-# [attributes]
-# env = "prod"
-
 # Optional Gateway Mode: this Client stands at a network boundary, accepts OpAMP from
 # other Clients, and folds them onto a small pool of upstream connections. It composes with the
 # [[supervisor]] blocks below — a host may supervise its own processes and gateway for others.
@@ -84,75 +63,19 @@ state_dir = "client-state"
 # client_ca_file = "client-ca.pem"
 
 # Optional TLS. Every key is optional on its own, so this section may carry a
-# trust override, a client identity, or both.
 # [tls]
-# ca_file = "ca.pem"          # replaces the built-in roots — the private-CA deployment
-# cert_file = "client.pem"    # this Client's certificate, for a Server on mutual TLS
-# key_file = "client-key.pem" # its private key; cert_file and key_file go together or not at all
-#
-# The identity above is the one an operator provisions — including the BOOTSTRAP certificate a
-# fresh host enrols with. A certificate the Server issued outranks it: the Client stores that pair
-# in <state_dir> as client-cert.pem and client-key.pem and prefers it, the same way persisted
 # connection settings outrank the endpoint written here. Deleting the stored pair
-# reverts to this one.
-#
-# Enrolment needs nothing here. When the Server declares that it signs (a [client_ca] section in
-# its server.toml), a Client with no certificate generates a key — which never leaves this host —
-# sends a signing request, and gets a certificate back through the ordinary offer flow; it renews
-# the same way once the certificate is two thirds through its life. So the useful order is: let the
-# fleet enrol, then have the Server require certificates.
 
 # Optional package verification. With a key set, every Server-offered package MUST
-# carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
-# its content hash alone and a signed one is refused. A [[supervisor]] block takes package
 # delivery by naming its program with a bare file name (see the blocks below); *which*
 # artifact it then receives is the Server's decision, expressed as that package's Selector —
 # never a key in this file.
-# Generate a key and sign artifacts with the `opamp-package-sign` helper
-# (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
-# [packages]
-# verification_key = "<hex-encoded Ed25519 public key>"
 # archive_key = "the key an encrypted .7z was packed with"   # opens an encrypted
-#                          # artifact. One secret for the fleet — a single archive serves every
-#                          # Agent — and never the [auth] credential, which the Server rotates on
 #                          # its own: a rotation would leave every archive unopenable.
-#                          # The Server never learns this key; the artifact stays encrypted
-#                          # wherever it is stored and is opened only on the host that runs it.
-
-# Consent for the Server to replace *this Client's own* binary. **Absent — as here — means the
-# consent stands**, under the name below (ADR-0017): a Client the fleet cannot update is the one
-# program on the host that has to be patched by hand. Write `enabled = false` to withdraw it, and
-# the Client's Agent then declares no package capability at all — no offer can reach it.
-#
 # Unlike a [[supervisor]], which only consents while the Server picks the artifact, the
-# Client must NAME its package: an offer under any other name is refused and reported, never
-# applied. This is one of two independent guards, and it is the one on this side of the wire — the
 # Server will not offer a package built for another Agent type either, and this Client's
-# own type is the constant `supervisor`. Neither replaces the other: an operator who typed a
-# Collector artifact as `supervisor` gets past the Server, and this name is what is left.
-#
-# What happens on an accepted offer: the artifact is verified like any other, staged as a new
 # version *beside* the running one in the versioned install layout, and proved by running
-# `client self-check` on it before the `current` pointer moves. The process then exits and asks the
-# service manager to restart it — it does not restart itself. A marker in state_dir carries the
-# outcome across that restart: the new version commits itself once it reaches the Server, and one
-# that will not stay up is rolled back to its predecessor after three attempts.
-#
-# Both lines below are the defaults, shown to be edited rather than because they must be written.
-# [self_update]
-# enabled = true                     # false withdraws the consent entirely
-# package = "supervisor"             # the Client's own Agent type; name yours if your Set differs
-
 # Optional authentication toward the Server: exactly one scheme — bearer_token, or
-# username and password together. The Authorization header rides every plain-HTTP request and
-# the WebSocket upgrade. Without TLS the credentials travel in cleartext; pair with wss:// or
-# https:// beyond the loopback.
-# [auth]
-# bearer_token = "a-long-random-token"
-# --- or ---
-# username = "fleet"
-# password = "a-strong-password"
-
 # ── Supervisor Mode ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
@@ -176,41 +99,20 @@ state_dir = "client-state"
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
-#
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory
 # this Client creates and owns, which is what makes replacing it a rename this Client can make.
 # Every Supervisor therefore takes package updates; there is no second shape and no opt-out.
-#
 # An absolute path is refused at startup: the Client manages only programs it installs. To bring
 # an agent the machine already carries under management, repack it and upload it as a Set — the
 # Icinga 2 and GLPI Agent pages walk through exactly that. Anything in between — ./x, bin/x —
 # fails at startup rather than being guessed at, and a bare name is NOT searched for in $PATH; it
 # names a file in that one directory.
-#
 # Every block reports two names, and they answer different questions:
-#
-#   name           service.instance.name — *which* Agent this is. Yours, unique per block, also the
 #                  directory name, so it follows the usual name grammar (lowercase, digits, '-').
-#                  A Managed Process can never overwrite it.
-#   service_name   service.name — *what* this Agent is, the Agent type. Optional. A Managed Process
-#                  that reports its own type wins over it (a Collector with the opampextension
-#                  states the dist.name it was built with); with neither, the program's file name
-#                  is used. Unlike `name` it may be a reverse FQDN, as the protocol recommends.
-#
-# Aim at the type to reach every Agent of a kind, at the instance name to reach exactly one:
-#
-#   curl -X PUT -H 'Content-Type: application/json' \
-#        -d '{"selector": {"service.instance.name": "edge-01"}}' \
-#        http://<server>:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/selector
 
 # 1. A Collector WITH the opampextension — it reports its own description, health, and
 # effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
-# distribution, hence otelcol-contrib. Prebuilt distributions are published at
-# https://github.com/open-telemetry/opentelemetry-collector-releases/releases — one .tar.gz per
-# platform, uploadable as a package exactly as published; the binary inside is named after the
-# distribution (otelcol-contrib, otelcol), which is why `binary` below says the same.
-# Pin endpoint_port and make sure the configuration the
 # Server distributes carries the extension pointing at it:
 #
 #   extensions:
@@ -225,18 +127,8 @@ state_dir = "client-state"
 #
 # [[supervisor]]
 # type = "collector"
-# name = "otelcol-contrib"
-# binary = "otelcol-contrib"  # bare, so it lives in this Supervisor's program/ directory and
 #                          # takes binary updates from the Server:
-#                          # the artifact the Server selects for this Agent is verified, swapped
-#                          # over it, health-gated on apply_grace_secs, and rolled back if it will
-#                          # not stay up. *Which* artifact is the Server's decision — give the
-#                          # Set a Selector there (PUT /api/v1/packages/<name>/<type>/<version>/
-#                          # selector), so a rollout is aimed centrally instead of from this file.
 #                          # An artifact that is a .tar.gz is unpacked here: the member
-#                          # whose file name matches this one is what gets installed, so an
-#                          # upstream release can be uploaded exactly as published.
-#                          # Put the first copy there yourself; every later one arrives by package.
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # optional: overrides [supervisors] for this block. Only a kind that
@@ -249,38 +141,16 @@ state_dir = "client-state"
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
 # the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
-# Every received config-map entry is written to <supervisor_dir>/<name>/config/ under its
 # Configuration's name and passed as its own --config; a change restarts the collector.
 # Named by a bare file name like every other program here, so this Collector too came from a
 # Server-offered package and is updated by the fleet.
 # [[supervisor]]
 # type = "collector"
-# name = "otelcol"
-# binary = "otelcol"
-# service_name = "otelcol"   # without the extension nothing reports a type, so state one here;
-#                            # left out, the program's file name ("otelcol") is used anyway.
-# [supervisor.env]           # optional environment for the process; same variable as in the
-#                            # block above, its own value here — the receiver port is offset so
-#                            # both collectors can run on one host (see config/examples/)
-# OTLP_HTTP_ENDPOINT = "127.0.0.1:14318"
 
-# 3. Any other process — a Foreign Agent under a generic "command" Custom Supervisor. The
-# process speaks no OpAMP, so the Supervisor observes it from the outside (spawn, exit,
-# restart). Every received config-map entry is written to <supervisor_dir>/<name>/config/
 # under its Configuration's name; point the program's own flag at that file and
-# the Supervisor restarts the process on a change so it re-reads it. Named by an absolute
-# path here, so it is the machine's program: installed and updated by whatever put it there,
-# never by the Server. A bare file name instead would put it in this Supervisor's own
 # program/ directory and consent to package delivery, like `binary` above.
-#
 # args and env values may use two placeholders naming this Supervisor's own directories, so
 # nothing has to be kept in sync with state_dir or supervisor_dir:
-#
-#   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
-#   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
-#
-# Any other ${...} is passed to the process untouched, so an agent's own variable syntax keeps
-# working — which also means a misspelled placeholder is handed over rather than refused. The
 # program itself (command, binary) is never substituted: it is a bare file name, and that must be
 # readable in this file rather than assembled at startup.
 #
@@ -290,14 +160,11 @@ state_dir = "client-state"
 # agent the machine already carries under management, repack it and upload it as a Set.
 # [[supervisor]]
 # type = "command"
-# name = "my-agent"
 # command = "my-agent"
-# args = ["--config", "${config_dir}/my-agent-conf"]
 # version_args = ["--version"]          # what it reports as service.version — and, for this kind,
 #                                       # the check run against a staged package before the
 #                                       # running program is stopped
 # [supervisor.env]                      # optional environment for the process
-# LOG_LEVEL = "info"
 #
 # The process starts in the directory its program lives in. There is no working_dir key: the
 # answer is always this Supervisor's own program/ (or its tree root), and the old default — the
@@ -312,59 +179,3 @@ state_dir = "client-state"
 # labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
 # [attributes] table at the top of this file still describes the *host*, and every Agent on it
 # carries those.
-
-# 4. Telegraf, under a kind of its own. Two lines: everything else about Telegraf — the program's
-# name per platform, --config against the Configuration named `telegraf-conf`, how it states its
-# version, and the SIGHUP it re-reads its configuration on — is Telegraf's property, so the kind
-# holds it. That last one is why the kind exists: as a block key the signal was refused on Windows
-# at parse time, so one Supervisor set could not serve a mixed fleet. The kind sends the signal
-# where signals exist and restarts where they do not.
-#
-# Upload the .tar.gz InfluxData publishes exactly as published; the member whose file name matches
-# is what gets installed. See docs/artifacts/telegraf.md.
-# [[supervisor]]
-# type = "telegraf"
-# name = "telegraf"
-
-# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
-# which is the point. Its two platform invocations differ in nearly everything (the program's name
-# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
-# --script), and none of those differences is anybody's decision: they follow from the artifact
-# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
-# requirements rather than preferences, and points --vardir outside program/, which a package swap
-# replaces whole.
-#
-# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
-# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
-# [[supervisor]]
-# type = "glpi"
-# name = "glpi"
-
-# 6. Icinga 2, under a kind of its own — the only wrapped kind that keeps any keys, and it keeps
-# exactly the four that describe the *installation this host is joining*. Everything about the
-# artifact is the kind's: the daemon's place in the tree, its directories (which Icinga takes as
-# -D constants rather than flags), the LD_LIBRARY_PATH that makes the tree's own libraries win,
-# the sixty seconds it needs to shut down, and the `daemon -C` validation without which a failed
-# reload would be reported as an apply that worked.
-#
-# The four that remain are facts of the Icinga installation, and nothing here can compute them:
-# the ticket was minted on the parent for exactly one common name, and a node that differs from it
-# does not enrol. Leave parent_host out for a standalone node that only runs local checks.
-#
-# Which delivered Configuration is Icinga's root is stated by the fleet, with `role = "main"` on
-# that Configuration; where nothing is marked, the conventional name `icinga2-conf` stands in.
-#
-# Building the artifact, the enrolment and the Windows differences are in docs/manual/icinga2.md;
-# the artifact itself in docs/artifacts/icinga2.md.
-# [[supervisor]]
-# type = "icinga2"
-# name = "icinga2"
-# parent_host = "master.example.com"    # omit for a standalone node: no enrolment, no ticket.
-#                                       # `host:port` sets a port other than Icinga's 5665.
-# node_name   = "edge-01.example.com"   # this node's NodeName, certificate CN and Endpoint name
-#                                       # in one. Default: this host's FQDN, and where that cannot
-#                                       # be resolved, this Supervisor's own name.
-# ticket_file = "${config_dir}/icinga2-ticket"        # delivered per host as a supplementary entry
-# trusted_cert_file = "${config_dir}/icinga2-parent-cert"  # the parent's own certificate, pinned;
-#                                       # without it the request trusts what the parent presents
-#                                       # on first sight, which is logged as such

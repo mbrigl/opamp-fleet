@@ -1,4 +1,4 @@
-//! Gateway Mode (ADR-0003, ADR-0024): the Client at a network boundary.
+//! Gateway Mode (ADR-0009): the Client at a network boundary.
 //!
 //! It is an OpAMP **server** downstream and an OpAMP **client** upstream, and it folds many
 //! downstream connections onto a small pool of upstream ones. What it does *not* do is as
@@ -54,14 +54,14 @@ struct Gateway {
     pool: Pool,
     registry: Arc<Registry>,
     limit: usize,
-    /// The most distinct Agents one downstream connection may carry (ADR-0024): past it a report
+    /// The most distinct Agents one downstream connection may carry (ADR-0009): past it a report
     /// for a *new* Agent is dropped, so a single peer cannot grow the routing state without bound.
     max_agents: usize,
 }
 
 /// Serves the downstream endpoint until `shutdown` fires.
 ///
-/// Mutual TLS is per hop (ADR-0013, ADR-0024): with a `[gateway.tls]` section the downstream hop is
+/// Mutual TLS is per hop (ADR-0017, ADR-0009): with a `[gateway.tls]` section the downstream hop is
 /// encrypted and, when a `client_ca_file` is configured, every downstream Agent must present a
 /// certificate that chains to it — the access-control boundary the section exists for. Without the
 /// section the hop is plaintext, which a fleet still bootstrapping may want but which also carries
@@ -124,7 +124,7 @@ async fn serve_plain(
     .map_err(|e| format!("the gateway endpoint stopped: {e}"))
 }
 
-/// The TLS downstream endpoint (ADR-0024): the same server-side rustls terminator the Server uses,
+/// The TLS downstream endpoint (ADR-0009): the same server-side rustls terminator the Server uses,
 /// with the handshake proving the downstream Agent against `client_ca_file` when one is set.
 async fn serve_tls(
     app: Router,
@@ -154,7 +154,7 @@ async fn serve_tls(
 
 /// Builds the rustls configuration the downstream endpoint serves with. A configured
 /// `client_ca_file` turns on mutual TLS and — unlike the Server, whose one port also answers
-/// browsers (ADR-0005) — makes a client certificate **mandatory**: this endpoint speaks only OpAMP,
+/// browsers (ADR-0011) — makes a client certificate **mandatory**: this endpoint speaks only OpAMP,
 /// so a configured CA is an access-control boundary, not a hint. Its absence keeps the hop
 /// server-authenticated only, which a bootstrapping fleet uses.
 fn tls_server_config(tls: &GatewayTlsConfig) -> Result<Arc<ServerConfig>, String> {
@@ -185,7 +185,7 @@ fn tls_server_config(tls: &GatewayTlsConfig) -> Result<Arc<ServerConfig>, String
         .with_single_cert(certs, key)
         .map_err(|e| format!("cannot use the gateway TLS certificate and key: {e}"))?;
     // `RustlsConfig::from_config` leaves ALPN to the caller; without it an HTTP/2 client fails the
-    // negotiation. Matches the Server's listener (ADR-0005).
+    // negotiation. Matches the Server's listener (ADR-0011).
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }
@@ -247,7 +247,7 @@ async fn serve_socket(
                         // Past the limit a message never becomes a frame, so it surfaces here. The
                         // Baseline's answer is the 1009 close, and a Gateway owes it downstream for
                         // the same reason the Server owes it upstream — it *is* an OpAMP server to
-                        // the Agents behind it (ADR-0024). It used to hang up without a status.
+                        // the Agents behind it (ADR-0009). It used to hang up without a status.
                         debug!(%peer, error = %e, "a downstream connection failed");
                         let _ = socket.send(too_big_close()).await;
                         break;
@@ -297,7 +297,7 @@ async fn serve_socket(
     }
 
     // The peer is gone. Its Agents stop being routable here — and nothing is said upstream on
-    // their behalf, because they said nothing (ADR-0024 rule 7).
+    // their behalf, because they said nothing (ADR-0009 rule 10).
     let count = carried.len();
     state.registry.detach_all(carried);
     debug!(%peer, agents = count, "a downstream client disconnected");
@@ -323,7 +323,7 @@ async fn exchange(
     }
     // A downstream Client may gzip its report — the Baseline says a server MUST accept it — and the
     // size limit applies after decompression, so a small bomb buys no more memory than a large
-    // plain body would. This endpoint implemented neither until ADR-0005 put both in one place with
+    // plain body would. This endpoint implemented neither until ADR-0011 put both in one place with
     // the Server's; a Gateway that refused what the Server accepts would break the hop for exactly
     // the Agents that compress.
     let raw = match opamp::endpoint::decode_body(
@@ -396,7 +396,7 @@ async fn exchange(
 /// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
 ///
 /// axum's spelling of it; the Client's other two sockets speak tungstenite and have their own in
-/// `transport`. The sentence is shared by all of them (ADR-0005).
+/// `transport`. The sentence is shared by all of them (ADR-0011).
 fn too_big_close() -> AxumMessage {
     AxumMessage::Close(Some(CloseFrame {
         code: close_code::SIZE,

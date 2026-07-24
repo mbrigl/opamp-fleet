@@ -1,9 +1,7 @@
-//! A stub Managed Process for tests (ADR-0011): pure Rust so it behaves identically on Linux,
+//! A stub Managed Process for tests (ADR-0015): pure Rust so it behaves identically on Linux,
 //! macOS, and Windows CI — no shell scripts.
 //!
 //! Behaviour, driven entirely by arguments:
-//! - `--version` — print a version line the way real agents do (free text around a SemVer),
-//!   then exit; what the plugins' version probe invokes.
 //! - `--touch <path>` — write a marker file, then keep running. The marker holds this run's
 //!   process id and every argument, one per line, so a test observes both *that* the stub ran
 //!   and *with what*; a restart rewrites it with a fresh pid.
@@ -11,7 +9,7 @@
 //!   crash-path tests. Without them the stub sleeps until it is killed.
 //! - `--ignore-hup` (Unix only) — ignore `SIGHUP`, the way a daemon that reloads on it survives
 //!   the signal; without the flag the default disposition terminates the stub. What the reload
-//!   tests (ADR-0011) use for both sides of `reload-or-restart`.
+//!   tests (ADR-0015) use for both sides of `reload-or-restart`.
 
 use std::time::Duration;
 
@@ -23,10 +21,6 @@ fn main() {
         unsafe {
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }
-    }
-    if args.iter().any(|a| a == "--version") {
-        println!("stub_agent version 9.9.9 (test build)");
-        return;
     }
     let flag = |name: &str| {
         args.iter()
