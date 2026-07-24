@@ -58,6 +58,7 @@ impl Plugin for CommandPlugin {
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
+            apply_grace: ctx.apply_grace,
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.

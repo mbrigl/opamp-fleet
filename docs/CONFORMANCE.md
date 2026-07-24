@@ -133,11 +133,11 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | planned | Needed for Server-driven credential rotation (goal 17). |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
-| `AcceptsRestartCommand` | `0x0400` | Beta | optional | planned | Server-initiated restart of a Managed Process. |
+| `AcceptsRestartCommand` | `0x0400` | Beta | optional | implemented | Declared by Supervisor-backed Agents only — the self-Agent has no process to restart. Queued via `POST /api/v1/agents/{uid}/restart`, delivered as the Baseline's command-only message on both transports (pushed over WebSocket, on the next poll over plain HTTP). |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
-| `ReportsHeartbeat` | `0x2000` | Development | optional | planned | Liveness independent of message traffic. |
-| `ReportsAvailableComponents` | `0x4000` | Development | optional | planned | Also reported by the Collector's `opampextension`. |
+| `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval arrives with `AcceptsOpAMPConnectionSettings`. |
+| `ReportsAvailableComponents` | `0x4000` | Development | optional | implemented | Relayed from the Managed Process's `opampextension` through the Supervisor Endpoint; declared only once components are known. The hash rides full reports, the full map goes out on the Server's `ReportAvailableComponents` flag — which the Server sets while it only holds a hash. |
 | `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | planned | Reports the outcome of a connection-settings offer. |
 
 ## Server capabilities
@@ -174,8 +174,8 @@ separately because conformance depends on them just as much.
 | `AgentIdentification` | The Agent MUST adopt a new `instance_uid` | implemented | The Client adopts and persists the new identity. |
 | `RequestInstanceUid` | Server-generated identity on request | implemented | The Server mints a UUID v7 and re-keys the Agent. The Client does not use the flag (it self-generates), which the protocol permits. |
 | Connection multiplexing | Distinguish Agents by `instance_uid` | implemented | Both ends. The Server keys all state on `instance_uid` and serves n Agents over one WebSocket connection (tested). The Client carries one Agent per Supervisor over one shared connection, routed by `instance_uid` alone (ADR-0003, ADR-0011); connection pools larger than one arrive with Gateway Mode. |
-| Duplicate `instance_uid` | Detection and handling | planned | |
-| Duplicate WebSocket connections | Handling defined by the spec | planned | |
+| Duplicate `instance_uid` | Detection and handling | implemented | The Server rekeys an identity that reports over a second live WebSocket connection: a fresh UUID v7 via `AgentIdentification`, which the Client adopts (the Baseline's SHOULD). Stateless plain-HTTP polling offers nothing to tell two pollers apart, so detection is WebSocket-only. |
+| Duplicate WebSocket connections | Handling defined by the spec | implemented | The Client holds one connection by construction and sends `agent_disconnect` before a graceful reconnect. The Server tracks per-connection ownership: only the owning connection marks its Agents disconnected, so a stale socket never takes down an Agent another connection carries. |
 | Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
 | Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | planned | `[Beta]`. Basic or Bearer, applied before the WebSocket upgrade. Underpins goal 17. |
 | Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | The Server offers configuration only to Agents declaring `AcceptsRemoteConfig`; the Client stops reporting effective config to a Server without `AcceptsEffectiveConfig`. |
@@ -199,7 +199,8 @@ and health reporting, identity handling (UUID v7, reassignment, server-generated
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0011) puts real
 processes behind that loop: each configured Supervisor is its own Agent multiplexed over the
 Client's one connection, a received configuration restarts the Managed Process on the written
-files and is acknowledged `APPLYING` → `APPLIED`/`FAILED` by outcome, and every Supervisor serves
+files and is acknowledged `APPLYING` → `APPLIED` only once the process survived the apply grace
+(`apply_grace_secs`, default 3 s) — exiting within it reports `FAILED` — and every Supervisor serves
 a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
 health, and effective configuration into its Agent. Configuration targeting (ADR-0012) composes
 each Agent's Remote configuration from the named Configurations whose Selectors match its

@@ -169,6 +169,32 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
 }
 
 #[tokio::test]
+async fn a_restart_is_pushed_to_a_connected_agent_as_its_own_frame() {
+    let server = spawn().await;
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "restartable", 1);
+    report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    send(&mut socket, &report).await;
+    recv(&mut socket).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 202);
+
+    let pushed = recv(&mut socket).await;
+    let command = pushed.command.expect("the pushed restart command");
+    assert_eq!(command.r#type, opamp::proto::CommandType::Restart as i32);
+    assert!(pushed.remote_config.is_none(), "command-only frame");
+}
+
+#[tokio::test]
 async fn agent_disconnect_and_socket_loss_mark_the_agent_disconnected() {
     let server = spawn().await;
 
@@ -205,6 +231,62 @@ async fn agent_disconnect_and_socket_loss_mark_the_agent_disconnected() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("the server never noticed the lost connection");
+}
+
+#[tokio::test]
+async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
+    // The Baseline's duplicate detection: the same instance_uid alive on another connection
+    // (bad UID generators, cloned VMs) — the Server rekeys the newcomer via AgentIdentification.
+    let server = spawn().await;
+    let mut first = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    send(&mut first, &full_report(&uid, "original", 1)).await;
+    let reply = recv(&mut first).await;
+    assert!(reply.agent_identification.is_none());
+
+    let mut second = connect(server.addr).await;
+    send(&mut second, &full_report(&uid, "clone", 1)).await;
+    let reply = recv(&mut second).await;
+    let assigned = reply
+        .agent_identification
+        .expect("the duplicate is rekeyed");
+    assert_eq!(assigned.new_instance_uid.len(), 16);
+    assert_ne!(assigned.new_instance_uid, uid.as_bytes().to_vec());
+
+    // Two distinct, connected Agents — the incumbent kept its identity.
+    let agents = server.state.snapshot();
+    assert_eq!(agents.len(), 2);
+    assert!(agents.iter().all(|a| a.connected));
+    assert_eq!(
+        agents
+            .iter()
+            .filter(|a| a.instance_uid == uid.to_string())
+            .count(),
+        1
+    );
+
+    // Only the owning connection may take its Agent down: closing the second connection leaves
+    // the original Agent connected, and vice versa (the regression the ownership guard fixes).
+    let new_uid = InstanceUid::from_wire(&assigned.new_instance_uid).expect("valid uid");
+    send(&mut second, &full_report(&new_uid, "clone", 1)).await;
+    recv(&mut second).await;
+    drop(second);
+    let original_stays = || {
+        let agents = server.state.snapshot();
+        let disconnected = |name: &str| {
+            agents
+                .iter()
+                .any(|a| a.service_name == name && !a.connected)
+        };
+        (disconnected("clone") && !disconnected("original")).then_some(())
+    };
+    for _ in 0..50 {
+        if original_stays().is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the rekeyed clone never went down alone — or took the original with it");
 }
 
 #[tokio::test]

@@ -12,6 +12,10 @@ name = "opamp-fleet-client"
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
 poll_interval_secs = 30
 
+# Heartbeat interval over the WebSocket transport, in seconds (the protocol's default: 30).
+# 0 disables heartbeats; on plain HTTP every poll already is the periodic report.
+heartbeat_interval_secs = 30
+
 # Where the Client persists its instance_uid and the received remote configuration.
 state_dir = "client-state"
 
@@ -53,6 +57,8 @@ state_dir = "client-state"
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+# apply_grace_secs = 3     # how long a restarted process must survive before a received
+#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:

@@ -47,7 +47,7 @@ pub async fn run(
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, &mut engine, shutdown).await {
+                match serve(socket, &mut engine, config, shutdown).await {
                     Served::Shutdown => {
                         // Usually already stopped before the goodbyes went out; idempotent.
                         engine.shutdown_processes().await;
@@ -72,14 +72,35 @@ pub async fn run(
     }
 }
 
-async fn serve(mut socket: Socket, engine: &mut Engine, shutdown: &mut Shutdown) -> Served {
+async fn serve(
+    mut socket: Socket,
+    engine: &mut Engine,
+    config: &ClientConfig,
+    shutdown: &mut Shutdown,
+) -> Served {
     // A (re)connected Server may know nothing about us: every Agent starts from a full snapshot.
     engine.force_full_all();
     if send_all(&mut socket, engine.poll_reports()).await.is_err() {
         return Served::ConnectionLost;
     }
 
+    // The heartbeat (ReportsHeartbeat, Baseline default 30 s; 0 disables): a routine report per
+    // Agent, so `sequence_num` advances and the Server's liveness view stays fresh without any
+    // state change. Starts one period from now — the connect snapshot just went out.
+    let mut heartbeat = (config.heartbeat_interval_secs > 0).then(|| {
+        let period = std::time::Duration::from_secs(config.heartbeat_interval_secs);
+        tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+    });
+
     loop {
+        let heartbeat_due = async {
+            match heartbeat.as_mut() {
+                Some(interval) => {
+                    interval.tick().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             incoming = socket.next() => {
                 let Some(Ok(message)) = incoming else {
@@ -116,6 +137,11 @@ async fn serve(mut socket: Socket, engine: &mut Engine, shutdown: &mut Shutdown)
             // A Managed Process changed some Agent's state: push it now, not at the next poll.
             _ = engine.changed() => {
                 if send_all(&mut socket, engine.owed_reports()).await.is_err() {
+                    return Served::ConnectionLost;
+                }
+            }
+            _ = heartbeat_due => {
+                if send_all(&mut socket, engine.poll_reports()).await.is_err() {
                     return Served::ConnectionLost;
                 }
             }

@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use opamp::proto::{AgentDescription, AgentRemoteConfig, ComponentHealth, EffectiveConfig};
+use opamp::proto::{
+    AgentDescription, AgentRemoteConfig, AvailableComponents, ComponentHealth, EffectiveConfig,
+};
 use tokio::sync::mpsc;
 
 use crate::service::runtime::Shutdown;
@@ -23,6 +25,10 @@ pub enum ProcessCommand {
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
     ApplyConfig { config: AgentRemoteConfig },
+    /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
+    /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —
+    /// the health events of the stop/spawn cycle are the visible outcome.
+    Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
 }
@@ -37,6 +43,9 @@ pub enum ProcessEvent {
     Health(ComponentHealth),
     /// The process's self-reported effective configuration; replaces the written-files echo.
     EffectiveConfig(EffectiveConfig),
+    /// The process's available components (reported through the Supervisor Endpoint by the
+    /// Collector's `opampextension`), relayed upstream under the owning Agent.
+    AvailableComponents(AvailableComponents),
     /// Outcome of an [`ProcessCommand::ApplyConfig`]: `Ok` acknowledges `APPLIED`, `Err`
     /// reports `FAILED` with the error — a rejected configuration is a report, not a silence.
     ConfigApplied {
@@ -74,6 +83,9 @@ pub struct SupervisorContext {
     pub config_dir: PathBuf,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
+    /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
+    /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
+    pub apply_grace: Duration,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.
