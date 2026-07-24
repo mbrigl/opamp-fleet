@@ -33,7 +33,9 @@ async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 
 async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(AppState::new(dir.path().join("fleet-config.yaml")));
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
+    );
     let app = server::app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -79,6 +81,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
             "state_dir = {state:?}\n\n",
+            "[attributes]\n",
+            "env = \"prod\"\n\n",
             "[[supervisor]]\n",
             "type = \"collector\"\n",
             "name = \"otelcol\"\n",
@@ -89,6 +93,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "name = \"stub\"\n",
             "command = {stub:?}\n",
             "args = [\"--touch\", {stub_marker:?}]\n",
+            "[supervisor.attributes]\n",
+            "role = \"edge\"\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
@@ -119,10 +125,14 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.healthy);
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
-    // The operator changes the fleet configuration; the Server pushes it over the socket.
+    // The operator distributes a fleet-wide Configuration; the Server pushes it over the socket.
     state
-        .set_desired_config("receivers: {}\n".to_string())
-        .expect("set the desired config");
+        .put_configuration(server::configs::Configuration {
+            name: "fleet".to_string(),
+            selector: Default::default(),
+            body: "receivers: {}\n".to_string(),
+        })
+        .expect("distribute the fleet configuration");
 
     // Both Agents acknowledge APPLIED and are in sync; the processes restarted on the files.
     wait_until("both agents in sync", || {
@@ -145,10 +155,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
     assert_ne!(restarted_stub_pid, first_stub_pid);
 
-    // The written entry files are what the processes were pointed at.
+    // The written entry files carry the Configuration's name (ADR-0012) and are what the
+    // processes were pointed at.
     let collector_argv = std::fs::read_to_string(&otelcol_marker).expect("collector marker");
     assert!(collector_argv.contains("--config"));
-    let stub_config = state_dir.join("supervisors/stub/config/config");
+    let stub_config = state_dir.join("supervisors/stub/config/fleet");
     assert_eq!(
         std::fs::read_to_string(stub_config).expect("the stub's written config"),
         "receivers: {}\n"
@@ -160,4 +171,58 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         snapshot.iter().all(|a| a.healthy).then_some(())
     })
     .await;
+
+    // The operator-defined attributes arrived and Selectors act on them: a Configuration
+    // targeting `role = edge` matches only the stub Supervisor (ADR-0012).
+    let agents = state.snapshot();
+    let stub = view(&agents, "stub").expect("stub view");
+    assert_eq!(
+        stub.non_identifying_attributes
+            .get("env")
+            .map(String::as_str),
+        Some("prod")
+    );
+    assert_eq!(
+        stub.non_identifying_attributes
+            .get("role")
+            .map(String::as_str),
+        Some("edge")
+    );
+    let otelcol = view(&agents, "otelcol").expect("otelcol view");
+    assert_eq!(
+        otelcol
+            .non_identifying_attributes
+            .get("env")
+            .map(String::as_str),
+        Some("prod")
+    );
+    assert!(!otelcol.non_identifying_attributes.contains_key("role"));
+
+    state
+        .put_configuration(server::configs::Configuration {
+            name: "edge-extra".to_string(),
+            selector: [("role".to_string(), "edge".to_string())].into(),
+            body: "processors: {}\n".to_string(),
+        })
+        .expect("distribute the targeted configuration");
+    wait_until("the stub to apply both entries", || {
+        let snapshot = state.snapshot();
+        let stub = view(&snapshot, "stub")?;
+        (stub.in_sync
+            && stub.matched_configurations == ["edge-extra", "fleet"]
+            && stub.remote_config_status == "APPLIED")
+            .then_some(())
+    })
+    .await;
+    wait_until("the collector to stay on the fleet configuration", || {
+        let snapshot = state.snapshot();
+        let otelcol = view(&snapshot, "otelcol")?;
+        (otelcol.in_sync && otelcol.matched_configurations == ["fleet"]).then_some(())
+    })
+    .await;
+    let stub_extra = state_dir.join("supervisors/stub/config/edge-extra");
+    assert_eq!(
+        std::fs::read_to_string(stub_extra).expect("the stub's second entry file"),
+        "processors: {}\n"
+    );
 }

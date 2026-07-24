@@ -1,22 +1,24 @@
 //! In-memory fleet state and the OpAMP control loop, keyed by Instance UID — never by the
 //! connection that carried a message (ADR-0003).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
-    AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification, AgentRemoteConfig,
-    AgentToServer, AgentToServerFlags, ComponentHealth, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerCapabilities, ServerErrorResponse, ServerErrorResponseType, ServerToAgent,
-    ServerToAgentFlags,
+    any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
+    AgentRemoteConfig, AgentToServer, AgentToServerFlags, ComponentHealth, KeyValue,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse,
+    ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
+use utoipa::ToSchema;
+
+use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
@@ -36,21 +38,6 @@ impl Transport {
             Transport::Http => "http",
             Transport::WebSocket => "websocket",
         }
-    }
-}
-
-/// The configuration the Server wants the fleet to run, with its identity — the hash that gates
-/// every push (specification: no redundant reconfiguration).
-#[derive(Clone)]
-pub struct DesiredConfig {
-    pub body: String,
-    pub hash: Vec<u8>,
-}
-
-impl DesiredConfig {
-    pub fn new(body: String) -> Self {
-        let hash = Sha256::digest(body.as_bytes()).to_vec();
-        DesiredConfig { body, hash }
     }
 }
 
@@ -77,52 +64,63 @@ pub struct Processed {
     pub disconnected: bool,
 }
 
-/// Shared state behind every handler: the fleet, the desired configuration, and the push channel
+/// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
-    desired: RwLock<Option<DesiredConfig>>,
-    fleet_config_file: PathBuf,
+    configs: ConfigStore,
     push: watch::Sender<u64>,
 }
 
 impl AppState {
-    /// Builds the state, restoring the desired configuration from disk when one was persisted.
-    pub fn new(fleet_config_file: PathBuf) -> Self {
-        let desired = match std::fs::read_to_string(&fleet_config_file) {
-            Ok(body) if !body.trim().is_empty() => {
-                info!(file = %fleet_config_file.display(), "restored the fleet configuration");
-                Some(DesiredConfig::new(body))
-            }
-            _ => None,
-        };
-        AppState {
-            fleet: Mutex::new(HashMap::new()),
-            desired: RwLock::new(desired),
-            fleet_config_file,
-            push: watch::channel(0).0,
+    /// Builds the state, restoring every persisted Configuration from `config_dir`. A store that
+    /// cannot be opened (or holds an unparsable file) fails startup loudly.
+    pub fn new(config_dir: PathBuf) -> Result<Self, String> {
+        let configs = ConfigStore::open(config_dir)?;
+        let restored = configs.list().len();
+        if restored > 0 {
+            info!(
+                configurations = restored,
+                "restored the Configuration store"
+            );
         }
+        Ok(AppState {
+            fleet: Mutex::new(HashMap::new()),
+            configs,
+            push: watch::channel(0).0,
+        })
     }
 
-    /// A receiver that fires whenever the desired configuration changes; WebSocket loops use it to
-    /// push offers without waiting for the Agent to speak.
+    /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
+    /// offers without waiting for the Agent to speak.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.push.subscribe()
     }
 
-    pub fn desired_config(&self) -> Option<DesiredConfig> {
-        self.desired.read().expect("desired lock").clone()
+    /// Read access to the Configuration store (the REST API's `GET` routes).
+    pub fn configurations(&self) -> &ConfigStore {
+        &self.configs
     }
 
-    /// Replaces the desired configuration, persists it, and wakes every WebSocket loop.
-    pub fn set_desired_config(&self, body: String) -> Result<DesiredConfig, String> {
-        let config = DesiredConfig::new(body);
-        std::fs::write(&self.fleet_config_file, &config.body)
-            .map_err(|e| format!("cannot persist {}: {e}", self.fleet_config_file.display()))?;
-        *self.desired.write().expect("desired lock") = Some(config.clone());
+    /// Creates or replaces a Configuration, persists it, and wakes every WebSocket loop — the
+    /// matching Agents are offered the change without being asked.
+    pub fn put_configuration(&self, config: Configuration) -> Result<(), String> {
+        let name = config.name.clone();
+        self.configs.put(config)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(hash = %hex::encode(&config.hash), "fleet configuration updated");
-        Ok(config)
+        info!(configuration = %name, "configuration stored and distributed");
+        Ok(())
+    }
+
+    /// Deletes a Configuration and wakes every WebSocket loop; `false` when none of that name
+    /// exists. Agents that applied it keep running it — narrowing never revokes (ADR-0012).
+    pub fn delete_configuration(&self, name: &str) -> Result<bool, String> {
+        let deleted = self.configs.delete(name)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(configuration = %name, "configuration deleted");
+        }
+        Ok(deleted)
     }
 
     /// The control loop for one report, shared by both transports (ADR-0007): update what we know,
@@ -209,12 +207,14 @@ impl AppState {
             record.connected = false;
         }
 
-        // The config offer — gated by the hash comparison, and only toward an Agent that both said
+        // The config offer — composed from the Configurations whose Selectors match this Agent
+        // (ADR-0012), gated by the hash comparison, and only toward an Agent that both said
         // goodbye ≠ true and declared AcceptsRemoteConfig (capability negotiation is binding).
         let remote_config = if disconnected {
             None
         } else {
-            offer(record, self.desired_config().as_ref())
+            let desired = self.configs.desired_for(record.description.as_ref());
+            offer(record, desired.as_ref())
         };
 
         Processed {
@@ -231,12 +231,13 @@ impl AppState {
         }
     }
 
-    /// The unsolicited offer a WebSocket loop pushes when the desired configuration changes; `None`
-    /// when the Agent already runs it (or cannot accept one), so nothing redundant crosses the wire.
+    /// The unsolicited offer a WebSocket loop pushes when a Configuration changes; `None` when
+    /// the Agent already runs its composed set (or nothing matches it, or it cannot accept one),
+    /// so nothing redundant crosses the wire.
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
-        let desired = self.desired_config();
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
+        let desired = self.configs.desired_for(record.description.as_ref());
         let remote_config = offer(record, desired.as_ref())?;
         Some(ServerToAgent {
             instance_uid: uid.as_bytes().to_vec(),
@@ -257,13 +258,16 @@ impl AppState {
         }
     }
 
-    /// The REST view of the fleet (`GET /api/agents`).
+    /// The REST view of the fleet (`GET /api/v1/agents`).
     pub fn snapshot(&self) -> Vec<AgentView> {
-        let desired = self.desired_config();
         let fleet = self.fleet.lock().expect("fleet lock");
         let mut agents: Vec<AgentView> = fleet
             .iter()
-            .map(|(uid, record)| AgentView::from_record(uid, record, desired.as_ref()))
+            .map(|(uid, record)| {
+                let desired = self.configs.desired_for(record.description.as_ref());
+                let matched = self.configs.matching_names(record.description.as_ref());
+                AgentView::from_record(uid, record, desired.as_ref(), matched)
+            })
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
         agents
@@ -271,7 +275,8 @@ impl AppState {
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
-/// it — the "no redundant reconfiguration" goal in one place.
+/// it — the "no redundant reconfiguration" goal in one place. Every matching Configuration is one
+/// named entry; the Managed Process does its own merging (ADR-0012).
 fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentRemoteConfig> {
     let desired = desired?;
     if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRemoteConfig as u64 == 0 {
@@ -287,26 +292,44 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
     }
     Some(AgentRemoteConfig {
         config: Some(AgentConfigMap {
-            config_map: HashMap::from([(
-                String::new(),
-                AgentConfigFile {
-                    body: desired.body.clone().into_bytes(),
-                    content_type: String::new(),
-                },
-            )]),
+            config_map: desired
+                .entries
+                .iter()
+                .map(|(name, body)| {
+                    (
+                        name.clone(),
+                        AgentConfigFile {
+                            body: body.clone().into_bytes(),
+                            content_type: String::new(),
+                        },
+                    )
+                })
+                .collect(),
         }),
         config_hash: desired.hash.clone(),
     })
 }
 
 /// One Agent as the REST API and the UI see it.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AgentView {
     pub instance_uid: String,
     pub service_name: String,
     pub service_version: String,
+    /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
-    pub transport: &'static str,
+    /// Every reported identifying attribute — what a Selector can match on (ADR-0012).
+    pub identifying_attributes: BTreeMap<String, String>,
+    /// Every reported non-identifying attribute — Selectors match these too.
+    pub non_identifying_attributes: BTreeMap<String, String>,
+    /// The Configurations currently matching this Agent, in name order.
+    pub matched_configurations: Vec<String>,
+    /// Hex hash of the composed configuration this Agent should run; empty when nothing matches.
+    pub desired_hash: String,
+    /// The Capability Set this Agent declared, as capability names from the Baseline's
+    /// `AgentCapabilities` (see docs/CONFORMANCE.md).
+    pub capabilities: Vec<String>,
+    pub transport: String,
     pub connected: bool,
     pub healthy: bool,
     pub health_status: String,
@@ -318,30 +341,83 @@ pub struct AgentView {
     pub last_seen_ms: u64,
 }
 
+/// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
+/// bits are surfaced verbatim rather than dropped — a peer declaring them is worth seeing.
+fn capability_names(mask: u64) -> Vec<String> {
+    use opamp::proto::AgentCapabilities as C;
+    const KNOWN: [(C, &str); 16] = [
+        (C::ReportsStatus, "ReportsStatus"),
+        (C::AcceptsRemoteConfig, "AcceptsRemoteConfig"),
+        (C::ReportsEffectiveConfig, "ReportsEffectiveConfig"),
+        (C::AcceptsPackages, "AcceptsPackages"),
+        (C::ReportsPackageStatuses, "ReportsPackageStatuses"),
+        (C::ReportsOwnTraces, "ReportsOwnTraces"),
+        (C::ReportsOwnMetrics, "ReportsOwnMetrics"),
+        (C::ReportsOwnLogs, "ReportsOwnLogs"),
+        (
+            C::AcceptsOpAmpConnectionSettings,
+            "AcceptsOpAMPConnectionSettings",
+        ),
+        (
+            C::AcceptsOtherConnectionSettings,
+            "AcceptsOtherConnectionSettings",
+        ),
+        (C::AcceptsRestartCommand, "AcceptsRestartCommand"),
+        (C::ReportsHealth, "ReportsHealth"),
+        (C::ReportsRemoteConfig, "ReportsRemoteConfig"),
+        (C::ReportsHeartbeat, "ReportsHeartbeat"),
+        (C::ReportsAvailableComponents, "ReportsAvailableComponents"),
+        (
+            C::ReportsConnectionSettingsStatus,
+            "ReportsConnectionSettingsStatus",
+        ),
+    ];
+    let mut names = Vec::new();
+    let mut undefined = mask;
+    for (bit, name) in KNOWN {
+        if mask & bit as u64 != 0 {
+            names.push(name.to_string());
+            undefined &= !(bit as u64);
+        }
+    }
+    if undefined != 0 {
+        names.push(format!("unknown bits 0x{undefined:x}"));
+    }
+    names
+}
+
+/// Reported attributes as the API shows them: string values as-is, other value kinds in their
+/// debug form — the view is for reading, the wire keeps the typed original.
+fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+    attributes
+        .iter()
+        .filter_map(|kv| {
+            let value = kv.value.as_ref()?.value.as_ref()?;
+            let text = match value {
+                any_value::Value::StringValue(s) => s.clone(),
+                other => format!("{other:?}"),
+            };
+            Some((kv.key.clone(), text))
+        })
+        .collect()
+}
+
 impl AgentView {
     fn from_record(
         uid: &InstanceUid,
         record: &AgentRecord,
         desired: Option<&DesiredConfig>,
+        matched_configurations: Vec<String>,
     ) -> Self {
-        let attr = |list: &[opamp::proto::KeyValue], key: &str| -> String {
-            list.iter()
-                .find(|kv| kv.key == key)
-                .and_then(|kv| kv.value.as_ref())
-                .and_then(|v| v.value.as_ref())
-                .map(|v| match v {
-                    opamp::proto::any_value::Value::StringValue(s) => s.clone(),
-                    other => format!("{other:?}"),
-                })
-                .unwrap_or_default()
-        };
-        let (name, version, os) = match &record.description {
+        let (identifying, non_identifying) = match &record.description {
             Some(d) => (
-                attr(&d.identifying_attributes, "service.name"),
-                attr(&d.identifying_attributes, "service.version"),
-                attr(&d.non_identifying_attributes, "os.type"),
+                attr_map(&d.identifying_attributes),
+                attr_map(&d.non_identifying_attributes),
             ),
-            None => (String::new(), String::new(), String::new()),
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
+        let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
+            map.get(key).cloned().unwrap_or_default()
         };
         let status = record.remote_config_status.as_ref();
         let status_name = match status.map(|s| s.status) {
@@ -350,6 +426,8 @@ impl AgentView {
             Some(s) if s == RemoteConfigStatuses::Failed as i32 => "FAILED",
             _ => "UNSET",
         };
+        // In sync means: runs exactly the composed set — trivially true when nothing matches,
+        // since an unmatched Agent is deliberately left alone (goal 9).
         let in_sync = match desired {
             None => true,
             Some(d) => {
@@ -358,10 +436,18 @@ impl AgentView {
         };
         AgentView {
             instance_uid: uid.to_string(),
-            service_name: name,
-            service_version: version,
-            os,
-            transport: record.transport.as_str(),
+            service_name: lookup(&identifying, "service.name"),
+            service_version: lookup(&identifying, "service.version"),
+            os: match lookup(&non_identifying, "os.description") {
+                description if !description.is_empty() => description,
+                _ => lookup(&non_identifying, "os.type"),
+            },
+            identifying_attributes: identifying,
+            non_identifying_attributes: non_identifying,
+            matched_configurations,
+            desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
+            capabilities: capability_names(record.capabilities),
+            transport: record.transport.as_str().to_string(),
             connected: record.connected,
             healthy: record.health.as_ref().map(|h| h.healthy).unwrap_or(false),
             health_status: record
@@ -419,4 +505,24 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_names_decode_known_bits_and_surface_undefined_ones() {
+        use opamp::proto::AgentCapabilities as C;
+        assert!(capability_names(0).is_empty());
+        assert_eq!(
+            capability_names(C::ReportsStatus as u64 | C::ReportsHealth as u64),
+            ["ReportsStatus", "ReportsHealth"]
+        );
+        let with_undefined = capability_names(C::ReportsStatus as u64 | 1 << 60);
+        assert_eq!(
+            with_undefined,
+            ["ReportsStatus", "unknown bits 0x1000000000000000"]
+        );
+    }
 }

@@ -64,6 +64,9 @@ pub struct AgentState {
     process_description: Option<AgentDescription>,
     /// The Managed Process's self-reported effective configuration; replaces the echo.
     process_effective_config: Option<EffectiveConfig>,
+    /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
+    /// attributes so Selectors can target them. Reported attributes win on key collision.
+    configured_attributes: Vec<(String, String)>,
 }
 
 impl AgentState {
@@ -95,6 +98,7 @@ impl AgentState {
             send_health: false,
             process_description: None,
             process_effective_config: None,
+            configured_attributes: Vec::new(),
         })
     }
 
@@ -103,6 +107,16 @@ impl AgentState {
         let mut state = Self::new(name, storage)?;
         state.managed = true;
         Ok(state)
+    }
+
+    /// Attaches the operator-defined attributes this Agent reports (ADR-0012).
+    #[must_use]
+    pub fn with_attributes(
+        mut self,
+        attributes: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.configured_attributes = attributes.into_iter().collect();
+        self
     }
 
     pub fn uid(&self) -> InstanceUid {
@@ -301,17 +315,38 @@ impl AgentState {
     }
 
     fn describe(&self) -> AgentDescription {
+        let mut identifying_attributes = vec![string_attr("service.name", &self.name)];
+        // `service.version` is the *Agent's* version. The self-Agent is the Client, so its baked
+        // version is the truth; a Supervisor-backed Agent stands for its Managed Process, whose
+        // version only the process itself can report (folded in below, goal 16) — never invented
+        // from the Client's.
+        if !self.managed {
+            identifying_attributes.push(string_attr("service.version", crate::version::version()));
+        }
+        identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
+        let mut non_identifying_attributes = vec![
+            string_attr("os.type", os_type()),
+            string_attr("host.arch", std::env::consts::ARCH),
+        ];
+        if let Some(os) = os_description() {
+            non_identifying_attributes.push(string_attr("os.description", os));
+        }
         let mut description = AgentDescription {
-            identifying_attributes: vec![
-                string_attr("service.name", &self.name),
-                string_attr("service.version", crate::version::version()),
-                string_attr("service.instance.id", &self.uid.to_string()),
-            ],
-            non_identifying_attributes: vec![
-                string_attr("os.type", os_type()),
-                string_attr("host.arch", std::env::consts::ARCH),
-            ],
+            identifying_attributes,
+            non_identifying_attributes,
         };
+        // Operator-defined attributes (ADR-0012) — added only where nothing is reported under the
+        // same key, so what the code (and below, the Managed Process) reports always wins.
+        for (key, value) in &self.configured_attributes {
+            let taken = |list: &[KeyValue]| list.iter().any(|kv| kv.key == *key);
+            if !taken(&description.identifying_attributes)
+                && !taken(&description.non_identifying_attributes)
+            {
+                description
+                    .non_identifying_attributes
+                    .push(string_attr(key, value));
+            }
+        }
         // Fold in what the Managed Process reported about itself — except its identity: the
         // Agent the Server sees is the Supervisor, keyed by the Supervisor's uid (goal 16).
         if let Some(reported) = &self.process_description {
@@ -373,6 +408,56 @@ fn os_type() -> &'static str {
     }
 }
 
+/// Human-readable operating-system description (OTel `os.description`, e.g. "Ubuntu 24.04.2
+/// LTS") — best effort per platform, computed once, absent when the platform gives none.
+fn os_description() -> Option<&'static str> {
+    static DESCRIPTION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DESCRIPTION.get_or_init(read_os_description).as_deref()
+}
+
+#[cfg(target_os = "linux")]
+fn read_os_description() -> Option<String> {
+    // os-release(5): PRETTY_NAME="Ubuntu 24.04.2 LTS"
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn read_os_description() -> Option<String> {
+    // `sw_vers` prints ProductName/ProductVersion/BuildVersion lines, e.g. "macOS" / "15.5".
+    let output = std::process::Command::new("sw_vers").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|value| value.trim_start_matches(':').trim().to_string())
+    };
+    match (field("ProductName"), field("ProductVersion")) {
+        (Some(name), Some(version)) => Some(format!("{name} {version}")),
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn read_os_description() -> Option<String> {
+    // `cmd /c ver` prints e.g. "Microsoft Windows [Version 10.0.26100.2033]".
+    let output = std::process::Command::new("cmd")
+        .args(["/c", "ver"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn read_os_description() -> Option<String> {
+    None
+}
+
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -404,6 +489,100 @@ mod tests {
             }),
             config_hash: hash.to_vec(),
         }
+    }
+
+    #[test]
+    fn configured_attributes_are_reported_but_never_shadow_reported_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::new("test-agent".to_string(), storage)
+            .expect("agent")
+            .with_attributes(
+                [
+                    ("env".to_string(), "prod".to_string()),
+                    // Collides with what the code reports — the reported value must win.
+                    ("os.type".to_string(), "configured".to_string()),
+                ]
+                .into(),
+            );
+
+        let description = agent.describe();
+        let value = |key: &str| {
+            description
+                .non_identifying_attributes
+                .iter()
+                .find(|kv| kv.key == key)
+                .and_then(|kv| kv.value.as_ref())
+                .and_then(|v| v.value.as_ref())
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s.clone(),
+                    other => format!("{other:?}"),
+                })
+        };
+        assert_eq!(value("env").as_deref(), Some("prod"));
+        assert_eq!(value("os.type").as_deref(), Some(os_type()));
+        assert_eq!(
+            description
+                .non_identifying_attributes
+                .iter()
+                .filter(|kv| kv.key == "os.type")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_description_names_the_distribution_not_only_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let description = make_agent(dir.path()).describe();
+        let os = description
+            .non_identifying_attributes
+            .iter()
+            .find(|kv| kv.key == "os.description")
+            .expect("an os.description on a distribution with /etc/os-release");
+        let text = match &os.value.as_ref().and_then(|v| v.value.as_ref()) {
+            Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+            other => panic!("os.description must be a string, got {other:?}"),
+        };
+        assert!(!text.is_empty());
+        assert_ne!(text, "linux", "the PRETTY_NAME, not the os.type");
+    }
+
+    #[test]
+    fn only_the_self_agent_carries_the_client_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let version_of = |agent: &AgentState| {
+            agent
+                .describe()
+                .identifying_attributes
+                .iter()
+                .find(|kv| kv.key == "service.version")
+                .and_then(|kv| kv.value.clone())
+                .and_then(|v| v.value)
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s,
+                    other => format!("{other:?}"),
+                })
+        };
+
+        // The self-Agent *is* the Client — its baked version is the Agent's version.
+        let this = make_agent(&dir.path().join("self"));
+        assert_eq!(
+            version_of(&this).as_deref(),
+            Some(crate::version::version())
+        );
+
+        // A Supervisor-backed Agent reports no version until its Managed Process states one.
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        assert_eq!(version_of(&supervised), None);
+
+        supervised.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.version", "0.142.0")],
+            non_identifying_attributes: vec![],
+        });
+        assert_eq!(version_of(&supervised).as_deref(), Some("0.142.0"));
     }
 
     #[test]
