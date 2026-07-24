@@ -21,6 +21,11 @@ pub struct ClientConfig {
     /// WebSocket, where the Server pushes.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// How often each Agent heartbeats over the WebSocket transport (`ReportsHeartbeat`). The
+    /// Baseline's default is 30 seconds; `0` disables heartbeats and undeclares the capability.
+    /// Ignored on plain HTTP, where every poll is the periodic report.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
@@ -168,6 +173,11 @@ fn default_poll_interval_secs() -> u64 {
     30
 }
 
+fn default_heartbeat_interval_secs() -> u64 {
+    // The Baseline: "The interval between the heartbeats SHOULD be 30 seconds".
+    30
+}
+
 fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
@@ -182,6 +192,7 @@ impl Default for ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
             poll_interval_secs: default_poll_interval_secs(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
             attributes: BTreeMap::new(),
             tls: None,
@@ -252,6 +263,10 @@ mod tests {
         );
         assert!(cfg.endpoint.contains(":4320/v1/opamp"));
         assert_eq!(cfg.poll_interval_secs, 30);
+        // The Baseline's heartbeat default; 0 is the documented way to disable.
+        assert_eq!(cfg.heartbeat_interval_secs, 30);
+        let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
+        assert_eq!(disabled.heartbeat_interval_secs, 0);
     }
 
     #[test]

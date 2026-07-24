@@ -39,13 +39,21 @@ fn registry() -> Vec<Box<dyn Plugin>> {
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
 /// unknown plugin, or a plugin rejects its settings — startup fails loudly, nothing runs half.
 pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine, String> {
+    // Heartbeats are a Client-wide choice: enabled (interval > 0) every Agent declares the
+    // capability; disabled none does — an undeclared capability must never be exercised.
+    let declare_heartbeat = |mut state: AgentState| {
+        if config.heartbeat_interval_secs > 0 {
+            state.declare_capability(opamp::proto::AgentCapabilities::ReportsHeartbeat);
+        }
+        state
+    };
     if config.supervisors.is_empty() {
         let storage = Storage::new(config.state_dir.clone())
             .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
         let state = AgentState::new(config.name.clone(), storage)
             .map_err(|e| format!("cannot restore the agent state: {e}"))?
             .with_attributes(config.agent_attributes(None));
-        return Ok(Engine::new(vec![state]));
+        return Ok(Engine::new(vec![declare_heartbeat(state)]));
     }
 
     let plugins = registry();
@@ -69,9 +77,11 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         let storage = Storage::new(state_dir.clone())
             .map_err(|e| format!("cannot prepare {}: {e}", state_dir.display()))?;
         let config_dir = storage.config_dir();
-        let state = AgentState::supervised(block.name.clone(), storage)
-            .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
-            .with_attributes(config.agent_attributes(Some(block)));
+        let state = declare_heartbeat(
+            AgentState::supervised(block.name.clone(), storage)
+                .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
+                .with_attributes(config.agent_attributes(Some(block))),
+        );
 
         // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
         // unconditionally, before the process starts — a taken port fails startup, not later.

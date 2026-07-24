@@ -80,7 +80,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
-            "state_dir = {state:?}\n\n",
+            "state_dir = {state:?}\n",
+            "heartbeat_interval_secs = 1\n\n",
             "[attributes]\n",
             "env = \"prod\"\n\n",
             "[[supervisor]]\n",
@@ -238,4 +239,34 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         std::fs::read_to_string(stub_extra).expect("the stub's second entry file"),
         "processors: {}\n"
     );
+
+    // Heartbeats (ReportsHeartbeat, 1 s in this test): with nothing left to change, every
+    // Agent's sequence number keeps advancing and the description survives — routine reports,
+    // not ReportFullState churn.
+    let quiesced: Vec<(String, u64)> = state
+        .snapshot()
+        .iter()
+        .map(|a| (a.instance_uid.clone(), a.sequence_num))
+        .collect();
+    assert!(state
+        .snapshot()
+        .iter()
+        .all(|a| a.capabilities.iter().any(|c| c == "ReportsHeartbeat")));
+    wait_until(
+        "heartbeats to advance every agent's sequence number",
+        || {
+            let snapshot = state.snapshot();
+            quiesced
+                .iter()
+                .all(|(uid, seq)| {
+                    snapshot.iter().any(|a| {
+                        &a.instance_uid == uid
+                            && a.sequence_num > *seq
+                            && !a.service_name.is_empty()
+                    })
+                })
+                .then_some(())
+        },
+    )
+    .await;
 }
