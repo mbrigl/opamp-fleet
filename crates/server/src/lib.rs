@@ -15,7 +15,9 @@ use axum::Router;
 
 use fleet::AppState;
 
-/// The complete application: OpAMP endpoint, REST API, and UI on one router (ADR-0005).
-pub fn app(state: Arc<AppState>) -> Router {
-    transport::router(state.clone()).merge(api::router(state))
+/// The complete application: OpAMP endpoint, REST API, and UI on one router (ADR-0005). The
+/// credential check guards the OpAMP endpoint alone (ADR-0013) — REST API and UI stay open,
+/// operator-facing auth being a separate decision.
+pub fn app(state: Arc<AppState>, auth: Option<transport::OpampAuth>) -> Router {
+    transport::router(state.clone(), auth).merge(api::router(state))
 }

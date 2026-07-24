@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -21,6 +22,7 @@ use opamp::uid::InstanceUid;
 use prost::Message as _;
 use tracing::{debug, warn};
 
+use crate::config::AuthConfig;
 use crate::fleet::{bad_request, AppState, Transport};
 
 /// The endpoint path the Baseline names as the default.
@@ -29,14 +31,63 @@ pub const OPAMP_PATH: &str = "/v1/opamp";
 /// The protobuf media type the Baseline requires on the plain-HTTP transport.
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
-pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+/// The OpAMP endpoint's credential check (ADR-0013), precomputed from the `[auth]` section.
+pub struct OpampAuth {
+    /// Every `Authorization` value that authenticates — Bearer and Basic alike.
+    accepted: Vec<String>,
+    /// The `WWW-Authenticate` value a `401` carries.
+    challenge: String,
+}
+
+impl OpampAuth {
+    pub fn from_config(auth: &AuthConfig) -> Self {
+        OpampAuth {
+            accepted: auth.accepted_headers(),
+            challenge: auth.challenge(),
+        }
+    }
+
+    fn permits(&self, headers: &HeaderMap) -> bool {
+        let presented = header_str(headers, header::AUTHORIZATION);
+        self.accepted
+            .iter()
+            // Constant-time per candidate, so a comparison never leaks how far it matched.
+            .any(|accepted| {
+                constant_time_eq::constant_time_eq(accepted.as_bytes(), presented.as_bytes())
+            })
+    }
+}
+
+pub fn router(state: Arc<AppState>, auth: Option<OpampAuth>) -> Router {
+    let mut router = Router::new()
         // One path, both transports — split exactly as the Baseline describes: a WebSocket
         // upgrade (a GET) starts the WebSocket transport, a POST carrying the protobuf
         // Content-Type is one plain-HTTP exchange.
         .route(OPAMP_PATH, get(upgrade).post(post_exchange))
         .layer(DefaultBodyLimit::max(MAX_MESSAGE_SIZE))
-        .with_state(state)
+        .with_state(state);
+    if let Some(auth) = auth {
+        // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
+        // WebSocket upgrade completes — answers 401 without a valid credential (ADR-0013).
+        router = router.layer(middleware::from_fn_with_state(Arc::new(auth), require_auth));
+    }
+    router
+}
+
+async fn require_auth(
+    State(auth): State<Arc<OpampAuth>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if auth.permits(request.headers()) {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, auth.challenge.clone())],
+        "the OpAMP endpoint requires authentication",
+    )
+        .into_response()
 }
 
 async fn upgrade(State(state): State<Arc<AppState>>, upgrade: WebSocketUpgrade) -> Response {

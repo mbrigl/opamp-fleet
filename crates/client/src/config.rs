@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use serde::Deserialize;
 
 /// `client.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
@@ -37,6 +38,9 @@ pub struct ClientConfig {
     pub attributes: BTreeMap<String, String>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
+    /// Optional authentication toward the Server (ADR-0013); absent means no `Authorization`
+    /// header, as before.
+    pub auth: Option<AuthConfig>,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -157,6 +161,35 @@ fn take_string_table(
     }
 }
 
+/// The `[auth]` block (ADR-0013): exactly one scheme — `bearer_token`, or `username` and
+/// `password` together. Mixing or halving them fails loudly at startup (ADR-0008).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    pub bearer_token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl AuthConfig {
+    /// The `Authorization` header value this block yields, sent on every plain-HTTP request and
+    /// on the WebSocket upgrade.
+    pub fn authorization(&self) -> Result<String, String> {
+        match (&self.bearer_token, &self.username, &self.password) {
+            (Some(token), None, None) => Ok(format!("Bearer {token}")),
+            (None, Some(user), Some(password)) => {
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                Ok(format!("Basic {encoded}"))
+            }
+            (Some(_), _, _) => Err(
+                "[auth] must set either bearer_token or username/password, not both".to_string(),
+            ),
+            _ => Err("[auth] needs bearer_token, or username and password together".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -211,6 +244,7 @@ impl Default for ClientConfig {
             state_dir: default_state_dir(),
             attributes: BTreeMap::new(),
             tls: None,
+            auth: None,
             supervisors: Vec::new(),
         }
     }
@@ -228,6 +262,11 @@ impl ClientConfig {
         let config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         config.check_supervisor_names()?;
+        if let Some(auth) = &config.auth {
+            // A half-configured block must fail now, not at the first exchange.
+            auth.authorization()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         Ok(config)
     }
 
@@ -251,6 +290,28 @@ impl ClientConfig {
             merged.extend(block.attributes.clone());
         }
         merged
+    }
+
+    /// Basic and Bearer are cleartext without TLS: sending them beyond the loopback over `ws://`
+    /// or `http://` deserves a warning (ADR-0013) — ultimately the operator's choice, so never
+    /// an error.
+    pub fn sends_credentials_in_cleartext(&self) -> bool {
+        if self.auth.is_none() {
+            return false;
+        }
+        let Some((scheme, rest)) = self.endpoint.split_once("://") else {
+            return false;
+        };
+        if scheme == "wss" || scheme == "https" {
+            return false;
+        }
+        let host_port = rest.split(['/', '?']).next().unwrap_or("");
+        // A bracketed IPv6 host keeps its brackets; only a trailing `:port` is cut off.
+        let host = match host_port.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(""),
+            None => host_port.split(':').next().unwrap_or(""),
+        };
+        !matches!(host, "localhost" | "127.0.0.1" | "::1")
     }
 
     pub fn transport(&self) -> Result<TransportKind, String> {
@@ -419,6 +480,73 @@ mod tests {
         assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
         let block = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\n[supervisor.attributes]\nflag = true\n";
         assert!(toml::from_str::<ClientConfig>(block).is_err());
+    }
+
+    #[test]
+    fn auth_yields_exactly_one_authorization_scheme() {
+        let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
+        assert_eq!(
+            bearer.auth.expect("auth").authorization().expect("value"),
+            "Bearer tok"
+        );
+
+        let basic: ClientConfig =
+            toml::from_str("[auth]\nusername = \"fleet\"\npassword = \"secret\"").expect("parse");
+        assert_eq!(
+            basic.auth.expect("auth").authorization().expect("value"),
+            // base64("fleet:secret")
+            "Basic ZmxlZXQ6c2VjcmV0"
+        );
+
+        // Mixing the schemes, halving Basic, or an empty block all fail loudly.
+        for bad in [
+            "[auth]\nbearer_token = \"tok\"\nusername = \"fleet\"\npassword = \"s\"",
+            "[auth]\nusername = \"fleet\"",
+            "[auth]\npassword = \"secret\"",
+            "[auth]",
+        ] {
+            let cfg: ClientConfig = toml::from_str(bad).expect("parses; the mix is semantic");
+            assert!(
+                cfg.auth.expect("auth").authorization().is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
+    }
+
+    #[test]
+    fn cleartext_credentials_are_flagged_beyond_the_loopback() {
+        for (endpoint, cleartext) in [
+            ("ws://fleet.example:4320/v1/opamp", true),
+            ("http://10.0.0.7:4320/v1/opamp", true),
+            ("ws://127.0.0.1:4320/v1/opamp", false),
+            ("http://localhost:4320/v1/opamp", false),
+            ("ws://[::1]:4320/v1/opamp", false),
+            ("wss://fleet.example:4320/v1/opamp", false),
+            ("https://fleet.example:4320/v1/opamp", false),
+        ] {
+            let cfg = ClientConfig {
+                endpoint: endpoint.to_string(),
+                auth: Some(AuthConfig {
+                    bearer_token: Some("tok".to_string()),
+                    username: None,
+                    password: None,
+                }),
+                ..ClientConfig::default()
+            };
+            assert_eq!(
+                cfg.sends_credentials_in_cleartext(),
+                cleartext,
+                "{endpoint}"
+            );
+        }
+
+        // Without [auth] there is nothing to leak.
+        let no_auth = ClientConfig {
+            endpoint: "ws://fleet.example:4320/v1/opamp".to_string(),
+            ..ClientConfig::default()
+        };
+        assert!(!no_auth.sends_credentials_in_cleartext());
     }
 
     #[test]

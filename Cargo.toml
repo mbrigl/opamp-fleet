@@ -32,6 +32,10 @@ hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
 # Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007).
 flate2 = "1"
+# Encoding Basic credentials into their Authorization header value (ADR-0013).
+base64 = "0.22"
+# Constant-time credential comparison on the Server (ADR-0013).
+constant_time_eq = "0.4"
 # kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0011). Unix-only.
 libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0007).
