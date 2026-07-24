@@ -23,5 +23,10 @@ sudo tar -xvf /tmp/otelcol_0.157.0_linux_amd64.tar.gz -C /usr/local/bin otelcol
 echo "Installing Fluent Bit..."
 curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh
 
+# 4. Stage the minimal example Configurations (ADR-0012) for the three processes into
+# fleet-configs/, so the Server offers them from its next start (see the seed script for
+# the Selector mapping and usage notes).
+echo "Staging example test Configurations..."
+"$(dirname "$0")/seed_test_configs.sh" --offline
 
 echo "Installation completed successfully!"
