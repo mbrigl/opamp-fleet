@@ -1,6 +1,6 @@
 # ADR-0014: Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-24
 - **Deciders:** Markus Brigl
 
