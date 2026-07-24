@@ -126,8 +126,8 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Agent. |
 | `AcceptsRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
 | `ReportsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
-| `AcceptsPackages` | `0x0008` | Beta | optional | planned | Software distribution (goal 10). |
-| `ReportsPackageStatuses` | `0x0010` | Beta | optional | planned | Software distribution (goal 10). |
+| `AcceptsPackages` | `0x0008` | Beta | optional | implemented | Software distribution for Managed Processes (goal 10, ADR-0015). Declared by a Supervisor-backed Agent whose block names a `package`; the offered artifact is downloaded, verified (content hash always, Ed25519 signature when a key is configured), swapped over the Managed Process's binary by the Supervisor, health-gated on `apply_grace_secs`, and rolled back if it will not stay up. The Client's own self-update (goal 11) is future work. |
+| `ReportsPackageStatuses` | `0x0010` | Beta | optional | implemented | `Installing` on receipt, `Installed`/`InstallFailed` after the Supervisor applies (ADR-0015), the offered `all_packages_hash` echoed once terminal — which is what stops the Server re-offering. Survives restarts via the persisted installed-package record. |
 | `ReportsOwnTraces` | `0x0020` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnMetrics` | `0x0040` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
@@ -149,8 +149,8 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 | `AcceptsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Server. |
 | `OffersRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
 | `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
-| `OffersPackages` | `0x0008` | Beta | optional | planned | Software distribution (goal 10). |
-| `AcceptsPackagesStatus` | `0x0010` | Beta | optional | planned | Software distribution (goal 10). |
+| `OffersPackages` | `0x0008` | Beta | optional | implemented | Declared only while a non-empty package store is armed (`packages_dir`, ADR-0015). Artifacts and metadata persist and are managed through the REST API; the hash-gated `PackagesAvailable` offer carries a `download_url` served from the same listener. |
+| `AcceptsPackagesStatus` | `0x0010` | Beta | optional | implemented | The Server records each Agent's reported `PackageStatuses` and gates re-offering on the `server_provided_all_packages_hash` (ADR-0015). |
 | `OffersConnectionSettings` | `0x0020` | Beta | optional | implemented | Declared only while `server.toml` carries a `[connection_offer]` — credential, heartbeat interval, and/or endpoint, compiled into one hash-gated `OpAMPConnectionSettings` offered to Agents declaring `AcceptsOpAMPConnectionSettings` whose reported hash differs (ADR-0014). A credential that `[auth]` would reject fails startup. |
 | `AcceptsConnectionSettingsRequest` | `0x0040` | Development | optional | planned | Agent-initiated certificate signing request flow. |
 
@@ -212,6 +212,10 @@ relaying from the Managed Process, and duplicate-`instance_uid` handling with pe
 disconnect scoping. The OpAMP endpoint optionally requires Basic or Bearer authentication on both
 transports (ADR-0013), and the Server rotates those credentials — plus heartbeat interval and
 endpoint — fleet-wide through hash-gated connection-settings offers the Client verifies by
-actually connecting, persists, and acknowledges (ADR-0014). Every remaining *planned* row —
-packages, other/telemetry connection settings, the certificate-request flow, own telemetry,
-custom messages — is future work; the rows above double as that work list.
+actually connecting, persists, and acknowledges (ADR-0014). Software distribution to Managed
+Processes is in place (ADR-0015): the Server stores and offers packages, and each Supervisor
+downloads the artifact, verifies it (content hash always, Ed25519 signature when a key is
+configured), swaps it over its Managed Process's binary, health-gates it on the apply grace, and
+rolls back a binary that will not stay up. Every remaining *planned* row — other/telemetry
+connection settings, the certificate-request flow, own telemetry, custom messages, and the
+Client's own self-update (goal 11) — is future work; the rows above double as that work list.

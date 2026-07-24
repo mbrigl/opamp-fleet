@@ -33,3 +33,15 @@ config_dir = "fleet-configs"
 # bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
+
+# Where software packages are persisted (ADR-0015): one artifact + metadata pair each. Upload a
+# package with PUT /api/v1/packages/{name}?version=<v> (artifact as the body, optional Ed25519
+# signature=<hex>); the Server offers it to Agents whose [[supervisor]] block names it. The
+# download endpoint sits on the unauthenticated REST plane — the content hash and signature are
+# what protect an installed binary, so sign packages and configure the key on the Client.
+packages_dir = "fleet-packages"
+
+# The absolute base URL advertised for downloads. Leave unset for the common single-listener
+# case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when
+# downloads must go through a different host.
+# advertised_url = "https://fleet.example:4320"

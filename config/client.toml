@@ -31,6 +31,13 @@ state_dir = "client-state"
 # [tls]
 # ca_file = "ca.pem"
 
+# Optional package verification (ADR-0015). With a key set, every Server-offered package MUST
+# carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
+# its content hash alone and a signed one is refused. A [[supervisor]] block opts into package
+# delivery by naming the package that updates its binary (its `package = "..."` key below).
+# [packages]
+# verification_key = "<hex-encoded Ed25519 public key>"
+
 # Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
 # username and password together. The Authorization header rides every plain-HTTP request and
 # the WebSocket upgrade. Without TLS the credentials travel in cleartext; pair with wss:// or
@@ -71,6 +78,9 @@ state_dir = "client-state"
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
+# package = "otelcol"      # (ADR-0015) update this binary from the Server package of this name:
+#                          # the artifact is verified, swapped over `binary`, health-gated on
+#                          # apply_grace_secs, and rolled back if it will not stay up
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:

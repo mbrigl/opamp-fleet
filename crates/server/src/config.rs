@@ -29,6 +29,15 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     /// Optional connection settings offered to the fleet (ADR-0014); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
+    /// Where software packages are persisted — artifact + metadata each (ADR-0015). An empty or
+    /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
+    #[serde(default = "default_packages_dir")]
+    pub packages_dir: PathBuf,
+    /// The absolute base URL the Server advertises for package downloads (ADR-0015), e.g.
+    /// `https://fleet.example:4320`. When unset, the Server offers a path-only `download_url`
+    /// that the Client resolves against its own OpAMP endpoint — right for the common
+    /// single-listener deployment; set it when downloads must go through a different host.
+    pub advertised_url: Option<String>,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -170,6 +179,10 @@ fn default_config_dir() -> PathBuf {
     PathBuf::from("fleet-configs")
 }
 
+fn default_packages_dir() -> PathBuf {
+    PathBuf::from("fleet-packages")
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -178,6 +191,8 @@ impl Default for ServerConfig {
             tls: None,
             auth: None,
             connection_offer: None,
+            packages_dir: default_packages_dir(),
+            advertised_url: None,
         }
     }
 }

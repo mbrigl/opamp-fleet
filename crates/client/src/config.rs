@@ -45,6 +45,13 @@ pub struct ClientConfig {
     /// settings at startup — never from the file, and it wins over `[auth]`.
     #[serde(skip)]
     pub authorization_override: Option<String>,
+    /// Package verification (ADR-0015); absent means unsigned packages are accepted on their
+    /// content hash alone.
+    pub packages: Option<PackagesConfig>,
+    /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
+    /// signature is checked against. Set from the file at load; not itself a file key.
+    #[serde(skip)]
+    pub package_key: Option<Vec<u8>>,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -75,6 +82,10 @@ pub struct SupervisorBlock {
     pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
+    /// The package this Supervisor's Managed Process is updated from (ADR-0015): the name of a
+    /// Server-offered package whose artifact swaps this process's binary. Set enables
+    /// `AcceptsPackages`; unset means this Supervisor takes no package offers.
+    pub package: Option<String>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
@@ -108,6 +119,12 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        let package = take_string(&mut table, "package")?;
+        if let Some(package) = &package {
+            crate::cli::parse_instance_name(package).map_err(|e| {
+                format!("supervisor {name:?}: invalid package name {package:?}: {e}")
+            })?;
+        }
         Ok(SupervisorBlock {
             kind,
             name,
@@ -115,6 +132,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             attributes,
+            package,
             settings: table,
         })
     }
@@ -194,6 +212,16 @@ impl AuthConfig {
     }
 }
 
+/// The `[packages]` block (ADR-0015): how downloaded package artifacts are verified.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesConfig {
+    /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
+    /// signature against it; when unset, an unsigned package is accepted on its content hash alone
+    /// and a *signed* one is refused (there is nothing to check it with).
+    pub verification_key: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -250,6 +278,8 @@ impl Default for ClientConfig {
             tls: None,
             auth: None,
             authorization_override: None,
+            packages: None,
+            package_key: None,
             supervisors: Vec::new(),
         }
     }
@@ -264,7 +294,7 @@ impl ClientConfig {
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let config: ClientConfig =
+        let mut config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         config.check_supervisor_names()?;
         if let Some(auth) = &config.auth {
@@ -272,7 +302,27 @@ impl ClientConfig {
             auth.authorization()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        // Decode the package verification key once — a malformed key must fail startup, not the
+        // first package offer.
+        if let Some(key_hex) = config
+            .packages
+            .as_ref()
+            .and_then(|p| p.verification_key.as_ref())
+        {
+            let key = hex::decode(key_hex).map_err(|e| {
+                format!(
+                    "{}: [packages].verification_key is not valid hex: {e}",
+                    path.display()
+                )
+            })?;
+            config.package_key = Some(key);
+        }
         Ok(config)
+    }
+
+    /// The Ed25519 public key package signatures are verified against (ADR-0015), or `None`.
+    pub fn package_key(&self) -> Option<&[u8]> {
+        self.package_key.as_deref()
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently

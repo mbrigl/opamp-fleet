@@ -7,14 +7,15 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -30,7 +31,8 @@ use crate::fleet::{AgentView, AppState, RestartError};
     ),
     tags(
         (name = "fleet", description = "The fleet as the Server sees it"),
-        (name = "configurations", description = "Selector-targeted Configurations")
+        (name = "configurations", description = "Selector-targeted Configurations"),
+        (name = "packages", description = "Software packages the Server delivers (ADR-0015)")
     )
 )]
 struct ApiDoc;
@@ -45,6 +47,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             put_configuration,
             delete_configuration
         ))
+        .routes(routes!(list_packages))
+        .routes(routes!(put_package, delete_package))
+        .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -233,5 +238,164 @@ async fn delete_configuration(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// One stored package's name and version (never its artifact bytes).
+#[derive(Serialize, ToSchema)]
+struct PackageView {
+    name: String,
+    version: String,
+}
+
+/// The query parameters of a package upload: everything but the artifact, which is the body.
+#[derive(Deserialize, IntoParams)]
+struct PackageUpload {
+    /// The package version (free-form, e.g. a SemVer the Agent may compare).
+    version: String,
+    /// `true` marks an addon; the default is a top-level package (a Managed Process's binary).
+    #[serde(default)]
+    addon: bool,
+    /// Hex-encoded Ed25519 signature over the artifact; verified by the Agent before it installs.
+    #[serde(default)]
+    signature: Option<String>,
+}
+
+/// All stored packages, in name order (never the artifact bytes).
+#[utoipa::path(
+    get,
+    path = "/api/v1/packages",
+    tag = "packages",
+    responses(
+        (status = 200, description = "Every stored package", body = [PackageView]),
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody)
+    )
+)]
+async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
+    match state.packages() {
+        Some(store) => Json(
+            store
+                .list()
+                .into_iter()
+                .map(|(name, version)| PackageView { name, version })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            "package delivery is not configured on this Server",
+        ),
+    }
+}
+
+/// Creates or replaces a package. The artifact is the raw request body; its metadata rides the
+/// query. Distribution follows from state: matching Agents are offered it on their next exchange.
+#[utoipa::path(
+    put,
+    path = "/api/v1/packages/{name}",
+    tag = "packages",
+    params(
+        ("name" = String, Path, description = "The package name (ADR-0010 grammar)"),
+        PackageUpload
+    ),
+    request_body(content = Vec<u8>, description = "The artifact bytes", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "The stored package", body = PackageView),
+        (status = 400, description = "Invalid name, empty artifact, or bad signature", body = ErrorBody),
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The package could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(upload): Query<PackageUpload>,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = configs::validate_name(&name) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid name {name:?}: {e}"),
+        );
+    }
+    let signature = match upload.signature.as_deref() {
+        Some(hex) => match hex::decode(hex) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid signature hex: {e}"),
+                )
+            }
+        },
+        None => None,
+    };
+    match state.put_package(
+        name.clone(),
+        upload.version.clone(),
+        upload.addon,
+        signature,
+        body.to_vec(),
+    ) {
+        Ok(()) => {
+            info!(package = %name, bytes = body.len(), "package stored from the API");
+            Json(PackageView {
+                name,
+                version: upload.version,
+            })
+            .into_response()
+        }
+        Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
+        Err(e) if e.starts_with("invalid") || e.contains("empty") => {
+            error(StatusCode::BAD_REQUEST, e)
+        }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Deletes a package. Agents that installed it keep running it; they simply receive no further
+/// offers of it.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/packages/{name}",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The package could not be deleted", body = ErrorBody)
+    )
+)]
+async fn delete_package(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    match state.delete_package(&name) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
+        Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Serves a package's artifact bytes — the `download_url` the Agent is offered points here. On the
+/// unauthenticated REST plane (ADR-0013); the artifact's content hash and Ed25519 signature are
+/// what the Agent verifies before it installs (ADR-0015).
+#[utoipa::path(
+    get,
+    path = "/api/v1/packages/{name}/file",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    responses(
+        (status = 200, description = "The artifact bytes", content_type = "application/octet-stream"),
+        (status = 404, description = "No such package", body = ErrorBody)
+    )
+)]
+async fn download_package(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.packages().and_then(|store| store.artifact(&name)) {
+        Some(bytes) => {
+            ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
+        }
+        None => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
     }
 }

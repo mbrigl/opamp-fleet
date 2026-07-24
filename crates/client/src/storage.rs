@@ -16,6 +16,16 @@ use tracing::warn;
 const UID_FILE: &str = "instance-uid";
 const CONFIG_PB_FILE: &str = "remote-config.pb";
 const CONFIG_DIR: &str = "config";
+const PACKAGE_FILE: &str = "installed-package.json";
+
+/// The package this Supervisor's Managed Process currently runs (ADR-0015), persisted so a
+/// restarted Client reports the version it has and is not re-offered it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InstalledPackage {
+    pub name: String,
+    pub version: String,
+    pub hash_hex: String,
+}
 
 pub struct Storage {
     dir: PathBuf,
@@ -86,6 +96,24 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /// The installed package (ADR-0015), if one survived a previous run.
+    pub fn load_package(&self) -> Option<InstalledPackage> {
+        let text = std::fs::read_to_string(self.dir.join(PACKAGE_FILE)).ok()?;
+        match serde_json::from_str(&text) {
+            Ok(package) => Some(package),
+            Err(e) => {
+                warn!(error = %e, "stored package record is unreadable; ignoring it");
+                None
+            }
+        }
+    }
+
+    /// Records the installed package, so a restarted Client reports what it runs.
+    pub fn store_package(&self, package: &InstalledPackage) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(package).expect("an InstalledPackage serializes");
+        std::fs::write(self.dir.join(PACKAGE_FILE), json)
     }
 }
 

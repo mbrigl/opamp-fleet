@@ -161,7 +161,10 @@
           <h1>Agents</h1>
           <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s)</p>
         </div>
-        <button id="toggle-config" class="btn btn-primary">Configurations</button>
+        <div style="display: flex; gap: 10px;">
+          <button id="toggle-packages" class="btn btn-ghost">Packages</button>
+          <button id="toggle-config" class="btn btn-primary">Configurations</button>
+        </div>
       </div>
 
       <section id="config-card" class="card config">
@@ -178,6 +181,28 @@
           <button id="delete" class="btn btn-ghost">Delete</button>
           <button id="cancel" class="btn btn-ghost">Close</button>
           <span id="config-error" class="err"></span>
+        </div>
+      </section>
+
+      <section id="packages-card" class="card config">
+        <h2>Packages — a software artifact offered to every Agent whose Supervisor names it; verified (content hash, and signature when a key is configured), then swapped and health-gated. Packages are fleet-wide — no Selector.</h2>
+        <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
+        <div class="config-fields">
+          <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
+          <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="package-addon" /> addon (default: top-level, a Managed Process's binary)
+          </label>
+          <input id="package-file" type="file" style="color: var(--muted); font-size: 13px;" />
+        </div>
+        <div class="config-actions">
+          <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
+          <button id="package-delete" class="btn btn-ghost">Delete</button>
+          <button id="package-close" class="btn btn-ghost">Close</button>
+          <span id="package-error" class="err"></span>
         </div>
       </section>
 
@@ -271,6 +296,14 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        for (const p of a.packages || []) {
+          const cls = p.status === "Installed" ? "green"
+            : p.status === "InstallFailed" ? "red"
+            : "amber"; // Installing / InstallPending
+          const label = `pkg: ${esc(p.name)}${p.version ? " " + esc(p.version) : ""}`;
+          const title = p.status === "InstallFailed" && p.error ? esc(p.error) : esc(p.status);
+          chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
+        }
         return `<div class="chips">${chips.join("")}</div>`;
       }
       function matchedConfigs(a) {
@@ -283,8 +316,9 @@
         if (!filterText) return true;
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
+        const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
         const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
-          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || [])
+          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
       }
@@ -461,6 +495,80 @@
         });
       }
 
+      // Packages editor (ADR-0015): name + version + addon + optional signature + artifact file,
+      // PUT/DELETE per package. Packages are fleet-wide — no Selector, unlike Configurations.
+      let packages = [];
+      let selectedPackage = null;
+
+      function renderPackageList() {
+        $("package-list").innerHTML = packages.map((p) =>
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}</span>`
+        ).join("") || `<span class="chip">none yet</span>`;
+        document.querySelectorAll("#package-list .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => selectPackage(chip.dataset.name));
+        });
+      }
+      function selectPackage(name) {
+        const pkg = packages.find((p) => p.name === name);
+        if (!pkg) return;
+        selectedPackage = name;
+        $("package-name").value = pkg.name;
+        $("package-version").value = pkg.version || "";
+        $("package-error").textContent = "";
+        renderPackageList();
+      }
+      $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
+      $("package-close").addEventListener("click", () => $("packages-card").classList.remove("open"));
+      $("package-upload").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        const version = $("package-version").value.trim();
+        const file = $("package-file").files[0];
+        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!file) { $("package-error").textContent = "choose an artifact file to upload"; return; }
+        const params = new URLSearchParams({ version, addon: $("package-addon").checked ? "true" : "false" });
+        const signature = $("package-signature").value.trim();
+        if (signature) params.set("signature", signature);
+        let res;
+        try {
+          res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}?${params}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: await file.arrayBuffer(),
+          });
+        } catch (e) { $("package-error").textContent = e.message; return; }
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = name;
+        $("package-file").value = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      $("package-delete").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = null;
+        $("package-name").value = ""; $("package-version").value = ""; $("package-signature").value = "";
+        $("package-addon").checked = false; $("package-file").value = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      async function refreshPackages() {
+        try {
+          const res = await fetch("/api/v1/packages");
+          packages = res.ok ? await res.json() : [];
+        } catch { return; }
+        renderPackageList();
+      }
+
       async function refreshAgents() {
         try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
         render();
@@ -476,9 +584,11 @@
       }
 
       refreshConfigs();
+      refreshPackages();
       refreshAgents();
       setInterval(refreshAgents, 2000);
       setInterval(refreshConfigs, 5000);
+      setInterval(refreshPackages, 5000);
     </script>
   </body>
 </html>

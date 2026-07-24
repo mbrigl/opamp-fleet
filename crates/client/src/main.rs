@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod connection;
 mod engine;
+mod packages;
 mod service;
 mod storage;
 mod supervisor;

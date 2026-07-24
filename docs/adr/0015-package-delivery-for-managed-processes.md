@@ -1,6 +1,6 @@
 # ADR-0015: Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-24
 - **Deciders:** Markus Brigl
 

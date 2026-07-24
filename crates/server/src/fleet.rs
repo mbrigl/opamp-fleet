@@ -11,8 +11,9 @@ use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
     ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
-    OpAmpConnectionSettings, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities,
-    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    OpAmpConnectionSettings, PackageStatuses, PackagesAvailable, RemoteConfigStatus,
+    RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -24,6 +25,7 @@ use utoipa::ToSchema;
 
 use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
+use crate::packages::PackageStore;
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
@@ -70,6 +72,9 @@ pub struct AgentRecord {
     /// The outcome of the last connection-settings offer this Agent reported (ADR-0014); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
+    /// The package statuses this Agent last reported (ADR-0015); the
+    /// `server_provided_all_packages_hash` inside is what gates re-offering packages.
+    pub package_statuses: Option<PackageStatuses>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
@@ -121,6 +126,28 @@ impl ConnectionOffer {
     }
 }
 
+/// The package store plus the base URL each `download_url` is built from (ADR-0015).
+pub struct PackageOffering {
+    store: PackageStore,
+    download_base: String,
+}
+
+impl PackageOffering {
+    /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
+    /// against its own endpoint. The download sits on the unauthenticated REST plane (ADR-0013);
+    /// the artifact's content hash and signature are what protect it, so no credential rides it.
+    pub fn new(store: PackageStore, download_base: String) -> Self {
+        PackageOffering {
+            store,
+            download_base,
+        }
+    }
+
+    pub fn store(&self) -> &PackageStore {
+        &self.store
+    }
+}
+
 /// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
@@ -132,6 +159,9 @@ pub struct AppState {
     /// The connection settings offered to the fleet (ADR-0014); `None` offers nothing and leaves
     /// `OffersConnectionSettings` undeclared.
     connection_offer: Option<ConnectionOffer>,
+    /// The packages offered to the fleet (ADR-0015); `None` offers nothing and leaves
+    /// `OffersPackages` undeclared.
+    packages: Option<PackageOffering>,
 }
 
 impl AppState {
@@ -152,6 +182,7 @@ impl AppState {
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
+            packages: None,
         })
     }
 
@@ -163,14 +194,33 @@ impl AppState {
         self
     }
 
+    /// Arms package delivery (ADR-0015); with a non-empty store the Server declares
+    /// `OffersPackages` and `AcceptsPackagesStatus`.
+    #[must_use]
+    pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
+        self.packages = packages;
+        self
+    }
+
+    /// Read access to the package store, for the REST API's package routes.
+    pub fn packages(&self) -> Option<&PackageStore> {
+        self.packages.as_ref().map(PackageOffering::store)
+    }
+
     /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
-    /// only while an offer is actually configured — an undeclared capability is never exercised,
-    /// a declared one never hollow.
+    /// while a connection offer is configured and `OffersPackages` / `AcceptsPackagesStatus`
+    /// while a non-empty package store is armed — an undeclared capability is never exercised, a
+    /// declared one never hollow.
     fn capabilities(&self) -> u64 {
-        match self.connection_offer {
-            Some(_) => SERVER_CAPABILITIES | ServerCapabilities::OffersConnectionSettings as u64,
-            None => SERVER_CAPABILITIES,
+        let mut caps = SERVER_CAPABILITIES;
+        if self.connection_offer.is_some() {
+            caps |= ServerCapabilities::OffersConnectionSettings as u64;
         }
+        if self.packages.as_ref().is_some_and(|p| !p.store.is_empty()) {
+            caps |= ServerCapabilities::OffersPackages as u64
+                | ServerCapabilities::AcceptsPackagesStatus as u64;
+        }
+        caps
     }
 
     /// A fresh identity for one WebSocket connection.
@@ -313,6 +363,7 @@ impl AppState {
                 restart_pending: false,
                 available_components: None,
                 connection_settings_status: None,
+                package_statuses: None,
                 owner: conn,
             }
         });
@@ -351,6 +402,14 @@ impl AppState {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
             }
             record.connection_settings_status = Some(status);
+        }
+        if let Some(statuses) = msg.package_statuses {
+            for status in statuses.packages.values() {
+                if status.status == opamp::proto::PackageStatusEnum::InstallFailed as i32 {
+                    warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
+                }
+            }
+            record.package_statuses = Some(statuses);
         }
         if let Some(incoming) = msg.available_components {
             // A routine hash-only update must not degrade an already-fetched full map of the
@@ -423,6 +482,14 @@ impl AppState {
             self.settings_offer(record)
         };
 
+        // The package offer (ADR-0015), gated by capability and the reported
+        // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
+        let packages_available = if disconnected {
+            None
+        } else {
+            self.packages_offer(record)
+        };
+
         Processed {
             reply: ServerToAgent {
                 instance_uid: uid.as_bytes().to_vec(),
@@ -430,12 +497,31 @@ impl AppState {
                 flags: reply_flags,
                 remote_config,
                 connection_settings,
+                packages_available,
                 agent_identification: identification,
                 ..Default::default()
             },
             uid: Some(uid),
             disconnected,
         }
+    }
+
+    /// The package offer for one Agent, or `None` when it cannot accept packages or the aggregate
+    /// hash it last reported already matches what the store holds.
+    fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
+        let offering = self.packages.as_ref()?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+            return None;
+        }
+        let reported = record
+            .package_statuses
+            .as_ref()
+            .map(|s| s.server_provided_all_packages_hash.as_slice())
+            .unwrap_or_default();
+        if reported == offering.store.all_packages_hash().as_slice() {
+            return None;
+        }
+        offering.store.offer(&offering.download_base, None)
     }
 
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
@@ -465,20 +551,61 @@ impl AppState {
         })
     }
 
-    /// The unsolicited offer a WebSocket loop pushes when a Configuration changes; `None` when
-    /// the Agent already runs its composed set (or nothing matches it, or it cannot accept one),
+    /// The unsolicited offer a WebSocket loop pushes when a Configuration or package changes;
+    /// `None` when the Agent already runs both (or nothing matches it, or it cannot accept one),
     /// so nothing redundant crosses the wire.
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
         let desired = self.configs.desired_for(record.description.as_ref());
-        let remote_config = offer(record, desired.as_ref())?;
+        let remote_config = offer(record, desired.as_ref());
+        let packages_available = self.packages_offer(record);
+        if remote_config.is_none() && packages_available.is_none() {
+            return None;
+        }
         Some(ServerToAgent {
             instance_uid: uid.as_bytes().to_vec(),
             capabilities: self.capabilities(),
-            remote_config: Some(remote_config),
+            remote_config,
+            packages_available,
             ..Default::default()
         })
+    }
+
+    /// Creates or replaces a package (ADR-0015), persists it, and wakes every WebSocket loop so a
+    /// matching connected Agent is offered it now.
+    pub fn put_package(
+        &self,
+        name: String,
+        version: String,
+        addon: bool,
+        signature: Option<Vec<u8>>,
+        artifact: Vec<u8>,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.put(name.clone(), version, addon, signature, artifact)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package stored and offered");
+        Ok(())
+    }
+
+    /// Deletes a package; `Ok(false)` when none of that name exists.
+    pub fn delete_package(&self, name: &str) -> Result<bool, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        let deleted = store.delete(name)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(package = %name, "package deleted");
+        }
+        Ok(deleted)
     }
 
     /// Marks the Agents a closing WebSocket connection carried as no longer connected — but only
@@ -570,6 +697,8 @@ pub struct AgentView {
     pub capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     pub available_components: Vec<String>,
+    /// The Agent's package installations (ADR-0015), in name order; empty until reported.
+    pub packages: Vec<PackageStatusView>,
     pub transport: String,
     pub connected: bool,
     pub healthy: bool,
@@ -580,6 +709,37 @@ pub struct AgentView {
     pub in_sync: bool,
     pub sequence_num: u64,
     pub last_seen_ms: u64,
+}
+
+/// One package's installation state as the REST API and UI see it (ADR-0015).
+#[derive(Serialize, ToSchema)]
+pub struct PackageStatusView {
+    pub name: String,
+    /// The version the Agent has installed; empty if it has none.
+    pub version: String,
+    /// `Installed`, `Installing`, `InstallPending`, or `InstallFailed`.
+    pub status: String,
+    /// The failure reason when `status` is `InstallFailed`.
+    pub error: String,
+}
+
+impl PackageStatusView {
+    fn from_status(status: &opamp::proto::PackageStatus) -> Self {
+        use opamp::proto::PackageStatusEnum as S;
+        let name = match status.status {
+            s if s == S::Installed as i32 => "Installed",
+            s if s == S::Installing as i32 => "Installing",
+            s if s == S::InstallPending as i32 => "InstallPending",
+            s if s == S::InstallFailed as i32 => "InstallFailed",
+            _ => "Unknown",
+        };
+        PackageStatusView {
+            name: status.name.clone(),
+            version: status.agent_has_version.clone(),
+            status: name.to_string(),
+            error: status.error_message.clone(),
+        }
+    }
 }
 
 /// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
@@ -695,6 +855,19 @@ impl AgentView {
                     let mut names: Vec<String> = ac.components.keys().cloned().collect();
                     names.sort_unstable();
                     names
+                })
+                .unwrap_or_default(),
+            packages: record
+                .package_statuses
+                .as_ref()
+                .map(|s| {
+                    let mut views: Vec<PackageStatusView> = s
+                        .packages
+                        .values()
+                        .map(PackageStatusView::from_status)
+                        .collect();
+                    views.sort_by(|a, b| a.name.cmp(&b.name));
+                    views
                 })
                 .unwrap_or_default(),
             transport: record.transport.as_str().to_string(),

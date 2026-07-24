@@ -25,6 +25,16 @@ pub enum ProcessCommand {
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
     ApplyConfig { config: AgentRemoteConfig },
+    /// A package was downloaded and verified (content hash and signature; ADR-0015): swap its
+    /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
+    /// does — a binary that will not stay up is rolled back to the previous one. Answered with
+    /// [`ProcessEvent::PackageApplied`]. `staged` holds the verified artifact bytes; `hash` is the
+    /// package hash the status refers to; `version` is what the Agent then reports it has.
+    ApplyPackage {
+        staged: Vec<u8>,
+        version: String,
+        hash: Vec<u8>,
+    },
     /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
     /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —
     /// the health events of the stop/spawn cycle are the visible outcome.
@@ -51,6 +61,12 @@ pub enum ProcessEvent {
     ConfigApplied {
         hash: Vec<u8>,
         result: Result<(), String>,
+    },
+    /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0015).
+    PackageApplied {
+        hash: Vec<u8>,
+        result: Result<String, String>,
     },
 }
 
