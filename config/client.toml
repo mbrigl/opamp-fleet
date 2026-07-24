@@ -57,6 +57,8 @@ state_dir = "client-state"
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+# apply_grace_secs = 3     # how long a restarted process must survive before a received
+#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:

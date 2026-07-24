@@ -96,6 +96,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             name: block.name.clone(),
             config_dir,
             stop_timeout: Duration::from_secs(block.stop_timeout_secs),
+            apply_grace: Duration::from_secs(block.apply_grace_secs),
             settings: block.settings.clone(),
             events: EventSender::new(index, event_tx.clone()),
             shutdown: shutdown.clone(),

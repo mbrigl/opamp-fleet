@@ -200,7 +200,8 @@ and health reporting, identity handling (UUID v7, reassignment, server-generated
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0011) puts real
 processes behind that loop: each configured Supervisor is its own Agent multiplexed over the
 Client's one connection, a received configuration restarts the Managed Process on the written
-files and is acknowledged `APPLYING` → `APPLIED`/`FAILED` by outcome, and every Supervisor serves
+files and is acknowledged `APPLYING` → `APPLIED` only once the process survived the apply grace
+(`apply_grace_secs`, default 3 s) — exiting within it reports `FAILED` — and every Supervisor serves
 a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
 health, and effective configuration into its Agent. Configuration targeting (ADR-0012) composes
 each Agent's Remote configuration from the named Configurations whose Selectors match its

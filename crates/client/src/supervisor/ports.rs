@@ -83,6 +83,9 @@ pub struct SupervisorContext {
     pub config_dir: PathBuf,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
+    /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
+    /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
+    pub apply_grace: Duration,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.

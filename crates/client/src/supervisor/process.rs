@@ -32,6 +32,9 @@ pub struct ProcessSpec {
 pub struct Runner {
     pub name: String,
     pub stop_timeout: Duration,
+    /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
+    /// (ADR-0011's health-gated acknowledgement); zero acknowledges on start.
+    pub apply_grace: Duration,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -55,15 +58,58 @@ impl Runner {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
                         child = self.spawn_if_due().await;
-                        // Applying means running on the new files: acknowledge accordingly.
-                        let result = match (&child, (self.build)().is_some()) {
-                            (Some(_), _) => Ok(()),
+                        // Applying means running on the new files — and surviving the apply
+                        // grace (ADR-0011's health-gated acknowledgement): a process that exits
+                        // right away has rejected its configuration the only way a process can.
+                        let mut exited_in_grace = false;
+                        let result = match (child.take(), (self.build)().is_some()) {
+                            (Some(mut started), _) if !self.apply_grace.is_zero() => {
+                                tokio::select! {
+                                    status = started.wait() => {
+                                        let describe = status
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|e| format!("wait failed: {e}"));
+                                        warn!(supervisor = %self.name, status = %describe, "process exited during the apply grace");
+                                        self.events
+                                            .send(ProcessEvent::Health(unhealthy(
+                                                format!("exited during the apply grace ({describe})"),
+                                                describe.clone(),
+                                            )))
+                                            .await;
+                                        exited_in_grace = true;
+                                        Err(format!("the process exited during the apply grace ({describe})"))
+                                    }
+                                    _ = tokio::time::sleep(self.apply_grace) => {
+                                        child = Some(started);
+                                        Ok(())
+                                    }
+                                    // Shutting down mid-grace: no acknowledgement — the goodbyes
+                                    // carry no status anyway — just stop gracefully on the way out.
+                                    _ = shutdown.requested() => {
+                                        child = Some(started);
+                                        break;
+                                    }
+                                }
+                            }
+                            (started @ Some(_), _) => {
+                                child = started;
+                                Ok(())
+                            }
                             (None, false) => Ok(()), // nothing should run; that is the config
                             (None, true) => Err("the process did not start".to_string()),
                         };
                         self.events
                             .send(ProcessEvent::ConfigApplied { hash: config.config_hash, result })
                             .await;
+                        if exited_in_grace {
+                            // Stay supervised: a flaky-but-valid configuration is retried with
+                            // backoff, exactly like any unexpected exit.
+                            let delay = backoff.advance();
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => child = self.spawn_if_due().await,
+                                _ = shutdown.requested() => break,
+                            }
+                        }
                     }
                     Some(ProcessCommand::Restart) => {
                         stop(&mut child, self.stop_timeout, &self.name).await;
@@ -303,12 +349,21 @@ mod tests {
     }
 
     fn start(build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
+        // Zero grace: the pre-grace instant acknowledgement most tests exercise.
+        start_with_grace(Duration::ZERO, build)
+    }
+
+    fn start_with_grace(
+        apply_grace: Duration,
+        build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+    ) -> Harness {
         let (event_tx, events) = mpsc::channel(64);
         let (commands, command_rx) = mpsc::channel(16);
         let (shutdown_tx, shutdown) = shutdown_channel();
         let runner = Runner {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
+            apply_grace,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(build),
@@ -449,6 +504,80 @@ mod tests {
         assert_eq!(health.status, "awaiting configuration");
         harness.shutdown_tx.send(true).expect("signal shutdown");
         let _ = harness.task.await;
+    }
+
+    async fn apply(harness: &Harness, hash: &[u8]) {
+        harness
+            .commands
+            .send(ProcessCommand::ApplyConfig {
+                config: AgentRemoteConfig {
+                    config_hash: hash.to_vec(),
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("send the command");
+    }
+
+    async fn next_ack(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+    ) -> (Vec<u8>, Result<(), String>) {
+        loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("an event in time")
+                .expect("an open channel");
+            if let ProcessEvent::ConfigApplied { hash, result } = event {
+                return (hash, result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_process_surviving_the_apply_grace_is_acknowledged_applied() {
+        let mut harness = start_with_grace(Duration::from_millis(200), || Some(sh("sleep 600")));
+        apply(&harness, b"h1").await;
+        let (hash, result) = next_ack(&mut harness.events).await;
+        assert_eq!(hash, b"h1".to_vec());
+        assert!(result.is_ok(), "survived the grace: {result:?}");
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    #[tokio::test]
+    async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised() {
+        let mut harness = start_with_grace(Duration::from_millis(500), || Some(sh("exit 3")));
+        apply(&harness, b"h1").await;
+        let (hash, result) = next_ack(&mut harness.events).await;
+        assert_eq!(hash, b"h1".to_vec());
+        let error = result.expect_err("the exit within the grace fails the apply");
+        assert!(error.contains("apply grace"), "{error}");
+        // The watchdog keeps trying with backoff — the process is not abandoned.
+        let respawned = next_health(&mut harness.events).await;
+        assert!(respawned.healthy, "the backoff respawn happened");
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_the_grace_stops_promptly_without_an_ack() {
+        let mut harness = start_with_grace(Duration::from_secs(600), || Some(sh("sleep 600")));
+        apply(&harness, b"h1").await;
+        // The spawn health event arrives; then the runner sits in the grace.
+        let started = next_health(&mut harness.events).await;
+        assert!(started.healthy);
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        tokio::time::timeout(Duration::from_secs(10), harness.task)
+            .await
+            .expect("the runner exits in time despite the long grace")
+            .expect("no panic");
+        // No ConfigApplied was ever emitted.
+        while let Ok((_, event)) = harness.events.try_recv() {
+            assert!(
+                !matches!(event, ProcessEvent::ConfigApplied { .. }),
+                "no acknowledgement during shutdown"
+            );
+        }
     }
 
     #[tokio::test]
