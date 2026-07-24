@@ -1,6 +1,6 @@
 # ADR-0013: Static Basic and Bearer authentication on the OpAMP endpoint, optional by default
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-24
 - **Deciders:** Markus Brigl
 
