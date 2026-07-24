@@ -84,10 +84,19 @@
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
-      /* Config editor (revealed by the primary button) */
+      /* Configurations editor (revealed by the primary button) */
       .config { padding: 16px; margin-bottom: 20px; display: none; }
       .config.open { display: block; }
       .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+      .config-fields { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+      .config-fields input {
+        flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--border-strong);
+        border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px;
+        font-family: var(--mono);
+      }
+      .config-fields input::placeholder { color: var(--muted); }
+      .chip.selected { background: var(--primary); color: #fff; }
+      .chip.clickable { cursor: pointer; }
       textarea {
         width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
         border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
@@ -152,16 +161,23 @@
           <h1>Agents</h1>
           <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s)</p>
         </div>
-        <button id="toggle-config" class="btn btn-primary">Distribute config</button>
+        <button id="toggle-config" class="btn btn-primary">Configurations</button>
       </div>
 
       <section id="config-card" class="card config">
-        <h2>Remote configuration</h2>
-        <textarea id="config" placeholder="Enter the configuration to distribute to the fleet…"></textarea>
+        <h2>Configurations — each targets the Agents its Selector matches; an empty Selector targets every Agent</h2>
+        <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
+        <div class="config-fields">
+          <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent)" autocomplete="off" />
+        </div>
+        <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
+        <textarea id="config" placeholder="The configuration body to distribute…"></textarea>
         <div class="config-actions">
-          <button id="save" class="btn btn-primary">Distribute to fleet</button>
-          <button id="cancel" class="btn btn-ghost">Cancel</button>
-          <span class="hash">config hash: <span id="confighash">—</span></span>
+          <button id="save" class="btn btn-primary">Save &amp; distribute</button>
+          <button id="delete" class="btn btn-ghost">Delete</button>
+          <button id="cancel" class="btn btn-ghost">Close</button>
+          <span id="config-error" class="err"></span>
         </div>
       </section>
 
@@ -180,6 +196,7 @@
               <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
               <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
+              <th>Matched configs</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
@@ -199,9 +216,11 @@
       let sortKey = "name";
       let sortDir = 1;
       let configDirty = false;
+      // Agents whose declared-capabilities detail row is open, keyed by instance_uid so the
+      // state survives the periodic re-render.
+      const expandedCaps = new Set();
 
       const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-      const shortHash = (h) => (h ? h.slice(0, 12) : "—");
       function ago(ms) {
         const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
         if (s < 60) return s + "s ago";
@@ -233,14 +252,30 @@
       }
       function labels(a) {
         const chips = [];
-        if (a.transport) chips.push(`transport: ${esc(a.transport)}`);
-        if (a.health_status) chips.push(`status: ${esc(a.health_status)}`);
-        return `<div class="chips">${chips.map((c) => `<span class="chip">${c}</span>`).join("")}</div>`;
+        if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
+        if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
+        for (const [k, v] of Object.entries(a.non_identifying_attributes || {})) {
+          if (k !== "os.type") chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
+        }
+        const caps = a.capabilities || [];
+        if (caps.length) {
+          const open = expandedCaps.has(a.instance_uid);
+          chips.push(`<span class="chip clickable cap-toggle${open ? " selected" : ""}" data-uid="${esc(a.instance_uid)}" title="Click to ${open ? "hide" : "show"} the declared capabilities">capabilities: ${caps.length} ${open ? "▴" : "▾"}</span>`);
+        }
+        return `<div class="chips">${chips.join("")}</div>`;
+      }
+      function matchedConfigs(a) {
+        const names = a.matched_configurations || [];
+        if (!names.length) return `<span class="pill gray">none</span>`;
+        return `<div class="chips">${names.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</div>`;
       }
 
       function matches(a) {
         if (!filterText) return true;
+        const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
+          .map(([k, v]) => `${k}=${v}`);
         const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || [])
           .join(" ").toLowerCase();
         return hay.includes(filterText);
       }
@@ -253,7 +288,8 @@
         });
         $("count").textContent = agents.length;
         $("empty").style.display = rows.length ? "none" : "block";
-        $("agents").innerHTML = rows.map((a) => `
+        $("agents").innerHTML = rows.map((a) => {
+          const row = `
           <tr>
             <td class="chk"><input type="checkbox" /></td>
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
@@ -261,11 +297,23 @@
             <td>${configPill(a)}</td>
             <td class="num">${esc(a.service_version) || "—"}</td>
             <td>${esc(a.os) || "—"}</td>
+            <td>${matchedConfigs(a)}</td>
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
             <td>${labels(a)}</td>
-          </tr>`).join("");
+          </tr>`;
+          if (!expandedCaps.has(a.instance_uid)) return row;
+          const caps = (a.capabilities || []).map((c) => `<span class="chip">${esc(c)}</span>`).join("");
+          return row + `
+          <tr>
+            <td class="chk"></td>
+            <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
+              <span class="sub" style="align-self: center">declared capabilities:</span>
+              ${caps || `<span class="chip">none declared</span>`}
+            </div></td>
+          </tr>`;
+        }).join("");
         document.querySelectorAll("th.sortable").forEach((th) => {
           const arrow = th.querySelector(".arrow");
           arrow.textContent = th.dataset.key === sortKey ? (sortDir === 1 ? "▲" : "▼") : "";
@@ -281,39 +329,128 @@
         });
       });
       $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
+      $("agents").addEventListener("click", (e) => {
+        const toggle = e.target.closest(".cap-toggle");
+        if (!toggle) return;
+        const uid = toggle.dataset.uid;
+        if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
+        render();
+      });
       $("select-all").addEventListener("change", (e) => {
         document.querySelectorAll('#agents input[type="checkbox"]').forEach((c) => (c.checked = e.target.checked));
       });
 
-      // Config editor
-      $("config").addEventListener("input", () => { configDirty = true; });
-      const closeConfig = () => $("config-card").classList.remove("open");
-      $("toggle-config").addEventListener("click", () => $("config-card").classList.toggle("open"));
-      $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); refreshConfig(); });
-      $("save").addEventListener("click", async () => {
-        const res = await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "text/plain" }, body: $("config").value });
-        const cfg = await res.json();
+      // Configurations editor (ADR-0012): name + selector + body, PUT/DELETE per Configuration.
+      let configurations = [];
+      let selectedName = null;
+
+      const selectorText = (sel) => Object.entries(sel || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+      function parseSelector(text) {
+        const selector = {};
+        for (const pair of text.split(",").map((p) => p.trim()).filter(Boolean)) {
+          const eq = pair.indexOf("=");
+          if (eq < 1) throw new Error(`selector entry "${pair}" is not key=value`);
+          selector[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+        }
+        return selector;
+      }
+      function renderConfigList() {
+        $("config-list").innerHTML = configurations.map((c) =>
+          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}</span>`
+        ).join("") || `<span class="chip">none yet</span>`;
+        document.querySelectorAll("#config-list .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => selectConfig(chip.dataset.name));
+        });
+      }
+      function selectConfig(name) {
+        const config = configurations.find((c) => c.name === name);
+        if (!config) return;
+        selectedName = name;
         configDirty = false;
-        $("confighash").textContent = shortHash(cfg.hash);
-        closeConfig();
+        $("config-name").value = config.name;
+        $("config-selector").value = selectorText(config.selector);
+        $("config").value = config.body;
+        $("config-error").textContent = "";
+        renderConfigList();
+      }
+      const closeConfig = () => $("config-card").classList.remove("open");
+      $("config").addEventListener("input", () => { configDirty = true; });
+      $("toggle-config").addEventListener("click", () => $("config-card").classList.toggle("open"));
+      $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); });
+      $("save").addEventListener("click", async () => {
+        const name = $("config-name").value.trim();
+        let selector;
+        try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ selector, body: $("config").value }),
+        });
+        if (!res.ok) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
+        configDirty = false;
+        selectedName = name;
+        await refreshConfigs();
+        refreshAgents();
+      });
+      $("delete").addEventListener("click", async () => {
+        const name = $("config-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
+        selectedName = null;
+        $("config-name").value = ""; $("config-selector").value = ""; $("config").value = "";
+        await refreshConfigs();
         refreshAgents();
       });
 
-      async function refreshAgents() {
-        try { agents = await (await fetch("/api/agents")).json(); } catch { return; }
-        render();
-      }
-      async function refreshConfig() {
-        let cfg = { config: "", hash: "" };
-        try { cfg = await (await fetch("/api/config")).json(); } catch { return; }
-        $("confighash").textContent = cfg.hash ? shortHash(cfg.hash) : "—";
-        if (!configDirty) $("config").value = cfg.config;
+      // Every attribute the fleet currently reports, as clickable key=value suggestions for the
+      // selector — what a Selector can actually match on.
+      function renderSelectorOptions() {
+        const pairs = new Set();
+        for (const a of agents) {
+          for (const list of [a.identifying_attributes, a.non_identifying_attributes]) {
+            for (const [k, v] of Object.entries(list || {})) pairs.add(`${k}=${v}`);
+          }
+        }
+        $("selector-options").innerHTML = [...pairs].sort().map((p) =>
+          `<span class="chip clickable" data-pair="${esc(p)}">${esc(p)}</span>`
+        ).join("") || `<span class="chip">no agents reporting yet</span>`;
+        document.querySelectorAll("#selector-options .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => {
+            const input = $("config-selector");
+            const current = input.value.trim();
+            if (current.split(",").map((p) => p.trim()).includes(chip.dataset.pair)) return;
+            input.value = current ? `${current}, ${chip.dataset.pair}` : chip.dataset.pair;
+          });
+        });
       }
 
-      refreshConfig();
+      async function refreshAgents() {
+        try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
+        render();
+        renderSelectorOptions();
+      }
+      async function refreshConfigs() {
+        try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }
+        renderConfigList();
+        if (selectedName && !configDirty) {
+          const selected = configurations.find((c) => c.name === selectedName);
+          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); }
+        }
+      }
+
+      refreshConfigs();
       refreshAgents();
       setInterval(refreshAgents, 2000);
-      setInterval(refreshConfig, 5000);
+      setInterval(refreshConfigs, 5000);
     </script>
   </body>
 </html>

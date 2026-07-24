@@ -1,5 +1,6 @@
 //! The Client's own configuration file — TOML (ADR-0008).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -23,6 +24,12 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Operator-defined attributes (ADR-0012), reported as non-identifying attributes of **every**
+    /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
+    /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
+    /// code or the Managed Process reports win over configured ones.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
@@ -49,6 +56,8 @@ pub struct SupervisorBlock {
     pub endpoint_port: u16,
     /// How long a graceful stop may take before the Managed Process is killed.
     pub stop_timeout_secs: u64,
+    /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
+    pub attributes: BTreeMap<String, String>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
@@ -74,11 +83,14 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: stop_timeout_secs must not be negative")
             })?,
         };
+        let attributes = take_string_table(&mut table, "attributes")
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
         Ok(SupervisorBlock {
             kind,
             name,
             endpoint_port,
             stop_timeout_secs,
+            attributes,
             settings: table,
         })
     }
@@ -101,6 +113,29 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
         Some(toml::Value::Integer(i)) => Ok(Some(i)),
         Some(other) => Err(format!(
             "`{key}` must be an integer, not {}",
+            other.type_str()
+        )),
+    }
+}
+
+fn take_string_table(
+    table: &mut toml::Table,
+    key: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    match table.remove(key) {
+        None => Ok(BTreeMap::new()),
+        Some(toml::Value::Table(entries)) => entries
+            .into_iter()
+            .map(|(k, v)| match v {
+                toml::Value::String(s) => Ok((k, s)),
+                other => Err(format!(
+                    "`{key}.{k}` must be a string, not {}",
+                    other.type_str()
+                )),
+            })
+            .collect(),
+        Some(other) => Err(format!(
+            "`{key}` must be a table of strings, not {}",
             other.type_str()
         )),
     }
@@ -148,6 +183,7 @@ impl Default for ClientConfig {
             name: default_name(),
             poll_interval_secs: default_poll_interval_secs(),
             state_dir: default_state_dir(),
+            attributes: BTreeMap::new(),
             tls: None,
             supervisors: Vec::new(),
         }
@@ -179,6 +215,16 @@ impl ClientConfig {
             }
         }
         Ok(())
+    }
+
+    /// The operator-defined attributes one Agent reports (ADR-0012): the machine-level table,
+    /// with a Supervisor's own entries merged over it per key.
+    pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
+        let mut merged = self.attributes.clone();
+        if let Some(block) = block {
+            merged.extend(block.attributes.clone());
+        }
+        merged
     }
 
     pub fn transport(&self) -> Result<TransportKind, String> {
@@ -294,6 +340,46 @@ mod tests {
         let not_an_int =
             "[[supervisor]]\ntype = \"command\"\nname = \"x\"\nendpoint_port = \"a\"\n";
         assert!(toml::from_str::<ClientConfig>(not_an_int).is_err());
+    }
+
+    #[test]
+    fn attributes_parse_at_both_levels_and_merge_per_agent() {
+        let cfg: ClientConfig = toml::from_str(
+            r#"
+            [attributes]
+            env = "prod"
+            role = "machine"
+
+            [[supervisor]]
+            type = "command"
+            name = "stub"
+            command = "/bin/true"
+            [supervisor.attributes]
+            role = "edge"
+            "#,
+        )
+        .expect("parse");
+
+        // The self-Agent case: the machine-level table alone.
+        assert_eq!(
+            cfg.agent_attributes(None).get("env").map(String::as_str),
+            Some("prod")
+        );
+
+        // A Supervisor's own entries override the machine-level ones per key.
+        let merged = cfg.agent_attributes(Some(&cfg.supervisors[0]));
+        assert_eq!(merged.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(merged.get("role").map(String::as_str), Some("edge"));
+
+        // `attributes` is a common key, never plugin settings.
+        assert!(!cfg.supervisors[0].settings.contains_key("attributes"));
+    }
+
+    #[test]
+    fn non_string_attributes_are_rejected() {
+        assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
+        let block = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\n[supervisor.attributes]\nflag = true\n";
+        assert!(toml::from_str::<ClientConfig>(block).is_err());
     }
 
     #[test]

@@ -54,7 +54,13 @@ async fn main() {
         }
     };
 
-    let state = Arc::new(AppState::new(config.fleet_config_file.clone()));
+    let state = match AppState::new(config.config_dir.clone()) {
+        Ok(state) => Arc::new(state),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let app = server::app(state);
 
     match &config.tls {
