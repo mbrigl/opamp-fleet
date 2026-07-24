@@ -29,6 +29,16 @@ state_dir = "client-state"
 # [tls]
 # ca_file = "ca.pem"
 
+# Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
+# username and password together. The Authorization header rides every plain-HTTP request and
+# the WebSocket upgrade. Without TLS the credentials travel in cleartext; pair with wss:// or
+# https:// beyond the loopback.
+# [auth]
+# bearer_token = "a-long-random-token"
+# --- or ---
+# username = "fleet"
+# password = "a-strong-password"
+
 # ── Supervisor Mode (ADR-0003, ADR-0011) ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the

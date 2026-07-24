@@ -8,7 +8,10 @@ use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerToAgent};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{
     connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
 };
@@ -40,10 +43,36 @@ pub async fn run(
         None => None,
     };
 
+    // The Authorization header (ADR-0013) rides the upgrade request — the server checks it
+    // before the WebSocket comes up.
+    let authorization = match &config.auth {
+        Some(auth) => {
+            let value: tokio_tungstenite::tungstenite::http::HeaderValue = auth
+                .authorization()?
+                .parse()
+                .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
+            if config.sends_credentials_in_cleartext() {
+                warn!(
+                    "sending credentials over unencrypted ws:// beyond the loopback — use wss://"
+                );
+            }
+            Some(value)
+        }
+        None => None,
+    };
+
     let mut backoff = Backoff::new();
     loop {
-        match connect_async_tls_with_config(&config.endpoint, None, false, connector.clone()).await
-        {
+        // tungstenite consumes the request per attempt; rebuild it from the endpoint each time.
+        let mut request = config
+            .endpoint
+            .as_str()
+            .into_client_request()
+            .map_err(|e| format!("invalid endpoint {}: {e}", config.endpoint))?;
+        if let Some(value) = &authorization {
+            request.headers_mut().insert(AUTHORIZATION, value.clone());
+        }
+        match connect_async_tls_with_config(request, None, false, connector.clone()).await {
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
@@ -55,6 +84,12 @@ pub async fn run(
                     }
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
+            }
+            Err(WsError::Http(response)) if response.status() == StatusCode::UNAUTHORIZED => {
+                warn!(
+                    endpoint = %config.endpoint,
+                    "the server rejected the credentials (HTTP 401) — check [auth]"
+                );
             }
             Err(e) => warn!(endpoint = %config.endpoint, error = %e, "cannot connect"),
         }

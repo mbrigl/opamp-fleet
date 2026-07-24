@@ -41,5 +41,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0010](0010-client-os-service-and-cli.md) | Client as a multi-instance OS service — clap subcommand CLI, per-instance identity, versioned install layout | 🟢 accepted |
 | [0011](0011-supervisor-mode-hexagonal-core-and-plugins.md) | Supervisor Mode — hexagonal supervision core, compiled-in plugins, n Agents over one connection | 🟢 accepted |
 | [0012](0012-selector-targeted-configurations-and-openapi-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
-| [0013](0013-opamp-endpoint-authentication.md) | Static Basic and Bearer authentication on the OpAMP endpoint, optional by default | 🟡 proposed |
+| [0013](0013-opamp-endpoint-authentication.md) | Static Basic and Bearer authentication on the OpAMP endpoint, optional by default | 🟢 accepted |
 
