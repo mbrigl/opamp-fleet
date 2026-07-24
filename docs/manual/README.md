@@ -5,3 +5,6 @@
 3. **Open the UI** at <http://127.0.0.1:4321/>. The Agent is listed as *Connected*, with the
           http://127.0.0.1:4321/api/v1/configurations/base
    $ curl -X POST http://127.0.0.1:4321/api/v1/configurations/base/rollout
+  its status report, that the Client dropped them. Mutual TLS itself *is* built: see
+  [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
+  renewal is what bounds an issued certificate.

@@ -26,6 +26,7 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(1);
 /// The Agent plane on an ephemeral port, with the header-read timeout tightened.
 async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
     );
     let app = server::agent_app(state, Admission::new(None, false));

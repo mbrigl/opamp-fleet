@@ -7,13 +7,20 @@
 //! and each end keeps its own path-based wrapper — the error naming a trust anchor, a listener's
 //! key or a client CA is written where that is known.
 
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Every certificate in `pem`, in the order it appears — a chain, or a bundle of trust anchors.
 ///
 /// An empty file is an error rather than an empty chain: a trust bundle that parsed to nothing
 /// would configure a TLS stack that trusts nobody, and it would do it silently.
 pub fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
+    let certs = certs.map_err(|e| format!("cannot parse a certificate: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificates".to_string());
     }
+    Ok(certs)
+}
+
 /// The first private key in `pem`, in any of the encodings rustls accepts (PKCS#8, PKCS#1, SEC1).
 pub fn private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, String> {
 }
