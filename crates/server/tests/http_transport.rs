@@ -277,6 +277,26 @@ async fn no_component_demand_without_the_declared_capability() {
 }
 
 #[tokio::test]
+async fn stateless_http_polling_never_triggers_the_duplicate_rekey() {
+    // Two pollers sharing one uid are indistinguishable from one over stateless plain HTTP —
+    // detection is deliberately WebSocket-only, so no identification is ever minted here.
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let reply = exchange(&client, &url, &full_report(&uid, "poller-a", 1)).await;
+    assert!(reply.agent_identification.is_none());
+    let reply = exchange(&client, &url, &full_report(&uid, "poller-b", 1)).await;
+    assert!(reply.agent_identification.is_none());
+    assert_eq!(
+        server.state.snapshot().len(),
+        1,
+        "one record, last writer wins"
+    );
+}
+
+#[tokio::test]
 async fn gzip_request_bodies_are_accepted() {
     let server = spawn().await;
     let client = reqwest::Client::new();
