@@ -177,7 +177,7 @@ separately because conformance depends on them just as much.
 | Duplicate `instance_uid` | Detection and handling | implemented | The Server rekeys an identity that reports over a second live WebSocket connection: a fresh UUID v7 via `AgentIdentification`, which the Client adopts (the Baseline's SHOULD). Stateless plain-HTTP polling offers nothing to tell two pollers apart, so detection is WebSocket-only. |
 | Duplicate WebSocket connections | Handling defined by the spec | implemented | The Client holds one connection by construction and sends `agent_disconnect` before a graceful reconnect. The Server tracks per-connection ownership: only the owning connection marks its Agents disconnected, so a stale socket never takes down an Agent another connection carries. |
 | Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
-| Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | planned | `[Beta]`. Basic or Bearer, applied before the WebSocket upgrade. Underpins goal 17. |
+| Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | implemented | `[Beta]`. The Server's optional `[auth]` section guards `/v1/opamp` (ADR-0013): Basic and Bearer accepted, checked on every plain-HTTP POST and before the WebSocket upgrade completes, `401` with a `WWW-Authenticate` challenge otherwise. The Client sends the header on both transports. Without `[auth]` the endpoint stays open. Underpins goal 17. |
 | Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | The Server offers configuration only to Agents declaring `AcceptsRemoteConfig`; the Client stops reporting effective config to a Server without `AcceptsEffectiveConfig`. |
 | Retrying, throttling, bad request | Defined error and backoff behaviour | implemented | The Server answers malformed input with `BAD_REQUEST` error responses; the Client honours `UNAVAILABLE` retry hints and reconnects with capped exponential backoff. The Server does not yet emit throttling itself. |
 | Custom messages | `CustomCapabilities` / `CustomMessage` exchange | planned | `[Development]`. Outside the capability bitmask: each side lists supported custom capabilities as reverse-FQDN strings; a `CustomMessage` for an unsupported capability can be ignored. |
@@ -209,5 +209,6 @@ reported attributes — delivered as named `AgentConfigMap` entries, hash-gated 
 whole model exposed through the OpenAPI-described REST API v1. On top of that loop sit the
 server-initiated restart command, periodic heartbeats on both transports, available-components
 relaying from the Managed Process, and duplicate-`instance_uid` handling with per-connection
-disconnect scoping. Every remaining *planned* row — packages, connection settings, own telemetry,
-custom messages, authentication — is future work; the rows above double as that work list.
+disconnect scoping. The OpAMP endpoint optionally requires Basic or Bearer authentication on both
+transports (ADR-0013). Every remaining *planned* row — packages, connection settings, own
+telemetry, custom messages — is future work; the rows above double as that work list.

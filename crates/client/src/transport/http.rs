@@ -27,6 +27,20 @@ pub async fn run(
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .timeout(Duration::from_secs(30));
+    if let Some(auth) = &config.auth {
+        // The Authorization header (ADR-0013) rides every request, the disconnect included.
+        let mut value = reqwest::header::HeaderValue::from_str(&auth.authorization()?)
+            .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
+        value.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+        if config.sends_credentials_in_cleartext() {
+            warn!(
+                "sending credentials over unencrypted http:// beyond the loopback — use https://"
+            );
+        }
+    }
     if let Some(tls) = &config.tls {
         let pem = std::fs::read(&tls.ca_file)
             .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
@@ -104,6 +118,9 @@ async fn exchange(
         .await
         .map_err(|e| format!("cannot reach {endpoint}: {e}"))?;
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("the server rejected the credentials (HTTP 401) — check [auth]".to_string());
+    }
     if !status.is_success() {
         return Err(format!("the server answered {status}"));
     }

@@ -36,7 +36,7 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempD
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
     );
-    let app = server::app(state.clone());
+    let app = server::app(state.clone(), None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind the server");

@@ -61,7 +61,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let app = server::app(state);
+    let auth = config
+        .auth
+        .as_ref()
+        .map(server::transport::OpampAuth::from_config);
+    if auth.is_some() {
+        info!("the OpAMP endpoint requires authentication (ADR-0013)");
+    }
+    let app = server::app(state, auth);
 
     match &config.tls {
         Some(tls) => {

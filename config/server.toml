@@ -12,3 +12,13 @@ config_dir = "fleet-configs"
 # [tls]
 # cert_file = "cert.pem"
 # key_file = "key.pem"
+
+# Optional authentication on the OpAMP endpoint (ADR-0013). When the section is present, every
+# OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching
+# any listed credential; anything else is answered 401. Both schemes may be configured at once;
+# several valid credentials allow overlapping rotation. Without [auth] the endpoint stays open.
+# REST API and UI are not guarded by this.
+# [auth]
+# bearer_tokens = ["a-long-random-token"]
+# [auth.basic_users]
+# fleet = "a-strong-password"
