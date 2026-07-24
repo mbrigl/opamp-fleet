@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{ProcessSpec, Runner};
+use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 #[derive(Debug, Deserialize)]
@@ -27,6 +27,12 @@ struct CommandSettings {
     /// The working directory to start in.
     #[serde(default)]
     working_dir: Option<PathBuf>,
+    /// Arguments that make the command print its version (e.g. `["--version"]`). When set, the
+    /// command is invoked once with exactly these arguments and the first Semantic Versioning
+    /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
+    /// version flag is its own convention — hence opt-in, unlike the Collector's.
+    #[serde(default)]
+    version_args: Option<Vec<String>>,
 }
 
 pub struct CommandPlugin;
@@ -42,6 +48,13 @@ impl Plugin for CommandPlugin {
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         let (commands, command_rx) = mpsc::channel(16);
+        if let Some(version_args) = settings.version_args.clone() {
+            tokio::spawn(probe_version(
+                settings.command.clone(),
+                version_args,
+                ctx.events.clone(),
+            ));
+        }
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -77,6 +90,7 @@ mod tests {
             command = "/usr/bin/thing"
             args = ["--a"]
             working_dir = "/tmp"
+            version_args = ["--version"]
             [env]
             K = "v"
             "#,
@@ -85,6 +99,7 @@ mod tests {
         let settings: CommandSettings = table.try_into().expect("settings");
         assert_eq!(settings.command, PathBuf::from("/usr/bin/thing"));
         assert_eq!(settings.env.get("K").map(String::as_str), Some("v"));
+        assert_eq!(settings.version_args, Some(vec!["--version".to_string()]));
 
         let typo: toml::Table = toml::from_str("comand = \"/x\"").expect("table");
         assert!(typo.try_into::<CommandSettings>().is_err());

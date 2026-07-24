@@ -202,7 +202,11 @@ processes behind that loop: each configured Supervisor is its own Agent multiple
 Client's one connection, a received configuration restarts the Managed Process on the written
 files and is acknowledged `APPLYING` → `APPLIED`/`FAILED` by outcome, and every Supervisor serves
 a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
-health, and effective configuration into its Agent. Every remaining *planned* row —
-packages, connection settings, own telemetry, restart command, heartbeats, available components,
-custom messages, authentication, duplicate handling — is future work; the rows above double as that
-work list.
+health, and effective configuration into its Agent. Configuration targeting (ADR-0012) composes
+each Agent's Remote configuration from the named Configurations whose Selectors match its
+reported attributes — delivered as named `AgentConfigMap` entries, hash-gated per Agent, with the
+whole model exposed through the OpenAPI-described REST API v1. On top of that loop sit the
+server-initiated restart command, periodic heartbeats on both transports, available-components
+relaying from the Managed Process, and duplicate-`instance_uid` handling with per-connection
+disconnect scoping. Every remaining *planned* row — packages, connection settings, own telemetry,
+custom messages, authentication — is future work; the rows above double as that work list.

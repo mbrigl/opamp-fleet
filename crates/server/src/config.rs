@@ -16,10 +16,11 @@ pub struct ServerConfig {
     /// Address and port the single listener binds — OpAMP, REST API, and UI share it (ADR-0005).
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
-    /// Where the desired remote configuration is persisted, so a Server restart does not lose what
-    /// the fleet should be running. Missing file means: no configuration to offer yet.
-    #[serde(default = "default_fleet_config_file")]
-    pub fleet_config_file: PathBuf,
+    /// Where Configurations are persisted — one JSON file each (ADR-0012) — so a Server restart
+    /// does not lose what the fleet should be running. An empty or missing directory means: no
+    /// Configuration to offer yet.
+    #[serde(default = "default_config_dir")]
+    pub config_dir: PathBuf,
     /// Optional TLS; when present the listener serves HTTPS/WSS (ADR-0007).
     pub tls: Option<TlsConfig>,
 }
@@ -37,15 +38,15 @@ fn default_listen() -> SocketAddr {
     DEFAULT_LISTEN.parse().expect("default listen address")
 }
 
-fn default_fleet_config_file() -> PathBuf {
-    PathBuf::from("fleet-config.yaml")
+fn default_config_dir() -> PathBuf {
+    PathBuf::from("fleet-configs")
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             listen: default_listen(),
-            fleet_config_file: default_fleet_config_file(),
+            config_dir: default_config_dir(),
             tls: None,
         }
     }
@@ -73,7 +74,7 @@ mod tests {
         let cfg: ServerConfig = toml::from_str(
             r#"
             listen = "127.0.0.1:9999"
-            fleet_config_file = "cfg.yaml"
+            config_dir = "configs"
             [tls]
             cert_file = "cert.pem"
             key_file = "key.pem"

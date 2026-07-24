@@ -15,6 +15,12 @@ poll_interval_secs = 30
 # Where the Client persists its instance_uid and the received remote configuration.
 state_dir = "client-state"
 
+# Operator-defined attributes (ADR-0012), reported by every Agent this Client presents so the
+# Server's Selectors can target them. A [[supervisor]] block may add its own [supervisor.attributes]
+# table, which overrides these per key.
+# [attributes]
+# env = "prod"
+
 # Optional TLS trust override (ADR-0007) for wss:// / https:// against a private CA:
 # [tls]
 # ca_file = "ca.pem"
@@ -51,21 +57,24 @@ state_dir = "client-state"
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
 # the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
-# Received remote configuration is written to <state_dir>/supervisors/<name>/config/ and every
-# entry is passed as --config; a change restarts the collector.
+# Every received config-map entry is written to <state_dir>/supervisors/<name>/config/ under its
+# Configuration's name (ADR-0012) and passed as its own --config; a change restarts the collector.
 # [[supervisor]]
 # type = "collector"
 # name = "otelcol-plain"
 # binary = "/usr/local/bin/otelcol"
 
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
-# Bit speaks no OpAMP and reads its configuration from a file: point -c at the written remote
-# config and the Supervisor restarts the process on a change so it re-reads it.
+# Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
+# (named after the Configuration on the Server, here "fluent-bit-conf") and the Supervisor
+# restarts the process on a change so it re-reads it.
 # [[supervisor]]
 # type = "command"
 # name = "fluent-bit"
 # command = "/opt/fluent-bit/bin/fluent-bit"
-# args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/config"]
+# args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/fluent-bit-conf"]
 # working_dir = "/var/lib/fluent-bit"   # optional
+# [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)
+# role = "edge"
 # [supervisor.env]                      # optional environment for the process
 # FLB_LOG_LEVEL = "info"

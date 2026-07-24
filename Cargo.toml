@@ -36,14 +36,18 @@ flate2 = "1"
 libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0007).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-# The Client's plain-HTTP(S) polling transport (ADR-0007).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+# The Client's plain-HTTP(S) polling transport (ADR-0007); `json` serves the REST-API tests.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
 # TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0007).
 # The provider is installed once at each binary's startup.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered
+# routes and schemas at compile time, so contract and behaviour cannot drift.
+utoipa = "5"
+utoipa-axum = "0.2"
 # Reads the repository in build.rs to compute the baked-in version (ADR-0009). Build-dependency
 # only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
 # build script only opens the local checkout.

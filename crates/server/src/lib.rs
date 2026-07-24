@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod config;
+pub mod configs;
 pub mod fleet;
 pub mod transport;
 

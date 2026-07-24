@@ -1,6 +1,6 @@
 # ADR-0012: Selector-targeted Configurations and the OpenAPI-described REST API
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 

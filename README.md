@@ -186,26 +186,34 @@ A minimal closed control loop on one machine:
 
 1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves
    everything on one port (default `4320`): the OpAMP endpoint at `/v1/opamp` (plain HTTP **and**
-   WebSocket, [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)), the REST API under `/api/`, and
-   the bundled UI at `/`.
+   WebSocket, [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)), the REST API under `/api/v1/`
+   ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), and the
+   bundled UI at `/`.
 2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
 3. **Open the UI** at <http://127.0.0.1:4320/> — the Agent is listed as *Connected*. Press
-   **Distribute config**, enter any configuration text, and save.
-4. **Watch the loop close:** a WebSocket Client receives the configuration within a second, an HTTP
-   Client on its next poll. The Agent stores it (under its `state_dir`), reports it **Applied** with
-   the matching hash, and its effective configuration shows up in the table. Distributing the same
-   configuration again sends nothing — the config-hash comparison gates every push.
+   **Configurations**, name a Configuration, optionally give it a Selector (`key=value` pairs an
+   Agent's reported attributes must equal; empty targets every Agent), enter the configuration
+   text, and save.
+4. **Watch the loop close:** a WebSocket Client whose attributes match receives the configuration
+   within a second, an HTTP Client on its next poll. The Agent stores it (under its `state_dir`),
+   reports it **Applied** with the matching hash, and its effective configuration shows up in the
+   table. Distributing the same configuration again sends nothing — the config-hash comparison
+   gates every push. An Agent matching several Configurations receives all of them as named
+   entries and merges them itself; an Agent matching none is left running what it already runs.
 
-The same operations are available to any portal through the REST API:
+The same operations are available to any portal through the REST API — the OpenAPI document at
+`/api/v1/openapi.json` is the contract to generate a client from:
 
 ```console
-$ curl http://127.0.0.1:4320/api/agents            # the fleet as JSON
-$ curl http://127.0.0.1:4320/api/config            # the desired configuration + hash
-$ curl -X PUT --data-binary @my-config.yaml \
-       http://127.0.0.1:4320/api/config            # distribute a configuration
+$ curl http://127.0.0.1:4320/api/v1/agents                   # the fleet, with reported attributes
+$ curl http://127.0.0.1:4320/api/v1/configurations           # every Configuration
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
+       http://127.0.0.1:4320/api/v1/configurations/linux-base  # distribute to a subset
+$ curl -X DELETE http://127.0.0.1:4320/api/v1/configurations/linux-base
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or

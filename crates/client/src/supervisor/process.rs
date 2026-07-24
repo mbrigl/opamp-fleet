@@ -1,5 +1,6 @@
 //! The shared child runner both plugins drive: spawn, watch, restart with backoff, apply a new
-//! configuration by respawning, stop gracefully within the budget.
+//! configuration by respawning, stop gracefully within the budget — plus the one-shot version
+//! probe both plugins use to learn a Managed Process's own version.
 //!
 //! Mirrors the reference `opampsupervisor` (ADR-0011): SIGTERM → bounded wait → kill on Unix,
 //! `Child::kill` on Windows (which has no SIGTERM equivalent), and exponential backoff for a
@@ -8,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use opamp::proto::ComponentHealth;
+use opamp::proto::{AgentDescription, ComponentHealth};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -137,6 +138,102 @@ impl Runner {
     }
 }
 
+/// How long a version probe may take before it is abandoned — it must never stall startup.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs `<program> <args>` once and reports the Managed Process's version as a Description
+/// event, if the output contains one. Best effort by design: a missing binary, a hang, or
+/// versionless output is logged and otherwise ignored — probing must never break supervision.
+/// A later self-report through the Supervisor Endpoint replaces the probed value.
+pub async fn probe_version(program: PathBuf, args: Vec<String>, events: EventSender) {
+    let mut command = Command::new(&program);
+    command.args(&args).kill_on_drop(true);
+    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            warn!(program = %program.display(), error = %e, "version probe cannot run");
+            return;
+        }
+        Err(_) => {
+            warn!(program = %program.display(), "version probe timed out");
+            return;
+        }
+    };
+    // Some tools print their version to stderr; accept either stream.
+    let text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match find_semver(&text) {
+        Some(version) => {
+            info!(program = %program.display(), version = %version, "version probed");
+            events
+                .send(ProcessEvent::Description(AgentDescription {
+                    identifying_attributes: vec![opamp::proto::KeyValue {
+                        key: "service.version".to_string(),
+                        value: Some(opamp::proto::AnyValue {
+                            value: Some(opamp::proto::any_value::Value::StringValue(version)),
+                        }),
+                    }],
+                    non_identifying_attributes: Vec::new(),
+                }))
+                .await;
+        }
+        None => {
+            warn!(program = %program.display(), "version probe output contains no semantic version")
+        }
+    }
+}
+
+/// The first Semantic Versioning 2.0.0 version found in free-form text (e.g. the `1.2.3` in
+/// "otelcol-contrib version 1.2.3"). A leading `v` and trailing punctuation around a token are
+/// tolerated; the extracted version itself is strictly SemVer.
+fn find_semver(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.strip_prefix(['v', 'V']).unwrap_or(token);
+        let token = token.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+        is_semver(token).then(|| token.to_string())
+    })
+}
+
+/// Strict SemVer 2.0.0: `MAJOR.MINOR.PATCH`, optional `-prerelease`, optional `+build`.
+fn is_semver(s: &str) -> bool {
+    let (rest, build) = match s.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (s, None),
+    };
+    let (core, prerelease) = match rest.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (rest, None),
+    };
+    let numeric = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    let identifier = |part: &str| {
+        !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    let core_parts: Vec<&str> = core.split('.').collect();
+    if core_parts.len() != 3 || !core_parts.into_iter().all(numeric) {
+        return false;
+    }
+    if let Some(prerelease) = prerelease {
+        // A numeric prerelease identifier must not have leading zeros (SemVer 2.0.0 §9).
+        let valid = |part: &str| {
+            identifier(part) && (!part.bytes().all(|b| b.is_ascii_digit()) || numeric(part))
+        };
+        if !prerelease.split('.').all(valid) {
+            return false;
+        }
+    }
+    match build {
+        Some(build) => build.split('.').all(identifier),
+        None => true,
+    }
+}
+
 /// Graceful stop: SIGTERM and a bounded wait on Unix, then (or on Windows, directly) kill.
 async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     let Some(mut c) = child.take() else {
@@ -230,6 +327,69 @@ mod tests {
                 return health;
             }
         }
+    }
+
+    #[test]
+    fn find_semver_extracts_the_first_strict_version_from_free_text() {
+        // The shapes real tools print.
+        assert_eq!(
+            find_semver("otelcol-contrib version 0.114.0").as_deref(),
+            Some("0.114.0")
+        );
+        assert_eq!(find_semver("thing v1.2.3,").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            find_semver("agent 2.0.0-rc.1+build.5 (linux/amd64)").as_deref(),
+            Some("2.0.0-rc.1+build.5")
+        );
+        // The first version wins.
+        assert_eq!(
+            find_semver("v1.0.0 (protocol 3.4.5)").as_deref(),
+            Some("1.0.0")
+        );
+        // A dangling separator counts as trailing punctuation around a valid core.
+        assert_eq!(find_semver("version 1.2.3-").as_deref(), Some("1.2.3"));
+        // Not SemVer 2: too few parts, leading zeros, invalid prerelease identifiers.
+        assert_eq!(find_semver("version 1.2"), None);
+        assert_eq!(find_semver("version 01.2.3"), None);
+        assert_eq!(find_semver("version 1.2.3-rc.01"), None);
+        assert_eq!(find_semver("no version at all"), None);
+    }
+
+    #[tokio::test]
+    async fn the_probe_reports_a_version_description() {
+        let (event_tx, mut events) = mpsc::channel(4);
+        probe_version(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "echo tool version 3.2.1".to_string()],
+            EventSender::new(0, event_tx),
+        )
+        .await;
+        let (_, event) = events.recv().await.expect("a probed description");
+        let ProcessEvent::Description(description) = event else {
+            panic!("expected a Description event, got {event:?}");
+        };
+        assert_eq!(description.identifying_attributes[0].key, "service.version");
+    }
+
+    #[tokio::test]
+    async fn a_failing_or_versionless_probe_stays_silent() {
+        let (event_tx, mut events) = mpsc::channel(4);
+        probe_version(
+            PathBuf::from("/nonexistent/definitely-not-here"),
+            vec![],
+            EventSender::new(0, event_tx.clone()),
+        )
+        .await;
+        probe_version(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "echo no version here".to_string()],
+            EventSender::new(0, event_tx),
+        )
+        .await;
+        assert!(
+            events.try_recv().is_err(),
+            "neither probe may emit an event"
+        );
     }
 
     #[tokio::test]

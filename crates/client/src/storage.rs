@@ -67,11 +67,19 @@ impl Storage {
     }
 
     /// Stores a received remote configuration: the protobuf for lossless restart, and each
-    /// config-map entry as a plain file under `config/`.
+    /// config-map entry as a plain file under `config/`. Entry files from a previous offer are
+    /// removed first — the composed entry set changes over time (ADR-0012), and a stale file
+    /// would otherwise still be handed to the Managed Process.
     pub fn store_remote_config(&self, config: &AgentRemoteConfig) -> io::Result<()> {
         std::fs::write(self.dir.join(CONFIG_PB_FILE), config.encode_to_vec())?;
         let config_dir = self.dir.join(CONFIG_DIR);
         std::fs::create_dir_all(&config_dir)?;
+        for entry in std::fs::read_dir(&config_dir)? {
+            let path = entry?.path();
+            if path.is_file() {
+                std::fs::remove_file(path)?;
+            }
+        }
         if let Some(map) = &config.config {
             for (name, file) in &map.config_map {
                 std::fs::write(config_dir.join(entry_file_name(name)), &file.body)?;
@@ -135,6 +143,47 @@ mod tests {
         assert_eq!(storage.load_remote_config(), Some(config));
         let plain = std::fs::read(dir.path().join("config").join("config")).expect("plain file");
         assert_eq!(plain, b"receivers: {}\n");
+    }
+
+    #[test]
+    fn a_new_offer_replaces_the_previous_entry_files() {
+        // The composed entry set changes over time (ADR-0012); an entry dropped upstream must
+        // not survive on disk, where it would still be handed to the Managed Process.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let offer = |entries: &[(&str, &[u8])]| AgentRemoteConfig {
+            config: Some(AgentConfigMap {
+                config_map: entries
+                    .iter()
+                    .map(|(name, body)| {
+                        (
+                            name.to_string(),
+                            AgentConfigFile {
+                                body: body.to_vec(),
+                                content_type: String::new(),
+                            },
+                        )
+                    })
+                    .collect(),
+            }),
+            config_hash: vec![1],
+        };
+        storage
+            .store_remote_config(&offer(&[("base", b"a\n"), ("extra", b"b\n")]))
+            .expect("store");
+        storage
+            .store_remote_config(&offer(&[("base", b"a2\n")]))
+            .expect("store again");
+
+        let config_dir = dir.path().join("config");
+        assert_eq!(
+            std::fs::read(config_dir.join("base")).expect("kept entry"),
+            b"a2\n"
+        );
+        assert!(
+            !config_dir.join("extra").exists(),
+            "the dropped entry is gone"
+        );
     }
 
     #[test]

@@ -43,7 +43,8 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         let storage = Storage::new(config.state_dir.clone())
             .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
         let state = AgentState::new(config.name.clone(), storage)
-            .map_err(|e| format!("cannot restore the agent state: {e}"))?;
+            .map_err(|e| format!("cannot restore the agent state: {e}"))?
+            .with_attributes(config.agent_attributes(None));
         return Ok(Engine::new(vec![state]));
     }
 
@@ -69,7 +70,8 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             .map_err(|e| format!("cannot prepare {}: {e}", state_dir.display()))?;
         let config_dir = storage.config_dir();
         let state = AgentState::supervised(block.name.clone(), storage)
-            .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?;
+            .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
+            .with_attributes(config.agent_attributes(Some(block)));
 
         // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
         // unconditionally, before the process starts — a taken port fails startup, not later.
