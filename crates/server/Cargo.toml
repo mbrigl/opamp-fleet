@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 opamp.workspace = true
+# Streaming a stored package artifact into the response body (ADR-0019) — the same workspace
+# dependency the Client already builds on, promoted from dev-only.
 futures-util.workspace = true
 tokio.workspace = true
 axum.workspace = true
@@ -24,9 +26,18 @@ tracing-subscriber.workspace = true
 sha2.workspace = true
 hex.workspace = true
 flate2.workspace = true
+base64.workspace = true
+constant_time_eq.workspace = true
 rustls.workspace = true
+rcgen.workspace = true
+time.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+# ADR-0019: probing the URL of a referenced package — one HEAD, to catch a typo. The Server never
+# downloads an artifact, so this is the whole of its outbound HTTP.
 reqwest.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true
 tempfile = "3"
+x509-parser = "0.18"

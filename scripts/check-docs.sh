@@ -32,6 +32,8 @@
 #      check if another one appears. The headings there must themselves run 1..N in order: a
 #      gap or a repeat is a botched renumbering, and it is the only half of the renumbering
 #      hazard a check can see (AGENTS.md, section 3).
+#      A citation into an external specification (e.g. "RFC 9110 §11") reuses the section sign
+#      for a document that is not in this repository, so it is accepted unverified.
 #   5. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) names an ADR
 #      file that exists in docs/adr/ — anticipated follow-ups are described by topic, never by
 #      a number that does not exist yet (docs/adr/README.md).
@@ -567,6 +569,9 @@ check_section_refs() {
           # which leaves the link expression itself intact.
           # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
           line="$(sed -E 's/`[^`]*`//g' <<< "$line")"
+          # A citation into an external spec (e.g. 'RFC 9110 §11') reuses the section sign for a
+          # document outside this repository — accept it unverified, like an external link.
+          line="$(sed -E 's/RFC [0-9]+ §[0-9]+//g' <<< "$line")"
           [[ "$line" == *§* ]] || continue
           while IFS= read -r linkexpr; do
             [[ "$linkexpr" =~ §([0-9]+) ]] || continue
@@ -597,9 +602,12 @@ check_section_refs() {
         ;;
       *)
         while IFS=: read -r lineno line; do
+          # A citation into an external spec (e.g. 'RFC 9110 §11') is accepted unverified.
+          [[ "$line" == RFC\ * ]] && continue
           n="${line#§}"
           _contains "$n" "${valid_sections[@]}" \
             || add_error "$rel:$lineno: reference '§$n' matches no numbered section in AGENTS.md"
+        done < <(grep -noE '(RFC [0-9]+ )?§[0-9]+' "$f")
         ;;
     esac
   done

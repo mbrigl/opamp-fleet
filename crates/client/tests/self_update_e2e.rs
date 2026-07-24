@@ -1,3 +1,10 @@
+use server::packages::{PackageStore, Platform};
+
+/// The Platform this test's Client will report about itself (ADR-0020) — the Server offers only
+/// the artifact that fits the machine, so a self-update test has to store one for this one.
+fn this_host() -> Platform {
+    Platform::new(std::env::consts::OS, std::env::consts::ARCH).expect("this host has a platform")
+}
 /// The version directory laid out before the update. Joined one component at a time, never as
 /// `versions/<name>`: this test builds the Windows pointer with `mklink`, a `cmd` builtin that
 /// reads an embedded `/` as the start of a switch.
@@ -18,6 +25,7 @@
     // Offered the way an operator uploads a release: the number on the archive, without the commit
     // the build carries (ADR-0013). The staged binary reports the full string and must still be
     // recognised as this release — the failure that ADR exists for.
+        .expect("put entry");
         std::fs::canonicalize(root.join("versions").join(PREVIOUS_VERSION_DIR))
         root.join("versions")
             .join(PREVIOUS_VERSION_DIR)
@@ -36,3 +44,4 @@
     let full = version_of(&client);
         .unwrap_or_else(|| panic!("{full:?} is not a version"))
         .to_string();
+        .expect("put entry");

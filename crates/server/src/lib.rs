@@ -4,9 +4,14 @@
 //! A library crate so integration tests can assemble the exact router the binary serves.
 
 pub mod api;
+pub mod ca;
 pub mod config;
+pub mod configs;
+pub mod credentials;
 pub mod fleet;
 pub mod listen;
+pub mod packages;
+pub mod tls;
 pub mod transport;
 
 use std::sync::Arc;
@@ -28,4 +33,8 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
 }
 
 /// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the
+/// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
+/// (ADR-0017). Without it the plane is open, which is what its loopback default is for.
+pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
+    api::router(state, auth)
 }
