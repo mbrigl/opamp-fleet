@@ -61,6 +61,10 @@ pub struct SupervisorBlock {
     pub endpoint_port: u16,
     /// How long a graceful stop may take before the Managed Process is killed.
     pub stop_timeout_secs: u64,
+    /// How long a freshly (re)started Managed Process must survive before a received
+    /// configuration is acknowledged `APPLIED`; exiting within the grace reports `FAILED`
+    /// (the health-gated acknowledgement ADR-0011 names). `0` acknowledges on start, as before.
+    pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
@@ -88,6 +92,12 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: stop_timeout_secs must not be negative")
             })?,
         };
+        let apply_grace_secs = match take_integer(&mut table, "apply_grace_secs")? {
+            None => default_apply_grace_secs(),
+            Some(secs) => u64::try_from(secs).map_err(|_| {
+                format!("supervisor {name:?}: apply_grace_secs must not be negative")
+            })?,
+        };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
         Ok(SupervisorBlock {
@@ -95,6 +105,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             name,
             endpoint_port,
             stop_timeout_secs,
+            apply_grace_secs,
             attributes,
             settings: table,
         })
@@ -184,6 +195,10 @@ fn default_state_dir() -> PathBuf {
 
 fn default_stop_timeout_secs() -> u64 {
     10
+}
+
+fn default_apply_grace_secs() -> u64 {
+    3
 }
 
 impl Default for ClientConfig {
@@ -320,6 +335,7 @@ mod tests {
         assert_eq!(collector.name, "otelcol");
         assert_eq!(collector.endpoint_port, 4321);
         assert_eq!(collector.stop_timeout_secs, 10);
+        assert_eq!(collector.apply_grace_secs, 3, "the default grace");
         assert_eq!(
             collector.settings.get("binary").and_then(|v| v.as_str()),
             Some("/usr/local/bin/otelcol")
@@ -355,6 +371,14 @@ mod tests {
         let not_an_int =
             "[[supervisor]]\ntype = \"command\"\nname = \"x\"\nendpoint_port = \"a\"\n";
         assert!(toml::from_str::<ClientConfig>(not_an_int).is_err());
+        let negative_grace =
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\napply_grace_secs = -1\n";
+        assert!(toml::from_str::<ClientConfig>(negative_grace).is_err());
+        let zero_grace: ClientConfig = toml::from_str(
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\napply_grace_secs = 0\n",
+        )
+        .expect("parse");
+        assert_eq!(zero_grace.supervisors[0].apply_grace_secs, 0);
     }
 
     #[test]
