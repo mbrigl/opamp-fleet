@@ -9,3 +9,5 @@ use crate::service::runtime::Shutdown;
                             AgentConfigObject {
             [[supervisor]]
             type = "command"
+            name = "agent"
+            "#,

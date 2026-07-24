@@ -174,7 +174,12 @@ fn spawn_server() -> (
                 .await
                 .expect("bind");
             tx.send(listener.local_addr().expect("addr")).expect("send");
+            axum::serve(
+                listener,
                 server::agent_app(served, server::transport::Admission::open()),
+            )
+            .await
+            .expect("serve");
         });
     });
     let addr = rx.recv().expect("the server's address");
