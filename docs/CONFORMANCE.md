@@ -59,6 +59,7 @@ each item landed, so a reader can check the claim rather than take it.
 | **Proto folders restructured** ([#352](https://github.com/open-telemetry/opamp-spec/pull/352)) | Adopted: the vendored schema now lives at `crates/opamp/proto/v0.20.0/opamp/v1/`. Build inputs only — see [Where the schema lives](#where-the-schema-lives). |
 | **`ComponentHealth.attributes`** ([#334](https://github.com/open-telemetry/opamp-spec/pull/334)) | Generated from the schema and relayed as part of the health message the Supervisor Endpoint folds upstream; this project sets none of its own. |
 | **`agent_disconnect` recommended for plain HTTP** ([#353](https://github.com/open-telemetry/opamp-spec/pull/353)) | Already the behaviour: the Client sends `agent_disconnect` on shutdown over both transports. |
+| **`AgentConfigFile.role`** ([#350](https://github.com/open-telemetry/opamp-spec/pull/350)) | Implemented ([ADR-0025](adr/0025-configurations-and-the-rest-api.md)): an optional `role` on the Configuration resource travels verbatim into every entry composed from it. |
 | **SDK service namespace identifying attribute** ([#381](https://github.com/open-telemetry/opamp-spec/pull/381)) | Documentation of the OpenTelemetry guidelines; no protocol obligation. |
 
 ### Where the schema lives
@@ -129,10 +130,14 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Agent. |
 | `AcceptsRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
 | `ReportsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
+| `AcceptsPackages` | `0x0008` | Beta | optional | implemented | Software distribution for Managed Processes (goal 10, ADR-0028). Declared by a Supervisor-backed Agent whose block names its program with a bare file name, which puts it in a directory this Client owns and is therefore the whole of its consent (ADR-0017); the Server chooses which artifact (ADR-0028); the offered artifact is streamed to disk, verified (content hash always, Ed25519 signature when a key is configured), unpacked when it is a `.tar.gz` or a `.7z` — the member named after the Managed Process's binary, since an upstream release ships an archive and nothing repacks it on the way (ADR-0028); the `DownloadableFile.headers` the offer names ride the `GET`, which is what makes a **referenced** artifact behind an authenticated mirror reachable at all (ADR-0028) — and because such a header is an operator's credential for *one* host, a download that carries any follows its redirect chain by hand and re-attaches them only while scheme, host and port are unchanged, since `reqwest` strips only `Authorization`, `Cookie` and `Proxy-Authorization` across origins and a custom token would otherwise be handed to wherever a mirror points; a header the offer names that is not a valid HTTP header fails the download by *key*, never printing its value; an encrypted `.7z` opens with `[packages] archive_key`, which the Server never learns — swapped over that binary by the Supervisor inside `<supervisor_dir>/<name>/program/`, health-gated on `apply_grace_secs`, and rolled back if it will not stay up. A Managed Process named by an *absolute* path is the machine's, declares no package capability, and is never written to. One that is **more than a single file** — an executable plus the shared objects it loads — is delivered by naming `program_path` in its block (ADR-0028): the whole archive is then unpacked into `<supervisor_dir>/<name>/program/tree/`, the tree it replaced kept beside it and put back whole if the new one will not stay up. Since the archive then names paths, every member is validated before anything is written and one this Client will not write — a `..` or absolute path, a symbolic or hard link, more than 10 000 members, more than 2 GiB unpacked — refuses the whole archive. Only a `TopLevel` package is installed: an `Addon` is what a Supervisor has no way to apply, so it is refused with `InstallFailed` rather than written over the binary it was meant to extend. **The Client updates itself the same way** (goal 11, ADR-0020): it is always its own Agent, and with `[self_update]` in `supervisor.toml` it accepts the one package that section names — anything else is refused, since a package with an empty Selector reaches every consenting Agent and one written over the Client takes the host out of reach. The artifact is staged as a new version *beside* the running one in the ADR-0021 layout, proved by running `supervisor self-check` on it before the `current` pointer moves, and the process then exits asking the service manager for a restart. A marker in the state directory carries the outcome across that restart: the new version commits itself once it reaches the Server, and a version that will not stay up is rolled back to its predecessor after three attempts. |
+| `ReportsPackageStatuses` | `0x0010` | Beta | optional | implemented | `Downloading` while the artifact is on the wire, `Installing` once the Supervisor applies it, then `Installed`/`InstallFailed` (ADR-0028), with the offered `all_packages_hash` echoed once terminal — which is what stops the Server re-offering. The `Downloading` reports repeat every 5 s and carry `PackageDownloadDetails` (percent, bytes per second), so a transfer of hundreds of megabytes stays distinguishable from a stuck install; both that status and the details are `[Development]` upstream. Survives restarts via the persisted installed-package record. Withheld from a Server that has declared capabilities without `AcceptsPackagesStatus` (ADR-0013) — a suppressed status is not queued, it returns with the full snapshot that follows any reconnect or `ReportFullState`. |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
 | `AcceptsRestartCommand` | `0x0400` | Beta | optional | implemented | Declared by Supervisor-backed Agents only — the self-Agent has no process to restart. Queued via `POST /api/v1/agents/{uid}/restart`, delivered as the Baseline's command-only message on both transports (pushed over WebSocket, on the next poll over plain HTTP). |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). `ComponentHealth.attributes`, new in `v0.19.0` (`[Development]`), is carried through from what a Managed Process reports; this project adds none of its own. |
+| `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). Deliberately **not** gated on the Server's `OffersRemoteConfig` (ADR-0013 clause 16), and the non-gate is a decision rather than an omission: that bit says the Server *can offer* configuration, whereas what licenses an inbound status report is `AcceptsStatus`, which every Server MUST set — there is no `AcceptsRemoteConfigStatus`. Gating it would also be dangerous exactly where it bit, since `last_remote_config_hash` is the sole input to the Server's re-offer decision, and inert where it did not: the status is unset until a configuration has actually been offered. |
 | `ReportsAvailableComponents` | `0x4000` | Development | optional | implemented | Relayed from the Managed Process's `opampextension` through the Supervisor Endpoint; declared only once components are known. The hash rides full reports, the full map goes out on the Server's `ReportAvailableComponents` flag — which the Server sets while it only holds a hash. |
+| `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | implemented | `APPLYING` on receipt, `APPLIED`/`FAILED` after applying, the hash echoed either way (ADR-0013) — which is what stops the Server re-offering. **One acknowledgement per offer**, whose `error_message` names everything dropped across both halves of it (ADR-0013 clause 7): the Baseline hashes all settings together, so the Agent answers the message, never one part of it. Survives restarts via the persisted settings. Gated on the Server's `OffersConnectionSettings` — *unless* that Server has actually sent an offer, which arms the report whatever its bitmask says (ADR-0013 clause 13); without that exception a Server offering without declaring could never stop offering. |
 
 ## Server capabilities
 
@@ -143,6 +148,9 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 | `AcceptsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Server. |
 | `OffersRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). `AgentConfigObject.role` (the field debuted in `v0.19.0` on `AgentConfigFile`, renamed with the message in `v0.20.0`) carries the optional `role` of the Configuration it was composed from (ADR-0025) — empty, and so unset on the wire, unless an operator set one. It is part of the hash that gates every push, so a role change reaches the fleet like any other edit; an empty role is hashed as nothing, which keeps every hash predating the decision exactly where it was. The Client writes a roled entry to the config directory like any other but leaves it out of what the Managed Process is configured with — the Collector plugin passes one `--config` per *unroled* entry, so `supplementary` content is there to be read by path and never handed over as configuration. |
 | `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
+| `AcceptsPackagesStatus` | `0x0010` | Beta | optional | implemented | The Server records each Agent's reported `PackageStatuses` and gates re-offering on the `server_provided_all_packages_hash` (ADR-0028). |
+| `OffersConnectionSettings` | `0x0020` | Beta | optional | partial | Declared while `server.toml` carries **anything this Server can offer** — a `[connection_offer]`, a `[telemetry_offer]`, or a `[client_ca]` whose issued certificate travels as an ordinary offer (ADR-0013 clause 3). Keying it on the first alone left the other two exercising an undeclared capability. From `[connection_offer]` come credential, heartbeat interval, and/or endpoint — credential, heartbeat interval, and/or endpoint, compiled into one hash-gated `OpAMPConnectionSettings` offered to Agents declaring `AcceptsOpAMPConnectionSettings` whose reported hash differs (ADR-0013). A credential that `[auth]` would reject fails startup. A `certificate` **is** offered, but only as the answer to a CSR (see the row below), never as a standing setting. `tls` and `proxy` are never offered: there is no configuration surface to put them in, which is the Server half of the gap the Agent row names. The same message carries the own-telemetry destinations of `[telemetry_offer]` (ADR-0016), offered per signal and only to Agents declaring that signal; the hash covers the whole offer, so an Agent acknowledges the message rather than any one part of it. |
+| `AcceptsConnectionSettingsRequest` | `0x0040` | Development | optional | implemented | The Agent-initiated CSR flow (ADR-0022). Declared only while `server.toml` carries a `[client_ca]` — the certificate and key the Server signs with, and `validity_days` (default 90). An Agent sends `ConnectionSettingsRequest.opamp.certificate_request.csr`; the Server signs it as a local CA and returns the issued certificate in an ordinary `ConnectionSettingsOffers` under its own hash, so one message can hand over the certificate and whatever standing offer goes with it. The Agent's private key never leaves its host — the Server puts nothing in `private_key`. Admission is the approval: a CSR that arrives has already satisfied every proof the endpoint requires, which is what the Baseline's flow means by awaiting one. A request that does not parse, or one arriving at a Server with no `[client_ca]`, is answered with a `ServerErrorResponse` of type `BadRequest` — the Baseline's MUST. A CSR that *carries* an `instance_uid` is not checked against the sender's, which the Baseline makes a MUST for that case — see [Mutual TLS](#mutual-tls-and-the-two-fields-still-refused), and [`HARDENING.md`](HARDENING.md) for the measure that would close it. |
 
 ## Protocol behaviour beyond capabilities
 
@@ -167,7 +175,12 @@ separately because conformance depends on them just as much.
 | Duplicate `instance_uid` | Detection and handling | implemented | The Server rekeys an identity that reports over a second live WebSocket connection: a fresh UUID v7 via `AgentIdentification`, which the Client adopts (the Baseline's SHOULD). Stateless plain-HTTP polling offers nothing to tell two pollers apart, so detection is WebSocket-only. |
 | Duplicate WebSocket connections | Handling defined by the spec | implemented | The Client holds one connection by construction and sends `agent_disconnect` before a graceful reconnect. The Server tracks per-connection ownership: only the owning connection marks its Agents disconnected, so a stale socket never takes down an Agent another connection carries. |
 | Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
+| Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | implemented | `[Beta]`. The Server's optional `[auth]` section guards `/v1/opamp` (ADR-0022): Basic and Bearer accepted, checked on every plain-HTTP POST and before the WebSocket upgrade completes, `401` with a `WWW-Authenticate` challenge otherwise. The Client sends the header on both transports. Without `[auth]` the endpoint stays open; the REST API and the UI are a separate plane with their own optional Basic credentials (`[rest.auth]`, ADR-0022), which the Baseline says nothing about. On WebSocket the check happens once, at that upgrade, so a rotated or withdrawn credential governs only the next connection — which the Baseline asks nothing about, and which is therefore carried as a hardening measure (H1) in [`HARDENING.md`](HARDENING.md) rather than as a conformance item. Underpins goal 17. |
 | Transport security | TLS on both transports | implemented | rustls on both ends (ADR-0012); `wss://` and `https://`, with an optional CA file on the Client that replaces the built-in roots for a private CA. Server-authenticated only — see the next row. |
+| Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | Governed on the Client side by one stated rule (ADR-0013) rather than case by case: **optimistic until the Server has declared anything, binding once it has** — which is the Baseline's own timing, and what makes the first report legal — with `capabilities: 0` read as silence rather than a retraction. A **received message outranks the bitmask** for the report answering it, so a Server that offers without declaring still gets its acknowledgement instead of re-offering for ever. Reporting is gated where the Server's bit governs the report (`package_statuses`, `connection_settings_status`, effective config); *sending* is gated pessimistically only where the message would be refused outright (a CSR to a Server without `AcceptsConnectionSettingsRequest`). `remote_config_status` is deliberately never gated — see its row. The Server, for its part, offers configuration only to Agents declaring `AcceptsRemoteConfig`, telemetry only per declared signal, and a restart only to `AcceptsRestartCommand`. |
+| Retrying, throttling, bad request | Defined error and backoff behaviour | implemented | The Server answers malformed input with `BAD_REQUEST` error responses, which the Client does not retry. Throttling is honoured on **both** levels the Baseline defines it at: the protocol's own `UNAVAILABLE` with `retry_info` (either transport), and — on plain HTTP — a `503` or `429`, whose `Retry-After` is waited out; without the header the wait is the Baseline's *"minimum recommended retry interval"* of 30 s. `Retry-After` is read in its delta-seconds form only; an HTTP-date value falls back to that same 30 s rather than pulling in a date parser for it. A `413` is treated as the Baseline's *"MUST NOT retry the same request"*: the report is dropped rather than counted as a lost exchange, since a lost exchange arms a full snapshot and would make the retry **larger** than the report just refused. Reconnects use capped exponential backoff **with jitter** — equal jitter over `[ceiling/2, ceiling)`, so a fleet coming back after a Server restart does not arrive on the same instants. The Server does not yet emit throttling itself. |
+| `OpAMP-Instance-UID` header | The Client SHOULD set it on plain HTTP | implemented | Sent on every POST, carrying the `instance_uid` of the message in canonical UUID form — so an intermediary or a log can route by Agent without decoding the protobuf body. |
+| Interim status reporting | The Client MAY report progress while it downloads and installs | implemented | While an artifact downloads the Client reports `Downloading` with `PackageDownloadDetails` every 5 s, and reports the terminal status once done — the Baseline's "status reports allow the Server to stay informed" for processing that takes a long time. |
 | Custom messages | `CustomCapabilities` / `CustomMessage` exchange | planned | `[Development]`. Outside the capability bitmask: each side lists supported custom capabilities as reverse-FQDN strings; a `CustomMessage` for an unsupported capability can be ignored. |
 
 ### Message size limits
@@ -188,8 +201,51 @@ through `max_message_size_bytes` (ADR-0009). Zero is rejected at startup: the Ba
 "unlimited", so a limit that could carry nothing is a configuration error, not a way to switch the
 rule off. The Supervisor Endpoint enforces the same limit as the Server it stands in for.
 
+### Mutual TLS and the two fields still refused
 
 Goal 17 asks for three things: TLS on both ends, mutual TLS, and a Server that accepts only
+authenticated Agent identities. **All three now hold** — rustls on both transports (ADR-0012), the
+optional `[auth]` credential (ADR-0022), and client certificates the Server itself issues
+(ADR-0022). What is left is smaller and deliberate, and this is where it is written down, because
+none of it is a capability bit.
+
+- **Two offer fields are not honoured.** `TLSConnectionSettings` and `ProxyConnectionSettings`, both
+  `[Development]`, are dropped from an offer. The refusal is a decision rather than a gap:
+  `insecure_skip_verify`, `ca_pem_contents`, and the rest are largely ways to weaken verification,
+  and a Server able to command them could switch off the check that proves it is the Server — trust
+  here is an operator's file, not a Server's instruction. There is nothing on the Client for `proxy`
+  to configure. **The acknowledgement no longer lies about it**: the Client applies every field it
+  does honour and then reports `FAILED` with an `error_message` naming what it dropped, so a Server
+  offering either learns that it did not take. The hash is echoed either way, so this does not put
+  the Server into a re-offer loop.
+- **A certificate proves membership, not identity.** The Server does not require a peer
+  certificate's subject to match the Agent's `instance_uid` or anything else it reports. Binding
+  them would mean a certificate dies whenever the Server re-keys an Agent through
+  `AgentIdentification` — an outage of the Server's own making. Authorization and multi-tenancy
+  remain the specification's non-goal.
+- **Mutual TLS is hop-by-hop.** Where Gateway Mode eventually stands between an Agent and the
+  Server there will be two mutual-TLS connections, and the certificate the Server verifies is the
+  Gateway's; the per-Agent proof that survives a terminating hop is the credential, forwarded
+  unchanged (ADR-0014). A fleet that gateways therefore keeps `[auth]` configured. A fleet whose
+  Clients connect directly can drop it and be certificate-only.
+- **Revocation is not implemented.** Short validity plus renewal at two thirds of it is what bounds
+  a certificate's reach; there is no CRL and no OCSP. Ejecting a host faster than its certificate
+  expires means rotating the CA.
+
+- **A CSR that names an `instance_uid` is not checked against its sender.** The Baseline: *"When the
+  Server receives a CSR containing the instance_uid in CSR fields the Server MUST verify that the
+  instance_uid field in AgentToServer message matches the instance_uid in the CSR fields"*, which it
+  justifies as what *"prevents Agents impersonating other Agents"*. This Server performs no such
+  check — `ClientCa::sign` treats the subject as descriptive and drops the request's SANs. That is a
+  **different question** from the one the bullet above settles: refusing to bind the *issued*
+  certificate to an `instance_uid` is right, because a re-key through `AgentIdentification` would
+  then kill a certificate the Server itself issued, whereas the MUST is about rejecting a mismatched
+  *request* — and nothing about re-keying argues against that. The MUST is conditional and nothing
+  currently triggers it: this project's Client puts its configured name in the CSR's common name and
+  no `instance_uid` anywhere, so no request this fleet produces carries one. A peer implementation
+  that does would be signed unverified, and interoperability with other Clients is a stated target
+  (ADR-0010). Closing it is measure **H3** in [`HARDENING.md`](HARDENING.md), where what has to be
+  worked out is set out.
 
 ## Deviations
 
@@ -211,4 +267,26 @@ Client's one connection, a received configuration restarts the Managed Process o
 files and is acknowledged `APPLYING` → `APPLIED` only once the process survived the apply grace
 (`apply_grace_secs`, default 3 s) — exiting within it reports `FAILED` — and every Supervisor serves
 a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
+health, and effective configuration into its Agent. Configuration targeting (ADR-0025) composes
+each Agent's Remote configuration from the named Configurations whose Selectors match its
+reported attributes — delivered as named `AgentConfigMap` entries, hash-gated per Agent, with the
+whole model exposed through the OpenAPI-described REST API v1. On top of that loop sit the
+server-initiated restart command, periodic heartbeats on both transports, available-components
+relaying from the Managed Process, and duplicate-`instance_uid` handling with per-connection
+disconnect scoping. The OpAMP endpoint optionally requires Basic or Bearer authentication on both
+transports (ADR-0022), and the Server rotates those credentials — plus heartbeat interval and
+endpoint — fleet-wide through hash-gated connection-settings offers the Client verifies by
+actually connecting, persists, and acknowledges (ADR-0013). Software distribution to Managed
+Processes is in place (ADR-0028): the Server stores and offers packages, and each Supervisor
+downloads the artifact, verifies it (content hash always, Ed25519 signature when a key is
+configured), swaps it over its Managed Process's binary, health-gates it on the apply grace, and
+rolls back a binary that will not stay up, reporting `Downloading` with its progress while the
+artifact is still on the wire. With the move to Baseline `v0.19.0` both ends also
 enforce the protocol's new message size limits in both directions, on both transports and at the
+restart and rolling back a version that will not stay up. Mutual TLS closes goal 17 (ADR-0022): the Server verifies client
+certificates against a configured CA and requires one on the OpAMP endpoint *in addition to* any
+credential, the Client presents one on both transports, and the Server issues them itself through
+the Baseline's CSR flow — the Agent keeps its private key, sends a signing request, and receives the
+*implemented*: both connection-settings capabilities honour the endpoint, credential, heartbeat, and
+certificate an offer carries but not its `tls` and `proxy` fields — deliberately, and no longer
+silently (see [Mutual TLS](#mutual-tls-and-the-two-fields-still-refused)).

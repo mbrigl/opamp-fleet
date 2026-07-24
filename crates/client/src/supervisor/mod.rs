@@ -57,7 +57,9 @@ fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String,
 /// unknown plugin, or a plugin rejects its settings — startup fails loudly, nothing runs half.
 pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine, String> {
     let (event_tx, events) = mpsc::channel(64);
+            .map_err(|e| format!("cannot restore the agent state: {e}"))?
             .with_attributes(kind_attributes(config.agent_attributes(None)))
+            .with_namespace(config.service_namespace.clone()),
     }
                     opamp::proto::AgentConfigObject {
 
@@ -90,6 +92,7 @@ fn check_endpoint_port(block: &SupervisorBlock, plugin: &dyn Plugin) -> Result<(
             program_path,
     let service_name = effective_service_name(block, plugin, &program.path)?;
     check_endpoint_port(block, plugin)?;
+            .with_namespace(config.service_namespace.clone()),
     let timing = effective_timing(config, block, plugin)?;
         stop_timeout: timing.stop_timeout,
         apply_grace: timing.apply_grace,
@@ -317,6 +320,50 @@ mod tests {
             )
             .is_ok(),
             "the opampextension connects to it, so pinning it is a decision"
+        );
+    }
+
+    /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
+    /// (ADR-0028) agrees with the `AcceptsPackages` capability an Agent actually declares.
+    #[tokio::test]
+    async fn installs_packages_reflects_declared_package_acceptance() {
+        let engine = build_engine(&owned, &shutdown).expect("build");
+        assert!(
+            engine.installs_packages(),
+        );
+
+        .expect("parse");
+            !engine.installs_packages(),
+        assert!(
+            engine.installs_packages(),
+        );
+    }
+
+    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0028). The
+    /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
+    /// replace a directory something else created and filled — so preparing the program's parent,
+    /// which is right for a single file, would make every first install of a tree fail.
+    #[tokio::test]
+    async fn a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package() {
+        let config = format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"fluent-bit\"\n\
+             program_path = \"bin/fluent-bit\"\n",
+            state = dir.path().join("state").to_string_lossy(),
+        );
+        let parsed: ClientConfig = toml::from_str(&config).expect("parse");
+        let mut engine = build_engine(&parsed, &shutdown).expect("build");
+
+            "a bare name is the consent whether the package is one file or a tree"
+        );
+        let program_dir = dir.path().join("state/supervisors/agent/program");
+        assert!(
+            program_dir.is_dir(),
+            "the root the tree is renamed into exists"
+        );
+        assert!(
+            !program_dir.join("tree").exists(),
+            "nothing occupies the name the first install has to rename onto"
         );
     }
 

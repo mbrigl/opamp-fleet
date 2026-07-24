@@ -1,4 +1,5 @@
 - [Gateway Mode: carrying other Clients](#gateway-mode-carrying-other-clients)
+- [Agents that are more than one file](#agents-that-are-more-than-one-file)
 
 ### Running it under its own account
 
@@ -137,6 +138,39 @@ To tag **one** Agent among several on a host, use a Server **label** instead
 same Selectors, and takes effect at once without editing a file on the host. A block's own
 `[supervisor.attributes]` table used to do this and no longer exists; a block carrying one fails at
 startup with that sentence.
+Every Agent additionally reports, without configuration, everything the protocol names to describe
+
+An attribute the host cannot answer is **left out, never reported empty** — a container without
+`/etc/machine-id` reports no `host.id` at all rather than a blank one a Selector could match. So a
+Selector on `host.id` reaches exactly the hosts that have one.
+
+One attribute is configured rather than detected, because only an operator knows it — the protocol
+asks for `service.namespace` "if it is used in the environment where the Agent runs":
+
+```toml
+service_namespace = "telemetry"
+```
+
+Unlike `[attributes]`, it *identifies* the Agent rather than tagging it, which is where the protocol
+puts it. Leave it out and nothing is reported.
+ca_file = "ca.pem"             # trust: replaces the built-in roots
+cert_file = "client.pem"       # identity: what this Client presents
+key_file = "client-key.pem"
+Every key is optional on its own, so this section may carry a trust override, a client identity, or
+both.
+
+`ca_file` is the trust override for `wss://`/`https://` endpoints whose certificate comes from a
+
+`cert_file` and `key_file` are this Client's own certificate for a Server that requires mutual TLS
+the **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
+the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
+stored pair reverts to what is written here.
+
+**Enrolment needs nothing in this file.** When the Server declares that it signs certificates, a
+Client without one generates a key — which never leaves the host — sends a signing request, and
+receives a certificate through the ordinary offer flow, renewing the same way once it is two thirds
+through its validity. The private key is written `0600`; on Windows the state directory's ACL is
+what protects it.
 ## Gateway Mode: carrying other Clients
 
 A Client can stand at a network boundary and carry other Clients' Agents upstream over a small pool
@@ -202,6 +236,10 @@ Three keys describe *time*, and all three are the deployment's policy first:
 stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 apply_grace_secs = 3     # how long a restart must hold before an apply is acknowledged
 
+[updates]
+retain_previous_secs = 86400
+```
+
 A **wrapped kind corrects them** where its agent's own behaviour demands it — Icinga 2 needs sixty
 seconds to drain its checks and close its cluster connections, which is a property of Icinga and
 not of any host. Only a block of an **unwrapped** kind may state its own, because there no kind
@@ -234,9 +272,67 @@ re-reads it:
 close that, in a Supervisor's operator-written strings — a `command`'s `args` and
 `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`. A wrapped kind builds its own
 paths and needs no placeholder, except in the four Icinga keys, which take them too:
+One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
+addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
+than written over the binary it was meant to extend.
+
+### Package updates: rollback and retention
+
+
+- **A failed update rolls back to the version it replaced** — but only when there *is* one. A
+  **first** install with nothing behind it is not rolled back to nothing: the verified program is
+  **kept in place** and reported `InstallFailed`, so `program/` never goes empty and the Server does
+  not re-offer the same artifact in a loop.
+- **A program that keeps failing to start is held, not restarted forever.** After a few attempts in
+  a row the Supervisor stops trying and waits for a change — a new configuration, a new package, or
+  a restart — rather than spinning (which would hammer the Server with re-downloads). A rolled-back
+  predecessor that also will not start is held the same way. The Agent reports it plainly
+  (`not restarting: the program keeps failing to start`).
+- **A successful update keeps the version it superseded for a window, then deletes it**, so an
+  operator has a fallback if the new version proves subtly wrong. The window is
   `retain_previous_secs`: global in `[updates]`, **one day** by default, overridable in a block of
   an unwrapped kind and by a wrapper that has a reason to. `0` deletes on success. Each Supervisor
   keeps at most the immediately previous version.
+
+```toml
+# Global default for every Supervisor (one day shown; the built-in default):
+[updates]
+retain_previous_secs = 86400
+```
+
+## Agents that are more than one file
+
+An executable plus the shared objects it loads — Fluent Bit is the usual example — is delivered by
+command = "fluent-bit"            # bare: consent, exactly as everywhere else
+program_path = "bin/fluent-bit"   # where the program sits inside the package
+```
+
+With `program_path` set, the whole archive is unpacked into
+`<supervisor_dir>/<name>/program/tree/`, keeping its own structure, and the program is
+`program/tree/bin/fluent-bit`. Without it, nothing changes: one member, one file, as before.
+
+**The path is matched from its end.** An upstream release wraps everything in a version-named
+directory — `fluent-bit-3.1.0/bin/fluent-bit` — and that prefix is dropped, so `bin/fluent-bit`
+keeps being right at the next release instead of naming a version. If it matches several members
+the install is refused and they are listed; write more of the path to say which.
+
+**The tree that was running is kept whole** as `program/tree.rollback` until the new one has
+survived `apply_grace_secs`, and put back whole if it has not — a rollback of half a tree would run
+nothing.
+
+What an archive may contain is checked before anything is written, and one bad member refuses the
+whole archive:
+
+| Refused | Why |
+|---|---|
+| a member with `..` in its path, or an absolute path | It names somewhere outside the directory being unpacked into. |
+| a symbolic or hard link | What it points at is not where it sits, which is the one thing a path check cannot judge. |
+| more than 10 000 members, or more than 2 GiB unpacked | An archive that expands without end. |
+
+Members outside the program's own directory — a `LICENSE` beside the wrapper — are not written, and
+the count is logged rather than passed over in silence.
+
+Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the
 build came from — `1.2.3` and `1.2.3+a1b2c3d` are the same release, and the content hash is what
 pins *which* bytes arrived. What is **not** ignored is the pre-release: a `1.2.3-dev` build offered

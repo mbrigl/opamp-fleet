@@ -20,6 +20,8 @@ use std::time::Duration;
 use client::config::TREE_DIR;
 use client::service::runtime::shutdown_channel;
 use client::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent};
+use client::supervisor::process::{
+};
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
 
@@ -63,15 +65,27 @@ struct Harness {
 }
 
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
+/// are what the package tests vary; `version_probe` is set only where the probe is the subject.
 fn runner(
     install: Option<InstallTarget>,
     apply_grace: Duration,
+    version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+) -> Harness {
+    runner_retaining(install, apply_grace, Duration::ZERO, version_probe, build)
+}
+
+fn runner_retaining(
+    install: Option<InstallTarget>,
+    apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
     runner_full(
         install,
         apply_grace,
+        retain_previous,
         version_probe,
         None,
         build,
@@ -81,6 +95,8 @@ fn runner(
 fn runner_full(
     install: Option<InstallTarget>,
     apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
     reload_signal: Option<i32>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
@@ -91,8 +107,10 @@ fn runner_full(
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
+        retain_previous,
         install,
         archive_key: None,
+        version_probe,
         reload_signal,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
@@ -108,12 +126,14 @@ fn runner_full(
 
 /// Zero grace: the pre-grace instant acknowledgement most supervision tests exercise.
 fn start(build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
+    runner(None, Duration::ZERO, None, build)
 }
 
 fn start_with_grace(
     apply_grace: Duration,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
+    runner(None, apply_grace, None, build)
 }
 
 async fn next_health(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> ComponentHealth {
@@ -322,14 +342,45 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     );
 }
 
+async fn next_probed_version(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> Option<String> {
     loop {
         let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
+            .expect("a probed description in time")
+            .expect("an open channel");
+        if let ProcessEvent::Description(description) = event {
+            return description
+                .identifying_attributes
+                .iter()
+                .find(|kv| kv.key == "service.version")
+                .and_then(|kv| kv.value.clone())
+                .and_then(|v| v.value)
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s,
+                    other => panic!("expected a string version, got {other:?}"),
+                });
+        }
+    }
+}
+
+/// A swapped program is a different program, and only the program knows its own version — so the
+/// swap has to ask again. Without this the Agent reports the package as installed while going on
+/// describing the version it replaced (or none at all, on a first install onto an empty
+/// `program/`), and only a restart of the Client ever corrects it.
+///
+/// Both probes here read the same stub and therefore the same version; what the second event
+/// proves is that the swap asked at all, which is the whole of the regression. Draining the
+/// startup probe's answer first is what makes "the second one" mean something: one probe emits at
+/// most one event, so anything arriving after it was asked by the swap.
+#[tokio::test]
+async fn a_swapped_binary_is_probed_again_for_its_version() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
+    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
@@ -337,6 +388,24 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     let mut harness = runner(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
+        Some(VersionProbe {
+            program: binary.clone(),
+            args: vec!["--version".to_string()],
+        }),
+        || None, // an unconfigured Collector: nothing runs, the version is still owed
+    );
+    assert_eq!(
+        next_probed_version(&mut harness.events).await.as_deref(),
+        Some("9.9.9"),
+        "the startup probe reports what is on disk before the swap"
+    );
+
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert_eq!(result, Ok("9.9.9".to_string()));
+    assert_eq!(
+        next_probed_version(&mut harness.events).await.as_deref(),
+        Some("9.9.9"),
+        "the swap must ask the newly installed program for its version"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
@@ -554,6 +623,7 @@ async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).expect("chmod");
     }
 
     let mut harness = start(move || Some(spec(&program)));
@@ -669,6 +739,7 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
     runner(
         Some(InstallTarget::Binary(binary.to_path_buf())),
         apply_grace,
+        None,
         move || Some(spec(&program)),
     )
 }
@@ -680,7 +751,9 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+    let program = binary.clone();
     let mut harness = runner_full(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
@@ -793,6 +866,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let mut harness = runner(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
+        None,
         || None,
     );
     let _ = next_health(&mut harness.events).await; // "awaiting configuration"
@@ -819,6 +893,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
     let mut harness = binary_harness(&binary, Duration::from_millis(500));
@@ -837,40 +912,108 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let _ = harness.task.await;
 }
 
+/// ADR-0028: a *first* install that will not start has nothing to roll back to, so it is **kept**
+/// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
+/// empty the directory and set the Server re-offering the same artifact in a loop.
+#[tokio::test]
+async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
+    // Nothing on disk yet: a first install onto an empty program directory.
     let mut harness = binary_harness(&binary, Duration::from_millis(200));
+
     let staged = dir.path().join("downloaded.staged");
+    let crasher = bytes_of(&stub_crasher());
+    std::fs::write(&staged, &crasher).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_err(), "a crasher fails the install");
+    // Not rolled back to nothing: the verified program is still there.
+    assert!(
+        binary.exists(),
+        "the first install is kept, not discarded (ADR-0028)"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
+        crasher,
+        "and it is the installed bytes"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
+/// ADR-0028: a program that keeps failing to start is **held** after a few tries, not restarted
+/// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
+/// reports it plainly.
+#[tokio::test]
+async fn a_program_that_keeps_crashing_is_held_not_looped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
+    let mut harness = binary_harness(&binary, Duration::from_millis(100));
+
+    // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_crasher())).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_err());
+
+    // Within a bounded time the Runner gives up and says so, instead of spinning forever.
+    let held = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let health = next_health(&mut harness.events).await;
+            if health.status.contains("not restarting") {
+                return health;
+            }
+        }
+    })
+    .await
+    .expect("the Runner holds instead of restarting forever");
+    assert!(held.status.contains("not restarting"), "{}", held.status);
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
+/// ADR-0028: a successful update does not delete the version it superseded — it is retained for the
+/// window, with a marker recording the deadline, so an operator has a fallback.
+#[tokio::test]
+async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
+    // A predecessor that stays up.
+    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+    let program = binary.clone();
+    let mut harness = runner_retaining(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
+        Duration::from_secs(3600), // keep the predecessor an hour
+        None,
         move || Some(spec(&program)),
+    );
     let _ = next_health(&mut harness.events).await;
+
+    // A new good version installs and stays up.
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_ok(), "a good binary applies");
+
+    // The predecessor is retained, not deleted on success — its file and a deadline marker remain.
+    let backup = binary.with_extension("rollback");
+    assert!(
+        backup.exists(),
+        "the previous version is kept for the retention window"
+    );
+    let mut marker = backup.clone().into_os_string();
+    marker.push(".until");
+    assert!(
+        PathBuf::from(marker).exists(),
+        "a marker records the deadline"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
@@ -921,6 +1064,7 @@ fn tree_harness(root: &Path) -> Harness {
             program_path: inside,
         }),
         Duration::from_millis(200),
+        None,
         move || Some(spec(&program)),
     )
 }

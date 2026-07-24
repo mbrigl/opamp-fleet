@@ -15,6 +15,7 @@ disclosure with you.
 ## Dev Container & agent execution
 
 OpAMP Fleet runs coding agents inside the Dev Container defined in
+[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json). Three properties shape its
 security posture:
 
 - **The Dev Container has no access to the host container engine.** The host Docker or Podman
@@ -76,6 +77,29 @@ credentials the built-in patterns miss.
 The actions the workflows run are referenced by major version tag, a mutable reference accepted
 with its risk in [ADR-0007](docs/adr/0007-action-references.md) and held by
 [`scripts/check-action-refs.sh`](scripts/check-action-refs.sh).
+
+## Fleet trust model
+
+**Admission is a fleet-wide trust boundary, not per-Agent authentication**
+([ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md)). A peer reaches the OpAMP
+endpoint by proving *fleet membership* — the [ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md)
+credential and/or the [ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md)
+client certificate. Neither identifies *which* Agent is speaking: an Agent's `instance_uid` is
+self-asserted (the Server may itself re-key it), a certificate is deliberately not bound to it, and a
+Gateway ([ADR-0014](docs/adr/0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)) forwards many Agents' reports under one
+certificate.
+
+The consequence, which is a design property rather than a defect: **within one admitted fleet there
+is no authorization between Agents.** Any admitted peer can send a report under any `instance_uid`
+and update that Agent's Server-side record (health, effective config, remote-config status, and so
+the Configuration offered to it) — most cleanly over plain HTTP, which offers nothing to tell two
+pollers apart. This is *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
+
+**What this means for operators:** treat one fleet (one Server, one shared admission) as a single
+trust domain. Do not place mutually distrusting Agents in the same fleet; isolate them by separate
+Server instance or network segment. The rationale, and the alternatives that were weighed and
+rejected (binding certificates to `instance_uid`, trust-on-first-use pinning, sequence-number
+checks), are in [ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md).
 
 ## Supported versions
 

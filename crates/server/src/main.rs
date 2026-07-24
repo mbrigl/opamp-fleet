@@ -79,36 +79,116 @@ async fn main() {
         }
     };
 
+    let connection_offer = match config
+        .connection_offer
+        .as_ref()
+        .map(server::fleet::ConnectionOffer::from_config)
+        .transpose()
+    {
+        Ok(offer) => {
+            if offer.is_some() {
                 // ADR-0013.
                 info!("offering connection settings to the fleet");
+            }
+            offer
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+    let client_ca = match config
+        .client_ca
+        .as_ref()
+        .map(server::ca::ClientCa::from_config)
+        .transpose()
+    {
+        Ok(ca) => {
+            if let Some(ca) = &ca {
+                // ADR-0022.
+                info!(
+                    validity_days = ca.validity_days(),
+                    "signing client certificates for Agents that ask"
+                );
+            }
+            ca
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+    let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
+        Ok(store) => {
+            if !store.is_empty() {
                 // ADR-0028.
                 info!("offering software packages to the fleet");
+            }
+                store,
+                config.advertised_url.clone().unwrap_or_default(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+        }
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+    let state = match AppState::new(config.config_dir.clone()) {
+        Ok(state) => Arc::new(
+            state
+                .with_connection_offer(connection_offer)
+                .with_client_ca(client_ca)
                 .with_packages(packages)
+                .with_max_message_size(config.max_message_size_bytes)
+                .with_max_total_package_bytes(config.max_total_package_bytes)
+        ),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+    let auth = config
+        .auth
+        .as_ref()
+        .map(server::transport::OpampAuth::from_config);
+    if auth.is_some() {
         // ADR-0022.
         info!("the OpAMP endpoint requires authentication");
+    }
+    // Mutual TLS is on when the listener has a CA to verify client certificates against; the
+    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0022).
+    let mutual_tls = config
+        .tls
+        .as_ref()
+        .is_some_and(|tls| tls.client_ca_file.is_some());
+    if mutual_tls {
+        info!("the OpAMP endpoint requires a client certificate");
+    }
     // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let agents = server::agent_app(
+    let operator_auth = config
+        .rest
+        .auth
+        .as_ref()
+        .map(server::api::OperatorAuth::from_config);
+    if operator_auth.is_some() {
+        // ADR-0022.
+        info!("the REST API and the UI require authentication");
+        // Basic puts a reusable password on the wire on every request. On loopback that stays on
+        // the host; published in cleartext it does not, and the operator should hear so once.
+        if config.tls.is_none() && !config.rest.listen.ip().is_loopback() {
+            tracing::warn!(
+                listen = %config.rest.listen,
+                "[rest.auth] sends its password in the clear on a listener that is not loopback — \
+                 add [tls], or put a TLS-terminating proxy in front (ADR-0022)"
+            );
+        }
+    }
+    let operators = server::operator_app(state.clone(), operator_auth);
 
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
@@ -126,6 +206,13 @@ async fn main() {
 
     match &config.tls {
         Some(tls) => {
+            let rustls_config = match server::tls::server_config(tls) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            };
             info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
             info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
             // The Agent plane's acceptor is its own: it is what carries the handshake's peer

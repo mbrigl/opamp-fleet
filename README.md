@@ -10,6 +10,9 @@ OpAMP — and that can equally run as a **gateway** multiplexing other clients u
 **specification** ([`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)) and **Architecture Decision
 Records** ([`docs/adr/`](docs/adr/)), so intent and the reasoning behind every structural choice stay
 explicit and reviewable. How much of the protocol each end implements is tracked in
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md); candidate measures for hardening the Client–Server
+link further are collected — as a backlog, not as decisions — in
+[`docs/HARDENING.md`](docs/HARDENING.md).
 
 
 ## Overview
@@ -183,6 +186,7 @@ its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and
 the **product's** name, `opamp-fleet`
 ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
+name needs no translation ([ADR-0028](docs/adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
 forgotten bump costs seconds rather than five build jobs — and the built binary must report the
@@ -198,18 +202,42 @@ A minimal closed control loop on one machine:
    [ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)) and the package downloads the offers point
    at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
    ([ADR-0025](docs/adr/0025-configurations-and-the-rest-api.md)), the API
+   docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
+   with Basic credentials
+   ([ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md)).
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
 3. **Open the UI** at <http://127.0.0.1:4321/> — the Agent is listed as *Connected*. Press
+   **Configurations**, name a Configuration, optionally give it a Selector (`key=value` pairs an
+   Agent's reported attributes must equal; empty targets every Agent), enter the configuration
+   text, and save.
+4. **Watch the loop close:** a WebSocket Client whose attributes match receives the configuration
+   within a second, an HTTP Client on its next poll. The Agent stores it (under its `state_dir`),
+   reports it **Applied** with the matching hash, and its effective configuration shows up in the
+   table. Distributing the same configuration again sends nothing — the config-hash comparison
+   gates every push. An Agent matching several Configurations receives all of them as named
+   entries and merges them itself; an Agent matching none is left running what it already runs.
+
+The same operations are available to any portal through the REST API — the OpenAPI document at
+`/api/v1/openapi.json` is the contract to generate a client from:
 
 ```console
 $ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
 $ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
        http://127.0.0.1:4321/api/v1/configurations/linux-base  # distribute to a subset
 $ curl -X DELETE http://127.0.0.1:4321/api/v1/configurations/linux-base
+
+# Content the agent reads by path rather than is configured with (ADR-0025): written next to the
+# configuration under its own name, never passed to the process as configuration.
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4321/api/v1/configurations/ruleset
+
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
+$ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
@@ -271,6 +299,7 @@ README.md             # overview & setup for humans
 AGENTS.md             # single source of truth for coding agents
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
+docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)

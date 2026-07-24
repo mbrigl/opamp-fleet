@@ -331,6 +331,7 @@ mod tests {
         );
         assert_eq!(
             loaded.tls.expect("tls").ca_file,
+            Some(PathBuf::from("/etc/ssl/private-ca.pem"))
         );
     }
 
@@ -389,6 +390,7 @@ mod tests {
         );
         assert_eq!(
             loaded.tls.expect("tls").ca_file,
+            Some(PathBuf::from(r"C:\ProgramData\opamp\ca.pem"))
         );
     }
 

@@ -53,9 +53,24 @@ pub fn string_value<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a str
 /// Deliberately short: it exists for what this project does **not** control — an older release file
 /// name, a foreign build system, an Agent that predates the convention — not as a general
 /// vocabulary. Everything this project produces is already canonical.
+const OS_ALIASES: &[(&str, &str)] = &[
+    ("macos", "darwin"),
+    ("osx", "darwin"),
+    ("win", "windows"),
+    ("win32", "windows"),
+    ("win64", "windows"),
+];
+
 /// Spellings of an architecture that mean a canonical [`HOST_ARCH`] value. Rust's own
 /// `std::env::consts::ARCH` is among them, which is why an Agent reporting its platform reads the
 /// same table the Server matches it against.
+const ARCH_ALIASES: &[(&str, &str)] = &[
+    ("x86_64", "amd64"),
+    ("x86-64", "amd64"),
+    ("x64", "amd64"),
+    ("aarch64", "arm64"),
+];
+
 /// The canonical `os.type` for a spelling of it — the input unchanged when the table has never
 /// heard of it.
 ///

@@ -35,6 +35,18 @@
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
       .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+      .config-fields { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+      .config-fields input {
+        flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--border-strong);
+        border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px;
+        font-family: var(--mono);
+      }
+      .config-fields input::placeholder { color: var(--muted); }
+      /* A field the action refuses to run without. Marked only while it is empty — once it holds
+         a value there is nothing left to point at, and a border that kept shouting would be the
+         same noise as no marking at all. */
+      .config-fields input.required:placeholder-shown { border-color: var(--soft-amber-fg); }
+      .chip.clickable { cursor: pointer; }
       textarea {
         width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
         border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
@@ -94,19 +106,59 @@
       <div class="page-head">
         <div>
         </div>
+        <div style="display: flex; gap: 10px;">
+        </div>
       </div>
 
       <section id="config-card" class="card config">
+        <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
+        <div class="config-fields">
+          <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
+                 title="Compared raw for equality against the service.name the agents report, before the selector (ADR-0025). Empty means every type — which for a collector body is rarely what you want." />
+          <datalist id="config-type-options"></datalist>
+          <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent of the type)" autocomplete="off" />
+          <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
+        </div>
+        <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
+        <div class="config-actions">
+          <button id="delete" class="btn btn-ghost">Delete</button>
+          <span id="config-state" class="sub"></span>
+          <span id="config-error" class="err"></span>
+        </div>
+      </section>
+
+        <div class="config-fields">
+        </div>
+        <div class="config-fields">
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+        </div>
+        <div class="config-fields">
+        </div>
+        <div class="config-fields">
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+        </div>
         <div class="config-actions">
         </div>
       </section>
 
-        <div class="config-actions">
+        <div class="config-fields">
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+        <div class="config-fields">
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+        <div class="config-fields">
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
         <div class="config-actions">
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
       </div>
+
 
       <div class="card table-wrap">
         <table>
@@ -137,6 +189,7 @@
       let configDirty = false;
       // Agents whose declared-capabilities / available-components detail rows are open, keyed by
       // instance_uid so the state survives the periodic re-render.
+      const expandedCaps = new Set();
       const expandedComponents = new Set();
 
       function ago(ms) {
@@ -164,7 +217,29 @@
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
       }
+      // The platform this agent reports, `os.type`-`host.arch` — the exact pair a package artifact
+      // is stored under, so it can be read off a row and typed into the packages form. Empty when
+      // the agent reports neither, which is also why it would be offered no package at all.
+      function platformOf(a) {
+        const n = a.non_identifying_attributes || {};
+        return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
+      }
+        const n = a.non_identifying_attributes || {};
         const chips = [];
+        if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
+        if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
+        // Every reported attribute, with nothing held back: this list is what a selector is
+        // written from, so leaving a key out of it hides a key you can target. os.type and
+        // host.arch appear in the OS column too, and that is not a duplicate — there they are the
+        // artifact's platform (`linux-amd64`, what an upload is keyed by), here they are attribute
+        // pairs (`os.type: linux`, what a selector matches). Two questions, two spellings.
+          chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
+        }
+        const caps = a.capabilities || [];
+        if (caps.length) {
+          const open = expandedCaps.has(a.instance_uid);
+          chips.push(`<span class="chip clickable cap-toggle${open ? " selected" : ""}" data-uid="${esc(a.instance_uid)}" title="Click to ${open ? "hide" : "show"} the declared capabilities">capabilities: ${caps.length} ${open ? "▴" : "▾"}</span>`);
+        }
         const components = a.available_components || [];
         if (components.length) {
           const open = expandedComponents.has(a.instance_uid);
@@ -173,10 +248,33 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        if (a.package_conflict) {
+          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
+        }
+        for (const p of a.packages || []) {
+          const cls = p.status === "Installed" ? "green"
+            : p.status === "InstallFailed" ? "red"
+            : "amber"; // Downloading / Installing / InstallPending
+          let label = `pkg: ${esc(p.name)}${p.version ? " " + esc(p.version) : ""}`;
+          let title = p.status === "InstallFailed" && p.error ? esc(p.error) : esc(p.status);
+          // A download of a few hundred megabytes takes minutes: show it moving rather than
+          // leaving the operator to guess whether it is progressing or wedged.
+          if (p.status === "Downloading") {
+            label += p.download_percent != null ? ` ↓ ${p.download_percent.toFixed(0)}%` : " ↓";
+            const rate = p.download_bytes_per_second;
+            title = rate ? `Downloading — ${(rate / 1048576).toFixed(1)} MiB/s` : "Downloading";
+          }
+          chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
+        }
+      }
       }
 
       function matches(a) {
         if (!filterText) return true;
+        const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
+          .map(([k, v]) => `${k}=${v}`);
+        const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
+          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
       }
@@ -189,14 +287,22 @@
         });
         $("count").textContent = agents.length;
         $("empty").style.display = rows.length ? "none" : "block";
+        $("agents").innerHTML = rows.map((a) => {
+          const row = `
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
+            <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
+          </tr>`;
+            <td class="chk"></td>
               ${chips || `<span class="chip">none</span>`}
+            </div></td>
+          </tr>`;
           if (expandedCaps.has(a.instance_uid)) {
           }
           if (expandedComponents.has(a.instance_uid)) {
           }
+        }).join("");
         document.querySelectorAll("th.sortable").forEach((th) => {
           const arrow = th.querySelector(".arrow");
           arrow.textContent = th.dataset.key === sortKey ? (sortDir === 1 ? "▲" : "▼") : "";
@@ -212,6 +318,7 @@
         });
       });
       $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
+      $("agents").addEventListener("click", (e) => {
         const restart = e.target.closest(".restart-btn");
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
@@ -225,23 +332,174 @@
           render();
           return;
         }
+        const toggle = e.target.closest(".cap-toggle");
+        render();
+      });
       $("select-all").addEventListener("change", (e) => {
       });
 
+      // Configurations editor (ADR-0025): name + type + selector + body, PUT/DELETE per
+      let configurations = [];
+      let selectedName = null;
+
+      const selectorText = (sel) => Object.entries(sel || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+      function parseSelector(text) {
+        const selector = {};
+        for (const pair of text.split(",").map((p) => p.trim()).filter(Boolean)) {
+          const eq = pair.indexOf("=");
+          if (eq < 1) throw new Error(`selector entry "${pair}" is not key=value`);
+          selector[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+        }
+        return selector;
+      }
+      function renderConfigList() {
+        document.querySelectorAll("#config-list .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => selectConfig(chip.dataset.name));
+        });
+      }
+      function renderConfigActions() {
+        const config = configurations.find((c) => c.name === selectedName);
+      }
+      function selectConfig(name) {
+        const config = configurations.find((c) => c.name === name);
+        if (!config) return;
+        selectedName = name;
+        configDirty = false;
+        $("config-name").value = config.name;
+        $("config-type").value = config.service_name || "";
+        $("config-selector").value = selectorText(config.selector);
+        $("config-role").value = config.role || "";
+        $("config").value = config.body;
+        $("config-error").textContent = "";
+        renderConfigList();
+        renderConfigActions();
+      }
       $("config").addEventListener("input", () => { configDirty = true; });
       $("save").addEventListener("click", async () => {
+        const name = $("config-name").value.trim();
+        const type = $("config-type").value.trim();
+        const role = $("config-role").value.trim();
+        try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          // An empty role or type is left out entirely rather than sent as "": absent is what
+          // the resource means by top-level configuration and by every-type.
+          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}), ...(type ? { service_name: type } : {}) }),
+        });
+        if (!res.ok) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
         configDirty = false;
+        selectedName = name;
+        await refreshConfigs();
         refreshAgents();
+      });
+        const config = configurations.find((c) => c.name === selectedName);
+        if (!config) return;
+        });
+        if (!res.ok) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
+        await refreshConfigs();
+        refreshAgents();
+      });
+      $("delete").addEventListener("click", async () => {
+        const name = $("config-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
+        selectedName = null;
+        $("config-name").value = ""; $("config-type").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
+        await refreshConfigs();
         refreshAgents();
       });
 
-      async function refreshAgents() {
-        render();
+      // Every attribute the fleet currently reports, as clickable key=value suggestions for the
+      // selector — what a Selector can actually match on.
+      function renderSelectorOptions() {
+        const pairs = new Set();
+        for (const a of agents) {
+          for (const list of [a.identifying_attributes, a.non_identifying_attributes]) {
+            for (const [k, v] of Object.entries(list || {})) pairs.add(`${k}=${v}`);
+          }
+        }
+        $("selector-options").innerHTML = [...pairs].sort().map((p) =>
+          `<span class="chip clickable" data-pair="${esc(p)}">${esc(p)}</span>`
+        ).join("") || `<span class="chip">no agents reporting yet</span>`;
+        // The types the fleet currently reports, as suggestions for the type input (ADR-0025) —
+        // so limiting a Configuration to a type is a pick, not a remembered spelling.
+        const types = [...new Set(agents.map((a) => a.service_name).filter(Boolean))].sort();
+        $("config-type-options").innerHTML = types.map((t) => `<option value="${esc(t)}"></option>`).join("");
+        document.querySelectorAll("#selector-options .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => {
+            const input = $("config-selector");
+            const current = input.value.trim();
+            if (current.split(",").map((p) => p.trim()).includes(chip.dataset.pair)) return;
+            input.value = current ? `${current}, ${chip.dataset.pair}` : chip.dataset.pair;
+          });
+        });
+      }
+
+      let packages = [];
+      }
       }
       }
 
+        let res;
+        if (!res.ok) return (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+        return "";
+      }
+          });
+      }
+        await refreshPackages();
+        refreshAgents();
+        await refreshPackages();
+        refreshAgents();
+        await refreshPackages();
+        refreshAgents();
+      });
+        await refreshPackages();
+        refreshAgents();
+      });
+      }
+        fillFromArtifact(file ? fromArtifactName(file.name) : null);
+      async function refreshPackages() {
+        try {
+          const res = await fetch("/api/v1/packages");
+          packages = res.ok ? await res.json() : [];
+        } catch { return; }
+      }
+
+      async function refreshAgents() {
+        try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
+        render();
+        renderSelectorOptions();
+      }
+      async function refreshConfigs() {
+        try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }
+        renderConfigList();
+        renderConfigActions();
+        if (selectedName && !configDirty) {
+          const selected = configurations.find((c) => c.name === selectedName);
+          if (selected) { $("config").value = selected.body; $("config-type").value = selected.service_name || ""; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
+        }
+      }
+
+      refreshConfigs();
+      refreshPackages();
       refreshAgents();
       setInterval(refreshAgents, 2000);
+      setInterval(refreshConfigs, 5000);
+      setInterval(refreshPackages, 5000);
     </script>
   </body>
 </html>

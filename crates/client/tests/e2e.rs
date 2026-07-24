@@ -32,6 +32,9 @@ async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 
 async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
+    );
     let app = server::agent_app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -80,6 +83,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "type = \"command\"\n",
             "name = \"stub\"\n",
             "args = [\"--touch\", {stub_marker:?}]\n",
+            "version_args = [\"--version\"]\n",
         ),
         stub_marker = stub_marker.to_string_lossy(),
     );
@@ -88,6 +92,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
             "state_dir = {state:?}\n",
             "heartbeat_interval_secs = 1\n\n",
+            "[attributes]\n",
+            "env = \"prod\"\n\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
@@ -109,6 +115,17 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
     state
+        .save_configuration(
+            "fleet",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the fleet configuration");
+    state
 
         let snapshot = state.snapshot();
     })
@@ -124,8 +141,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
     assert_ne!(restarted_stub_pid, first_stub_pid);
 
+    // The written entry files carry the Configuration's name (ADR-0025) and are what the
+    // processes were pointed at.
     let collector_argv = std::fs::read_to_string(&otelcol_marker).expect("collector marker");
     assert!(collector_argv.contains("--config"));
+    let stub_config = state_dir.join("supervisors/stub/config/fleet");
     assert_eq!(
         std::fs::read_to_string(stub_config).expect("the stub's written config"),
         "receivers: {}\n"
@@ -137,9 +157,17 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         snapshot.iter().all(|a| a.healthy).then_some(())
     })
     .await;
+
         let snapshot = state.snapshot();
+            .iter()
+            .then_some(())
+    })
+    .await;
+
     // The Client-wide attributes arrived — they describe the *host*, so both Agents carry them
     // (ADR-0025).
+    let agents = state.snapshot();
+    let stub = view(&agents, "stub").expect("stub view");
     let otelcol = view(&agents, "otelcol").expect("otelcol view");
     for agent in [stub, otelcol] {
         assert_eq!(
@@ -164,9 +192,14 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .set_labels(&uid, [("role".to_string(), "edge".to_string())].into())
         .is_ok());
     let agents = state.snapshot();
+    assert_eq!(
         view(&agents, "stub")
             .expect("stub view")
             .labels
+            .get("role")
+            .map(String::as_str),
+        Some("edge")
+    );
     assert!(view(&agents, "otelcol")
         .expect("otelcol view")
         .labels
@@ -174,8 +207,39 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // …and a Selector aimed at it reaches that Agent and no other — which is the whole claim the
     // retired block table used to carry.
+
+    state
+        .save_configuration(
+            "edge-extra",
+            server::configs::Revision {
+                selector: [("role".to_string(), "edge".to_string())].into(),
+                body: "processors: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the targeted configuration");
+    state
+    wait_until("the stub to apply both entries", || {
         let snapshot = state.snapshot();
+        let stub = view(&snapshot, "stub")?;
+        (stub.in_sync
+            && stub.matched_configurations == ["edge-extra", "fleet"]
+            && stub.remote_config_status == "APPLIED")
+            .then_some(())
+    })
+    .await;
+    wait_until("the collector to stay on the fleet configuration", || {
         let snapshot = state.snapshot();
+        let otelcol = view(&snapshot, "otelcol")?;
+        (otelcol.in_sync && otelcol.matched_configurations == ["fleet"]).then_some(())
+    })
+    .await;
+    let stub_extra = state_dir.join("supervisors/stub/config/edge-extra");
+    assert_eq!(
+        std::fs::read_to_string(stub_extra).expect("the stub's second entry file"),
+        "processors: {}\n"
+    );
 
     // Heartbeats (ReportsHeartbeat, 1 s in this test): with nothing left to change, every
     // Agent's sequence number keeps advancing and the description survives — routine reports,
@@ -207,11 +271,24 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     )
     .await;
     state
+        .save_configuration(
+            "fleet",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
         let snapshot = state.snapshot();
+            .iter()
             "[[supervisor]]\n",
             "type = \"command\"\n",
     state
+        .save_configuration(
+            server::configs::Revision {
+                selector: Default::default(),
         let snapshot = state.snapshot();
     state
+        .save_configuration(
+            server::configs::Revision {
+                selector: Default::default(),
         let snapshot = state.snapshot();
 }

@@ -2,6 +2,9 @@
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0009.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
     }
 
@@ -9,6 +12,7 @@
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
+            retain_previous: ctx.retain_previous,
         Ok(commands)
     }
         // The rule, not this host's answer: the default is the resolved FQDN where the resolver

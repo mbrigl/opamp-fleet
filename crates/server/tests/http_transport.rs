@@ -62,6 +62,12 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     assert_eq!(agents.as_array().expect("array").len(), 1);
     assert_eq!(agents[0]["transport"], "http");
     assert_eq!(agents[0]["connected"], true);
+    // The OS column prefers the human-readable description over the bare os.type.
+    assert_eq!(agents[0]["os"], "Testix 1.0 LTS");
+    assert_eq!(agents[0]["non_identifying_attributes"]["os.type"], "linux");
+    let capabilities = agents[0]["capabilities"].as_array().expect("capabilities");
+    assert!(capabilities.contains(&serde_json::json!("ReportsStatus")));
+    assert!(capabilities.contains(&serde_json::json!("AcceptsRemoteConfig")));
 }
 
 #[tokio::test]
@@ -72,21 +78,32 @@ async fn the_offer_is_gated_by_the_config_hash() {
     let uid = InstanceUid::default();
     exchange(&client, &url, &full_report(&uid, "itest", 1)).await;
 
+    // The operator distributes a configuration through the REST API; the fleet view names the
+    // hash this Agent's composed configuration should have.
     distribute(server.rest_addr, "fleet", &[], "receivers: {}\n").await;
     let agents: serde_json::Value = serde_json::from_slice(
         &client
             .get(format!("http://{}/api/v1/agents", server.rest_addr))
             .send()
             .await
+            .expect("get")
             .bytes()
             .await
             .expect("body"),
     )
     .expect("json");
+    let hash_hex = agents[0]["desired_hash"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    assert_eq!(agents[0]["matched_configurations"][0], "fleet");
 
+    // The next poll gets the offer — the Configuration as a named entry.
     let reply = exchange(&client, &url, &compressed_report(&uid, 2)).await;
     let offer = reply.remote_config.expect("an offer");
     assert_eq!(hex::encode(&offer.config_hash), hash_hex);
+    let map = offer.config.as_ref().expect("a config map");
+    assert!(map.config_map.contains_key("fleet"));
 
     // The Agent reports it applied — and is never offered the same configuration again.
     let mut ack = compressed_report(&uid, 3);
