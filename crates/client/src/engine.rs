@@ -185,6 +185,9 @@ impl Engine {
             ProcessEvent::EffectiveConfig(config) => {
                 agent.state.set_process_effective_config(config);
             }
+            ProcessEvent::AvailableComponents(components) => {
+                agent.state.set_available_components(components);
+            }
             ProcessEvent::ConfigApplied { hash, result } => {
                 agent.state.config_applied(hash, result);
             }

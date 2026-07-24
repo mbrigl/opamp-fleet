@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use opamp::proto::{AgentDescription, AgentRemoteConfig, ComponentHealth, EffectiveConfig};
+use opamp::proto::{
+    AgentDescription, AgentRemoteConfig, AvailableComponents, ComponentHealth, EffectiveConfig,
+};
 use tokio::sync::mpsc;
 
 use crate::service::runtime::Shutdown;
@@ -41,6 +43,9 @@ pub enum ProcessEvent {
     Health(ComponentHealth),
     /// The process's self-reported effective configuration; replaces the written-files echo.
     EffectiveConfig(EffectiveConfig),
+    /// The process's available components (reported through the Supervisor Endpoint by the
+    /// Collector's `opampextension`), relayed upstream under the owning Agent.
+    AvailableComponents(AvailableComponents),
     /// Outcome of an [`ProcessCommand::ApplyConfig`]: `Ok` acknowledges `APPLIED`, `Err`
     /// reports `FAILED` with the error — a rejected configuration is a report, not a silence.
     ConfigApplied {

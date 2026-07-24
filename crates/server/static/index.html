@@ -216,9 +216,10 @@
       let sortKey = "name";
       let sortDir = 1;
       let configDirty = false;
-      // Agents whose declared-capabilities detail row is open, keyed by instance_uid so the
-      // state survives the periodic re-render.
+      // Agents whose declared-capabilities / available-components detail rows are open, keyed by
+      // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
+      const expandedComponents = new Set();
 
       const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       function ago(ms) {
@@ -261,6 +262,11 @@
         if (caps.length) {
           const open = expandedCaps.has(a.instance_uid);
           chips.push(`<span class="chip clickable cap-toggle${open ? " selected" : ""}" data-uid="${esc(a.instance_uid)}" title="Click to ${open ? "hide" : "show"} the declared capabilities">capabilities: ${caps.length} ${open ? "▴" : "▾"}</span>`);
+        }
+        const components = a.available_components || [];
+        if (components.length) {
+          const open = expandedComponents.has(a.instance_uid);
+          chips.push(`<span class="chip clickable comp-toggle${open ? " selected" : ""}" data-uid="${esc(a.instance_uid)}" title="Click to ${open ? "hide" : "show"} the available components">components: ${components.length} ${open ? "▴" : "▾"}</span>`);
         }
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
@@ -306,16 +312,22 @@
             <td class="num">${ago(a.last_seen_ms)}</td>
             <td>${labels(a)}</td>
           </tr>`;
-          if (!expandedCaps.has(a.instance_uid)) return row;
-          const caps = (a.capabilities || []).map((c) => `<span class="chip">${esc(c)}</span>`).join("");
-          return row + `
+          let details = "";
+          const detailRow = (label, chips) => `
           <tr>
             <td class="chk"></td>
             <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
-              <span class="sub" style="align-self: center">declared capabilities:</span>
-              ${caps || `<span class="chip">none declared</span>`}
+              <span class="sub" style="align-self: center">${label}:</span>
+              ${chips || `<span class="chip">none</span>`}
             </div></td>
           </tr>`;
+          if (expandedCaps.has(a.instance_uid)) {
+            details += detailRow("declared capabilities", (a.capabilities || []).map((c) => `<span class="chip">${esc(c)}</span>`).join(""));
+          }
+          if (expandedComponents.has(a.instance_uid)) {
+            details += detailRow("available components", (a.available_components || []).map((c) => `<span class="chip">${esc(c)}</span>`).join(""));
+          }
+          return row + details;
         }).join("");
         document.querySelectorAll("th.sortable").forEach((th) => {
           const arrow = th.querySelector(".arrow");
@@ -337,6 +349,13 @@
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
             .then(() => refreshAgents());
+          return;
+        }
+        const comp = e.target.closest(".comp-toggle");
+        if (comp) {
+          const uid = comp.dataset.uid;
+          if (expandedComponents.has(uid)) expandedComponents.delete(uid); else expandedComponents.add(uid);
+          render();
           return;
         }
         const toggle = e.target.closest(".cap-toggle");
