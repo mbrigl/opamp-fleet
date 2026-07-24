@@ -24,6 +24,7 @@ sha2.workspace = true
 tokio.workspace = true
 prost.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
@@ -32,11 +33,24 @@ tracing-appender.workspace = true
 hex.workspace = true
 tokio-tungstenite.workspace = true
 reqwest.workspace = true
+base64.workspace = true
 rustls.workspace = true
+ring.workspace = true
+rcgen.workspace = true
+time.workspace = true
+x509-parser.workspace = true
+opentelemetry-http.workspace = true
+async-trait.workspace = true
 # The downstream OpAMP endpoint of Gateway Mode (ADR-0009): a WebSocket upgrade and a plain-HTTP
 # POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
 # it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
 axum = { workspace = true, features = ["ws"] }
+webpki-roots.workspace = true
+# ADR-0019: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# encrypted `.7z` with the key from `[packages] archive_key`.
+flate2.workspace = true
+tar.workspace = true
+sevenz-rust2.workspace = true
 
 # ADR-0015: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
@@ -65,5 +79,6 @@ tempfile = "3"
 # Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
 # encoder rides here alone again now that `pack` has moved to its own crate (ADR-0011) — a
 # dev-dependency reaches the tests and no shipped binary.
+sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0015: the end-to-end test runs the real Server in-process against the real Client binary.
 server = { path = "../server" }

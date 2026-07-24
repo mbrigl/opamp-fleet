@@ -136,6 +136,112 @@
   Set, which is the route the GLPI Agent and Icinga 2 pages already document. A block naming an
   absolute path will stop the Client at startup rather than starting without it.
 
+- **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
+  a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
+  a private source ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)) — and the Client
+  dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
+  The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
+  for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
+  them only while scheme, host and port are unchanged: HTTP clients strip only `Authorization`,
+  `Cookie` and `Proxy-Authorization` across origins, so a custom token would otherwise have been
+  handed to wherever a mirror redirected. Values are never logged, and a header that is not a valid
+  HTTP header now fails the download naming its key.
+  **What to do:** nothing, unless a referenced entry's download was failing — upgrade the Client and
+  retry the rollout. Ordinary uploaded packages are unaffected; a CDN mirror that redirects to signed
+  storage keeps working, since a download with no headers follows redirects exactly as before.
+
+- **Own telemetry crashed its exporter thread instead of exporting.** The first export panicked with
+  `there is no reactor running, must be called from the context of a Tokio 1.x runtime`, and the
+  signal died with the thread. The SDK does not export on the async runtime: each batch processor
+  and the metrics reader run on a **dedicated OS thread** and block on the export there, so the
+  asynchronous HTTP client the exporters were given had no reactor to work with. That was true from
+  the day own telemetry landed — it simply could not be reached until a destination was actually
+  offered. The exporters now dispatch each request onto this process's runtime and await the
+  result, so the socket work happens where the reactor is.
+  **What to do:** nothing. If own telemetry appeared to do nothing before, it should now arrive —
+  verified end to end against a local OTLP receiver: logs and metrics both, metrics on their 10 s
+  interval, no panic.
+
+- **A Server offering only telemetry destinations was ignored, and re-offered for ever.** With a
+  `[telemetry_offer]` and no `[connection_offer]`, the Server sends a connection-settings message
+  carrying no OpAMP settings — which is what the protocol asks it to do, and what its own test
+  asserts. The Client required OpAMP settings to be present and dropped the message whole: no
+  acknowledgement, so the Server's hash gate never closed and it re-sent the offer on every
+  exchange, while own metrics, traces and logs never started. Such an offer is now applied in place
+  and acknowledged, without a verification connection and without a reconnect — the protocol names
+  three classes of destination with deliberately different sequences, and scopes its
+  verify-by-connecting requirement to the OpAMP settings alone
+  ([ADR-0018](docs/adr/0018-connection-settings-and-server-capabilities.md)). A telemetry
+  endpoint change no longer disconnects the fleet either.
+  **What to do:** `[telemetry_offer]` alone is now enough; a `[connection_offer]` added only to work
+  around this can be removed. A Server that can offer anything at all — settings, telemetry, or a
+  `[client_ca]` — now declares `OffersConnectionSettings`, where before it declared the bit only for
+  `[connection_offer]` and exercised the capability undeclared for the other two.
+
+- **The Client kept reporting what a Server said it could not accept.** Capability negotiation is a
+  MUST in both directions, and only two of the seven Server bits changed any behaviour here: package
+  status went to Servers without `AcceptsPackagesStatus`, connection-settings status to Servers
+  without `OffersConnectionSettings`. Both are now gated by one stated rule — optimistic until the
+  Server has declared anything, binding once it has
+  ([ADR-0018](docs/adr/0018-connection-settings-and-server-capabilities.md)). A Server that
+  has actually *sent* an offer still gets its acknowledgement whatever its bitmask says, because
+  withholding it would leave that Server re-offering for ever. `remote_config_status` is
+  deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
+  the non-gate is not mistaken for an omission.
+  **What to do:** nothing against this project's Server, which declares what it exercises. This
+  matters for third-party Servers (ADR-0010): one implementing only the two mandatory bits now sees
+  a Client that respects that.
+
+- **A refused own-telemetry destination was acknowledged as applied.** A destination the Client would
+  not use — cleartext beyond loopback, or one carrying `tls`/`proxy` settings — was written to the
+  log and the offer was still reported `APPLIED`, so the fleet showed telemetry flowing that was not.
+  The refusal now reaches the Server as a `FAILED` status naming what was dropped, including one
+  found at startup when persisted settings are put back in force. An offered client `certificate` is
+  now honoured rather than ignored ([ADR-0025](docs/adr/0025-own-telemetry.md)):
+  the exporter presents it, paired with the key this Client generated for its signing request. A
+  `private_key` *in the offer* is refused by name — this Client's private key never leaves its host
+  and is never accepted from the Server.
+  **What to do:** check the fleet view after upgrading. A destination that was quietly refused will
+  now show as `FAILED` with the reason; that is the gap becoming visible, not a new failure.
+
+- **Own metrics were reported six times more slowly than the protocol recommends.** The Baseline's
+  recommended reporting interval for own metrics is 10 seconds; this Client sampled every 30 s and
+  left the OpenTelemetry SDK's periodic reader at its 60 s default, so a backend saw a value once a
+  minute. Both are now 10 s, driven by one constant — exporting more often than sampling would only
+  ship each value repeatedly.
+  **What to do:** expect roughly six times the metric volume per Agent from a fleet that has an
+  `own_metrics` destination offered. Traces and logs are unaffected; neither is on an interval.
+
+- **Buffered spans and log records were lost on every stop.** The daemon returned without flushing
+  its OTLP exporters, so the records explaining a shutdown — the ones that matter after a crash and
+  restart — never left the host. Both exit paths now flush first.
+
+- **Throttling and backoff follow the protocol.** A `503` or `429` on plain HTTP was treated as a
+  generic error and the next poll went out on the ordinary interval; `Retry-After` is now waited out
+  (30 s when the Server names no interval). A `413` no longer arms a full state report, which had
+  made the *next* request larger than the one just refused. And the reconnect backoff now carries
+  jitter, so a fleet coming back after a Server restart spreads over each interval instead of
+  arriving on the same instants.
+  **What to do:** nothing. A Server that never throttles sees no change.
+
+
+### Added
+
+- **Basic authentication for the REST API and the UI**
+  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)). `[rest.auth.basic_users]`
+  in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
+  `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
+  credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
+  browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
+  plane stays open exactly as before — the loopback default of ADR-0012 is what protects it then.
+  **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
+  with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
+  Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
+  the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two limits, stated
+  plainly: everyone listed can do everything (authentication, not authorization), and passwords sit
+  in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched — Agents and
+  package downloads carry no operator credential and never will.
+
 ### Changed
 
 - **The REST API and the UI moved to their own port, on loopback**
@@ -156,6 +262,24 @@
   `[rest]` / `listen = "0.0.0.0:4321"` in `server.toml` deliberately. **Clients need no change at
   all** — the endpoint, the offered `download_url`, and `advertised_url` all keep working as they
   are. The two addresses must differ; equal ones are refused at startup by name.
+
+### Fixed
+
+- **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
+  decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
+  already rolled out and therefore immutable
+  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)), a package store at its ceiling
+  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). With hundreds of megabytes
+  already in flight that answer races the upload, the connection resets, and what the tool could
+  report was a transport error naming the one thing that was *not* the problem: the Server had
+  answered, and said why. It now asks a second time with an empty artifact — refused in its own
+  right, so the probe can store nothing — and reports the Server's status and message. Transport
+  errors that are genuine read better too: the cause beneath `reqwest`'s own layer is printed
+  rather than swallowed, on downloads as well as uploads.
+  **What to do:** nothing. An upload that has been failing with `cannot reach …` will name its
+  reason on the next run.
+
+## [0.3.0] - 2026-08-15
 
 ### Added
 
@@ -183,6 +307,49 @@
 
 ### Changed
 
+- **A Managed Process's package updates no longer loop, and keep a fallback**
+  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). Three changes to
+  how a Supervisor applies a package (ADR-0019):
+  - A **first** install that will not start is no longer discarded — the verified program is kept in
+    place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
+    the Server re-offering the same artifact in a download-crash-rollback loop.
+  - A program that **keeps failing to start** is held after a few attempts instead of being
+    restarted forever (the give-up the Client's own self-update already uses). The Agent reports
+    `not restarting: the program keeps failing to start`.
+  - A **successful** update keeps the version it superseded for a window before deleting it, so an
+    operator has a fallback. New `[updates] retain_previous_secs` (default one day), overridable per
+    `[[supervisor]]` block with `retain_previous_secs`; `0` restores the old delete-on-success.
+
+  **What to do:** nothing to keep working. If a rollout of a package that crashes on start had been
+  looping, it now stops on its own; and a superseded version now occupies disk for up to a day per
+  Supervisor — lower `retain_previous_secs`, globally or per block, on a host that cannot spare it.
+
+
+### Changed
+
+- **Saving a Configuration no longer distributes it** ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)).
+  `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
+  `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
+  published Configuration stages the change (`pending_changes: true`) until the next publication.
+  In the bundled UI the button that used to read *Save & distribute* is now *Save*, and *Publish*
+  is what changes the fleet. Retracting (`{"published": false}`) removes the entry from every
+  composed config map, which matching Agents apply.
+  **What to do:** Configurations stored before the upgrade load as published and stay in force —
+  running fleets are untouched. Scripts that `PUT` a Configuration and expect delivery need the
+  one extra publication call.
+
+### Added
+
+- **A Configuration can state the Agent type it is for**
+  ([ADR-0016](docs/adr/0016-configurations-and-the-rest-api.md)). The optional
+  `service_name` field is compared raw against the `service.name` an Agent reports, before the
+  Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
+  currently reports as suggestions.
+  **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
+  field over a `service.name` Selector pair when creating new ones.
+
+### Changed
+
 - **The Linux service executes from `/opt`.** A default system install's executable layout —
   `versions/` and the `current` pointer — now lives at `/opt/opamp-fleet/client/<instance>`
   instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
@@ -194,6 +361,51 @@
   binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
   `opamp-fleet-client service install` once after the update, then delete the leftover
   `versions/` and `current` under `/var/lib/opamp-fleet/client/<instance>`.
+
+  No operator action required.
+
+- **The package-source probe can no longer be aimed at internal addresses (SSRF).** `PUT
+  /api/v1/packages/{name}/source` probes the operator-supplied URL once; that URL and its headers
+  are entirely caller-supplied, so the probe could be pointed at the cloud metadata endpoint
+  (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
+  refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
+  no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0019)
+  legitimately lives on an internal network. No operator action required unless a source URL
+  deliberately used a link-local or CGNAT host.
+
+- **The body-less state-changing `POST` routes reject cross-site browser requests (CSRF).**
+  `POST …/restart` and `POST …/rollback` are CORS "simple requests" a cross-origin page could fire
+  at a logged-in operator's browser without a preflight. They now require Fetch Metadata to mark the
+  request same-origin — a browser stamps `Sec-Fetch-Site` and forbids page scripts from forging it,
+  so a cross-site call is refused with `403`. Non-browser clients (`curl`, a portal) send no such
+  header and are unaffected; no API client or token changes. This is not operator authentication,
+  which remains a separate decision (ADR-0017).
+
+- **The package store has a whole-store size ceiling.** The upload route bounded a single artifact
+  by `max_package_size_bytes` but nothing bounded the *store*, so a caller could fill the disk by
+  uploading artifact after artifact under distinct names. Uploads are now also refused (`507`) once
+  the stored artifacts reach the new `max_total_package_bytes` (default 16 GiB). **What to do:**
+  nothing, unless a fleet's package set legitimately exceeds 16 GiB — then raise
+  `max_total_package_bytes` in `server.toml`.
+
+- **The Server-rotated connection credential is no longer left world-readable.** The
+  `connection-settings.pb` in the state directory holds the `Authorization` value the Server rotates
+  in (ADR-0018), which outranks the one in `client.toml`. It was written at the umask default
+  (typically `0644`), so on a multi-user host any local user could read the live fleet credential.
+  It is now written `0600` and its state directory `0700`. No operator action required.
+
+- **The enrolment private key is written owner-only from the start.** `client-key.pem` (ADR-0017)
+  was created at the umask default and narrowed to `0600` only afterwards, leaving a brief window in
+  which another local user could read it. The mode is now set in the open call, closing the window.
+  No operator action required.
+
+- **A referenced package's private-source token is stored owner-only on the Server.** A referenced
+  source (ADR-0019) can carry headers — a bearer token for a private artifact host — that were
+  persisted in the package store at the umask default, readable by other local users on the Server
+  host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
+  design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say so.
+  **What to do:** prefer a narrowly-scoped, rotatable token for a private source.
 
 - **The Client's OpAMP endpoint no longer follows HTTP redirects; artifact downloads follow a bounded
   chain.** The OpAMP endpoint is a fixed, operator-configured address, so its HTTP transport and the
@@ -209,6 +421,29 @@
   certificate or a key — so on a multi-user host that material was world-readable. The directories
   are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
   Process runs as the same user and still reads its own config. No operator action required.
+
+- **The artifact staging directory is kept owner-only.** A downloaded artifact is verified and then
+  re-opened by the installer; the staging directory was created at the umask default, so on a
+  multi-user host another local user could swap the file in that window and defeat the hash and
+  signature check it had already passed (TOCTOU). The directory (`packages/` under the Agent's state
+  or supervisor directory) is now `0700`. No operator action required.
+
+- **A Client that installs packages without a verification key now says so at startup.** Package
+  signing is opt-in (ADR-0019): with no `[packages] verification_key`, an offered package or
+  self-update is accepted on the Server-supplied content hash alone, with no signature binding the
+  bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
+  managed process's, or its own self-update) without a key now logs a warning at startup, so the
+  weaker posture is a knowing choice rather than a silent default. **What to do:** to require an
+  Ed25519 signature, set `[packages] verification_key` (see `opamp-package-sign`); otherwise nothing.
+
+- **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
+  with no bound, so a malicious or compromised Server could answer the download with an endless body
+  and fill the staging filesystem before the content hash — checked only once the whole stream lands
+  — could reject it. The download is now capped at the new `max_artifact_size_bytes` (default one
+  gibibyte, matching the Server's own per-package limit), enforced against an over-large
+  `Content-Length` up front and while a chunked body streams in. **What to do:** nothing, unless a
+  fleet distributes artifacts larger than 1 GiB — then raise `max_artifact_size_bytes` in
+  `client.toml`.
 
 - **A Gateway now says why it hung up on an oversized message.** The Baseline answers a message past
   the size limit with a WebSocket close of `1009 Message Too Big`, and
@@ -247,6 +482,41 @@
   **Anything matching the Server's `--version` output exactly has to be relaxed** — a check for
   `server 0.2.0` no longer matches a development build. Nothing else changes: the Client's string is
   what it always was, and no Agent, configuration or stored file is touched.
+
+- **Delete in the package form removes one artifact, not the whole package.** It deletes the
+  platform named in the form — the artifact the selected chip stands for — and leaves the other
+  platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
+  the `darwin-arm64` and `windows-amd64` builds with it.
+
+  The package itself goes when its last artifact does, so nothing is left behind either. Deleting
+  uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
+  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)).
+
+  `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
+  sends the `?os=…&arch=…` form of it that
+  [ADR-0020](docs/adr/0020-the-package-store.md) added.
+
+### Removed
+
+- **The ↩ Roll back button is gone from the package form.** The store still remembers the version
+  each artifact replaced ([ADR-0020](docs/adr/0020-the-package-store.md)) and
+  `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
+  removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
+  screen; asking for it is now a request rather than a press.
+
+### Added
+
+### Changed
+
+  Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+  **A package chip toggles.** Clicking one fills the form from it; clicking the selected one again
+  lets go, and the form describes no package in particular. Nothing is sent and nothing is deleted
+  either way. The selection lives in the list, so undoing it is a press in the list rather than a
+  button standing among the ones that write.
+
+  name — that is the alternative ADR-0020 weighed and rejected.
+
+### Fixed
 
 - **A Client running as a service now writes its own log to disk**
   ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)), at
@@ -311,12 +581,51 @@
   Server marks every Agent that rode it disconnected until each reports again — one heartbeat
   interval where one is configured.
 
+- **Mutual TLS, with client certificates this Server issues itself**
+  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)). Goal 17 is
+  complete: the connection is encrypted, and the peer at each end can now be proved.
+
+  **On the Server**, `[tls]` gains an optional `client_ca_file`. With it set, every request to
+  `/v1/opamp` must arrive over a connection carrying a client certificate that bundle verifies.
+  Client authentication stays optional at the TLS layer, because the same listener serves the REST
+  API and the UI — a browser presents nothing and is unaffected.
+
+  **Every configured proof must succeed** — this is the rule to read twice. `[auth]` alone behaves
+  exactly as before. `client_ca_file` alone makes the endpoint certificate-only. **Both configured
+  means both required**, not either one. So switching mutual TLS on can never widen admission; what
+  it can do is lock out a host that has no certificate yet, which is why the order is: let the fleet
+  enrol first, then set `client_ca_file`.
+
+  **On the Client**, `[tls]` gains `cert_file` and `key_file` for an operator-provisioned identity —
+  including the bootstrap certificate a fresh host enrols with. `ca_file` is now optional, so a
+  `[tls]` section may carry only an identity and keep the public roots.
+
+  **The Server can issue the certificates.** A new `[client_ca]` section in `server.toml`
+  (`cert_file`, `key_file`, `validity_days`, default 90) makes the Server a local CA. A Client that
+  has no certificate — or holds one two thirds through its life — generates a key **that never
+  leaves the host**, sends a signing request, and receives the certificate as an ordinary
+  connection-settings offer, which it proves by connecting with before the old one is replaced. It
+  asks only when the Server declares that it signs, so a Server without `[client_ca]` is never
+  asked.
+
+  **Enrolling before enforcing** is therefore the migration: add `[client_ca]`, let the fleet come
+  back with certificates (they appear in each Client's state directory as `client-cert.pem`), then
+  add `client_ca_file` and, when every host is on a certificate, delete `[auth]`. A fleet that will
+  run Gateways keeps `[auth]`: a Gateway terminates TLS, so the credential is the only per-Agent
+  proof that survives the hop.
+
+  **There is no revocation.** Short validity and renewal are what bound a certificate; ejecting a
+  host faster than its certificate expires means rotating the CA. And an expired certificate locks
+  a host out even with a valid credential — a Client switched off longer than its validity needs
+  `client_ca_file` unset for as long as it takes to re-enrol.
+
 - **A released `.7z` unpacks as an executable on Linux and macOS.** The member is packed with a
   Unix mode of `0755` (7-Zip's Unix-attribute convention), so `7z x` yields a binary that runs
   instead of one that needs a `chmod +x` nobody wrote down. `--format tar.gz` already did this in
   its tar header; the two containers now agree. Nothing changes for a package the Server delivers —
   the Client sets the mode itself when it installs one — and nothing changes for the Windows
   artifact, where the bit means something else and 7-Zip does not write it either.
+
 - **`opamp-fleet-client service install --interactive` writes the first configuration.** A freshly downloaded
   Client has no `client.toml` — the release artifact is the bare binary — and installing without one
   produced a service that started, dialled `127.0.0.1`, and managed nothing. The flag asks for what
@@ -339,6 +648,44 @@
   that does not report the version its artifacts are named after fails the run.
   Agent verifies. When you hand one to a Server for a Client self-update, `?version=` takes the
   release number — the one in the file name.
+
+- **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
+  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). An executable plus the shared objects it
+  loads — Fluent Bit is the case — could not be a package before, because exactly one archive
+  member was installed. Naming where the program sits inside the package unpacks the whole archive
+  instead:
+
+  ```toml
+  [[supervisor]]
+  type = "command"
+  name = "fluent-bit"
+  command = "fluent-bit"            # unchanged: the bare name is still the consent
+  program_path = "bin/fluent-bit"   # where the program sits inside the package
+  ```
+
+  The tree lands in `<supervisor_dir>/<name>/program/tree/`, and the one it replaced is kept as
+  `program/tree.rollback` until the new one has survived `apply_grace_secs` — put back **whole** if
+  it has not. The path is matched from its end, so the version-named directory a release wraps
+  everything in needs no mention and the value stays right at the next release.
+
+  **Without `program_path` nothing changes**: one member, one file, same layout, same rollback.
+
+  Unpacking a tree means the archive names paths, so every member is checked before anything is
+  written and one bad member refuses the whole archive: a `..` or absolute path, a symbolic or hard
+  link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
+  is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
+
+
+- **A connection-settings offer carrying `tls` or `proxy` is no longer acknowledged `APPLIED`.**
+  The Client never implemented those two fields and dropped them silently while reporting success,
+  so a Server offering either was told the settings were in force when they were not. It now applies
+  everything it does honour — endpoint, credential, heartbeat, certificate — and reports `FAILED`
+  with an `error_message` naming what it dropped
+  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)).
+
+  Nothing to do on any host. A Server whose `[connection_offer]` never carried those fields — this
+  project's Server cannot — sees no change at all.
+
 - **The Windows services list now shows a description**: **OpAMP Fleet Client for Windows**. It is a
   field of its own beside the display name, and nothing that registers a service fills it — so the
   Client had a display name and an empty Description column. It is the same text on every instance;
@@ -363,6 +710,24 @@
   `Start-Process -Verb RunAs` is gone — it sat *after* the registration, which is what gets refused
   first, so it could never fire.
 
+- **Every Agent now reports the attributes the protocol names.** Alongside `os.type` and
+  `host.arch`, an Agent reports `os.name`, `os.version`, `host.name`, and `host.id` — so a Selector
+  can target a distribution release, or pin one machine by its host name.
+
+  **`host.name` in particular was promised and missing.**
+  [ADR-0020](docs/adr/0020-the-package-store.md) offers "a Selector matching that host's
+  `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
+  Selector silently matched nothing. It works now.
+
+  An attribute the host cannot answer is **left out rather than reported empty** — a container
+  without `/etc/machine-id` reports no `host.id` — so a Selector on one reaches exactly the hosts
+  that have it. Nothing has to be changed on any host; the new attributes appear on the next
+  connection.
+
+- **`service_namespace` in `client.toml`**, for the one attribute the protocol makes conditional on
+  the environment ("if it is used in the environment where the Agent runs"). It is reported as an
+  *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
+  unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
 - **`opamp-fleet-client service install` without `--config` now bakes `<root>/client.toml` into the unit**,
   inside the install root, instead of `client.toml` resolved against whatever the working directory
   happened to be
@@ -382,6 +747,25 @@
   so a host that has not changed will still look different after an upgrade. A commit carrying a
   `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
   than producing a binary that disagrees with its own tag.
+- **An Agent that installed a package went on reporting the version it replaced.** The package
+  itself was reported correctly — `Installed`, with the new version, in the fleet view's package
+  pill — but the Agent's own `service.version`, which is the fleet table's **Version** column, still
+  named the old one. On a first install onto an empty `program/` it named nothing at all, and the
+  column stayed empty beside a package the Server had just seen installed.
+
+  Only the program knows its own version, so the Client asks it: it runs the Managed Process's
+  version flag (a Collector's `--version`, or a `command` Supervisor's configured `version_args`)
+  and reports what it prints. That question was asked once, when the Supervisor started — never
+  again after a swap replaced the binary it had asked. A Collector carrying the `opampextension`
+  corrected itself the moment it next started and self-reported; one without the extension, and one
+  with no configuration to run on yet, had nothing that ever would. Restarting the Client was the
+  only cure.
+
+  The program is now asked again after every successful swap, and the two sources — the probe and
+  the extension's self-report — are merged per attribute instead of each replacing the other.
+  Nothing to change on a host: an affected Agent reports its version within seconds of the next
+  install, and a Client restart still fixes an Agent that installed before this version.
+
 - **On macOS, a Client installed as a service could never update itself** — every offer was refused
   with "this Client does not run from a versioned install layout", and a torn `current` pointer was
   never repaired either. The service is registered against `<root>/current/client` (ADR-0014), and
@@ -389,6 +773,45 @@
   directory behind it on Linux; only the second shape says where in the layout the binary sits. The
   path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
   to change on a host: an affected Client picks its updates up as soon as it runs this version.
+
+- **A package now holds one artifact per platform, and `os`/`arch` are required**
+  ([ADR-0020](docs/adr/0020-the-package-store.md)). An Agent is offered only the artifact
+  built for the operating system and architecture it reported, and never another — so uploading a
+  Windows build no longer installs it over every Linux host in the fleet.
+
+  **Every Server has to be migrated before it will start.** A package stored without a platform is
+  refused at startup, naming the file. For each one, upload it again with its platform, or delete it:
+
+  ```console
+  $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
+         "http://<server>:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+  ```
+
+  **Four routes change.** `PUT /api/v1/packages/{name}` and `PUT …/{name}/source` require `os` and
+  `arch`; `POST …/{name}/rollback` and `GET …/{name}/file` require them in the query. `DELETE
+  …/{name}` still deletes the whole package, and now takes an optional `?os=…&arch=…` for one
+  artifact. Generated clients must be regenerated.
+
+  **`GET /api/v1/packages` answers a new shape.** `version`, `addon`, `source_url` and
+  `previous_version` moved out of the package and into a `variants` array, one entry per platform,
+  each with its own `os`, `arch` and rollback history. `selector` stays on the package: the Selector
+  aims, the platform fits.
+
+  A rollback names one platform and moves only that one — a canary taken back on Linux must not push
+  macOS off a version it never left.
+
+- **The Client reports `host.arch` as `amd64`/`arm64`**, the semantic-convention values the protocol
+  points at, where it used to report Rust's `x86_64`/`aarch64`
+  ([ADR-0020](docs/adr/0020-the-package-store.md)).
+
+  **A Selector written against `host.arch` must be edited on the Server** — `{"host.arch": "x86_64"}`
+  now matches nothing. Change it to `amd64` (or `aarch64` → `arm64`); nothing changes on any host.
+
+  This also closes a quiet defect: a Managed Process's attributes are folded over the Supervisor's,
+  and the Collector's `opampextension` already reported `amd64`. The same machine therefore changed
+  architecture depending on whether a Collector happened to run on it, and Selectors written against
+  either spelling broke without anything having changed.
+
 
 - **The service is registered as `opamp-fleet-client` on every platform**
   ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)). It used to be

@@ -8,6 +8,7 @@
 use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
+use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
 
@@ -24,6 +25,13 @@ pub struct Engine {
     agents: Vec<SupervisedAgent>,
     /// The shared event channel every adapter reports into, tagged with the Agent's index.
     events: mpsc::Receiver<(usize, ProcessEvent)>,
+    /// A connection-settings offer awaiting the transport's verification (ADR-0018). The offer
+    /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
+    /// pending offer — n Agents receiving the same offer verify and switch once.
+    pending_connection_offer: Option<ConnectionSettingsOffers>,
+    /// Packages awaiting the transport's download and verification (ADR-0019), each tagged with
+    /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
+    pending_package_downloads: Vec<(usize, PackageDownload)>,
 }
 
 impl Engine {
@@ -39,15 +47,140 @@ impl Engine {
         events: mpsc::Receiver<(usize, ProcessEvent)>,
     ) -> Self {
             events,
+            pending_connection_offer: None,
+            pending_package_downloads: Vec::new(),
     }
 
+    /// Restores previously applied connection settings on every Agent (ADR-0018), so a restarted
+    /// Client reports `APPLIED` and is not re-offered what it already runs.
+    pub fn adopt_connection_settings(&mut self, hash: &[u8]) {
         for agent in &mut self.agents {
+            agent.state.adopt_connection_settings(hash);
+        }
+    }
+
+    /// Declares one more capability on every Agent — e.g. `ReportsHeartbeat` once an offered
+    /// interval enables what the configuration had disabled.
+    pub fn declare_capability_all(&mut self, capability: opamp::proto::AgentCapabilities) {
         for agent in &mut self.agents {
+            agent.state.declare_capability(capability);
+        }
+    }
+
+    /// Asks the Server for a client certificate when it signs them and this Client needs one
+    /// (ADR-0017). Driven by capability rather than configuration: a Server that declares nothing
+    /// is never asked, and one that does hands this host an identity before mutual TLS is switched
+    /// on, which is what makes switching it on uneventful.
+    ///
+    /// The request rides the Client's **own** Agent. The identity belongs to the connection, not to
+    /// any one Agent (n Agents share it, ADR-0009), and the self-Agent is the one every Client has.
+    pub fn request_certificate(&mut self, config: &crate::config::ClientConfig) {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.state.server_signs_certificates() && !agent.state.is_managed())
+        else {
+            return;
+        };
+        if let Some(csr) = crate::csr::request(config) {
+            agent.state.request_certificate(csr);
+        }
+    }
+
+    /// The connection-settings offer the transport must verify by actually connecting, taken
+    /// exactly once (ADR-0018).
+    pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {
+        self.pending_connection_offer.take()
+    }
+
+    /// The packages the transport must download and verify (ADR-0019), each with its Agent's
+    /// index — drained so each is dispatched once.
+    pub fn take_package_downloads(&mut self) -> Vec<(usize, PackageDownload)> {
+        std::mem::take(&mut self.pending_package_downloads)
+    }
+
+    /// Records download progress for the Agent whose package is being fetched (ADR-0019), so the
+    /// next report carries `Downloading` with its details instead of a silent `Installing`.
+    pub fn package_downloading(
+        &mut self,
+        index: usize,
+        details: opamp::proto::PackageDownloadDetails,
+    ) {
+        if let Some(agent) = self.agents.get_mut(index) {
+            agent.state.package_downloading(details);
+            agent.owes_report = true;
+        }
+    }
+
+    /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
+    /// accepting commands, fails the install (reported, not silent).
+    pub fn apply_package(
+        &mut self,
+        index: usize,
+        staged: std::path::PathBuf,
+        version: String,
+        hash: Vec<u8>,
+    ) {
         let Some(agent) = self.agents.get_mut(index) else {
+            return;
+        };
+        // The bytes are in: the status moves from Downloading to Installing.
+        agent.state.package_downloaded();
+        match &agent.commands {
+            Some(commands) => {
+                if let Err(e) = commands.try_send(ProcessCommand::ApplyPackage {
+                    staged,
+                    version,
+                    hash: hash.clone(),
+                }) {
+                    warn!(error = %e, "cannot hand the package to the supervisor");
+                    agent.owes_report = true;
+                }
+            }
+            None => {
+                agent.owes_report = true;
+            }
+        }
+    }
+
+        agent.state.package_downloaded();
+    /// A package download or verification failed (ADR-0019): the owning Agent reports
+    /// `InstallFailed` — a rejected package is a report, not a silence.
+    pub fn package_download_failed(&mut self, index: usize, hash: Vec<u8>, error: String) {
+        if let Some(agent) = self.agents.get_mut(index) {
+            agent.state.package_applied(hash, Err(error));
+            agent.owes_report = true;
+        }
+    }
+
+    /// Closes a verified offer's lifecycle on every Agent: `APPLIED` (the transport switches
+    /// next) or `FAILED` with the error; either way every Agent owes the Server the outcome.
+    pub fn connection_settings_outcome(&mut self, hash: &[u8], result: Result<(), &str>) {
         for agent in &mut self.agents {
+            agent.state.connection_settings_outcome(hash, result);
+            agent.owes_report = true;
+        }
+    }
+
+    /// One Agent's next report, for the plain-HTTP verification probe (ADR-0018): a real
+    /// exchange needs a real report. Delivered on success; a failed probe leaves a sequence gap
+    /// the Baseline's `ReportFullState` recovery heals on the next exchange.
+    pub fn probe_report(&mut self) -> Option<AgentToServer> {
+        self.agents
+            .first_mut()
+            .map(|agent| agent.state.next_report())
+    }
+
     /// The identities carried, for logging.
     pub fn uids(&self) -> impl Iterator<Item = InstanceUid> + '_ {
         self.agents.iter().map(|a| a.state.uid())
+    }
+
+    /// Whether any Agent this Engine runs takes Server-offered packages — a self-update or a managed
+    /// process's package. What the startup check uses to decide whether an unconfigured verification
+    /// key is worth warning about (ADR-0019).
+    pub fn installs_packages(&self) -> bool {
+        self.agents.iter().any(|a| a.state.accepts_packages())
     }
 
     /// Every Agent starts over with a full snapshot — after (re)connecting, or when an exchange
@@ -94,8 +227,20 @@ impl Engine {
             warn!(agent = %uid, "dropping a reply for an unknown agent");
             return Handled::default();
         };
+        let agent = &mut self.agents[index];
+        let mut handled = agent.state.handle(reply);
         if handled.send_report {
             agent.owes_report = true;
+        }
+        // The connection-scoped part of the reply moves to the Engine's single pending slot;
+        // whichever Agent's reply carried it last wins — they are all the same offer.
+        if let Some(offer) = handled.connection_offer.take() {
+            self.pending_connection_offer = Some(offer);
+        }
+        // A package offer is per Agent (each Supervisor has its own binary): queue it with the
+        // owning Agent's index so the transport can route the verified artifact back.
+        if let Some(download) = handled.package_download.take() {
+            self.pending_package_downloads.push((index, download));
         }
         // A stored configuration awaiting application goes to the process adapter; its
         if let Some(config) = agent.state.take_pending_apply() {
@@ -191,6 +336,9 @@ impl Engine {
             }
             ProcessEvent::ConfigApplied { hash, result } => {
                 agent.state.config_applied(hash, result);
+            }
+            ProcessEvent::PackageApplied { hash, result } => {
+                agent.state.package_applied(hash, result);
             }
             // The adapter's last word before retirement (ADR-0015). The goodbye carries no
             // status, so the outcome is the operator's to read here — an `Err` names what the

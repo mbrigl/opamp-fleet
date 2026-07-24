@@ -1,4 +1,15 @@
+use crate::install;
     let exe = layout::running_exe()?;
+    // Process's package comes in, which is why the unpacking is shared with the Supervisor's swap.
+    install::write_program(artifact, &binary, BINARY_FILENAME, archive_key)?;
+/// Runs `<binary> self-check`, retrying briefly past `ETXTBSY`
+/// ([`install::is_text_file_busy`] states why).
+/// The loop stays here rather than being shared with the Supervisor's: that one drives a
+/// `tokio::process` spawn and this one a blocking `std::process` run, and the only thing they would
+/// have in common after being generalised over both is the predicate and the two constants they
+/// already share.
+            Err(e) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
+                std::thread::sleep(install::BUSY_DELAY);
     let reported = reported.trim();
     // The commit the binary was built from is provenance, not identity (ADR-0013): it is the one
     // part of the string an operator neither knows nor can type when uploading a release, and

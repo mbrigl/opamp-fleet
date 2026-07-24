@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use tokio::sync::watch;
 
 use crate::config::{ClientConfig, TransportKind};
+use crate::connection;
 use crate::supervisor;
+use crate::transport::{self, RunOutcome};
 
 /// What a daemon run needs to know: where the configuration file is, and an optional state-dir
 /// override (`--state-dir`, baked into installed units so they never depend on a relative path).
@@ -238,15 +240,72 @@ fn recovery_state_dir(spec: &RunSpec) -> PathBuf {
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
 
+    let mut engine = supervisor::build_engine(&config, &shutdown)?;
+    // Signing is opt-in (ADR-0019): with no `[packages] verification_key`, an offered artifact — a
+    // managed process's package or this Client's own self-update — is accepted on the Server-supplied
+    // content hash alone, with no signature binding those bytes to a key the operator holds. That is
+    // a deliberate posture, not a bug, but it is one an operator should choose knowingly, so say so
+    // loudly at startup rather than only in the code path that acts on it.
+    if config.package_key().is_none() && engine.installs_packages() {
+        tracing::warn!(
+            "accepting packages without a signature check: no [packages] verification_key is set, so \
+             an offered package or self-update is trusted on the Server's content hash alone \
+             (ADR-0019). Set verification_key to require an Ed25519 signature."
+        );
+    }
+    let telemetry = crate::telemetry::Telemetry::new();
 
     // Gateway Mode (ADR-0009), if armed: a downstream endpoint and an upstream pool, running
     // beside everything else. It is restarted when a verified offer moves this Client's endpoint,
     // since the pool dials that endpoint and would otherwise keep reaching for the old one.
     let mut gateway = spawn_gateway(&config, &shutdown);
+    if let Some(stored) = connection::load(&config.state_dir) {
+        // A restarted Client reports the persisted settings APPLIED, so the Server does not
+        // re-offer what it already runs (ADR-0018).
+        engine.adopt_connection_settings(&stored.hash);
+        let refused = telemetry.apply(&stored, &engine.self_description(), &config);
+        if !refused.is_empty() {
+            // And the Server hears about it. The line above just reported these settings APPLIED;
+            // saying nothing here would have this Client claim, on every reconnect for the life of
+            // the state directory, that a destination is in force which it refused to use
+            // (ADR-0025: refused *and reported*).
+            let error = refused.join("; ");
+            tracing::warn!(reason = %error, "not reporting own telemetry");
+            engine.connection_settings_outcome(&stored.hash, Err(&error));
+    }
     for uid in engine.uids() {
         tracing::info!(agent = %uid, "starting");
     }
 
+    loop {
+                        transport::ws::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
+                        transport::http::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
+            }
+        };
+        match outcome {
+            // Both exits flush first: the batch exporters hold spans and log records that have not
+            // left yet, and a process that simply returns drops them. The stop path is exactly when
+            // the last records are worth having — a crash-and-restart is what they explain.
+            RunOutcome::Shutdown => {
+                telemetry.shutdown();
+                return Ok(Exit::Normal);
+            }
+            RunOutcome::RestartForUpdate => {
+                telemetry.shutdown();
+                return Ok(Exit::RestartForUpdate);
+            }
+            // Verified connection settings took effect (ADR-0018): re-resolve the effective
+            // configuration — endpoint, credential, intervals, possibly the other transport —
+            // and reconnect. The Engine (and its Managed Processes) carries on.
+            RunOutcome::Reconfigured => {
+                config = load_effective_config(&spec)?;
+                // The telemetry destinations of the same offer are already in force: since
+                // ADR-0018 `process_connection_offer` applies them before it asks for the
+                // reconnect, and it composes the one acknowledgement that names anything refused.
+                // Re-applying here would be a no-op through `in_force` whose only visible effect
+                // was a `warn!` with no acknowledgement attached — which was the bug.
                 if let Some(handle) = gateway.take() {
                     handle.abort();
                     // The listener is only released once the task has unwound; binding the new
@@ -254,8 +313,27 @@ fn recovery_state_dir(spec: &RunSpec) -> PathBuf {
                     let _ = handle.await;
                 }
                 gateway = spawn_gateway(&config, &shutdown);
-    let mut config = ClientConfig::load(&spec.config_path)?;
+                if config.heartbeat_interval_secs > 0 {
+                    // An offered interval may enable what the file had disabled; the capability
+                    // follows (the reverse never happens — 0 means "not offered").
+                    engine
+                        .declare_capability_all(opamp::proto::AgentCapabilities::ReportsHeartbeat);
+                }
+            }
+        }
     }
+}
+
+/// persisted Server-offered connection settings on top (ADR-0018).
+fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
+    let mut config = ClientConfig::load(&spec.config_path)?;
+    if let Some(state_dir) = &spec.state_dir {
+        config.state_dir = state_dir.clone();
+    }
+    if let Some(stored) = connection::load(&config.state_dir) {
+        connection::apply(&mut config, &stored);
+    }
+    Ok(config)
 }
 
 /// ADR-0014 self-heal: when running from a versioned install layout, make sure `current`
