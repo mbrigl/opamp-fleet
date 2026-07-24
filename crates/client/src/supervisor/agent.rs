@@ -19,7 +19,9 @@ use tracing::{error, info, warn};
 
 use crate::storage::Storage;
 
-/// The Capability Set this Client declares (see docs/CONFORMANCE.md).
+/// The base Capability Set every Agent of this Client declares (see docs/CONFORMANCE.md).
+/// Individual Agents declare more via [`AgentState::declare_capability`] — e.g. heartbeats when
+/// enabled, restartability only where a Managed Process exists.
 pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::AcceptsRemoteConfig as u64
     | AgentCapabilities::ReportsEffectiveConfig as u64
@@ -40,6 +42,10 @@ pub struct AgentState {
     uid: InstanceUid,
     sequence_num: u64,
     name: String,
+    /// This Agent's declared Capability Set: the base set plus whatever
+    /// [`declare_capability`](Self::declare_capability) added. Carried in every report, so the
+    /// Server's cached mask follows on the next exchange.
+    capabilities: u64,
     start_time_ns: u64,
     storage: Storage,
     /// The last stored remote configuration; what `effective_config` echoes unless the Managed
@@ -85,6 +91,7 @@ impl AgentState {
             uid,
             sequence_num: 0,
             name,
+            capabilities: AGENT_CAPABILITIES,
             start_time_ns: now_ns(),
             storage,
             applied,
@@ -107,6 +114,12 @@ impl AgentState {
         let mut state = Self::new(name, storage)?;
         state.managed = true;
         Ok(state)
+    }
+
+    /// Adds one capability to this Agent's declared set — heartbeats when enabled, and bits an
+    /// Agent only earns situationally (a Managed Process to restart, components to report).
+    pub fn declare_capability(&mut self, capability: AgentCapabilities) {
+        self.capabilities |= capability as u64;
     }
 
     /// Attaches the operator-defined attributes this Agent reports (ADR-0012).
@@ -181,7 +194,7 @@ impl AgentState {
         let mut msg = AgentToServer {
             instance_uid: self.uid.as_bytes().to_vec(),
             sequence_num: self.sequence_num,
-            capabilities: AGENT_CAPABILITIES,
+            capabilities: self.capabilities,
             ..Default::default()
         };
         if self.send_full {
@@ -213,7 +226,7 @@ impl AgentState {
         AgentToServer {
             instance_uid: self.uid.as_bytes().to_vec(),
             sequence_num: self.sequence_num,
-            capabilities: AGENT_CAPABILITIES,
+            capabilities: self.capabilities,
             agent_disconnect: Some(AgentDisconnect {}),
             ..Default::default()
         }
@@ -583,6 +596,20 @@ mod tests {
             non_identifying_attributes: vec![],
         });
         assert_eq!(version_of(&supervised).as_deref(), Some("0.142.0"));
+    }
+
+    #[test]
+    fn declared_capabilities_ride_every_report_and_the_goodbye() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let base = agent.next_report().capabilities;
+        assert_eq!(base, AGENT_CAPABILITIES);
+        assert_eq!(base & AgentCapabilities::ReportsHeartbeat as u64, 0);
+
+        agent.declare_capability(AgentCapabilities::ReportsHeartbeat);
+        let declared = agent.next_report().capabilities;
+        assert_eq!(declared, base | AgentCapabilities::ReportsHeartbeat as u64);
+        assert_eq!(agent.disconnect_message().capabilities, declared);
     }
 
     #[test]

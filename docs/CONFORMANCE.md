@@ -136,7 +136,7 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `AcceptsRestartCommand` | `0x0400` | Beta | optional | planned | Server-initiated restart of a Managed Process. |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
-| `ReportsHeartbeat` | `0x2000` | Development | optional | planned | Liveness independent of message traffic. |
+| `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval arrives with `AcceptsOpAMPConnectionSettings`. |
 | `ReportsAvailableComponents` | `0x4000` | Development | optional | planned | Also reported by the Collector's `opampextension`. |
 | `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | planned | Reports the outcome of a connection-settings offer. |
 

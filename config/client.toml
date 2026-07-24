@@ -12,6 +12,10 @@ name = "opamp-fleet-client"
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
 poll_interval_secs = 30
 
+# Heartbeat interval over the WebSocket transport, in seconds (the protocol's default: 30).
+# 0 disables heartbeats; on plain HTTP every poll already is the periodic report.
+heartbeat_interval_secs = 30
+
 # Where the Client persists its instance_uid and the received remote configuration.
 state_dir = "client-state"
 
