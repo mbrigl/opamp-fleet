@@ -1,8 +1,10 @@
 //! The Client's own configuration file — TOML (ADR-0025).
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use serde::Deserialize;
 
 /// startup instead of silently applying a default.
@@ -16,6 +18,12 @@ pub struct ClientConfig {
     /// [`CLIENT_AGENT_TYPE`](crate::supervisor::agent::CLIENT_AGENT_TYPE) — `supervisor`, a
     #[serde(default = "default_name")]
     pub name: String,
+    /// The deployment's `service.namespace`. The Baseline asks for it "if it is used in the
+    /// environment where the Agent runs", which is knowledge only an operator has — so it is
+    /// configured rather than detected, and absent means it is not reported at all. Reported as
+    /// an **identifying** attribute of every Agent this Client presents, which is where the
+    /// Baseline puts it: it says which deployment the service belongs to.
+    pub service_namespace: Option<String>,
     /// How often the plain-HTTP transport polls. The Baseline's default is 30 seconds; ignored on
     /// WebSocket, where the Server pushes.
     #[serde(default = "default_poll_interval_secs")]
@@ -28,10 +36,26 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Operator-defined attributes (ADR-0011), reported as non-identifying attributes of **every**
+    /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
+    /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
+    /// code or the Managed Process reports win over configured ones.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
     /// Optional Gateway Mode (ADR-0034); absent means this Client gateways for nobody.
     pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
+    /// Optional authentication toward the Server (ADR-0026); absent means no `Authorization`
+    /// header, as before.
+    pub auth: Option<AuthConfig>,
+    /// A Server-rotated `Authorization` value (ADR-0027), applied from the persisted connection
+    /// settings at startup — never from the file, and it wins over `[auth]`.
+    #[serde(skip)]
+    pub authorization_override: Option<String>,
+    /// Package verification (ADR-0018); absent means unsigned packages are accepted on their
+    /// content hash alone.
+    pub packages: Option<PackagesConfig>,
     /// Where this Client's own log goes when it runs as a service (ADR-0028). Absent takes the
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
@@ -40,11 +64,26 @@ pub struct ClientConfig {
     /// and the apply grace. Absent takes the defaults.
     #[serde(default, rename = "supervisors")]
     pub supervisor_defaults: SupervisorsConfig,
+    /// How Managed-Process package updates behave once applied (ADR-0018) — the retention of a
+    /// superseded version. Absent takes the defaults: one day.
+    #[serde(default)]
+    pub updates: UpdatesConfig,
+    /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
+    /// signature is checked against. Set from the file at load; not itself a file key.
+    #[serde(skip)]
+    pub package_key: Option<Vec<u8>>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
+    /// The largest package or self-update artifact the Client downloads before verifying it
+    /// (ADR-0018). Streaming already caps peak memory at one chunk, but disk is finite: without a
+    /// ceiling a Server could answer the artifact GET with an endless body and fill the staging
+    /// filesystem before the content hash is ever checked. Matches the Server's own per-package
+    /// ceiling; `0` is refused at load, the same as the message limit.
+    #[serde(default = "default_max_artifact_size")]
+    pub max_artifact_size_bytes: u64,
     /// The `[[supervisor]]` blocks (ADR-0010): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -79,9 +118,33 @@ pub struct SupervisorBlock {
     /// acknowledgement ADR-0010 names). `0` acknowledges on start. `None` takes the global value,
     /// and a wrapped kind refuses the key for the reason above.
     pub apply_grace_secs: Option<u64>,
+    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0018): how
+    /// long the version a successful update supersedes is kept before deletion. `None` — the
+    /// default — takes the global value.
+    pub retain_previous_secs: Option<u64>,
+    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0018), e.g.
+    /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0018: one
+    /// member, one file. Setting it is what asks for the tree to be unpacked whole.
+    ///
+    /// It never decides *whether* packages are taken; the written shape of `binary`/`command`
+    /// still does that alone (ADR-0032).
+    pub program_path: Option<PathBuf>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
+
+/// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
+/// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
+/// the same root (ADR-0018, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
+/// directory name is cheap; a layout migration on every host is not.
+/// The subdirectory of `program/` holding an unpacked package tree (ADR-0018), with the tree it
+/// replaced kept beside it under the same name plus `.rollback`.
+///
+/// Two fixed names rather than a version directory and a pointer: it is the mechanism the
+/// single-file swap already uses, a directory rename is atomic on every platform this Client runs
+/// on, and nothing has to be reconciled after a crash halfway through an install. Which version is
+/// in there is reported by the Agent, not spelled on disk.
+pub const TREE_DIR: &str = "tree";
 
     ///
     /// Always inside this Supervisor's own `program/` directory (ADR-0032): a Managed Process is
@@ -99,6 +162,7 @@ pub struct SupervisorBlock {
 /// Client used to accept, so its refusal is the only notice an operator carrying such a block will
 /// get and it carries the whole explanation rather than a rule number.
 /// Returns an error for anything that is not a bare file name, naming the rule and the way across.
+    program_path: Option<&Path>,
     // The machine's program, which this Client no longer manages (ADR-0032). `has_root` rather
     // than `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`,
     // no drive letter — folds into the same message: it was only ever a near-miss of the absolute
@@ -110,6 +174,12 @@ pub struct SupervisorBlock {
              bare file name — it then lives in this Supervisor's own directory, where an update \
              is a rename this Client can make. To keep the machine's copy instead, take the block \
              out and let whatever put the file there keep it.",
+        // With a tree the program is one file *inside* the unpacked package (ADR-0018), and the
+        // bare name above is what it always was: the consent, readable in the file.
+        let path = match program_path {
+            Some(inside) => supervisor_dir.join(PROGRAM_DIR).join(TREE_DIR).join(inside),
+            None => supervisor_dir.join(PROGRAM_DIR).join(value),
+        };
         return Ok(Program { path });
         "supervisor {name:?}: `{key} = {}` is not a bare file name — no path separator and no \
          `..`. The program lives in this Supervisor's own directory and is updated from \
@@ -124,17 +194,29 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             .ok_or_else(|| "a [[supervisor]] block needs a `name`".to_string())?;
         crate::cli::parse_instance_name(&name)
             .map_err(|e| format!("invalid supervisor name {name:?}: {e}"))?;
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?
+        {
         let endpoint_port = match take_integer(&mut table, "endpoint_port")? {
             None => 0,
             Some(port) => u16::try_from(port)
                 .map_err(|_| format!("supervisor {name:?}: endpoint_port {port} is not a port"))?,
         };
         let stop_timeout_secs = match take_integer(&mut table, "stop_timeout_secs")? {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
                 format!("supervisor {name:?}: stop_timeout_secs must not be negative")
             })?),
         };
         let apply_grace_secs = match take_integer(&mut table, "apply_grace_secs")? {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
                 format!("supervisor {name:?}: apply_grace_secs must not be negative")
+            })?),
+        };
+        let retain_previous_secs = match take_integer(&mut table, "retain_previous_secs")? {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
+                format!("supervisor {name:?}: retain_previous_secs must not be negative")
             })?),
         };
         // Retired by ADR-0010, and refused by name rather than left to the plugin's strict parse:
@@ -148,20 +230,71 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                  still describe the host. Remove the table"
             ));
         }
+        let program_path = match take_string(&mut table, "program_path")
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?
+        {
+            None => None,
+            Some(raw) => Some(
+                validate_program_path(&raw)
+                    .map_err(|e| format!("supervisor {name:?}: `program_path = {raw:?}` {e}"))?,
+            ),
+        };
+        // `package = "name"` chose the artifact on the host; ADR-0019 moved that decision to the
+        // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
+        if table.contains_key("package") {
+            return Err(format!(
         // (ADR-0032). ADR-0032 left one shape, so every Supervisor accepts packages and the key
         // would only be a way to disagree with a constant.
                  program is named by a bare file name, so it lives in this Supervisor's own \
                  directory and is updated from Server-offered packages; there is no longer a \
                  second shape for the key to distinguish"
+            ));
+        }
         Ok(SupervisorBlock {
             kind,
             name,
             endpoint_port,
             stop_timeout_secs,
             apply_grace_secs,
+            retain_previous_secs,
+            program_path,
             settings: table,
         })
     }
+}
+
+/// Checks a `program_path` (ADR-0018): a relative path inside the package, and nothing that could
+/// reach outside it.
+///
+/// The same three refusals the archive sanitizer makes, made here instead — at startup, where the
+/// operator is still looking at the file, rather than at rollout time on every matched host.
+///
+/// # Errors
+/// Returns an error naming which rule the value breaks.
+fn validate_program_path(raw: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let path = Path::new(raw);
+    if raw.trim().is_empty() {
+        return Err("names nothing".to_string());
+    }
+    let mut components = path.components().peekable();
+    if components.peek().is_none() {
+        return Err("names nothing".to_string());
+    }
+    for component in components {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => return Err("must not contain `.`".to_string()),
+            Component::ParentDir => return Err("must not contain `..`".to_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(
+                    "must be relative — it names a path *inside* the package, not on the host"
+                        .to_string(),
+                )
+            }
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 fn take_string(table: &mut toml::Table, key: &str) -> Result<Option<String>, String> {
@@ -186,10 +319,52 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
     }
 }
 
+/// The `[auth]` block (ADR-0026): exactly one scheme — `bearer_token`, or `username` and
+/// `password` together. Mixing or halving them fails loudly at startup (ADR-0025).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    pub bearer_token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl AuthConfig {
+    /// The `Authorization` header value this block yields, sent on every plain-HTTP request and
+    /// on the WebSocket upgrade.
+    pub fn authorization(&self) -> Result<String, String> {
+        match (&self.bearer_token, &self.username, &self.password) {
+            (Some(token), None, None) => Ok(format!("Bearer {token}")),
+            (None, Some(user), Some(password)) => {
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                Ok(format!("Basic {encoded}"))
+            }
+            (Some(_), _, _) => Err(
+                "[auth] must set either bearer_token or username/password, not both".to_string(),
+            ),
+            _ => Err("[auth] needs bearer_token, or username and password together".to_string()),
+        }
+    }
+}
+
+/// The `[packages]` block (ADR-0018): how downloaded package artifacts are verified.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PackagesConfig {
+    /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
+    /// signature against it; when unset, an unsigned package is accepted on its content hash alone
+    /// and a *signed* one is refused (there is nothing to check it with).
+    pub verification_key: Option<String>,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018). Unset means artifacts are
+    /// expected unencrypted; an encrypted one then fails to install, naming this key.
+    ///
+    /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
+    /// credential from `[auth]`, which the Server rotates on its own (ADR-0027): a rotation would
+    /// leave every packed archive unopenable.
+    pub archive_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
     crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()
@@ -266,8 +441,30 @@ impl Default for SupervisorsConfig {
     }
 }
 
+/// The `[updates]` section (ADR-0018): how a Managed Process's package updates behave once applied.
+/// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// How long the version a successful update supersedes is kept before it is deleted, so an
+    /// operator has a fallback window (ADR-0018). `0` deletes it on success, the pre-ADR-0018
+    /// behaviour. A per-Supervisor `retain_previous_secs` overrides this for one block.
+    #[serde(default = "default_retain_previous_secs")]
+    pub retain_previous_secs: u64,
+}
+
+fn default_retain_previous_secs() -> u64 {
+    24 * 60 * 60 // one day
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            retain_previous_secs: default_retain_previous_secs(),
+        }
+    }
+}
+
 /// The `[gateway]` section (ADR-0034): the Client stands at a network boundary, accepts OpAMP from
 /// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
 /// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
@@ -321,6 +518,30 @@ impl GatewayConfig {
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
+    /// Optional, so a `[tls]` section can carry a client identity alone and keep the public roots.
+    pub ca_file: Option<PathBuf>,
+    /// PEM client certificate chain this Client presents (ADR-0026), for a fleet whose Server
+    /// demands mutual TLS. Together with [`key_file`](Self::key_file), and useless without it.
+    ///
+    /// This is the operator-provisioned identity, including the **bootstrap certificate** a host
+    /// enrols with. An identity the Server issued outranks it: the Client stores that one in its
+    /// state directory and prefers it, exactly as persisted connection settings outrank the
+    /// endpoint written here (ADR-0027). Deleting the stored pair falls back to this one.
+    pub cert_file: Option<PathBuf>,
+    /// PEM private key for [`cert_file`](Self::cert_file). Never leaves the host.
+    pub key_file: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    /// Loud validation (ADR-0025): half an identity is a configuration error, not a fallback to
+    /// none — a Server demanding mutual TLS would refuse the connection with no hint why.
+    fn check(&self) -> Result<(), String> {
+        match (&self.cert_file, &self.key_file) {
+            (Some(_), None) => Err("[tls] cert_file needs key_file beside it".to_string()),
+            (None, Some(_)) => Err("[tls] key_file needs cert_file beside it".to_string()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The transport the endpoint's scheme selects (ADR-0023).
@@ -361,6 +582,12 @@ fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
 }
 
+/// One gibibyte — the Server's own `DEFAULT_MAX_PACKAGE_SIZE`. A Server that will not store a
+/// larger artifact never offers one, so the two ends agree by default.
+fn default_max_artifact_size() -> u64 {
+    1 << 30
+}
+
 fn default_stop_timeout_secs() -> u64 {
     10
 }
@@ -376,12 +603,20 @@ impl Default for ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
             logging: LoggingConfig::default(),
+            updates: UpdatesConfig::default(),
+            service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
+            attributes: BTreeMap::new(),
             gateway: None,
             tls: None,
+            auth: None,
+            authorization_override: None,
+            packages: None,
+            package_key: None,
             max_message_size_bytes: default_max_message_size(),
+            max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
         }
     }
@@ -416,6 +651,7 @@ impl ClientConfig {
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         // **Every directory this Client derives is made absolute here**, and this is the one place
         // it can be done once. Since ADR-0010 a Managed Process starts in its own directory, so a
@@ -427,14 +663,49 @@ impl ClientConfig {
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
         config.check_supervisor_names()?;
+        if let Some(auth) = &config.auth {
+            // A half-configured block must fail now, not at the first exchange.
+            auth.authorization()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(tls) = &config.tls {
+            tls.check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         if let Some(gateway) = &config.gateway {
             gateway
                 .check(&config.endpoint)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // Decode the package verification key once — a malformed key must fail startup, not the
+        // first package offer.
+        if let Some(key_hex) = config
+            .packages
+            .as_ref()
+            .and_then(|p| p.verification_key.as_ref())
+        {
+            let key = hex::decode(key_hex).map_err(|e| {
+                format!(
+                    "{}: [packages].verification_key is not valid hex: {e}",
+                    path.display()
+                )
+            })?;
+            config.package_key = Some(key);
+        }
         // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
         // limit is mandatory, so a value that cannot carry a message fails startup.
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        // A ceiling of zero would refuse every artifact; like the message limit it is a bound, not
+        // a switch, so a value that cannot carry a download fails startup rather than silently
+        // rejecting every package.
+        if config.max_artifact_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_artifact_size_bytes must be greater than zero",
                 path.display()
             ));
         }
@@ -451,6 +722,31 @@ impl ClientConfig {
         Ok(config)
     }
 
+    /// The Ed25519 public key package signatures are verified against (ADR-0018), or `None`.
+    pub fn package_key(&self) -> Option<&[u8]> {
+        self.package_key.as_deref()
+    }
+
+    /// The client certificate and key this Client presents on both transports (ADR-0026), or
+    /// `None` when it has no identity to present.
+    ///
+    /// A pair the Server issued outranks the configured one, the same precedence persisted
+    /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
+    pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
+        let cert = self.state_dir.join(crate::tls::ISSUED_CERT_FILE);
+        let key = self.state_dir.join(crate::tls::ISSUED_KEY_FILE);
+        if cert.exists() && key.exists() {
+            return Some((cert, key));
+        }
+        let tls = self.tls.as_ref()?;
+        Some((tls.cert_file.clone()?, tls.key_file.clone()?))
+    }
+
+    /// The CA bundle that replaces the built-in roots, when one is configured (ADR-0023).
+    pub fn ca_file(&self) -> Option<&Path> {
+        self.tls.as_ref()?.ca_file.as_deref()
+    }
+
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
     /// merge two Supervisors into one.
     fn check_supervisor_names(&self) -> Result<(), String> {
@@ -463,12 +759,48 @@ impl ClientConfig {
         Ok(())
     }
 
+    /// The operator-defined attributes one Agent reports (ADR-0011): the machine-level table,
+    /// with a Supervisor's own entries merged over it per key.
+    pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
         // The block half is gone (ADR-0010): tagging one Agent among several is a Server label's
         // job, which does it from the fleet and takes effect at once. The parameter stays because
         // the two call sites still differ in nothing else, and a future per-block statement would
         // land here.
         let _ = block;
         self.attributes.clone()
+    }
+
+    /// The `Authorization` value this Client sends, if any: a Server-rotated credential
+    /// (ADR-0027) wins over the `[auth]` block (ADR-0026).
+    pub fn authorization_value(&self) -> Result<Option<String>, String> {
+        if let Some(rotated) = &self.authorization_override {
+            return Ok(Some(rotated.clone()));
+        }
+        self.auth.as_ref().map(|a| a.authorization()).transpose()
+    }
+
+    /// Basic and Bearer are cleartext without TLS: sending them beyond the loopback over `ws://`
+    /// or `http://` deserves a warning (ADR-0026) — ultimately the operator's choice, so never
+    /// an error.
+    pub fn sends_credentials_in_cleartext(&self) -> bool {
+        if self.auth.is_none() && self.authorization_override.is_none() {
+            return false;
+        }
+        let Some((scheme, rest)) = self.endpoint.split_once("://") else {
+            return false;
+        };
+        if scheme == "wss" || scheme == "https" {
+            return false;
+        }
+        let host_port = rest.split(['/', '?']).next().unwrap_or("");
+        // A bracketed IPv6 host keeps its brackets; only a trailing `:port` is cut off.
+        let host = match host_port.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(""),
+            None => host_port.split(':').next().unwrap_or(""),
+        };
+        !matches!(host, "localhost" | "127.0.0.1" | "::1")
+    }
+
     pub fn transport(&self) -> Result<TransportKind, String> {
         match self.endpoint.split("://").next() {
             Some("ws") | Some("wss") => Ok(TransportKind::WebSocket),
@@ -556,6 +888,25 @@ mod tests {
         assert_eq!(disabled.heartbeat_interval_secs, 0);
     }
 
+    /// The Baseline asks for `service.namespace` "if it is used in the environment where the Agent
+    /// runs" — so the file is the only thing that can know, and silence means the deployment does
+    /// not use one. It must be a top-level key rather than an `[attributes]` entry, because it
+    /// identifies the Agent where those merely tag it.
+    #[test]
+    fn the_service_namespace_is_a_top_level_key_and_absent_by_default() {
+        assert!(ClientConfig::default().service_namespace.is_none());
+        assert!(untouched.service_namespace.is_none());
+
+        let configured: ClientConfig =
+            toml::from_str("service_namespace = \"telemetry\"\n").expect("parse");
+        assert_eq!(configured.service_namespace.as_deref(), Some("telemetry"));
+
+        assert!(
+            toml::from_str::<ClientConfig>("service_namesapce = \"telemetry\"\n").is_err(),
+            "a typo fails startup rather than silently reporting no namespace"
+        );
+    }
+
     /// ADR-0028. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
@@ -565,6 +916,8 @@ mod tests {
         assert!(defaults.enabled);
         assert_eq!(defaults.keep, 7);
         assert!(defaults.dir.is_none(), "the state directory decides");
+
+        let configured: ClientConfig =
             toml::from_str("[logging]\nkeep = 3\ndir = \"/var/log/opamp\"\n").expect("parse");
         assert_eq!(configured.logging.keep, 3);
         assert_eq!(
@@ -618,17 +971,96 @@ mod tests {
         assert!(err.contains("max_message_size_bytes"), "{err}");
     }
 
+    /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
+    /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
+    /// a bound that could carry nothing rather than "unlimited", so it fails startup.
+    #[test]
+    fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
+        assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
         let tightened: ClientConfig =
+            toml::from_str("max_artifact_size_bytes = 1048576").expect("parse");
+        assert_eq!(tightened.max_artifact_size_bytes, 1_048_576);
 
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_artifact_size_bytes"), "{err}");
+    }
+
         let dir = tempfile::tempdir().expect("tempdir");
+    #[test]
                 command = "agent"
+
             message.contains("bare file name"),
     /// One shape (ADR-0032): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
     fn a_bare_name_resolves_and_everything_else_is_refused() {
+        let resolved = resolve_program(
+            "binary",
+            Path::new("otelcol-contrib"),
+            None,
+            &dir,
+            "otelcol",
+        )
+        .expect("a bare file name resolves");
             resolved,
+            let err = resolve_program("binary", Path::new(refused), None, &dir, "otelcol")
+
+    /// With a tree (ADR-0018) the program is one file *inside* the package, so the spawn path is
+    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0032
+    /// made it mean, which is consent and nothing else.
+    #[test]
+    fn a_tree_spawns_from_the_path_written_inside_the_package() {
+        let dir = PathBuf::from("/srv/fleet/fluent-bit");
+
+        let resolved = resolve_program(
+            "command",
+            Path::new("fluent-bit"),
+            Some(Path::new("bin/fluent-bit")),
+            &dir,
+            "fluent-bit",
+        )
+        .expect("a bare name with a program_path resolves");
+        assert_eq!(
+            resolved,
+            Program {
+                path: dir.join(PROGRAM_DIR).join(TREE_DIR).join("bin/fluent-bit"),
+            },
+            "the spawn path is readable in the file, before any package exists"
+        );
+    }
+
+    /// Refused at startup, where the operator is still looking at the file — not at rollout time
+    /// on every matched host, which is where the archive sanitizer would catch the same thing.
+    #[test]
+    fn a_program_path_must_stay_inside_the_package() {
+        assert_eq!(
+            validate_program_path("bin/fluent-bit").expect("relative"),
+            PathBuf::from("bin/fluent-bit")
+        );
+        for (refused, because) in [
+            ("../../etc/passwd", ".."),
+            ("bin/../../x", ".."),
+            ("./bin/fluent-bit", "`.`"),
+            ("", "nothing"),
+            ("   ", "nothing"),
+        ] {
+            let err = validate_program_path(refused).expect_err("must be refused: {refused}");
+            assert!(
+                err.contains(because),
+                "{refused}: {err} does not say {because}"
+            );
+        }
+        #[cfg(unix)]
+        assert!(validate_program_path("/opt/fluent-bit/bin/fluent-bit")
+            .expect_err("absolute")
+            .contains("relative"));
+        #[cfg(windows)]
+        assert!(validate_program_path("C:\\fluent-bit\\bin\\fluent-bit.exe")
+            .expect_err("absolute")
+            .contains("relative"));
+    }
+
     /// ADR-0032: the machine's program is refused, and the message is the only notice an operator
     /// carrying such a block will get — so it must name the way across, not a rule number.
     ///
@@ -646,9 +1078,18 @@ mod tests {
     /// absolute and is not. Since ADR-0032 it folds into the same refusal as the absolute form,
     /// because it was only ever a near-miss of it and both now have one answer.
     fn a_drive_relative_windows_path_folds_into_the_same_refusal() {
+            None,
         assert!(err.contains("only programs it installs"), "{err}");
+
+            r#"
             [[supervisor]]
             type = "command"
+            name = "agent"
+            "#,
+        )
+        );
+    }
+
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
@@ -715,13 +1156,57 @@ mod tests {
         assert!(command.settings.contains_key("args"));
     }
 
+    /// ADR-0018: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
+    /// block overrides it for itself — the shape `apply_grace_secs` has.
+    #[test]
+    fn retention_defaults_globally_and_is_overridable_per_supervisor() {
+        let default: ClientConfig = toml::from_str("").expect("parse");
+        assert_eq!(
+            default.updates.retain_previous_secs,
+            24 * 60 * 60,
+            "one day by default"
+        );
+
         let cfg: ClientConfig = toml::from_str(
             r#"
+            [updates]
+            retain_previous_secs = 3600
             [[supervisor]]
             type = "command"
+            name = "keeps-default"
+            command = "agent"
 
             [[supervisor]]
             type = "command"
+            name = "overrides"
+            command = "agent"
+            retain_previous_secs = 0
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.updates.retain_previous_secs, 3600,
+            "the global override"
+        );
+        assert_eq!(
+            cfg.supervisors[0].retain_previous_secs, None,
+            "a block that says nothing takes the global"
+        );
+        assert_eq!(
+            cfg.supervisors[1].retain_previous_secs,
+            Some(0),
+            "a block may override to immediate deletion"
+        );
+
+        let negative = toml::from_str::<ClientConfig>(
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"a\"\nretain_previous_secs = -1\n",
+        );
+        assert!(negative
+            .unwrap_err()
+            .to_string()
+            .contains("retain_previous_secs"));
+    }
+
     #[test]
     fn a_supervisor_block_needs_type_and_a_valid_name() {
         let missing_type = toml::from_str::<ClientConfig>("[[supervisor]]\nname = \"x\"\n");
@@ -767,24 +1252,105 @@ mod tests {
     /// The Client-wide table stays — it describes the *host*, and it is what a fresh Agent carries
     /// into its first message, before there is anything for a Server to label. The block's own
     /// table is gone, and refused by name (ADR-0010).
+    #[test]
     fn attributes_describe_the_host_and_a_block_no_longer_tags_one_agent() {
         let cfg: ClientConfig = toml::from_str(
             r#"
+            [attributes]
+            env = "prod"
+            role = "machine"
 
             [[supervisor]]
             type = "command"
+            name = "stub"
+            command = "/bin/true"
+            "#,
+        )
+        .expect("parse");
         for agent in [None, Some(&cfg.supervisors[0])] {
             let attributes = cfg.agent_attributes(agent);
             assert_eq!(attributes.get("env").map(String::as_str), Some("prod"));
             assert_eq!(attributes.get("role").map(String::as_str), Some("machine"));
         }
+
         let tagged = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"/bin/true\"\n\
                       [supervisor.attributes]\nrole = \"edge\"\n";
         let error = toml::from_str::<ClientConfig>(tagged).expect_err("refused");
         assert!(error.to_string().contains("Server label"), "{error}");
+    }
+
+    #[test]
+    fn non_string_attributes_are_rejected() {
+        assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
+    }
+
+    #[test]
+    fn auth_yields_exactly_one_authorization_scheme() {
+        let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
+        assert_eq!(
+            bearer.auth.expect("auth").authorization().expect("value"),
+            "Bearer tok"
+        );
+
+        let basic: ClientConfig =
+            toml::from_str("[auth]\nusername = \"fleet\"\npassword = \"secret\"").expect("parse");
+        assert_eq!(
+            basic.auth.expect("auth").authorization().expect("value"),
+            // base64("fleet:secret")
+            "Basic ZmxlZXQ6c2VjcmV0"
+        );
+
+        // Mixing the schemes, halving Basic, or an empty block all fail loudly.
+        for bad in [
+            "[auth]\nbearer_token = \"tok\"\nusername = \"fleet\"\npassword = \"s\"",
+            "[auth]\nusername = \"fleet\"",
+            "[auth]\npassword = \"secret\"",
+            "[auth]",
+        ] {
+            let cfg: ClientConfig = toml::from_str(bad).expect("parses; the mix is semantic");
+            assert!(
+                cfg.auth.expect("auth").authorization().is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
+    }
+
+    #[test]
+    fn cleartext_credentials_are_flagged_beyond_the_loopback() {
+        for (endpoint, cleartext) in [
+            ("ws://fleet.example:4320/v1/opamp", true),
+            ("http://10.0.0.7:4320/v1/opamp", true),
+            ("ws://127.0.0.1:4320/v1/opamp", false),
+            ("http://localhost:4320/v1/opamp", false),
+            ("ws://[::1]:4320/v1/opamp", false),
+            ("wss://fleet.example:4320/v1/opamp", false),
+            ("https://fleet.example:4320/v1/opamp", false),
         ] {
             let cfg = ClientConfig {
                 endpoint: endpoint.to_string(),
+                auth: Some(AuthConfig {
+                    bearer_token: Some("tok".to_string()),
+                    username: None,
+                    password: None,
+                }),
+                ..ClientConfig::default()
+            };
+            assert_eq!(
+                cfg.sends_credentials_in_cleartext(),
+                cleartext,
+                "{endpoint}"
+            );
+        }
+
+        // Without [auth] there is nothing to leak.
+        let no_auth = ClientConfig {
+            endpoint: "ws://fleet.example:4320/v1/opamp".to_string(),
+            ..ClientConfig::default()
+        };
+        assert!(!no_auth.sends_credentials_in_cleartext());
+    }
+
     #[test]
     fn duplicate_supervisor_names_are_rejected() {
         let cfg: ClientConfig = toml::from_str(

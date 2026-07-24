@@ -107,11 +107,25 @@ impl Plugin for CollectorPlugin {
             .map(|(k, v)| (k.clone(), ctx.expand(v)))
             .collect();
         let config_dir = ctx.config_dir;
+        let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
+            retain_previous: ctx.retain_previous,
+            // A package (ADR-0018) swaps this Collector's program — one file, or a whole tree.
+            install: Some(install),
+            archive_key: ctx.archive_key.clone(),
+            // The Collector states its version on `--version`, so even one without the
+            // opampextension (which never self-reports) shows its own version rather than none.
+            // The Runner asks at startup and again after every swap; an extension's self-report
+            // overwrites the probed value.
+            version_probe: Some(VersionProbe {
+                program: binary.clone(),
+                args: vec!["--version".to_string()],
+            }),
+                args: vec!["--version".to_string()],
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0010), which is also what the reference supervisor does.
             reload_signal: None,

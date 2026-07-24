@@ -7,7 +7,22 @@
 /build/
 /target/
 
+# Local runtime state (default paths of server.toml / supervisor.toml).
+#
+# Deliberately *not* anchored to the repository root: these are relative defaults, so they are
+# created under whatever directory the process runs in — and `cargo test` runs a crate's unit tests
+# with its package directory as the working directory, which puts `crates/client/client-state/` in
+# the tree. Anchored patterns left those untracked and waiting to be committed by accident.
+fleet-configs/
+client-state/
+# Package artifacts are programs — hundreds of megabytes each; they belong in a store, never in
+# the repository (ADR-0018).
+fleet-packages/
 
+# Environment files — never tracked, in any directory (they may hold secrets);
+# a secrets-free .env.example stays tracked
+.env*
+!.env.example
 
 # OS / editor
 .DS_Store

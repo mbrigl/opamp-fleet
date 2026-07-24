@@ -21,6 +21,12 @@ struct CommandSettings {
     /// Additional environment for the process.
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// Arguments that make the command print its version (e.g. `["--version"]`). When set, the
+    /// command is invoked once with exactly these arguments and the first Semantic Versioning
+    /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
+    /// version flag is its own convention — hence opt-in, unlike the Collector's.
+    #[serde(default)]
+    version_args: Option<Vec<String>>,
 }
 
 /// The keys this kind used to take and no longer does (ADR-0010), each with what answers it now.
@@ -69,7 +75,14 @@ impl Plugin for CommandPlugin {
         let settings: CommandSettings = raw
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
+        // Asked at startup and again after every package swap, so a Foreign Agent the Server
+        // updated describes the version it now runs rather than the one it replaced.
+        let version_probe = settings.version_args.clone().map(|args| VersionProbe {
+            program: command.clone(),
+            args,
+        });
         // What this Foreign Agent will actually be invoked with, after the placeholders were
         // expanded (ADR-0032). The spawn line names the program; the arguments are where a
         // placeholder that did not resolve — or a working directory that is not the one the
@@ -90,6 +103,11 @@ impl Plugin for CommandPlugin {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
+            retain_previous: ctx.retain_previous,
+            // A package (ADR-0018) swaps this command's program — one file, or a whole tree.
+            install: Some(install),
+            archive_key: ctx.archive_key.clone(),
+            version_probe,
             // Not this kind's to know (ADR-0010): an agent nobody wrote a wrapper for applies a
             // configuration by restarting, which is ADR-0010's generic behaviour.
             reload_signal: None,
@@ -123,6 +141,7 @@ mod tests {
         let table: toml::Table = toml::from_str(
             r#"
             args = ["--a"]
+            version_args = ["--version"]
             [env]
             K = "v"
             "#,
@@ -130,6 +149,7 @@ mod tests {
         .expect("table");
         let settings: CommandSettings = table.try_into().expect("settings");
         assert_eq!(settings.env.get("K").map(String::as_str), Some("v"));
+        assert_eq!(settings.version_args, Some(vec!["--version".to_string()]));
 
         let typo: toml::Table = toml::from_str("comand = \"/x\"").expect("table");
         assert!(typo.try_into::<CommandSettings>().is_err());

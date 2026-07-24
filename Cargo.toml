@@ -33,7 +33,10 @@ tracing-appender = "0.2"
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
+# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0023) — and,
+# on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0018).
 flate2 = "1"
+# Opening a `.7z` package artifact, encrypted or not (ADR-0018). Pure Rust; default features are
 # off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
 # this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0009 and ADR-0023
 # actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
@@ -45,13 +48,45 @@ sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256
 # Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust and no system library,
 # which is what ADR-0009 and ADR-0023 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
+tar = "0.4"
+# Encoding Basic credentials into their Authorization header value (ADR-0026).
+base64 = "0.22"
+# Constant-time credential comparison on the Server (ADR-0026).
+constant_time_eq = "0.4"
 # kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0010). Unix-only.
 libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0023).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# The Client's plain-HTTP(S) polling transport (ADR-0023); `json` serves the REST-API tests.
 # TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0023).
 # The provider is installed once at each binary's startup.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Ed25519 verification of downloaded package artifacts (ADR-0018) — the same ring already vendored
+# for TLS, used directly, so no new crypto backend enters the build.
+ring = "0.17"
+# The client-certificate CSR flow (ADR-0026): the Client produces the request, the Server signs it
+# as a local CA. Pinned to the `ring` backend — the provider ADR-0023 already installs, whose C is
+# already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
+# `x509-parser` is what reads a CSR back, and a certificate's validity for the renewal window.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+# The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
+# validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in
+# the tree as rcgen's own dependency, and preferable to hand-rolling calendar arithmetic.
+# Reading back the validity of the certificate the Client holds, which is what decides when to
+# renew (ADR-0026). rcgen parses X.509 only behind a private, test-only path, so this is the
+# public way in — and it is the very parser rcgen itself uses, already in the tree.
+x509-parser = "0.18"
+# The OTLP exporters' HTTP client trait. Both crates are already compiled into this binary through
+# `opentelemetry-otlp`; declaring them directly adds no supply chain, it only makes the trait
+# nameable so the exporters can be handed a client bound to this process's Tokio runtime — see
+# `client/src/telemetry.rs` for why that binding is necessary.
+opentelemetry-http = { version = "0.32", default-features = false, features = ["reqwest"] }
+async-trait = "0.1"
+
+# The built-in root store, for the one case the transports' own defaults cannot cover: a Client
+# presenting a client certificate (ADR-0026) to a Server with a publicly trusted one, which needs
+# a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
+webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 # The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0023): hyper defaults
@@ -60,6 +95,10 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 # `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
 # adds an entry to a manifest and no code to either binary.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+# Code-first OpenAPI for the REST API (ADR-0011): the document is derived from the registered
+# routes and schemas at compile time, so contract and behaviour cannot drift.
+utoipa = "5"
+utoipa-axum = "0.2"
 # Reads the repository in build.rs to compute the baked-in version (ADR-0017). Build-dependency
 # only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
 # build script only opens the local checkout.

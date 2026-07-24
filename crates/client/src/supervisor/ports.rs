@@ -24,6 +24,17 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
+    /// A package was downloaded and verified (content hash and signature; ADR-0018): swap its
+    /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
+    /// does — a binary that will not stay up is rolled back to the previous one. Answered with
+    /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
+    /// not its bytes, since a program is too big to carry through the core; `hash` is the package
+    /// hash the status refers to; `version` is what the Agent then reports it has.
+    ApplyPackage {
+        staged: PathBuf,
+        version: String,
+        hash: Vec<u8>,
+    },
     /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
     /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —
     /// the health events of the stop/spawn cycle are the visible outcome.
@@ -56,6 +67,12 @@ pub enum ProcessEvent {
     ConfigApplied {
         hash: Vec<u8>,
         result: Result<(), String>,
+    },
+    /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0018).
+    PackageApplied {
+        hash: Vec<u8>,
+        result: Result<String, String>,
     },
     /// Outcome of a [`ProcessCommand::Uninstall`] (ADR-0010), the adapter's last event. The
     /// Agent's goodbye carries no status, so the outcome is a log line — but an `Err` names what
@@ -90,11 +107,22 @@ pub struct SupervisorContext {
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
+    /// What an offered package replaces (ADR-0018) — resolved beside `program` and for
+    /// the same reason: a plugin that decided this for itself could disagree with the Agent's
+    /// declared consent.
+    pub install: crate::supervisor::process::InstallTarget,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0010). Zero acknowledges on start.
     pub apply_grace: Duration,
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0018),
+    /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
+    /// success.
+    pub retain_previous: Duration,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018); `None` when none is
+    /// configured. Client-wide, like the package verification key.
+    pub archive_key: Option<String>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.
@@ -187,3 +215,7 @@ pub trait Plugin {
 mod tests {
     use super::*;
     use crate::service::runtime::shutdown_channel;
+            install: crate::supervisor::process::InstallTarget::Binary(PathBuf::from(
+                "/opt/fluent-bit/bin/fluent-bit",
+            )),
+            retain_previous: Duration::from_secs(0),

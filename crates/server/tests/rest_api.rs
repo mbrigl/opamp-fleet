@@ -1,40 +1,208 @@
+//! The REST API v1 as the integration contract (ADR-0011): Configuration CRUD, loud rejection of
+//! invalid input, and the OpenAPI document any portal generates a client from.
+
+mod support;
+
+use support::spawn;
+
+fn url(addr: std::net::SocketAddr, path: &str) -> String {
+    format!("http://{addr}{path}")
+}
+
+#[tokio::test]
+async fn configurations_crud_round_trips() {
     let server = spawn().await;
     let client = reqwest::Client::new();
+
+    // Nothing yet.
+    let list: serde_json::Value = client
         .get(url(server.rest_addr, "/api/v1/configurations"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(list.as_array().expect("array").len(), 0);
+
+    // Create; the stored resource comes back, body normalized to a trailing newline.
+    let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
+        .json(&serde_json::json!({ "selector": { "os.type": "linux" }, "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status(), 200);
+    let stored: serde_json::Value = put.json().await.expect("json");
+    assert_eq!(stored["name"], "base");
+    assert_eq!(stored["selector"]["os.type"], "linux");
+    assert_eq!(stored["body"], "receivers: {}\n");
+    );
+
+    // Read back, singly and as the list.
+    let got: serde_json::Value = client
         .get(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got, stored);
+    let list: serde_json::Value = client
         .get(url(server.rest_addr, "/api/v1/configurations"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(list.as_array().expect("array").len(), 1);
+
+    // Delete; a second delete and a read find nothing.
+    let deleted = client
         .delete(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(deleted.status(), 204);
+    let again = client
         .delete(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("delete again");
+    assert_eq!(again.status(), 404);
+    let gone = client
         .get(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(gone.status(), 404);
+}
+
+/// ADR-0011: `role` is optional on the way in and absent on the way out when unset, so every
+/// stored Configuration and every generated client keeps working unchanged.
+#[tokio::test]
+async fn a_configuration_carries_an_optional_role() {
     let server = spawn().await;
     let client = reqwest::Client::new();
+
+    // Omitted: accepted, and absent from the response.
+    let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        stored.get("role").is_none(),
+        "an unset role stays out of the JSON: {stored}"
+    );
+
+    // Set: stored verbatim and returned.
+    let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/ruleset"))
+        .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "supplementary");
+
+    let got: serde_json::Value = client
         .get(url(server.rest_addr, "/api/v1/configurations/ruleset"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got["role"], "supplementary");
+
+    // A value this project has no word for is carried, not rejected — the vocabulary is
+    // Agent-type-specific and the Server never guesses at one.
+    let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/other"))
+        .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "some-agents-own-word");
+}
+
+#[tokio::test]
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status(), 200);
     let view = agent_view(&client, server.rest_addr, &uid).await;
+    assert!(
+            .is_empty(),
+    );
+
         .post(url(
             server.rest_addr,
             "/api/v1/configurations/fleet/rollout",
         ))
+        .send()
+        .await
+        .json()
+        .await
+        .expect("json");
     let view = agent_view(&client, server.rest_addr, &uid).await;
+
         .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
+        .send()
+        .await
+    assert_eq!(put.status(), 200);
     let view = agent_view(&client, server.rest_addr, &uid).await;
+    assert_eq!(
+    );
+
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/rollout"),
         ))
+        .send()
+        .await
+        .is_empty());
+
+    let missing = client
         .post(url(
             server.rest_addr,
             "/api/v1/configurations/missing/rollout",
         ))
+    assert_eq!(missing.status(), 404);
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/rollout"),
         ))
+        .send()
+        .await
+    assert_eq!(missing.status(), 404);
+}
+
+    let server = spawn().await;
+    let client = reqwest::Client::new();
         .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
         .post(url(
             server.rest_addr,
             "/api/v1/configurations/fleet/rollout",
@@ -44,68 +212,280 @@
             server.rest_addr,
             &format!("/api/v1/agents/{late}/rollout"),
         ))
+/// ADR-0011 over the wire: a Configuration stating an Agent type reaches only Agents reporting
+/// that `service.name`, whatever its Selector says.
+#[tokio::test]
+async fn a_typed_configuration_reaches_only_agents_of_its_type() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    for (name, service_name) in [
+        ("for-collectors", support::AGENT_TYPE),
+    ] {
+        let put = client
             .put(url(
                 server.rest_addr,
                 &format!("/api/v1/configurations/{name}"),
             ))
+            .json(&serde_json::json!({ "body": "x", "service_name": service_name }))
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(put.status(), 200);
+    }
+
+    assert_eq!(
         matched_configurations(&client, server.rest_addr, &uid).await,
+        ["for-collectors"],
+        "the type is a fit, not an aim: the other type's Configuration is no candidate"
+    );
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/rollout"),
         ))
+}
+
+#[tokio::test]
+async fn invalid_configurations_are_rejected_loudly() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    for (name, body) in [
+        ("Bad Name", "x: 1"), // grammar violation
+        ("con", "x: 1"),      // Windows reserved device name
+        ("ok-name", "   \n"), // empty body
+    ] {
+        let response = client
+            .put(url(
                 server.rest_addr,
+                &format!("/api/v1/configurations/{}", urlencoding(name)),
+            ))
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(response.status(), 400, "{name:?} must be rejected");
+        let error: serde_json::Value = response.json().await.expect("an error body");
+        assert!(error["error"].is_string());
+    }
+}
+
+fn urlencoding(s: &str) -> String {
+    s.replace(' ', "%20")
+}
+
+#[tokio::test]
+async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
     let response = reqwest::Client::new()
         .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get");
     assert_eq!(response.status(), 200);
     assert_eq!(
         response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    let document: serde_json::Value = response.json().await.expect("json");
+    let paths = document["paths"].as_object().expect("paths");
+    assert!(paths.contains_key("/api/v1/agents"));
+    assert!(paths.contains_key("/api/v1/configurations"));
+    assert!(paths.contains_key("/api/v1/configurations/{name}"));
+    // The resource schemas ride along, so a client can be generated without the source.
+    assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
+    assert!(document["components"]["schemas"]["ConfigurationSpec"].is_object());
+    assert!(document["components"]["schemas"]["AgentView"].is_object());
+}
+
+#[tokio::test]
+async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
     let server = spawn().await;
     let client = reqwest::Client::new();
+
+    // The docs page renders the OpenAPI document and pulls its renderer from this same origin.
+    let page = client
         .get(url(server.rest_addr, "/api/v1/docs"))
+        .send()
+        .await
+        .expect("get docs");
+    assert_eq!(page.status(), 200);
+    assert!(page
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html")));
+    let html = page.text().await.expect("html");
+    assert!(
+        html.contains("spec-url=\"/api/v1/openapi.json\""),
+        "points at the document"
+    );
+    assert!(
+        html.contains("/api/v1/docs/redoc.js"),
+        "loads the vendored renderer"
+    );
+
+    // The vendored bundle is served as JavaScript — no CDN, so the docs work offline.
+    let js = client
         .get(url(server.rest_addr, "/api/v1/docs/redoc.js"))
+        .send()
+        .await
+        .expect("get renderer");
+    assert_eq!(js.status(), 200);
+    assert!(js
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("javascript")));
+    assert!(
+        js.text().await.expect("js").len() > 100_000,
+        "the real bundle, not a stub"
+    );
+}
+
+#[tokio::test]
+async fn configurations_survive_a_server_restart() {
+    // The store is the persistence: a new AppState over the same directory restores everything.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = dir.path().join("fleet-configs");
+    {
+        let state = server::fleet::AppState::new(store_dir.clone()).expect("open");
+        state
+            .save_configuration(
+                "keeper",
+                server::configs::Revision {
+                    selector: std::collections::BTreeMap::new(),
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                    service_name: String::new(),
+                },
+            )
+            .expect("put");
+    }
+    let reopened = server::fleet::AppState::new(store_dir).expect("reopen");
+    let restored = reopened.configurations().list();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].name, "keeper");
+}
+    let server = spawn().await;
+    let client = reqwest::Client::new();
         .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
     assert_eq!(
         agents(&client, server.rest_addr).await.len(),
         1,
         "the row stays"
     );
+    let client = reqwest::Client::new();
     assert_eq!(agents(&client, server.rest_addr).await.len(), 1);
         .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
         agents(&client, server.rest_addr).await.is_empty(),
         agents(&client, server.rest_addr).await.len(),
     let server = spawn().await;
     let client = reqwest::Client::new();
+
             server.rest_addr,
+        .send()
+        .await
+        .expect("delete");
         .delete(url(server.rest_addr, "/api/v1/agents/not-a-uid"))
+        .send()
+        .await
+        .expect("delete");
+/// The body-less `POST` routes (`restart`, `rollback`) are CORS "simple requests": a cross-origin
+/// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
+/// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
+/// callers pass. The guard runs before the handler, so it decides regardless of the target.
+#[tokio::test]
+async fn a_cross_site_state_changing_post_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // A browser marks a cross-site request: refused with 403, whether or not the Agent exists.
+    let cross = client
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/restart"),
         ))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .expect("restart");
+    assert_eq!(cross.status(), 403, "a cross-site restart is refused");
+
+    // The same-site case from the bundled UI passes the guard — the request reaches the handler,
+    // which then answers 404 for an Agent that is not there. The point is it is *not* 403.
+    let same_origin = client
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/restart"),
         ))
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await
+        .expect("restart");
+    assert_ne!(
+        same_origin.status(),
+        403,
+        "a same-origin restart is not a CSRF"
+    );
+    assert_eq!(
+        same_origin.status(),
+        404,
+        "it reaches the handler: no such agent"
+    );
+
+    // A non-browser client (curl, a portal) sends no Sec-Fetch header and is unaffected.
+    let no_header = client
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/restart"),
         ))
+        .send()
+        .await
+        .expect("restart");
+    assert_ne!(
+        no_header.status(),
+        403,
+        "a client with no fetch metadata is not a CSRF"
+    );
+}
+
+    assert_eq!(response.status(), 200);
+    let server = spawn().await;
+    let client = reqwest::Client::new();
         .put(url(server.rest_addr, "/api/v1/configurations/canary"))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status(), 200);
         matched_configurations(&client, server.rest_addr, &uid)
         server.rest_addr,
         matched_configurations(&client, server.rest_addr, &uid).await,
         set_labels(&client, server.rest_addr, &uid, serde_json::json!({}))
     assert!(matched_configurations(&client, server.rest_addr, &uid)
+    let server = spawn().await;
+    let client = reqwest::Client::new();
         server.rest_addr,
             server.rest_addr,
     let agents = agents(&client, server.rest_addr).await;
+    let server = spawn().await;
+    let client = reqwest::Client::new();
     let view = &agents(&client, server.rest_addr).await[0];
     let view = &agents(&client, server.rest_addr).await[0];
     let view = &agents(&client, server.rest_addr).await[0];
+    let client = reqwest::Client::new();
             server.rest_addr,
         .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
     assert!(agents(&client, server.rest_addr).await.is_empty());
     let agents = agents(&client, server.rest_addr).await;

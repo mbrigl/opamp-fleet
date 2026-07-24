@@ -10,6 +10,7 @@ use opamp::frame;
 use opamp::proto::{AgentDisconnect, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent};
 use opamp::uid::InstanceUid;
 use server::fleet::SERVER_CAPABILITIES;
+use support::{compressed_report, distribute, distribute_with_role, full_report, spawn};
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -101,10 +102,17 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
 }
 
 /// ADR-0011: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
+/// Configuration without one leaves the field unset.
+#[tokio::test]
+async fn a_configuration_role_reaches_the_agent_verbatim() {
     let server = spawn().await;
     let mut socket = connect(server.addr).await;
     let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "collector", 1)).await;
+    recv(&mut socket).await;
+
     distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
+    recv(&mut socket).await;
     distribute_with_role(
         server.rest_addr,
         "ruleset",
@@ -113,14 +121,95 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
         "supplementary",
     )
     .await;
+
+    let map = recv(&mut socket)
+        .await
+        .remote_config
+        .expect("an offer")
+        .config
+        .expect("a config map");
+    assert_eq!(
+        map.config_map["ruleset"].role, "supplementary",
+        "the role travels unchanged"
+    );
+    assert_eq!(
+        map.config_map["base"].role, "",
+        "a Configuration without a role leaves the field unset"
+    );
+}
+
+#[tokio::test]
+async fn selectors_target_a_subset_and_compose_named_entries() {
+    // ADR-0011: every matching Configuration is one named entry of the offered config map; an
+    // Agent outside every Selector is left alone.
+    let server = spawn().await;
     let mut socket = connect(server.addr).await;
+    let left = InstanceUid::default();
+    let right = InstanceUid::default();
+    send(&mut socket, &full_report(&left, "left", 1)).await;
+    recv(&mut socket).await;
+    send(&mut socket, &full_report(&right, "right", 1)).await;
+    recv(&mut socket).await;
+
+    // A fleet-wide Configuration (empty Selector) reaches both Agents.
     distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
+    let mut offered = std::collections::HashMap::new();
+    for _ in 0..2 {
+        let pushed = recv(&mut socket).await;
+        let offer = pushed.remote_config.clone().expect("a pushed offer");
+        offered.insert(pushed.instance_uid.clone(), offer);
+    }
+    assert!(offered.contains_key(left.as_bytes().as_slice()));
+    assert!(offered.contains_key(right.as_bytes().as_slice()));
+
+    // Both acknowledge their offers (sequence numbers are per Agent).
+    for uid in [&left, &right] {
+        let offer = &offered[&uid.as_bytes().to_vec()];
+        let mut ack = compressed_report(uid, 2);
+        ack.remote_config_status = Some(RemoteConfigStatus {
+            last_remote_config_hash: offer.config_hash.clone(),
             status: RemoteConfigStatuses::Applied as i32,
             error_message: String::new(),
         });
+        send(&mut socket, &ack).await;
+        recv(&mut socket).await;
+    }
+
+    // A Configuration selecting `service.name = left` reaches only that Agent, composed with the
+    // fleet-wide one as two named entries.
+    distribute(
         server.rest_addr,
+        "left-only",
+        "exporters: {}\n",
+    )
+    .await;
     let pushed = recv(&mut socket).await;
+    assert_eq!(pushed.instance_uid, left.as_bytes());
+    let map = pushed
+        .remote_config
+        .expect("an offer for left")
+        .config
+        .expect("a config map");
+    let mut names: Vec<&str> = map.config_map.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["base", "left-only"]);
+
+    // The unmatched Agent hears nothing — it keeps running what it already runs (goal 9).
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+    assert!(nothing.is_err(), "no push toward the unmatched agent");
+
+    let views = server.state.snapshot();
+    let view = |name: &str| {
+        views
+            .iter()
+            .expect("a known agent")
+    };
+    assert_eq!(view("left").matched_configurations, ["base", "left-only"]);
+    assert_eq!(view("right").matched_configurations, ["base"]);
+    assert!(view("right").in_sync, "still running its composed set");
+    assert!(!view("left").in_sync, "owes the new composition");
+}
+
 #[tokio::test]
 async fn a_restart_is_pushed_to_a_connected_agent_as_its_own_frame() {
     let server = spawn().await;

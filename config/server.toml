@@ -1,12 +1,31 @@
 # OpAMP Fleet Server configuration (ADR-0025). Every setting is optional; the values shown are the
 # defaults. Start with: cargo run -p server -- --config config/server.toml
+#
+# HOW THIS FILE IS ORDERED, AND WHY IT MATTERS. Every bare key comes first; every [section] comes
+# after them. That is not tidiness — it is the only layout in which the commented examples below can
+# be switched on safely. A TOML section header captures every bare key that follows it until the
+# next header, so a `[telemetry_offer]` sitting above `packages_dir` would swallow it the moment
+# anyone uncommented it, and the Server would refuse to start with "unknown field `packages_dir`".
+# Add new settings accordingly: a bare key goes in the first half, a section in the second.
+
+# =============================================================================================
+# Settings
+# =============================================================================================
 
 # TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0023, superseding ADR-0025 on this point).
 #
 # The AGENT PLANE: the OpAMP endpoint (/v1/opamp) and the package download the offers point at.
 # Port 4320 is the protocol's default, and it is open to the network because that is where the
+# fleet is. The OPERATOR PLANE — the REST API (/api/v1/*), the API docs (/api/v1/docs), and the
+# UI (/) — is the [rest] section in the second half of this file.
 listen = "0.0.0.0:4320"
 
+# Where Configurations (ADR-0011) are persisted across Server restarts — one JSON file each,
+# holding the draft revision an operator edits and, once released, the published revision the
+# fleet is offered. SAVING NEVER DISTRIBUTES (ADR-0014): a Configuration reaches the Agents of
+# its type (ADR-0011) that its Selector matches only after
+# PUT /api/v1/configurations/{name}/publication — body {"published": true}.
+config_dir = "fleet-configs"
 
 # The largest OpAMP message accepted or sent, on either transport and in either direction. The
 # protocol requires the limit and recommends this default; a fleet of small status reports runs
@@ -14,10 +33,25 @@ listen = "0.0.0.0:4320"
 # closes the connection with 1009.
 max_message_size_bytes = 67108864
 
+#
+#
+#
+packages_dir = "fleet-packages"
+
+# The largest package artifact the REST API accepts on upload. A package is a program, not a
+# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
+# max_message_size_bytes above and applies to the package upload route alone.
+max_package_size_bytes = 1073741824
+
 # The absolute base URL advertised for downloads. Leave unset in the ordinary case: the offered
 # download_url is then a path, which the Client resolves against its own OpAMP endpoint — the
 # Agent plane, which is exactly where the download is served (ADR-0023). Set it only when
 # downloads must go through a different host, such as a mirror.
+# advertised_url = "https://fleet.example:4320"
+
+# =============================================================================================
+# Sections — everything below here is a [table]. Nothing but tables may follow.
+# =============================================================================================
 
 # Optional TLS (ADR-0023): with a certificate and key BOTH listeners serve HTTPS/WSS instead.
 # client_ca_file turns on mutual TLS (ADR-0026) and belongs to the Agent plane alone: every request
@@ -25,13 +59,109 @@ max_message_size_bytes = 67108864
 # verifies. Client authentication stays optional at the TLS layer, because the same listener serves
 # the package download, which a Client fetches presenting no certificate — so only the OpAMP route
 # requires one.
+#
+# EVERY CONFIGURED PROOF MUST SUCCEED. [auth] alone behaves as it always has; client_ca_file alone
+# makes the OpAMP endpoint certificate-only; both configured means BOTH are required of every
+# request, not either one. Turning mutual TLS on can therefore never widen admission — but it can
+# lock out a host that has no certificate yet, so let the fleet enrol first ([client_ca] below) and
+# set client_ca_file after.
 # [tls]
 # cert_file = "cert.pem"
 # key_file = "key.pem"
+# client_ca_file = "client-ca.pem"
+
+# Optional certificate authority for the CSR flow (ADR-0026). Present is what arms it: the Server
+# declares AcceptsConnectionSettingsRequest, and an Agent that has no certificate — or holds one two
+# thirds through its life — generates a key (which never leaves its host), sends a signing request,
+# and receives the certificate as an ordinary connection-settings offer.
+#
+# This is deliberately NOT the listener's own certificate and key: a CA private key sitting where
+# the server certificate lives means compromising the Server mints fleet members at will. Generate a
+# separate self-signed CA and point client_ca_file above at its certificate.
+#
+# Admission is the approval — a request that reached this Server already satisfied every proof the
+# endpoint requires. There is no approval queue, and no revocation: validity_days plus renewal is
+# what bounds a certificate, so keep it short rather than generous.
+# [client_ca]
+# cert_file = "client-ca.pem"
+# key_file = "client-ca-key.pem"
+# validity_days = 90
+
+# Optional authentication on the OpAMP endpoint (ADR-0026). When the section is present, every
+# OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching
+# any listed credential; anything else is answered 401. Both schemes may be configured at once;
+# several valid credentials allow overlapping rotation. Without [auth] the endpoint stays open.
+# REST API and UI are not guarded by this — that is [rest.auth] at the end of this file (ADR-0026).
+# [auth]
+# bearer_tokens = ["a-long-random-token"]
+# [auth.basic_users]
+# fleet = "a-strong-password"
+
+# Optional connection settings offered to the fleet (ADR-0027): every Agent declaring
+# AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and
+# switches only on success. Any subset of the keys works, but not an empty section. To rotate
+# credentials: add the new token to [auth] (old and new both accepted), point the offer at it,
+# restart the Server, and drop the old token once the fleet has migrated. Unless endpoint points
+# to another Server, the offered credential must be in the [auth] accepted set.
+# [connection_offer]
+# bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
+# heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
+# endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
+
+# WHERE THE FLEET SENDS ITS OWN TELEMETRY (ADR-0022). Each signal is independent, and each is
+# offered only to Agents that declare they can report it. The endpoints are full OTLP/HTTP URLs
+# WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing is
+# how telemetry disappears into a 404 nobody looks at.
+#
+# Five things worth knowing before you fill this in:
+#
+#  - The destinations are FLEET-WIDE. There is no Selector here as there is on Configurations
+#    (ADR-0011) and packages (ADR-0019): every Agent is offered the same three addresses. The only
+#    per-Agent variation is which of the three signals it gets, and that follows the capabilities
+#    the Agent itself declares.
+#  - A change here needs a SERVER RESTART. The offer is compiled once at startup; there is no
+#    reload, over SIGHUP or otherwise, and the REST API does not manage it.
+#  - The headers below apply to ALL THREE signals. There is one header map, not one per signal —
+#    which is the right shape when the three URLs are one collector, and the wrong one if you split
+#    them across backends that want different tokens.
+#  - Metrics arrive every 10 SECONDS per Agent, the interval the protocol recommends. Size the
+#    backend for it: that is six exports a minute per Agent — six hundred a minute across a hundred
+#    of them — each carrying process metrics for the Agent and for every process it supervises.
+#  - Offer only what you can receive. A signal you leave unset is simply not offered, and the Agent
+#    reports nothing for it — which costs less than a destination that answers 404 forever.
+#
+# Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
+# them leaves the file with a duplicated table header, which is an error rather than a merge.
+#
+# [telemetry_offer]
+# metrics_endpoint = "http://localhost:4318/v1/metrics"
+# traces_endpoint = "http://localhost:4318/v1/traces"
+# logs_endpoint = "http://localhost:4318/v1/logs"
+
+#
+# (3) Metrics only — the smallest useful shape: one signal, no header, nothing else offered.
 
 # THE OPERATOR PLANE (ADR-0023): the REST API, the API docs, and the bundled UI, on their own
+# listener. This port carries the authority to reconfigure and re-package the entire fleet, and
+# without [rest.auth] below it is open to whoever reaches it — hence loopback by default. Reach it
+# through an SSH tunnel, or publish it deliberately with listen = "0.0.0.0:4321".
 #
 # It must differ from the Agent plane's `listen` above; equal addresses are refused at startup,
 # by name, instead of surfacing later as "address already in use".
 [rest]
 listen = "127.0.0.1:4321"
+
+# Optional Basic authentication over the WHOLE Operator plane (ADR-0026): the REST API, the
+# OpenAPI document, the API docs, and the UI. Absent means open, as it has been. Every request
+# then needs `Authorization: Basic <base64(user:password)>`; anything else is answered 401 with a
+# challenge, which is what makes a browser ask for the password instead of showing a bare error —
+# so the UI needs no login page.
+#
+# Several users are how a credential is rotated, or one operator's is withdrawn on its own. The
+# operator tools carry it in the URL they are given: --server http://fleet-admin:secret@host:4321
+#
+# This is authentication, not authorization: everyone listed can do everything the plane offers.
+# Basic sends the password on every request, so pair it with [tls] — or a TLS-terminating proxy —
+# whenever this plane is not on loopback. The Server warns at startup if it is not.
+# [rest.auth.basic_users]
+# fleet-admin = "a-strong-password"

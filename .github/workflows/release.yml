@@ -101,6 +101,11 @@
           version='${{ steps.read.outputs.version }}'
           if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
             echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0017)"
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true }
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true }
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true }
           # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
         run: cargo build --release -p package-tools --bin opamp-package-sign --locked
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
@@ -108,6 +113,9 @@
     # A dry run builds and packs everything and stops here.
     if: needs.version.outputs.publish == 'true'
           (ADR-0020, ADR-0017) — the commit this build carries,
+          \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
+
+          done
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
 

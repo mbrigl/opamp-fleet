@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -19,20 +21,110 @@ use opamp::uid::InstanceUid;
 use prost::Message as _;
 use tracing::{debug, warn};
 
+use crate::config::AuthConfig;
+use crate::credentials::Credentials;
 use crate::fleet::{bad_request, AppState, Transport};
 
 /// The endpoint path the Baseline names as the default, and the protobuf media type it requires —
 /// both from the shared crate, because the Gateway serves the same endpoint (ADR-0025).
 pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
+/// The OpAMP endpoint's credential check (ADR-0026), precomputed from the `[auth]` section — Bearer
+/// and Basic alike. The comparison itself lives in [`crate::credentials`], shared with the Operator
+/// plane's own check (ADR-0026).
+pub struct OpampAuth(Credentials);
+
+impl OpampAuth {
+    pub fn from_config(auth: &AuthConfig) -> Self {
+        OpampAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
+    }
+}
+
+/// What a peer must prove to reach `/v1/opamp`. **Every configured mechanism must succeed**
+/// (ADR-0026): a credential when `[auth]` is set, a client certificate when `[tls] client_ca_file`
+/// is, both when both are. Nothing configured leaves the endpoint open, as it has always been.
+///
+/// The rule is deliberately not "either one". Header authorization is what the Baseline expects an
+/// Agent to carry and client certificates are what it adds "optionally also" on top — so stacking
+/// them is the protocol's own layering, and it is the only rule under which switching mutual TLS on
+/// cannot make a fleet admit anything it did not admit before.
+#[derive(Default)]
+pub struct Admission {
+    auth: Option<OpampAuth>,
+    /// Set while the listener has a client CA: the connection must have carried a certificate.
+    /// The certificate itself is already verified — rustls refuses one it cannot chain — so this
+    /// is a presence check, never a second verification.
+    require_client_certificate: bool,
+}
+
+impl Admission {
+    /// No proof required — the default deployment, and every test that is not about admission.
+    pub fn open() -> Self {
+        Admission::default()
+    }
+
+    pub fn new(auth: Option<OpampAuth>, require_client_certificate: bool) -> Self {
+        Admission {
+            auth,
+            require_client_certificate,
+        }
+    }
+
+    fn required(&self) -> bool {
+        self.auth.is_some() || self.require_client_certificate
+    }
+}
+
+pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     // The receive limit the Baseline requires of the Server on both transports; a request body
     // past it never reaches a handler, and axum answers it with the 413 the Baseline prescribes.
     let limit = state.max_message_size();
+    let mut router = Router::new()
         // One path, both transports — split exactly as the Baseline describes: a WebSocket
         // upgrade (a GET) starts the WebSocket transport, a POST carrying the protobuf
         // Content-Type is one plain-HTTP exchange.
         .route(OPAMP_PATH, get(upgrade).post(post_exchange))
         .layer(DefaultBodyLimit::max(limit))
+        .with_state(state);
+    if admission.required() {
+        // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
+        // WebSocket upgrade completes — answers 401 when a required proof is missing (ADR-0026,
+        // ADR-0026).
+        router = router.layer(middleware::from_fn_with_state(Arc::new(admission), admit));
+    }
+    router
+}
+
+async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: Next) -> Response {
+    // What this gate proves is *fleet membership*, not which Agent is speaking: the credential and
+    // the client certificate are fleet-wide, and `instance_uid` stays self-asserted behind them
+    // (ADR-0026). Admission is the trust boundary; there is no authorization between admitted Agents.
+    // Every configured proof, not the first that happens to pass.
+    if admission.require_client_certificate {
+        let presented = request
+            .extensions()
+            .get::<crate::tls::PeerCertificate>()
+            .is_some_and(crate::tls::PeerCertificate::present);
+        if !presented {
+            debug!("refused: the OpAMP endpoint requires a client certificate");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "the OpAMP endpoint requires a client certificate",
+            )
+                .into_response();
+        }
+    }
+    if let Some(auth) = &admission.auth {
+        if !auth.0.permits(request.headers()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
+                "the OpAMP endpoint requires authentication",
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 async fn upgrade(State(state): State<Arc<AppState>>, upgrade: WebSocketUpgrade) -> Response {
