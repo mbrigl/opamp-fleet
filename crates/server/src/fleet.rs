@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,11 @@ use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
     | ServerCapabilities::AcceptsEffectiveConfig as u64;
+
+/// Identifies one WebSocket connection for the duplicate detection the Baseline asks of the
+/// Server. Never a routing key — Agents are routed by `instance_uid` alone (ADR-0003); this only
+/// answers "is this identity already alive on *another* connection?".
+pub type ConnId = u64;
 
 /// Which transport a report arrived on. Recorded for the operator; it never keys any state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +63,10 @@ pub struct AgentRecord {
     pub restart_pending: bool,
     /// The Agent's available components — hash-only until the full map was demanded and arrived.
     pub available_components: Option<AvailableComponents>,
+    /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
+    /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
+    /// report from a *different* live connection is the duplicate the Baseline wants detected.
+    pub owner: Option<ConnId>,
 }
 
 /// Why a restart request was refused (`POST /api/v1/agents/{uid}/restart`).
@@ -84,6 +94,8 @@ pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
     configs: ConfigStore,
     push: watch::Sender<u64>,
+    /// Hands every WebSocket connection its identity for the duplicate detection.
+    next_conn: AtomicU64,
 }
 
 impl AppState {
@@ -102,7 +114,13 @@ impl AppState {
             fleet: Mutex::new(HashMap::new()),
             configs,
             push: watch::channel(0).0,
+            next_conn: AtomicU64::new(1),
         })
+    }
+
+    /// A fresh identity for one WebSocket connection.
+    pub fn connection_id(&self) -> ConnId {
+        self.next_conn.fetch_add(1, Ordering::Relaxed)
     }
 
     /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
@@ -167,7 +185,13 @@ impl AppState {
 
     /// The control loop for one report, shared by both transports (ADR-0007): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
-    pub fn process(&self, msg: AgentToServer, transport: Transport) -> Processed {
+    /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
+    pub fn process(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+    ) -> Processed {
         let Some(mut uid) = InstanceUid::from_wire(&msg.instance_uid) else {
             warn!(
                 len = msg.instance_uid.len(),
@@ -198,6 +222,26 @@ impl AppState {
             uid = new_uid;
         }
 
+        // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on
+        // *another* WebSocket connection — bad UID generators, cloned VMs — is rekeyed exactly
+        // as the Baseline prescribes: mint a fresh uid and answer with AgentIdentification,
+        // which the Client adopts. The newcomer starts a record of its own; the incumbent and
+        // its connection stay untouched. (Stateless plain-HTTP polling offers nothing to
+        // distinguish two pollers by, so detection is WebSocket-only.)
+        if let Some(this_conn) = conn {
+            let duplicate = fleet.get(&uid).is_some_and(|existing| {
+                existing.connected && existing.owner.is_some_and(|owner| owner != this_conn)
+            });
+            if duplicate {
+                let new_uid = InstanceUid::default();
+                warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
+                identification = Some(AgentIdentification {
+                    new_instance_uid: new_uid.as_bytes().to_vec(),
+                });
+                uid = new_uid;
+            }
+        }
+
         let known = fleet.contains_key(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
@@ -213,6 +257,7 @@ impl AppState {
                 last_seen_ms: now_ms(),
                 restart_pending: false,
                 available_components: None,
+                owner: conn,
             }
         });
 
@@ -228,6 +273,7 @@ impl AppState {
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
         record.connected = true;
+        record.owner = conn;
         record.last_seen_ms = now_ms();
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
@@ -261,6 +307,7 @@ impl AppState {
         if disconnected {
             info!(agent = %uid, "agent disconnected");
             record.connected = false;
+            record.owner = None;
         }
 
         // A hash without the map is an offer to fetch: demand the full component list from an
@@ -336,13 +383,18 @@ impl AppState {
         })
     }
 
-    /// Marks the Agents a closing WebSocket connection carried as no longer connected. State stays:
-    /// the fleet remembers what each Agent last reported.
-    pub fn mark_disconnected(&self, uids: &[InstanceUid]) {
+    /// Marks the Agents a closing WebSocket connection carried as no longer connected — but only
+    /// those the connection still *owns*: after a rekey (or a transport switch) another live
+    /// connection may legitimately carry an identity this one once saw, and a closing socket
+    /// must not take it down. State stays: the fleet remembers what each Agent last reported.
+    pub fn mark_disconnected(&self, uids: &[InstanceUid], conn: ConnId) {
         let mut fleet = self.fleet.lock().expect("fleet lock");
         for uid in uids {
             if let Some(record) = fleet.get_mut(uid) {
-                record.connected = false;
+                if record.owner == Some(conn) {
+                    record.connected = false;
+                    record.owner = None;
+                }
             }
         }
     }

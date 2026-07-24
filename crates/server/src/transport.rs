@@ -89,7 +89,8 @@ fn plain_http(state: &AppState, headers: &HeaderMap, body: Bytes) -> Response {
     };
 
     let reply = match AgentToServer::decode(raw.as_slice()) {
-        Ok(msg) => state.process(msg, Transport::Http).reply,
+        // Plain HTTP is stateless polling — there is no connection identity to pass.
+        Ok(msg) => state.process(msg, Transport::Http, None).reply,
         Err(e) => {
             warn!(error = %e, "undecodable report on the plain-HTTP transport");
             bad_request("the request body is not a valid AgentToServer message")
@@ -108,6 +109,8 @@ fn plain_http(state: &AppState, headers: &HeaderMap, body: Bytes) -> Response {
 async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut seen: Vec<InstanceUid> = Vec::new();
     let mut push = state.subscribe();
+    // This connection's identity — what the duplicate detection tells connections apart by.
+    let conn = state.connection_id();
 
     loop {
         tokio::select! {
@@ -117,7 +120,7 @@ async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     Message::Binary(data) => {
                         let reply = match frame::decode::<AgentToServer>(&data) {
                             Ok(msg) => {
-                                let outcome = state.process(msg, Transport::WebSocket);
+                                let outcome = state.process(msg, Transport::WebSocket, Some(conn));
                                 if let Some(uid) = outcome.uid {
                                     if outcome.disconnected {
                                         seen.retain(|s| s != &uid);
@@ -159,7 +162,7 @@ async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             .await
                             .is_err()
                         {
-                            state.mark_disconnected(&seen);
+                            state.mark_disconnected(&seen, conn);
                             return;
                         }
                     }
@@ -170,7 +173,7 @@ async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             .await
                             .is_err()
                         {
-                            state.mark_disconnected(&seen);
+                            state.mark_disconnected(&seen, conn);
                             return;
                         }
                     }
@@ -180,7 +183,7 @@ async fn serve_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     // The connection is gone; every Agent it carried is unreachable until it reports again.
-    state.mark_disconnected(&seen);
+    state.mark_disconnected(&seen, conn);
 }
 
 fn header_str(headers: &HeaderMap, name: header::HeaderName) -> &str {
