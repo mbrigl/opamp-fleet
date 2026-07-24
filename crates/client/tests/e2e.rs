@@ -93,6 +93,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "name = \"stub\"\n",
             "command = {stub:?}\n",
             "args = [\"--touch\", {stub_marker:?}]\n",
+            "version_args = [\"--version\"]\n",
             "[supervisor.attributes]\n",
             "role = \"edge\"\n",
         ),
@@ -169,6 +170,18 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     wait_until("both agents healthy", || {
         let snapshot = state.snapshot();
         snapshot.iter().all(|a| a.healthy).then_some(())
+    })
+    .await;
+
+    // The probed process version arrived for both: the collector plugin probes `--version` by
+    // itself, the command plugin because the block sets `version_args`. The stub prints its
+    // SemVer inside free text ("stub_agent version 9.9.9 (test build)").
+    wait_until("both agents report the probed version", || {
+        let snapshot = state.snapshot();
+        snapshot
+            .iter()
+            .all(|a| a.service_version == "9.9.9")
+            .then_some(())
     })
     .await;
 

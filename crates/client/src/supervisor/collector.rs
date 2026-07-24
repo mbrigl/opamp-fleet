@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{ProcessSpec, Runner};
+use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 #[derive(Debug, Deserialize)]
@@ -42,6 +42,14 @@ impl Plugin for CollectorPlugin {
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         let config_dir = ctx.config_dir;
         let (commands, command_rx) = mpsc::channel(16);
+        // The Collector states its version on `--version` — probe it once, so even a Collector
+        // without the opampextension (which never self-reports) shows its own version, not
+        // none. An extension's later self-report replaces the probed value.
+        tokio::spawn(probe_version(
+            settings.binary.clone(),
+            vec!["--version".to_string()],
+            ctx.events.clone(),
+        ));
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
