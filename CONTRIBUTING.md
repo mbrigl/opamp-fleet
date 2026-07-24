@@ -1,46 +1,39 @@
 # Contributing
 
-Thanks for your interest in contributing. This project is **specification- and ADR-driven**, and the
-same rules apply to humans and coding agents alike. For coding agents, the full instructions and
-agent-specific details live in [`AGENTS.md`](AGENTS.md).
+Thanks for your interest in contributing. This project is **specification- and ADR-driven**. The
+working rules in [`AGENTS.md`](AGENTS.md) are the single source of truth, and they govern coding
+agents and human contributors alike. This file carries no rules of its own: it points at them and
+adds only the contributor-facing procedure.
 
 ## Before you start
 
 Read, in this order:
 
-1. [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) — the constitution: problem, goals, and vocabulary.
-2. [`docs/adr/`](docs/adr/) — the Architecture Decision Records. **Accepted ADRs are binding.**
-3. [`AGENTS.md`](AGENTS.md) — the working rules (these govern coding agents, but the workflow is the
-   same for human contributors).
+1. [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md): the constitution, with problem, goals, and
+   success criteria, written in the vocabulary of [`docs/GLOSSARY.md`](docs/GLOSSARY.md).
+2. [`docs/adr/`](docs/adr/): the Architecture Decision Records. **Accepted ADRs are binding.**
+3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the system as it stands today, its parts,
+   their responsibilities, and how they fit together.
+4. [`AGENTS.md`](AGENTS.md): the working rules, with principles, the ADR process, the quality bar
+   (Definition of Done), and all conventions, including language and vocabulary.
 
 Authority runs **specification → accepted ADRs → individual change**.
 
 ## Workflow
 
-1. **Open an issue first** for anything non-trivial, so scope and intent can be agreed before work
-   starts.
-2. **Architecture-relevant decisions need an ADR.** Adding a dependency, designing a public
-   interface, choosing a protocol/data format or a persistence strategy — copy
-   [`docs/adr/template.md`](docs/adr/template.md), set status `proposed`, and wait for a maintainer
-   to accept it before implementing, and list the ADR in the index in
-   [`docs/adr/README.md`](docs/adr/README.md) as part of the same change. See that file for the full
-   process. Not every change needs an ADR — see the calibration rule in [`AGENTS.md`](AGENTS.md).
-3. **Keep changes small and reviewable.** Reference the relevant ADR(s) in commits and the pull
-   request (e.g. `Implements ADR-NNNN`).
-4. **Open a pull request** against `main`. Fill in the PR template and link the issue/ADR.
-
-## Conventions
-
-- **All artifacts in the repository are written in English** — code, comments, commit messages,
-  documentation, ADRs, and PRs. You may discuss in any language, but what lands in the repo is
-  English.
-- Use the **project vocabulary** from the specification consistently.
-- Build, test, and formatting commands: see the **Build, Test & Run** section in
-  [`README.md`](README.md).
-- **Documentation consistency is checked in CI** (ADR index integrity, relative links, and
-  §-section references into `AGENTS.md`) via
-  [`scripts/check-docs.sh`](scripts/check-docs.sh). Run it locally with `scripts/check-docs.sh`
-  before opening a pull request — it needs only bash and coreutils, already in the Dev Container.
+1. **Open an issue first** when scope or intent is not yet agreed
+   ([`AGENTS.md` §4](AGENTS.md#4-working-style)).
+2. **Follow [`AGENTS.md`](AGENTS.md)**: when a decision needs an ADR and how it is reviewed
+   ([§3](AGENTS.md#3-adr-rules)), when a change counts as done
+   ([§5](AGENTS.md#5-quality-bar--definition-of-done)), and the git and project rules
+   ([§6](AGENTS.md#6-project-rules)). Run [`scripts/check-all.sh`](scripts/check-all.sh) locally
+   before pushing ([§5](AGENTS.md#5-quality-bar--definition-of-done)). It runs the same checks CI
+   runs on every pull request, in the same order. With the repository's git hooks enabled (the Dev
+   Container does it; otherwise `git config core.hooksPath .githooks`) a push runs them for you
+   and stops while they are red. They need only bash and coreutils, already in the Dev Container.
+   Only the shell lint additionally needs [ShellCheck](https://www.shellcheck.net) and skips
+   itself where that is missing; CI runs it always.
+3. **Open a pull request** against `main`, fill in the PR template, and link the issue or ADR.
 
 ## License of contributions
 

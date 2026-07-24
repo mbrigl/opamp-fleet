@@ -1,4 +1,4 @@
-//! How a plane is served, and what bounds a connection before it is a request (ADR-0032).
+//! How a plane is served, and what bounds a connection before it is a request (ADR-0012).
 //!
 //! Everything else the Server enforces — the message size limits, Admission, `max_agents` — starts
 //! at a request. A peer that completes the TCP connection, sends `GET /v1/opamp HTTP/1.1` and then
@@ -12,8 +12,8 @@
 //! is worse than not configuring it: hyper panics. Both go together, and they go here.
 //!
 //! This is deliberately a bound on **connection setup**, not on a request. The Agent plane carries
-//! a long-lived WebSocket and streams package artifacts of arbitrary size (ADR-0015), and the
-//! Operator plane accepts a package upload with the body limit switched off (ADR-0008): a request
+//! a long-lived WebSocket and streams package artifacts of arbitrary size (ADR-0019), and the
+//! Operator plane accepts a package upload with the body limit switched off (ADR-0011): a request
 //! timeout would break exactly those three and leave the slow peer untouched.
 
 use std::net::TcpListener;
@@ -40,7 +40,7 @@ pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Bounded on purpose: an Agent's WebSocket is idle most of the time and would otherwise decide
 /// how long a restart takes. Whatever has not ended by then is cut, and the record flush that
-/// follows shutdown (ADR-0025) still runs.
+/// follows shutdown (ADR-0026) still runs.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 /// A plane's server on an already-bound listener, with its connection setup bounded.
