@@ -227,6 +227,7 @@ mod tests {
                 ProcessEvent::EffectiveConfig(_) => "effective",
                 ProcessEvent::AvailableComponents(_) => "components",
                 ProcessEvent::ConfigApplied { .. } => "applied",
+                ProcessEvent::PackageApplied { .. } => "package",
             });
         }
         assert_eq!(

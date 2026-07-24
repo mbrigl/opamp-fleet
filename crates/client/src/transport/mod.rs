@@ -6,6 +6,32 @@ pub mod ws;
 
 use std::time::Duration;
 
+use crate::config::ClientConfig;
+use crate::engine::Engine;
+
+/// Downloads, verifies, and applies any package the Engine has queued (ADR-0015). Each is handled
+/// in turn — download and verification are the transport's, the swap is the Supervisor's — and its
+/// outcome (`Installed`/`InstallFailed`) is reported back through the Engine. Returns whether any
+/// package was processed, so the caller flushes the owed status reports.
+pub async fn process_package_downloads(engine: &mut Engine, config: &ClientConfig) -> bool {
+    let downloads = engine.take_package_downloads();
+    if downloads.is_empty() {
+        return false;
+    }
+    for (index, package) in downloads {
+        match crate::packages::download_and_verify(&package, config).await {
+            Ok(staged) => {
+                engine.apply_package(index, staged, package.version, package.hash);
+            }
+            Err(e) => {
+                tracing::warn!(package = %package.name, error = %e, "package download or verification failed");
+                engine.package_download_failed(index, package.hash, e);
+            }
+        }
+    }
+    true
+}
+
 /// Why a transport run ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunOutcome {

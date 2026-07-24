@@ -13,8 +13,9 @@ use server::fleet::AppState;
 pub struct TestServer {
     pub addr: SocketAddr,
     pub state: Arc<AppState>,
-    // Held so the Configuration store's directory outlives the test.
-    _dir: tempfile::TempDir,
+    // Held so the store directories outlive the test. Public so a test binary that wires its own
+    // AppState (e.g. package delivery) can hand over the temp dir it kept alive.
+    pub _dir: tempfile::TempDir,
 }
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding

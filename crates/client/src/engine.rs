@@ -10,6 +10,7 @@ use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
 
@@ -31,6 +32,9 @@ pub struct Engine {
     /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
     /// pending offer — n Agents receiving the same offer verify and switch once.
     pending_connection_offer: Option<ConnectionSettingsOffers>,
+    /// Packages awaiting the transport's download and verification (ADR-0015), each tagged with
+    /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
+    pending_package_downloads: Vec<(usize, PackageDownload)>,
 }
 
 impl Engine {
@@ -62,6 +66,7 @@ impl Engine {
                 .collect(),
             events,
             pending_connection_offer: None,
+            pending_package_downloads: Vec::new(),
         }
     }
 
@@ -85,6 +90,53 @@ impl Engine {
     /// exactly once (ADR-0014).
     pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {
         self.pending_connection_offer.take()
+    }
+
+    /// The packages the transport must download and verify (ADR-0015), each with its Agent's
+    /// index — drained so each is dispatched once.
+    pub fn take_package_downloads(&mut self) -> Vec<(usize, PackageDownload)> {
+        std::mem::take(&mut self.pending_package_downloads)
+    }
+
+    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0015).
+    /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
+    /// accepting commands, fails the install (reported, not silent).
+    pub fn apply_package(&mut self, index: usize, staged: Vec<u8>, version: String, hash: Vec<u8>) {
+        let Some(agent) = self.agents.get_mut(index) else {
+            return;
+        };
+        match &agent.commands {
+            Some(commands) => {
+                if let Err(e) = commands.try_send(ProcessCommand::ApplyPackage {
+                    staged,
+                    version,
+                    hash: hash.clone(),
+                }) {
+                    warn!(error = %e, "cannot hand the package to the supervisor");
+                    agent.state.package_applied(
+                        hash,
+                        Err("the supervisor is not accepting commands".to_string()),
+                    );
+                    agent.owes_report = true;
+                }
+            }
+            None => {
+                agent.state.package_applied(
+                    hash,
+                    Err("this agent has no process to install a package into".to_string()),
+                );
+                agent.owes_report = true;
+            }
+        }
+    }
+
+    /// A package download or verification failed (ADR-0015): the owning Agent reports
+    /// `InstallFailed` — a rejected package is a report, not a silence.
+    pub fn package_download_failed(&mut self, index: usize, hash: Vec<u8>, error: String) {
+        if let Some(agent) = self.agents.get_mut(index) {
+            agent.state.package_applied(hash, Err(error));
+            agent.owes_report = true;
+        }
     }
 
     /// Closes a verified offer's lifecycle on every Agent: `APPLIED` (the transport switches
@@ -152,10 +204,11 @@ impl Engine {
             return Handled::default();
         };
         // n is the number of local Supervisors — small; a linear scan beats a map to maintain.
-        let Some(agent) = self.agents.iter_mut().find(|a| a.state.uid() == uid) else {
+        let Some(index) = self.agents.iter().position(|a| a.state.uid() == uid) else {
             warn!(agent = %uid, "dropping a reply for an unknown agent");
             return Handled::default();
         };
+        let agent = &mut self.agents[index];
         let mut handled = agent.state.handle(reply);
         if handled.send_report {
             agent.owes_report = true;
@@ -164,6 +217,11 @@ impl Engine {
         // whichever Agent's reply carried it last wins — they are all the same offer.
         if let Some(offer) = handled.connection_offer.take() {
             self.pending_connection_offer = Some(offer);
+        }
+        // A package offer is per Agent (each Supervisor has its own binary): queue it with the
+        // owning Agent's index so the transport can route the verified artifact back.
+        if let Some(download) = handled.package_download.take() {
+            self.pending_package_downloads.push((index, download));
         }
         // A stored configuration awaiting application goes to the process adapter; its
         // ConfigApplied event closes the APPLYING → APPLIED/FAILED lifecycle.
@@ -175,7 +233,9 @@ impl Engine {
                         agent.state.config_applied(
                             match e.into_inner() {
                                 ProcessCommand::ApplyConfig { config } => config.config_hash,
-                                ProcessCommand::Restart | ProcessCommand::Shutdown => Vec::new(),
+                                ProcessCommand::ApplyPackage { .. }
+                                | ProcessCommand::Restart
+                                | ProcessCommand::Shutdown => Vec::new(),
                             },
                             Err("the supervisor is not accepting commands".to_string()),
                         );
@@ -240,6 +300,9 @@ impl Engine {
             }
             ProcessEvent::ConfigApplied { hash, result } => {
                 agent.state.config_applied(hash, result);
+            }
+            ProcessEvent::PackageApplied { hash, result } => {
+                agent.state.package_applied(hash, result);
             }
         }
         agent.owes_report = true;

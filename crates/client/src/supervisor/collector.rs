@@ -54,6 +54,8 @@ impl Plugin for CollectorPlugin {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
+            // A package (ADR-0015) swaps this Collector binary.
+            binary: Some(settings.binary.clone()),
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || {

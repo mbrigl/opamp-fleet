@@ -11,14 +11,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
     AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
-    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
-    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
-    ServerToAgent, ServerToAgentFlags,
+    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageStatus,
+    PackageStatusEnum, PackageStatuses, RemoteConfigStatus, RemoteConfigStatuses,
+    ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
 
-use crate::storage::Storage;
+use crate::packages::PackageDownload;
+use crate::storage::{InstalledPackage, Storage};
 
 /// The base Capability Set every Agent of this Client declares (see docs/CONFORMANCE.md).
 /// Individual Agents declare more via [`AgentState::declare_capability`] — e.g. heartbeats when
@@ -43,6 +44,9 @@ pub struct Handled {
     /// machine has already acknowledged `APPLYING`; the transport owns the verification, the
     /// switch, and reporting the outcome back through the [`Engine`](crate::engine).
     pub connection_offer: Option<ConnectionSettingsOffers>,
+    /// A package to download, verify, and hand to the Supervisor (ADR-0015). The state machine
+    /// has acknowledged `Installing`; the transport owns the download and verification.
+    pub package_download: Option<PackageDownload>,
 }
 
 pub struct AgentState {
@@ -88,6 +92,28 @@ pub struct AgentState {
     /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
     connection_settings_status: Option<ConnectionSettingsStatus>,
     send_settings_status: bool,
+    /// The package this Agent's Managed Process is updated from (ADR-0015): the name of a
+    /// Server-offered package. `None` means the Agent takes no package offers (and declares
+    /// neither package capability).
+    package_name: Option<String>,
+    /// The package currently installed, persisted across restarts.
+    installed_package: Option<InstalledPackage>,
+    /// The package hash currently downloading/installing, so a repeated offer of the same hash is
+    /// not re-entered while it is in flight.
+    installing: Option<PackageDownload>,
+    /// The `all_packages_hash` last offered, echoed as `server_provided_all_packages_hash` once
+    /// the Agent's package reaches a terminal state — which is what stops the Server re-offering.
+    offered_all_packages_hash: Vec<u8>,
+    /// What the Agent reports as `server_provided_all_packages_hash`: the offered aggregate once
+    /// terminal, empty (or the previous value) while an install is in flight.
+    echoed_all_packages_hash: Vec<u8>,
+    /// The version and hash the Server last offered for this Agent's package — reported as
+    /// `server_offered_version`/`server_offered_hash` (the Baseline requires them while
+    /// installing or after a failure).
+    server_offered: Option<(String, Vec<u8>)>,
+    /// The last install failure for this Agent's package, reported alongside the status.
+    package_error: String,
+    send_package_status: bool,
     /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
@@ -128,8 +154,26 @@ impl AgentState {
             send_components_full: false,
             connection_settings_status: None,
             send_settings_status: false,
+            package_name: None,
+            installed_package: None,
+            installing: None,
+            offered_all_packages_hash: Vec::new(),
+            echoed_all_packages_hash: Vec::new(),
+            server_offered: None,
+            package_error: String::new(),
+            send_package_status: false,
             configured_attributes: Vec::new(),
         })
+    }
+
+    /// Opts this Agent into package delivery for the named package (ADR-0015): declares
+    /// `AcceptsPackages` and `ReportsPackageStatuses`, and restores what it last installed so a
+    /// restarted Client reports the version it runs and is not re-offered it.
+    pub fn accept_package(&mut self, package_name: String) {
+        self.package_name = Some(package_name);
+        self.installed_package = self.storage.load_package();
+        self.declare_capability(AgentCapabilities::AcceptsPackages);
+        self.declare_capability(AgentCapabilities::ReportsPackageStatuses);
     }
 
     /// Restores the outcome of a previously applied connection-settings offer (ADR-0014): the
@@ -285,6 +329,9 @@ impl AgentState {
         if self.send_full || self.send_settings_status {
             msg.connection_settings_status = self.connection_settings_status.clone();
         }
+        if self.package_name.is_some() && (self.send_full || self.send_package_status) {
+            msg.package_statuses = Some(self.package_statuses());
+        }
         // Available components ride the Baseline's two-step shape: the hash in every full
         // snapshot, the full map only when the Server demanded it via ReportAvailableComponents.
         if let Some(components) = &self.available_components {
@@ -302,7 +349,59 @@ impl AgentState {
         self.send_health = false;
         self.send_components_full = false;
         self.send_settings_status = false;
+        self.send_package_status = false;
         msg
+    }
+
+    /// This Agent's package status as one `PackageStatuses`: its single package's state, plus the
+    /// `server_provided_all_packages_hash` the Server compares to gate re-offering.
+    fn package_statuses(&self) -> PackageStatuses {
+        let Some(name) = &self.package_name else {
+            return PackageStatuses::default();
+        };
+        // `agent_has_*` is what the Agent actually runs — the last successful install, if any.
+        let (has_version, has_hash) = self
+            .installed_package
+            .as_ref()
+            .map(|p| {
+                (
+                    p.version.clone(),
+                    hex::decode(&p.hash_hex).unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        let status = if self.installing.is_some() {
+            // A download/install is in flight.
+            PackageStatusEnum::Installing
+        } else if !self.package_error.is_empty() {
+            // The last attempt failed — a refusal is a report, not a silence.
+            PackageStatusEnum::InstallFailed
+        } else if self.installed_package.is_some() {
+            PackageStatusEnum::Installed
+        } else {
+            PackageStatusEnum::InstallPending
+        };
+        // While installing, `agent_has_version` is still the old one (we have not switched yet).
+        let (version, hash) = (has_version, has_hash);
+        let (offered_version, offered_hash) = self
+            .server_offered
+            .clone()
+            .unwrap_or_else(|| (String::new(), Vec::new()));
+        let package = PackageStatus {
+            name: name.clone(),
+            agent_has_version: version,
+            agent_has_hash: hash,
+            server_offered_version: offered_version,
+            server_offered_hash: offered_hash,
+            status: status as i32,
+            error_message: self.package_error.clone(),
+            ..Default::default()
+        };
+        PackageStatuses {
+            packages: [(name.clone(), package)].into(),
+            server_provided_all_packages_hash: self.echoed_all_packages_hash.clone(),
+            error_message: String::new(),
+        }
     }
 
     /// The final message of a connection: the Baseline requires `agent_disconnect` in it.
@@ -407,7 +506,98 @@ impl AgentState {
             }
         }
 
+        // A package offer (ADR-0015): act only on this Agent's named package. Download and
+        // verification are the transport's; the state machine acknowledges Installing and hands
+        // over the coordinates.
+        if let Some(available) = reply.packages_available.as_ref() {
+            self.handle_package_offer(available, &mut handled);
+        }
+
         handled
+    }
+
+    /// Reacts to a `PackagesAvailable` offer for this Agent's one named package.
+    fn handle_package_offer(
+        &mut self,
+        offer: &opamp::proto::PackagesAvailable,
+        handled: &mut Handled,
+    ) {
+        let Some(name) = self.package_name.clone() else {
+            return;
+        };
+        self.offered_all_packages_hash = offer.all_packages_hash.clone();
+        let Some(available) = offer.packages.get(&name) else {
+            // Our package is not in this offer — nothing for us to install; echo the aggregate so
+            // the Server stops offering (its other packages are not our concern).
+            self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+            self.send_package_status = true;
+            return;
+        };
+        self.server_offered = Some((available.version.clone(), available.hash.clone()));
+        let installed_hash = self
+            .installed_package
+            .as_ref()
+            .map(|p| hex::decode(&p.hash_hex).unwrap_or_default());
+        if installed_hash.as_deref() == Some(available.hash.as_slice()) {
+            // Already running this package: in sync — echo the aggregate to end the offer.
+            self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+            self.send_package_status = true;
+            return;
+        }
+        let in_flight = self
+            .installing
+            .as_ref()
+            .is_some_and(|d| d.hash == available.hash);
+        if in_flight {
+            return; // Already downloading/installing this exact package.
+        }
+        let Some(file) = &available.file else {
+            warn!(package = %name, "package offer carries no downloadable file; ignoring");
+            return;
+        };
+        let download = PackageDownload {
+            name: name.clone(),
+            version: available.version.clone(),
+            hash: available.hash.clone(),
+            download_url: file.download_url.clone(),
+            content_hash: file.content_hash.clone(),
+            signature: file.signature.clone(),
+        };
+        info!(package = %name, version = %available.version, "package offered; installing");
+        self.installing = Some(download.clone());
+        self.package_error.clear();
+        self.send_package_status = true;
+        handled.send_report = true;
+        handled.package_download = Some(download);
+    }
+
+    /// Closes a package's lifecycle the Supervisor applied (ADR-0015): `Ok(version)` records it
+    /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
+    /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
+    /// refusal is a report, not a loop.
+    pub fn package_applied(&mut self, hash: Vec<u8>, result: Result<String, String>) {
+        self.installing = None;
+        match result {
+            Ok(version) => {
+                let installed = InstalledPackage {
+                    name: self.package_name.clone().unwrap_or_default(),
+                    version: version.clone(),
+                    hash_hex: hex::encode(&hash),
+                };
+                if let Err(e) = self.storage.store_package(&installed) {
+                    warn!(error = %e, "cannot persist the installed package record");
+                }
+                info!(version = %version, "package installed");
+                self.installed_package = Some(installed);
+                self.package_error.clear();
+            }
+            Err(error) => {
+                error!(error = %error, "package installation failed");
+                self.package_error = error;
+            }
+        }
+        self.echoed_all_packages_hash = self.offered_all_packages_hash.clone();
+        self.send_package_status = true;
     }
 
     /// Takes an offered configuration in: store it, then either acknowledge it directly (the
@@ -776,6 +966,124 @@ mod tests {
         );
         this.handle(&command_with_config);
         assert!(!this.take_pending_restart());
+    }
+
+    #[test]
+    fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
+        use opamp::proto::{
+            DownloadableFile, PackageAvailable, PackageStatusEnum, PackagesAvailable,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        agent.accept_package("otelcol".to_string());
+        let _ = agent.next_report();
+
+        // The two package capabilities are declared once a package is accepted.
+        let caps = agent.next_report().capabilities;
+        assert_ne!(caps & AgentCapabilities::AcceptsPackages as u64, 0);
+        assert_ne!(caps & AgentCapabilities::ReportsPackageStatuses as u64, 0);
+
+        let offer = PackagesAvailable {
+            packages: [(
+                "otelcol".to_string(),
+                PackageAvailable {
+                    version: "2.0.0".to_string(),
+                    file: Some(DownloadableFile {
+                        download_url: "/api/v1/packages/otelcol/file".to_string(),
+                        content_hash: b"chash".to_vec(),
+                        ..Default::default()
+                    }),
+                    hash: b"pkg-hash".to_vec(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            all_packages_hash: b"agg-1".to_vec(),
+        };
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer.clone()),
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        let download = handled.package_download.expect("a download");
+        assert_eq!(download.name, "otelcol");
+        assert_eq!(download.version, "2.0.0");
+        assert_eq!(download.content_hash, b"chash");
+
+        // The next report acknowledges Installing.
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(
+            statuses.packages["otelcol"].status,
+            PackageStatusEnum::Installing as i32
+        );
+
+        // A repeat of the same offer while in flight is not re-entered.
+        let again = agent.handle(&ServerToAgent {
+            packages_available: Some(offer),
+            ..Default::default()
+        });
+        assert!(again.package_download.is_none(), "no re-download in flight");
+
+        // The Supervisor installed it: Installed, at the offered version, aggregate echoed.
+        agent.package_applied(b"pkg-hash".to_vec(), Ok("2.0.0".to_string()));
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::Installed as i32);
+        assert_eq!(status.agent_has_version, "2.0.0");
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-1");
+
+        // A re-offer of the same package is now recognised as already installed — no re-download.
+        let settled = agent.handle(&ServerToAgent {
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        version: "2.0.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "/x".to_string(),
+                            content_hash: b"chash".to_vec(),
+                            ..Default::default()
+                        }),
+                        hash: b"pkg-hash".to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg-1".to_vec(),
+            }),
+            ..Default::default()
+        });
+        assert!(settled.package_download.is_none(), "already installed");
+    }
+
+    #[test]
+    fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        agent.accept_package("otelcol".to_string());
+        agent.offered_all_packages_hash = b"agg-2".to_vec();
+        agent.server_offered = Some(("9.9.9".to_string(), b"bad".to_vec()));
+        agent.installing = Some(crate::packages::PackageDownload {
+            name: "otelcol".to_string(),
+            version: "9.9.9".to_string(),
+            hash: b"bad".to_vec(),
+            download_url: String::new(),
+            content_hash: Vec::new(),
+            signature: Vec::new(),
+        });
+
+        agent.package_applied(b"bad".to_vec(), Err("would not stay up".to_string()));
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(
+            status.status,
+            opamp::proto::PackageStatusEnum::InstallFailed as i32
+        );
+        assert_eq!(status.error_message, "would not stay up");
+        // A failure is a report, not a loop: the aggregate is echoed so the Server stops re-offering.
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-2");
     }
 
     #[test]

@@ -109,6 +109,8 @@ pub async fn run(
                     }
                 }
             }
+            // A package offer (ADR-0015): download and verify; the outcome rides the owed reports.
+            crate::transport::process_package_downloads(engine, config).await;
             reports = engine.owed_reports();
             if reports.is_empty() {
                 break;

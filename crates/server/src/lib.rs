@@ -7,6 +7,7 @@ pub mod api;
 pub mod config;
 pub mod configs;
 pub mod fleet;
+pub mod packages;
 pub mod transport;
 
 use std::sync::Arc;

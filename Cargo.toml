@@ -45,6 +45,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0007).
 # The provider is installed once at each binary's startup.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Ed25519 verification of downloaded package artifacts (ADR-0015) — the same ring already vendored
+# for TLS, used directly, so no new crypto backend enters the build.
+ring = "0.17"
 rustls-pemfile = "2"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }

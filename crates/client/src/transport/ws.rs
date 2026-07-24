@@ -197,6 +197,14 @@ async fn serve(
                                 }
                             }
                         }
+                        // A package offer (ADR-0015): download and verify; the Installed/Failed
+                        // status flows back through the process events, but a synchronous
+                        // download failure is reported now.
+                        if crate::transport::process_package_downloads(engine, config).await
+                            && send_all(&mut socket, engine.owed_reports()).await.is_err()
+                        {
+                            return Served::ConnectionLost;
+                        }
                     }
                     Message::Close(_) => return Served::ConnectionLost,
                     // tungstenite answers pings on the next write; text frames are not OpAMP.
