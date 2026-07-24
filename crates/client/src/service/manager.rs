@@ -1,8 +1,8 @@
-//! Cross-platform service lifecycle over the `service-manager` crate (ADR-0010).
+//! Cross-platform service lifecycle over the `service-manager` crate (ADR-0028).
 //!
 //! `service-manager` targets the platform's native manager (systemd, launchd, Windows SCM) behind
 //! one API. This module wraps it in the project's vocabulary. There is **one service per build**
-//! (ADR-0010): it is named after the product, takes no suffix, and nothing has to be looked up to
+//! (ADR-0028): it is named after the product, takes no suffix, and nothing has to be looked up to
 //! address it. The installed program is the layout's `current` pointer, so a self-update is a
 //! pointer switch — never a re-registration.
 
@@ -20,7 +20,7 @@ use service_manager::{
 use super::{ServiceControl, ServiceLevel, ServiceState};
 use crate::product::{PRODUCT_DISPLAY_NAME, PRODUCT_NAME};
 
-/// Restart after a failure, never after a clean stop (ADR-0010) — with a delay so a Client that
+/// Restart after a failure, never after a clean stop (ADR-0028) — with a delay so a Client that
 /// fails at startup does not spin, and no retry limit so a host recovers however long it takes.
 const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
     delay_secs: Some(RESTART_DELAY_SECS),
@@ -30,11 +30,11 @@ const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
 
 /// Read by [`windows_config`](super::windows_config) so both platforms wait the same before a
 /// restart — and by the service smoke test, which has to outwait it before it may conclude that a
-/// killed service is not coming back (ADR-0005 widens visibility by need).
+/// killed service is not coming back (ADR-0025 widens visibility by need).
 pub const RESTART_DELAY_SECS: u32 = 5;
 
-/// The name the service is registered under — the same on every platform (ADR-0010 clause 11), and the
-/// **product's** name rather than the program's (ADR-0010 clause 11).
+/// The name the service is registered under — the same on every platform (ADR-0028), and the
+/// **product's** name rather than the program's (ADR-0028 clause 3).
 ///
 /// There is no suffix and nothing to look up: one build installs one service, and a second
 /// installation is a second build with its own `PRODUCT_NAME`. The name that identifies an
@@ -46,7 +46,7 @@ pub fn service_name() -> &'static str {
     PRODUCT_NAME
 }
 
-/// The name a human reads where the platform has somewhere to put one (ADR-0010 clause 11): the Windows
+/// The name a human reads where the platform has somewhere to put one (ADR-0028): the Windows
 /// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
 /// label — neither has a second name to give.
 #[must_use]
@@ -60,12 +60,12 @@ pub fn display_name() -> &'static str {
 ///
 /// This column answers "what is this?", so it says what the program does rather than repeating the
 /// display name beside it. Windows is the only platform with somewhere to put it — systemd shows
-/// the unit name as its `Description` and a launchd job has no such field at all (ADR-0010 clause 11).
+/// the unit name as its `Description` and a launchd job has no such field at all (ADR-0028).
 pub const WINDOWS_DESCRIPTION: &str =
     "Places this machine under OpAMP management: connects to a Server, supervises the Agents \
      configured for this host, and updates them and itself from packages the Server offers.";
 
-/// The service label, built so that **every backend renders it identically** (ADR-0010 clause 11).
+/// The service label, built so that **every backend renders it identically** (ADR-0028).
 ///
 /// `service-manager` renders a label through two functions that do not agree — `{organization}-`
 /// `{application}` for systemd, `{qualifier}.{organization}.{application}` for launchd and the
@@ -99,13 +99,13 @@ pub struct InstallSpec {
     pub level: ServiceLevel,
     /// The program to run: the layout's `current` pointer, never a version directory directly.
     pub program: PathBuf,
-    /// Absolute path of the TOML configuration file (ADR-0008) the unit carries. The unit holds
+    /// Absolute path of the TOML configuration file (ADR-0025) the unit carries. The unit holds
     /// the *path*, never the configuration itself — one source of truth.
     pub config_path: PathBuf,
     /// Absolute state directory baked into the unit (a service's working directory is `/` or
     /// `System32`; relative paths would be meaningless).
     pub state_dir: PathBuf,
-    /// The account the service runs as instead of root/`LocalSystem` (ADR-0010 clause 18) — already
+    /// The account the service runs as instead of root/`LocalSystem` (ADR-0028) — already
     /// resolved by [`run_as`](super::run_as), so what arrives here exists and needs no password.
     pub run_as: Option<String>,
 }
@@ -114,7 +114,7 @@ pub struct InstallSpec {
 /// marker is what routes into the Windows SCM dispatcher; it is ignored on Unix.
 ///
 /// Both paths are absolute and both are baked in, which is what makes an upgrade a re-registration
-/// rather than a migration (ADR-0010 clause 14): only `ExecStart` changes.
+/// rather than a migration (ADR-0028 clause 10): only `ExecStart` changes.
 fn service_args(spec: &InstallSpec) -> Vec<OsString> {
     vec![
         OsString::from("run"),
@@ -127,7 +127,7 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
 }
 
 /// Register the service running `spec.program`, **including** the failure recovery
-/// that makes ADR-0010's restart-on-failure real on every platform. On Windows that is a second
+/// that makes ADR-0028's restart-on-failure real on every platform. On Windows that is a second
 /// step against the SCM, because `service-manager` silently drops the policy there; on systemd and
 /// launchd the manager has already written it.
 ///
@@ -137,7 +137,7 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
 pub fn install(spec: &InstallSpec) -> Result<(), String> {
     install_service(spec)?;
     // What `service-manager` does not do on Windows, done here (see `windows_config`) — since
-    // ADR-0010 clause 18 that includes the logon account, which its `sc.exe` backend ignores.
+    // ADR-0028 that includes the logon account, which its `sc.exe` backend ignores.
     super::windows_config::configure(
         service_name(),
         display_name(),
@@ -153,11 +153,11 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
             program: spec.program.clone(),
             args: service_args(spec),
             contents: None,
-            // systemd `User=` / launchd `UserName` (ADR-0010 clause 18). The Windows backend ignores this
+            // systemd `User=` / launchd `UserName` (ADR-0028). The Windows backend ignores this
             // field, which is why `install` sets the logon account through `windows_config`.
             username: spec.run_as.clone(),
             working_directory: None,
-            // The Client is file-configured (ADR-0008): the unit carries the config path in the
+            // The Client is file-configured (ADR-0025): the unit carries the config path in the
             // arguments above, never settings as environment variables.
             environment: None,
             autostart: true,
@@ -223,7 +223,7 @@ impl ServiceControl for NativeService {
 }
 
 /// The default **data** root for a scope: `<base>/<PRODUCT_NAME>`, where `supervisor.toml` and the
-/// state directory live (ADR-0010 clause 8).
+/// state directory live (ADR-0028 clause 7).
 ///
 /// One level named after the product, and no level below it. What used to be
 /// `<base>/opamp-fleet/client/<instance>` asserted `client` where the file says `supervisor` and
@@ -240,8 +240,8 @@ pub fn default_root(level: ServiceLevel) -> Result<PathBuf, String> {
 /// The default root of the executable layout — `versions/` and the `current` pointer — for a
 /// scope.
 ///
-/// **Linux at system scope is the only place this differs from the data root** (ADR-0010 clause 9).
-/// A binary staged under `/var/lib` carries the SELinux type `var_lib_t`,
+/// **Linux at system scope is the only place this differs from the data root** (ADR-0028 clause 8,
+/// carrying ADR-0028). A binary staged under `/var/lib` carries the SELinux type `var_lib_t`,
 /// which systemd may never execute: the service would register cleanly and then die at its first
 /// start with `status=203/EXEC` on every enforcing host (Fedora, RHEL, SUSE 16). The layout
 /// therefore lives under `/opt`, whose `usr_t` label is an entrypoint type systemd runs
@@ -250,7 +250,7 @@ pub fn default_root(level: ServiceLevel) -> Result<PathBuf, String> {
 /// Everywhere else — macOS, Windows, and every user scope — layout and data share
 /// [`default_root`]. Windows does not split even under the MSI: `Program Files` holds the
 /// installer's payload and nothing the daemon rewrites, because the self-update means the
-/// service's own account must be able to write `versions/` and `current` (ADR-0010 clause 18).
+/// service's own account must be able to write `versions/` and `current` (ADR-0028 clause 13).
 ///
 /// # Errors
 /// Returns an error if the platform's base directory cannot be determined from the environment.
@@ -262,7 +262,7 @@ pub fn default_layout_root(level: ServiceLevel) -> Result<PathBuf, String> {
     default_root(level)
 }
 
-/// `<base>/<PRODUCT_NAME>` — one level, named after the product (ADR-0010 clause 8).
+/// `<base>/<PRODUCT_NAME>` — one level, named after the product (ADR-0028 clause 7).
 fn per_product(base: PathBuf) -> PathBuf {
     base.join(PRODUCT_NAME)
 }
@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::service::layout;
 
-    /// ADR-0010 clause 11's whole mechanism: a label with no qualifier and no organization renders the
+    /// ADR-0028's whole mechanism: a label with no qualifier and no organization renders the
     /// same through *both* of the crate's functions, so systemd, launchd, and the SCM show one
     /// name. A dot anywhere in it would split the label again and undo that.
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         );
     }
 
-    /// The service carries the **product's** name and the program carries its own (ADR-0010
+    /// The service carries the **product's** name and the program carries its own (ADR-0028
     /// clause 9). They are separate constants holding different strings, and the day someone
     /// derives one from the other, one published package Set stops serving every variant.
     #[test]
@@ -338,7 +338,7 @@ mod tests {
     }
 
     /// No suffix, on any platform: one build installs one service, so there is no second one to
-    /// tell apart and nothing for a verb to look up (ADR-0010 clauses 11 and 13).
+    /// tell apart and nothing for a verb to look up (ADR-0028 clauses 3 and 6).
     #[test]
     fn the_service_name_carries_no_suffix() {
         assert!(!service_name().contains('-') || service_name() == PRODUCT_NAME);
@@ -351,7 +351,7 @@ mod tests {
 
     /// The display name is prose and the service name is a slug; neither is derived from the
     /// other, because no rule that produces `OpAMP Fleet Agent` from `opamp-fleet` would still
-    /// read correctly for the next variant build (ADR-0010 clause 12).
+    /// read correctly for the next variant build (ADR-0028 clause 2).
     #[test]
     fn the_names_a_human_reads() {
         assert_eq!(display_name(), PRODUCT_DISPLAY_NAME);
@@ -386,11 +386,11 @@ mod tests {
         let args = service_args(&spec);
         assert!(
             !args.contains(&OsString::from("opamp-fleet")),
-            "the account decides who runs the command, it is never part of it (ADR-0010 clause 18)"
+            "the account decides who runs the command, it is never part of it (ADR-0028)"
         );
         assert!(
             !args.contains(&OsString::from("--instance")),
-            "the flag is removed, not hidden (ADR-0010 clause 13)"
+            "the flag is removed, not hidden (ADR-0028 clause 6)"
         );
         assert_eq!(args[0], OsString::from("run"));
         assert_eq!(args[1], OsString::from("--service"));
@@ -413,12 +413,12 @@ mod tests {
                 assert_eq!(delay_secs, Some(RESTART_DELAY_SECS));
                 assert_eq!(max_retries, None, "a host recovers however long it takes");
             }
-            other => panic!("the Client restarts only on failure (ADR-0010), got {other:?}"),
+            other => panic!("the Client restarts only on failure (ADR-0028), got {other:?}"),
         }
     }
 
     /// One level under the platform's base, named after the product — no `client` level asserting
-    /// a name the file contradicts, and no level holding the constant `default` (ADR-0010).
+    /// a name the file contradicts, and no level holding the constant `default` (ADR-0028).
     #[cfg(target_os = "linux")]
     #[test]
     fn the_default_root_is_one_level_named_after_the_product() {
@@ -436,7 +436,7 @@ mod tests {
         );
     }
 
-    /// ADR-0010 clause 9: a system service's binary must not live under
+    /// ADR-0028 clause 8, carrying ADR-0028: a system service's binary must not live under
     /// `/var/lib` — SELinux's `var_lib_t` is no entrypoint type, and the service would fail its
     /// first start with `status=203/EXEC` on every enforcing host. The executable layout defaults
     /// to `/opt`; the data root stays under `/var/lib`, so an upgrade re-registers and moves no
@@ -458,7 +458,7 @@ mod tests {
         );
     }
 
-    /// Linux at system scope is the *only* split (ADR-0010 clause 9). Windows keeps one root
+    /// Linux at system scope is the *only* split (ADR-0028 clause 8). Windows keeps one root
     /// however it was installed, because a layout the daemon rewrites cannot live in the tree the
     /// installer owns — see clause 12 and the `--run-as` hand-over.
     #[cfg(any(target_os = "macos", windows))]

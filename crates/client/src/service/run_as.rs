@@ -1,15 +1,15 @@
-//! The operator-named service account of ADR-0010 clause 18: resolved before anything is written, and the
+//! The operator-named service account of ADR-0028: resolved before anything is written, and the
 //! ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` makes the system service run as that account, and the
 //! installation's files — the configuration, the state directory, and the executable layout,
-//! across both roots since ADR-0010 clause 9 — belong
+//! across both roots since ADR-0028 clause 8 — belong
 //! to it afterwards. The two halves live here; *what* the service manager is told is
 //! [`manager`](super::manager)'s and [`windows_config`](super::windows_config)'s business.
 //!
-//! **Resolution comes first** because ADR-0010 wants an install that cannot succeed to fail
+//! **Resolution comes first** because ADR-0028 wants an install that cannot succeed to fail
 //! before it writes: an account that does not exist (Unix), or a Windows account form that would
-//! need a password nobody may pass (ADR-0020), is such an install. On Unix the account is
+//! need a password nobody may pass (ADR-0029), is such an install. On Unix the account is
 //! resolved through `id(1)` — POSIX, present on every Linux and macOS host, and the alternative
 //! is `getpwnam(3)` behind `unsafe` or a user-lookup dependency for two integers.
 //!
@@ -18,7 +18,6 @@
 //! it points to is re-owned as the `versions/` entry it is. On Windows the files under
 //! `%ProgramData%` stay owned by Administrators and the account is *granted* Modify with
 //! inheritance instead — the platform's idiom for "these directories are yours to use", and what
-//! lets the service create tomorrow's files (a staged version, a rewritten `supervisor.toml`) in
 //! directories it did not create today.
 
 use std::path::Path;
@@ -36,7 +35,7 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the service's name, which since ADR-0010 is the product's — on Windows the
+    /// `service` is the service's name, which since ADR-0028 is the product's — on Windows the
     /// one virtual account that may be
     /// named is the service's own.
     ///
@@ -168,7 +167,7 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
 }
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
-/// parameter must not exist (ADR-0020: it would stand in the process list and the installer log).
+/// parameter must not exist (ADR-0029: it would stand in the process list and the installer log).
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
@@ -199,7 +198,7 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     }
     Err(format!(
         "the account {account} would need a password, and a password is never taken on a command \
-         line (ADR-0020). Passwordless forms: the service's own virtual account \
+         line (ADR-0029). Passwordless forms: the service's own virtual account \
          (NT SERVICE\\{service}), a group-managed service account (name ending in $), NT \
          AUTHORITY\\LocalService, or NT AUTHORITY\\NetworkService."
     ))
@@ -209,14 +208,11 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// ADR-0010 clause 18: the accepted Windows forms are exactly the passwordless ones, and the refusal
+    /// ADR-0028: the accepted Windows forms are exactly the passwordless ones, and the refusal
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
     #[test]
     fn windows_forms_are_the_passwordless_ones() {
-        let svc = "supervisor";
-        assert!(windows_account_form(r"NT SERVICE\supervisor", svc).is_ok());
         assert!(
-            windows_account_form(r"nt service\SUPERVISOR", svc).is_ok(),
             "account names compare case-insensitively on Windows"
         );
         assert!(windows_account_form(r"NT AUTHORITY\LocalService", svc).is_ok());
@@ -227,20 +223,17 @@ mod tests {
         );
 
         let other = windows_account_form(r"NT SERVICE\mssqlserver", svc).expect_err("not ours");
-        assert!(other.contains(r"NT SERVICE\supervisor"), "{other}");
 
         let plain = windows_account_form("bob", svc).expect_err("needs a password");
         assert!(plain.contains("password"), "{plain}");
-        assert!(plain.contains(r"NT SERVICE\supervisor"), "{plain}");
-        assert!(plain.contains("ADR-0020"), "{plain}");
+        assert!(plain.contains("ADR-0029"), "{plain}");
     }
 
-    /// The refusal for a missing Unix account is the actionable message ADR-0010 asks installs to
+    /// The refusal for a missing Unix account is the actionable message ADR-0028 asks installs to
     /// fail with — and it must promise that nothing was written, because resolution runs first.
     #[cfg(unix)]
     #[test]
     fn a_missing_account_is_refused_with_the_way_out() {
-        let err = RunAs::resolve("no-such-account-0062", "supervisor").expect_err("must not exist");
         assert!(err.contains("does not exist"), "{err}");
         assert!(err.contains("useradd"), "{err}");
         assert!(
@@ -263,20 +256,11 @@ mod tests {
                 .stdout,
         )
         .expect("utf8");
-        let me = RunAs::resolve(user.trim(), "supervisor").expect("own account resolves");
 
         let root = std::env::temp_dir().join(format!("run-as-test-{}", std::process::id()));
-        let versions = root.join("versions/supervisor-1.0.0-abc");
         std::fs::create_dir_all(&versions).expect("mkdir");
-        std::fs::write(
-            versions.join(crate::service::layout::BINARY_FILENAME),
-            b"binary",
         )
-        .expect("write");
-        std::os::unix::fs::symlink("versions/supervisor-1.0.0-abc", root.join("current"))
-            .expect("symlink");
 
-        let missing = root.join("supervisor.toml");
         me.hand_over(&[&root, &missing])
             .expect("a missing config file is skipped, the tree is walked");
 

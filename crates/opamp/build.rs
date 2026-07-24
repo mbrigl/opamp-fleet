@@ -1,10 +1,10 @@
 // Two things both ends need before they compile, in the crate both ends already depend on.
 //
-// 1. The OpAMP protobuf types, generated from the vendored, pinned schema (ADR-0006).
-// 2. The version this build reports (ADR-0009, as amended by ADR-0009), baked in as
+// 1. The OpAMP protobuf types, generated from the vendored, pinned schema (ADR-0009).
+// 2. The version this build reports (ADR-0017, as amended by ADR-0017), baked in as
 //    `OPAMP_BUILD_VERSION` and read back through `opamp::version::current`.
 //
-// The version lives here rather than in one binary's build script because ADR-0009 asks for a
+// The version lives here rather than in one binary's build script because ADR-0017 asks for a
 // *single* helper that every surface reads, and `cargo:rustc-env` reaches only the crate whose
 // script emitted it: a second copy in the Server would be a second implementation of the same rule,
 // free to drift from this one.
@@ -25,7 +25,7 @@ fn main() {
     match resolve_version() {
         Ok(version) => println!("cargo:rustc-env=OPAMP_BUILD_VERSION={version}"),
         Err(e) => {
-            eprintln!("cannot resolve the build version (ADR-0009): {e}");
+            eprintln!("cannot resolve the build version (ADR-0017): {e}");
             std::process::exit(1);
         }
     }
@@ -85,7 +85,7 @@ fn resolve_version() -> Result<String, String> {
         );
     }
 
-    // The number itself, from the file that decides it (ADR-0009) or from the override.
+    // The number itself, from the file that decides it (ADR-0017) or from the override.
     let (base, source) = match std::env::var("OPAMP_FLEET_VERSION") {
         Ok(raw) => (
             parse_components(&raw).ok_or_else(|| {
@@ -100,7 +100,7 @@ fn resolve_version() -> Result<String, String> {
                 parse_components(&raw).ok_or_else(|| {
                     format!(
                         "the version in Cargo.toml, {raw:?}, is not a strict MAJOR.MINOR.PATCH \
-                         version (ADR-0009's grammar: three integers, no pre-release, no metadata)"
+                         version (ADR-0017's grammar: three integers, no pre-release, no metadata)"
                     )
                 })?,
                 "Cargo.toml",
@@ -127,7 +127,7 @@ fn resolve_version() -> Result<String, String> {
         // which, so it says so instead of shipping a binary that disagrees with its own tag.
         Some(tag) => Err(format!(
             "HEAD carries the tag {tag:?} but {source} says {base} — a release tag and the version \
-             it releases must be the same (ADR-0009)"
+             it releases must be the same (ADR-0017)"
         )),
         // No release tag here: a build on the way to `base`, and unmistakably not it.
         None => Ok(format!("{base}-dev+{hash}")),
@@ -170,7 +170,7 @@ fn parse_tag(tag: &str) -> Option<String> {
     parse_components(tag.strip_prefix(TAG_PREFIX)?)
 }
 
-/// Strict SemVer core grammar (ADR-0009): exactly three non-negative integers without leading
+/// Strict SemVer core grammar (ADR-0017): exactly three non-negative integers without leading
 /// zeros, separated by `.` or `/` (mixed permitted), normalised to dots. No pre-release, no
 /// build metadata, no whitespace.
 fn parse_components(raw: &str) -> Option<String> {

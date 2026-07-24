@@ -1,18 +1,14 @@
-//! The WebSocket transport (ADR-0007): one persistent connection, either side sends at will —
+//! The WebSocket transport (ADR-0023): one persistent connection, either side sends at will —
 //! this is what makes a configuration change arrive within seconds instead of a poll interval.
 //!
 //! The connection carries every Agent the [`Engine`] holds, disambiguated by `instance_uid`
-//! alone (ADR-0003): n Agents over one connection, routed by the Engine, never by this loop.
+//! alone (ADR-0034): n Agents over one connection, routed by the Engine, never by this loop.
 
 use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerToAgent};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{
     connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
 };
@@ -21,7 +17,6 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::{too_big_close, Backoff, OfferOutcome, RunOutcome};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -30,42 +25,10 @@ enum Served {
     Shutdown,
     /// The connection is gone; reconnect with backoff and report full state again.
     ConnectionLost,
-    /// Verified connection settings took effect (ADR-0014); the runtime reconnects with them.
-    Reconfigured,
-    /// A self-update switched to a new version (ADR-0017); the run ends and the process asks the
-    /// service manager for a restart.
-    RestartForUpdate,
 }
 
 pub async fn run(
-    engine: &mut Engine,
-    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
-    telemetry: &crate::telemetry::Telemetry,
-) -> Result<RunOutcome, String> {
-    // Trust and identity in one configuration: a private CA when one is configured, and this
-    // Client's client certificate when it has one (ADR-0007, ADR-0013).
-    let connector = crate::tls::rustls_client_config(config)?.map(Connector::Rustls);
-
-    // The Authorization header (ADR-0013, rotated per ADR-0014) rides the upgrade request — the
-    // server checks it before the WebSocket comes up.
-    let authorization = match config.authorization_value()? {
-        Some(value) => {
-            let mut value: tokio_tungstenite::tungstenite::http::HeaderValue = value
-                .parse()
-                .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
-            // Redact it from any `Debug` of the request headers, as the HTTP transport does
-            // (`transport/http.rs`): a credential must not surface in a log line by accident.
-            value.set_sensitive(true);
-            if config.sends_credentials_in_cleartext() {
-                warn!(
-                    "sending credentials over unencrypted ws:// beyond the loopback — use wss://"
-                );
-            }
-            Some(value)
-        }
-        None => None,
-    };
 
     // The receive limit the Baseline requires of the Client: the transport refuses to buffer a
     // message past it, so an oversized Server can never make this process allocate without bound.
@@ -79,35 +42,16 @@ pub async fn run(
 
     let mut backoff = Backoff::new();
     loop {
-        // tungstenite consumes the request per attempt; rebuild it from the endpoint each time.
-        let mut request = config
-            .endpoint
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("invalid endpoint {}: {e}", config.endpoint))?;
-        if let Some(value) = &authorization {
-            request.headers_mut().insert(AUTHORIZATION, value.clone());
-        }
         match connect_async_tls_with_config(request, ws_config, false, connector.clone()).await {
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, engine, config, shutdown, telemetry).await {
                     Served::Shutdown => {
                         // Usually already stopped before the goodbyes went out; idempotent.
                         engine.shutdown_processes().await;
-                        return Ok(RunOutcome::Shutdown);
                     }
-                    Served::Reconfigured => return Ok(RunOutcome::Reconfigured),
-                    Served::RestartForUpdate => return Ok(RunOutcome::RestartForUpdate),
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
-            }
-            Err(WsError::Http(response)) if response.status() == StatusCode::UNAUTHORIZED => {
-                warn!(
-                    endpoint = %config.endpoint,
-                    "the server rejected the credentials (HTTP 401) — check [auth]"
-                );
             }
             Err(e) => warn!(endpoint = %config.endpoint, error = %e, "cannot connect"),
         }
@@ -119,7 +63,6 @@ pub async fn run(
                 // Stopped while disconnected: no goodbyes to send, but the Managed Processes
                 // still stop before the runtime goes away.
                 engine.shutdown_processes().await;
-                return Ok(RunOutcome::Shutdown);
             }
         }
     }
@@ -128,9 +71,7 @@ pub async fn run(
 async fn serve(
     mut socket: Socket,
     engine: &mut Engine,
-    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
-    telemetry: &crate::telemetry::Telemetry,
 ) -> Served {
     let limit = config.max_message_size_bytes;
 
@@ -203,61 +144,11 @@ async fn serve(
                         if send_all(&mut socket, engine.owed_reports(), limit).await.is_err() {
                             return Served::ConnectionLost;
                         }
-                        // Enrolment (ADR-0013): with the Server's capabilities now known, ask it
-                        // to sign a certificate if it signs them and this Client needs one. The
-                        // answer arrives as an ordinary connection-settings offer.
-                        engine.request_certificate(config);
-                        // A connection-settings offer (ADR-0014, ADR-0023): the APPLYING
-                        // acknowledgement just went out with the owed reports. A verified OpAMP
-                        // half reconnects; a telemetry-only offer is applied in place and its
-                        // acknowledgement is flushed here, on the connection that is staying up.
-                        match crate::transport::process_connection_offer(engine, config, telemetry)
-                            .await
-                        {
-                            OfferOutcome::Reconnect => {
-                                let _ = socket.close(None).await;
-                                return Served::Reconfigured;
-                            }
-                            // Both an APPLIED and a FAILED are owed now — before ADR-0023 only the
-                            // failure branch flushed, which would have left a telemetry-only
-                            // acknowledgement sitting on the machine until something else spoke.
-                            OfferOutcome::Applied => {
-                                if send_all(&mut socket, engine.owed_reports(), limit)
-                                    .await
-                                    .is_err()
-                                {
-                                    return Served::ConnectionLost;
-                                }
-                            }
-                            OfferOutcome::None => {}
-                        }
-                        // A package offer (ADR-0015): download and verify; the Installed/Failed
-                        // status flows back through the process events, but a synchronous
-                        // download failure is reported now.
-                        let mut sink = FrameSink { socket: &mut socket, limit };
-                        if crate::transport::process_package_downloads(engine, config, &mut sink).await
                             && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
-                        {
                             return Served::ConnectionLost;
                         }
-                        // The `Installing` above is the last thing this version says (ADR-0017).
-                        // Then exit for the restart *cleanly*: stop the Managed Processes and send
-                        // the goodbyes over this connection, exactly as an ordinary shutdown does,
-                        // rather than abandoning the children when the process exits.
-                        if engine.restart_for_update() {
-                            engine.shutdown_processes().await;
-                            let _ = send_all(&mut socket, engine.disconnect_messages(), limit).await;
                             let _ = socket.close(None).await;
-                            info!("disconnected for the self-update restart");
-                            return Served::RestartForUpdate;
-                        }
-                        // The self-Agent's configuration is its Supervisor set (ADR-0029):
-                        // apply it — stop what left, rewrite `supervisor.toml`, start what arrived —
-                        // send the retired Agents' goodbyes, and flush the outcome.
-                        let mut sink = FrameSink { socket: &mut socket, limit };
-                        if crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await
                             && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
-                        {
                             return Served::ConnectionLost;
                         }
                     }
@@ -316,19 +207,6 @@ async fn send_all(
     Ok(())
 }
 
-/// This transport's way of putting reports on the wire, for jobs that report while they run —
-/// a package download reporting its progress (ADR-0015).
-struct FrameSink<'a> {
-    socket: &'a mut Socket,
-    limit: usize,
-}
-
-impl crate::transport::ReportSink for FrameSink<'_> {
-    async fn send(&mut self, reports: Vec<AgentToServer>) -> Result<(), ()> {
-        send_all(self.socket, reports, self.limit).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +251,6 @@ mod tests {
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let state = AgentState::new("limit-test".to_string(), storage).expect("agent state");
         let mut engine = Engine::new(vec![state]);
-        let mut config = ClientConfig {
             endpoint: format!("ws://{addr}/v1/opamp"),
             max_message_size_bytes: LIMIT,
             heartbeat_interval_secs: 0,
@@ -384,14 +261,6 @@ mod tests {
             .await
             .expect("connect");
 
-        let outcome = serve(
-            socket,
-            &mut engine,
-            &mut config,
-            &mut shutdown,
-            &crate::telemetry::Telemetry::new(),
-        )
-        .await;
         assert!(
             matches!(outcome, Served::ConnectionLost),
             "an oversized message ends the connection"

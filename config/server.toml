@@ -1,31 +1,12 @@
-# OpAMP Fleet Server configuration (ADR-0008). Every setting is optional; the values shown are the
+# OpAMP Fleet Server configuration (ADR-0025). Every setting is optional; the values shown are the
 # defaults. Start with: cargo run -p server -- --config config/server.toml
-#
-# HOW THIS FILE IS ORDERED, AND WHY IT MATTERS. Every bare key comes first; every [section] comes
-# after them. That is not tidiness — it is the only layout in which the commented examples below can
-# be switched on safely. A TOML section header captures every bare key that follows it until the
-# next header, so a `[telemetry_offer]` sitting above `packages_dir` would swallow it the moment
-# anyone uncommented it, and the Server would refuse to start with "unknown field `packages_dir`".
-# Add new settings accordingly: a bare key goes in the first half, a section in the second.
 
-# =============================================================================================
-# Settings
-# =============================================================================================
-
-# TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0032, superseding ADR-0005 on this point).
+# TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0023, superseding ADR-0025 on this point).
 #
 # The AGENT PLANE: the OpAMP endpoint (/v1/opamp) and the package download the offers point at.
 # Port 4320 is the protocol's default, and it is open to the network because that is where the
-# fleet is. The OPERATOR PLANE — the REST API (/api/v1/*), the API docs (/api/v1/docs), and the
-# UI (/) — is the [rest] section in the second half of this file.
 listen = "0.0.0.0:4320"
 
-# Where Configurations (ADR-0012) are persisted across Server restarts — one JSON file each,
-# holding the draft revision an operator edits and, once released, the published revision the
-# fleet is offered. SAVING NEVER DISTRIBUTES (ADR-0030): a Configuration reaches the Agents of
-# its type (ADR-0012) that its Selector matches only after
-# PUT /api/v1/configurations/{name}/publication — body {"published": true}.
-config_dir = "fleet-configs"
 
 # The largest OpAMP message accepted or sent, on either transport and in either direction. The
 # protocol requires the limit and recommends this default; a fleet of small status reports runs
@@ -33,234 +14,24 @@ config_dir = "fleet-configs"
 # closes the connection with 1009.
 max_message_size_bytes = 67108864
 
-# How long an Agent that declares ReportsHeartbeat may be silent before the fleet view calls it
-# stale (ADR-0025). It is an observation, never a state change: nothing is torn down, and the next
-# report clears it. Ignored when [connection_offer] names a heartbeat interval — the period this
-# Server actually asked for is a better answer than a default. Three times the protocol's own
-# default heartbeat of 30 s, because one missed beat is a lost packet.
-stale_after_secs = 90
-
-# Where software packages are persisted (ADR-0015, reorganised by ADR-0039 and ADR-0040). Two
-# objects share this directory, and the split is the whole of the model:
-#
-#   <packages_dir>/<agent type>@<version>/   a PACKAGE: what an Agent type runs at a version.
-#                                            Its identity is those two tokens and nothing else —
-#                                            no name of its own, no Selector, no kind flag —
-#                                            holding one artifact per platform. It aims at nobody
-#                                            and is never rolled out.
-#   <packages_dir>/deployments/<name>.json   a DEPLOYMENT: a name, the channel its Selector aims at,
-#                                            at most one Package per Agent type, and each
-#                                            artifact's Ed25519 signature. The only thing rolled
-#                                            out.
-#
-# The Agent type is compared raw against the `service.name` the Agents report (ADR-0016), so spell
-# it exactly — a Client updating itself is typed `supervisor`.
-#
-# Create a Package with PUT /api/v1/packages/{agent_type}/{version} — the body has no writable
-# field, so {} is all of it. Then store one entry per platform: upload an artifact with
-# PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body), or point
-# the entry at an artifact hosted elsewhere with PUT .../entries/{os}/{arch}/source (ADR-0015:
-# url + sha256, optional headers for a private source); the Server stores only that reference and
-# never downloads it. No two entries share a platform — writing one again replaces it.
-#
-# Then put it in a channel and sign it there:
-#   PUT  /api/v1/deployments/{name}                    body {"selector": {"channel": "stable"}}
-#   PUT  /api/v1/deployments/{name}/packages/{agent_type}/{version}
-#   PUT  /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}
-#   POST /api/v1/deployments/{name}/rollout               <- THE ONLY CALL THAT DISTRIBUTES
-#
-# SAVING NEVER DISTRIBUTES: everything above the rollout stores. An Agent that enrols, or is
-# labelled into the channel, afterwards waits for an act of its own.
-#
-# An Agent belongs to AT MOST ONE Deployment. Two claiming it is a conflict — it is offered
-# nothing new and the fleet view names both — so a Selector may not be empty and there is no
-# fleet-wide default. A Selector is equality and cannot say "not", so channels are a partition over
-# an attribute every Agent carries. The Server prescribes NO key — `channel` (which stream of
-# versions a host follows), `region` (where it runs) and `tenant` (whose it is) are examples, not a
-# schema. Set it in the host's [attributes], or as a Server label (PUT /api/v1/agents/<uid>/labels),
-# which needs no access to the host.
-#
-# A canary is two channels holding different versions. Finishing the rollout is giving the stable
-# channel the canary's version and pressing once more — NOT widening the canary channel, which would
-# have both claim the same hosts.
-#
-# While a Package is rolled out to an Agent its entries are immutable; ship a change as the next
-# version, which is a new Package. Taking a bad version back is not a rollout: the fleet only
-# moves forward, and what reverses a release is the host's own health-gated rollback.
-#
-# The download endpoint sits on the unauthenticated REST plane — the content hash and signature
-# are what protect an installed binary, so sign packages and configure the key on the Client.
-packages_dir = "fleet-packages"
-
-# The largest package artifact the REST API accepts on upload. A package is a program, not a
-# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
-# max_message_size_bytes above and applies to the package upload route alone.
-max_package_size_bytes = 1073741824
-
 # The absolute base URL advertised for downloads. Leave unset in the ordinary case: the offered
 # download_url is then a path, which the Client resolves against its own OpAMP endpoint — the
-# Agent plane, which is exactly where the download is served (ADR-0032). Set it only when
+# Agent plane, which is exactly where the download is served (ADR-0023). Set it only when
 # downloads must go through a different host, such as a mirror.
-# advertised_url = "https://fleet.example:4320"
 
-# =============================================================================================
-# Sections — everything below here is a [table]. Nothing but tables may follow.
-# =============================================================================================
-
-# Optional TLS (ADR-0007): with a certificate and key BOTH listeners serve HTTPS/WSS instead.
-# client_ca_file turns on mutual TLS (ADR-0013) and belongs to the Agent plane alone: every request
+# Optional TLS (ADR-0023): with a certificate and key BOTH listeners serve HTTPS/WSS instead.
+# client_ca_file turns on mutual TLS (ADR-0026) and belongs to the Agent plane alone: every request
 # to /v1/opamp must then arrive over a connection carrying a client certificate that bundle
 # verifies. Client authentication stays optional at the TLS layer, because the same listener serves
 # the package download, which a Client fetches presenting no certificate — so only the OpAMP route
 # requires one.
-#
-# EVERY CONFIGURED PROOF MUST SUCCEED. [auth] alone behaves as it always has; client_ca_file alone
-# makes the OpAMP endpoint certificate-only; both configured means BOTH are required of every
-# request, not either one. Turning mutual TLS on can therefore never widen admission — but it can
-# lock out a host that has no certificate yet, so let the fleet enrol first ([client_ca] below) and
-# set client_ca_file after.
 # [tls]
 # cert_file = "cert.pem"
 # key_file = "key.pem"
-# client_ca_file = "client-ca.pem"
 
-# Optional certificate authority for the CSR flow (ADR-0013). Present is what arms it: the Server
-# declares AcceptsConnectionSettingsRequest, and an Agent that has no certificate — or holds one two
-# thirds through its life — generates a key (which never leaves its host), sends a signing request,
-# and receives the certificate as an ordinary connection-settings offer.
-#
-# This is deliberately NOT the listener's own certificate and key: a CA private key sitting where
-# the server certificate lives means compromising the Server mints fleet members at will. Generate a
-# separate self-signed CA and point client_ca_file above at its certificate.
-#
-# Admission is the approval — a request that reached this Server already satisfied every proof the
-# endpoint requires. There is no approval queue, and no revocation: validity_days plus renewal is
-# what bounds a certificate, so keep it short rather than generous.
-# [client_ca]
-# cert_file = "client-ca.pem"
-# key_file = "client-ca-key.pem"
-# validity_days = 90
-
-# Optional authentication on the OpAMP endpoint (ADR-0013). When the section is present, every
-# OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching
-# any listed credential; anything else is answered 401. Both schemes may be configured at once;
-# several valid credentials allow overlapping rotation. Without [auth] the endpoint stays open.
-# REST API and UI are not guarded by this — that is [rest.auth] at the end of this file (ADR-0032).
-# [auth]
-# bearer_tokens = ["a-long-random-token"]
-# [auth.basic_users]
-# fleet = "a-strong-password"
-
-# Optional connection settings offered to the fleet (ADR-0014): every Agent declaring
-# AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and
-# switches only on success. Any subset of the keys works, but not an empty section. To rotate
-# credentials: add the new token to [auth] (old and new both accepted), point the offer at it,
-# restart the Server, and drop the old token once the fleet has migrated. Unless endpoint points
-# to another Server, the offered credential must be in the [auth] accepted set.
-# [connection_offer]
-# bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
-# heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
-# endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
-
-# WHERE THE FLEET SENDS ITS OWN TELEMETRY (ADR-0023). Each signal is independent, and each is
-# offered only to Agents that declare they can report it. The endpoints are full OTLP/HTTP URLs
-# WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing is
-# how telemetry disappears into a 404 nobody looks at.
-#
-# An Agent sends process metrics for itself and for each process it supervises, its own log output,
-# and spans over the operations that already have a lifecycle here (a configuration applied, a
-# package installed, a self-update). It refuses a cleartext http:// destination outside the private
-# address space — loopback, 10/8, 172.16/12, 192.168/16, fc00::/7 — and by address, not by name.
-#
-# Nothing about this is configured on the Client: the capability means "report to the destination
-# the Server specifies", so this section is the only place it comes from.
-#
-# Five things worth knowing before you fill this in:
-#
-#  - The destinations are FLEET-WIDE. There is no Selector here as there is on Configurations
-#    (ADR-0012) and packages (ADR-0016): every Agent is offered the same three addresses. The only
-#    per-Agent variation is which of the three signals it gets, and that follows the capabilities
-#    the Agent itself declares.
-#  - A change here needs a SERVER RESTART. The offer is compiled once at startup; there is no
-#    reload, over SIGHUP or otherwise, and the REST API does not manage it.
-#  - The headers below apply to ALL THREE signals. There is one header map, not one per signal —
-#    which is the right shape when the three URLs are one collector, and the wrong one if you split
-#    them across backends that want different tokens.
-#  - Metrics arrive every 10 SECONDS per Agent, the interval the protocol recommends. Size the
-#    backend for it: that is six exports a minute per Agent — six hundred a minute across a hundred
-#    of them — each carrying process metrics for the Agent and for every process it supervises.
-#  - Offer only what you can receive. A signal you leave unset is simply not offered, and the Agent
-#    reports nothing for it — which costs less than a destination that answers 404 forever.
-#  - What this section says, it says about ALL THREE signals (ADR-0023). An Agent already reporting
-#    traces STOPS when you remove traces_endpoint from here: the offer is the whole truth about own
-#    telemetry, not a list of changes. Which is what makes a destination removable at all.
-#
-# TURNING IT OFF. An endpoint set to the empty string is an explicit withdrawal — the Agent shuts
-# that exporter down, forgets the destination, and acknowledges it like any other offer:
-#
-#     [telemetry_offer]
-#     metrics_endpoint = ""      # stop reporting metrics
-#
-# That is the only way to say "stop all three", because a Server that offers nothing says nothing:
-# DELETING this section does not switch anything off. It withdraws nothing, so that a Server with no
-# telemetry of its own cannot tear down a fleet another Server pointed at a collector — and so an
-# Agent keeps reporting across restarts, which is the point of the destination being persisted.
-# To stop a fleet: set the endpoints empty, restart the Server, let the Agents acknowledge, then
-# remove the section.
-#
-# Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
-# them leaves the file with a duplicated table header, which is an error rather than a merge.
-#
-# (1) Development — the stack in .devcontainer/ comes up with the Dev Container and publishes
-#     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because loopback is
-#     inside the private address space, which is why this reads http:// and why the ports are
-#     published rather than left on a compose network.
-# [telemetry_offer]
-# metrics_endpoint = "http://localhost:4318/v1/metrics"
-# traces_endpoint = "http://localhost:4318/v1/traces"
-# logs_endpoint = "http://localhost:4318/v1/logs"
-
-# (2) Production — TLS in front of the collector, and a token if it wants one. An Agent REFUSES a
-#     cleartext destination outside the private address space, and refuses a cleartext HOST NAME
-#     whatever it resolves to: it is not warned about and not downgraded, the offer comes back
-#     FAILED naming the reason. Terminate TLS in front of the receiver and offer the https:// URL.
-#
-#     A Collector one hop away on the LAN needs no certificate for this: an address in 10/8,
-#     172.16/12, 192.168/16 or fc00::/7 is accepted in cleartext (ADR-0023), e.g.
-#     http://192.168.10.5:4318/v1/metrics. The judgement is on the ADDRESS — a name that resolves
-#     there is still refused, because a name can be re-pointed after the offer was admitted.
-# [telemetry_offer]
-# metrics_endpoint = "https://collector.example:4318/v1/metrics"
-# traces_endpoint = "https://collector.example:4318/v1/traces"
-# logs_endpoint = "https://collector.example:4318/v1/logs"
-# [telemetry_offer.headers]
-# Authorization = "Bearer a-telemetry-token"
-#
-# (3) Metrics only — the smallest useful shape: one signal, no header, nothing else offered.
-# [telemetry_offer]
-# metrics_endpoint = "https://collector.example:4318/v1/metrics"
-
-# THE OPERATOR PLANE (ADR-0032): the REST API, the API docs, and the bundled UI, on their own
-# listener. This port carries the authority to reconfigure and re-package the entire fleet, and
-# without [rest.auth] below it is open to whoever reaches it — hence loopback by default. Reach it
-# through an SSH tunnel, or publish it deliberately with listen = "0.0.0.0:4321".
+# THE OPERATOR PLANE (ADR-0023): the REST API, the API docs, and the bundled UI, on their own
 #
 # It must differ from the Agent plane's `listen` above; equal addresses are refused at startup,
 # by name, instead of surfacing later as "address already in use".
 [rest]
 listen = "127.0.0.1:4321"
-
-# Optional Basic authentication over the WHOLE Operator plane (ADR-0032): the REST API, the
-# OpenAPI document, the API docs, and the UI. Absent means open, as it has been. Every request
-# then needs `Authorization: Basic <base64(user:password)>`; anything else is answered 401 with a
-# challenge, which is what makes a browser ask for the password instead of showing a bare error —
-# so the UI needs no login page.
-#
-# Several users are how a credential is rotated, or one operator's is withdrawn on its own. The
-# operator tools carry it in the URL they are given: --server http://fleet-admin:secret@host:4321
-#
-# This is authentication, not authorization: everyone listed can do everything the plane offers.
-# Basic sends the password on every request, so pair it with [tls] — or a TLS-terminating proxy —
-# whenever this plane is not on loopback. The Server warns at startup if it is not.
-# [rest.auth.basic_users]
-# fleet-admin = "a-strong-password"

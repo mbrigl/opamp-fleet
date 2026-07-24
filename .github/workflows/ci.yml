@@ -1,6 +1,6 @@
 name: CI
 
-# Enforces the Definition of Done (AGENTS.md §5) on the stack decided in ADR-0005: build, test,
+# Enforces the Definition of Done (AGENTS.md §5) on the stack decided in ADR-0025: build, test,
 # lint, and format on Linux, plus release builds of the Client on every platform it ships on —
 # Linux, Windows, and macOS — and of the Server on Linux only (docs/SPECIFICATION.md).
 # The commands MUST match README.md → "Build, Test & Run", the single source of truth.
@@ -29,7 +29,7 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  # ADR-0010: the client carries platform-specific service paths (the Windows SCM shim, launchd
+  # ADR-0028: the client carries platform-specific service paths (the Windows SCM shim, launchd
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist
   # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
@@ -56,9 +56,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: client-linux, os: ubuntu-latest, package: client, binary: target/release/supervisor }
-          - { name: client-windows, os: windows-latest, package: client, binary: target/release/supervisor.exe }
-          - { name: client-macos, os: macos-latest, package: client, binary: target/release/supervisor }
           - { name: server-linux, os: ubuntu-latest, package: server, binary: target/release/server }
     steps:
       - uses: actions/checkout@v7

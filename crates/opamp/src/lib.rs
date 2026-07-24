@@ -1,4 +1,4 @@
-//! The shared OpAMP wire layer (ADR-0006).
+//! The shared OpAMP wire layer (ADR-0009).
 //!
 //! Both ends of the protocol — the [`server`](../server) and the [`client`](../client) — need the
 //! same OpAMP message types and the same WebSocket framing. Generating and framing them **once**,

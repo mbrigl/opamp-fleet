@@ -1,5 +1,5 @@
 //! The Client under the machine's **real** service manager — systemd, launchd, or the SCM
-//! (ADR-0010, ADR-0017).
+//! (ADR-0028, ADR-0020).
 //!
 //! Every other test in this project stands in for the service manager: the self-update end-to-end
 //! test restarts the Client itself, "exactly as systemd would". That is what makes the update loop
@@ -31,11 +31,11 @@ use client::service::{ServiceControl, ServiceLevel, ServiceState};
 use server::fleet::{AgentView, AppState};
 
 /// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
-/// reported as `service.instance.name` (ADR-0022), which is what the fleet view is searched by.
+/// reported as `service.instance.name` (ADR-0012), which is what the fleet view is searched by.
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
-/// `supervisor` (ADR-0022).
+/// `supervisor` (ADR-0029).
 ///
-/// Since ADR-0010 there is no `--instance` to isolate this run under, and the service it registers
+/// Since ADR-0028 there is no `--instance` to isolate this run under, and the service it registers
 /// carries the product's name like any other install. This test therefore takes over the host's
 /// one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
@@ -51,7 +51,6 @@ struct Registered;
 impl Drop for Registered {
     fn drop(&mut self) {
         let _ = service().stop();
-        let _ = client(&["service", "uninstall"], &PathBuf::from("supervisor.toml"));
     }
 }
 
@@ -59,7 +58,6 @@ impl Drop for Registered {
 /// rather than the library is the point here: `service install` also stages the versioned layout,
 /// and an operator's mistake would be in that command line.
 fn client(args: &[&str], config: &Path) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config)
         .args(args)
@@ -99,7 +97,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform since ADR-0010 clause 11, so this is what systemd, launchd, and the SCM
+    // One name on every platform since ADR-0028, so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -176,12 +174,7 @@ fn spawn_server() -> (
                 .await
                 .expect("bind");
             tx.send(listener.local_addr().expect("addr")).expect("send");
-            axum::serve(
-                listener,
                 server::agent_app(served, server::transport::Admission::open()),
-            )
-            .await
-            .expect("serve");
         });
     });
     let addr = rx.recv().expect("the server's address");
@@ -207,14 +200,12 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("install");
     let (addr, state, _server) = spawn_server();
-    let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
         format!(
             "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n"
         ),
     )
-    .expect("write supervisor.toml");
 
     client(
         &["service", "install", "--root", &root.to_string_lossy()],
@@ -223,7 +214,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     .expect("install the service");
     let _registered = Registered;
 
-    // launchd does not auto-start after an install (a known ADR-0010 gap), so every platform is
+    // launchd does not auto-start after an install (a known ADR-0028 gap), so every platform is
     // started explicitly — which is also what the README's checklist tells an operator to do.
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
@@ -278,7 +269,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::Stopped,
-        "an explicitly stopped service must stay down (ADR-0010)"
+        "an explicitly stopped service must stay down (ADR-0028)"
     );
 
     client(&["service", "uninstall"], &config).expect("uninstall the service");

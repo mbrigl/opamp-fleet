@@ -1,8 +1,8 @@
-//! The supervision `Runner` (ADR-0011) across everything it does *to a host*: spawn and watchdog,
-//! the health-gated apply, the binary swap and its rollback (ADR-0015), and the tree install
-//! (ADR-0015).
+//! The supervision `Runner` (ADR-0010) across everything it does *to a host*: spawn and watchdog,
+//! the health-gated apply, the binary swap and its rollback (ADR-0018), and the tree install
+//! (ADR-0018).
 //!
-//! An integration test rather than a unit test, and that is the reason ADR-0005 exists: these cases
+//! An integration test rather than a unit test, and that is the reason ADR-0025 exists: these cases
 //! need the supervision core **and** a real program to spawn, and Cargo hands a test the path of a
 //! helper binary "only … when building an integration test or benchmark". As unit tests inside a
 //! binary crate they could reach no such program, so they ran `/bin/sh` scripts and were gated to
@@ -20,9 +20,6 @@ use std::time::Duration;
 use client::config::TREE_DIR;
 use client::service::runtime::shutdown_channel;
 use client::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent};
-use client::supervisor::process::{
-    probe_version, InstallTarget, Preflight, ProcessSpec, Runner, VersionProbe,
-};
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
 
@@ -54,7 +51,6 @@ fn spec(program: &Path) -> ProcessSpec {
         args: Vec::new(),
         env: Vec::new(),
         working_dir: None,
-        own_process_group: false,
         ensure_dirs: Vec::new(),
     }
 }
@@ -67,29 +63,16 @@ struct Harness {
 }
 
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
-/// are what the package tests vary; `version_probe` is set only where the probe is the subject.
 fn runner(
     install: Option<InstallTarget>,
     apply_grace: Duration,
-    version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
-) -> Harness {
-    runner_retaining(install, apply_grace, Duration::ZERO, version_probe, build)
-}
-
-fn runner_retaining(
-    install: Option<InstallTarget>,
-    apply_grace: Duration,
-    retain_previous: Duration,
-    version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
     runner_full(
         install,
         apply_grace,
-        retain_previous,
         version_probe,
-        None,
         None,
         build,
     )
@@ -98,9 +81,6 @@ fn runner_retaining(
 fn runner_full(
     install: Option<InstallTarget>,
     apply_grace: Duration,
-    retain_previous: Duration,
-    version_probe: Option<VersionProbe>,
-    preflight: Option<Preflight>,
     reload_signal: Option<i32>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
@@ -111,11 +91,8 @@ fn runner_full(
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
-        retain_previous,
         install,
         archive_key: None,
-        version_probe,
-        preflight,
         reload_signal,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
@@ -131,14 +108,12 @@ fn runner_full(
 
 /// Zero grace: the pre-grace instant acknowledgement most supervision tests exercise.
 fn start(build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
-    runner(None, Duration::ZERO, None, build)
 }
 
 fn start_with_grace(
     apply_grace: Duration,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
-    runner(None, apply_grace, None, build)
 }
 
 async fn next_health(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> ComponentHealth {
@@ -189,9 +164,6 @@ async fn apply(harness: &Harness, hash: &[u8]) {
                 config_hash: hash.to_vec(),
                 ..Default::default()
             },
-            // The apply's span (ADR-0023). The core opens a real one; a test drives the Runner
-            // directly, so what it hands over is the span it is already running in.
-            span: tracing::Span::current(),
         })
         .await
         .expect("send the command");
@@ -208,7 +180,6 @@ async fn apply_package(
             staged: staged.to_path_buf(),
             version: version.to_string(),
             hash: version.as_bytes().to_vec(),
-            span: tracing::Span::current(),
         })
         .await
         .expect("send");
@@ -233,13 +204,6 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
 
     let mut harness = start({
         let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
-        move || {
-            Some(ProcessSpec {
-                program: program.clone(),
-                args: vec!["--touch".to_string(), marker.display().to_string()],
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
                 ensure_dirs: vec![state.clone()],
             })
         }
@@ -266,7 +230,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.task.await.expect("join");
 }
 
-/// A program named by a **relative** path still starts — which it did not, once ADR-0037 had the
+/// A program named by a **relative** path still starts — which it did not, once ADR-0010 had the
 /// process begin in its own directory.
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
@@ -306,10 +270,6 @@ async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() 
         move || {
             Some(ProcessSpec {
                 program: relative.clone(),
-                args: vec!["--touch".to_string(), marker.display().to_string()],
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
                 ensure_dirs: Vec::new(),
             })
         }
@@ -329,7 +289,6 @@ async fn the_probe_reports_a_version_description() {
     probe_version(
         stub_agent(),
         vec!["--version".to_string()],
-        None,
         EventSender::new(0, event_tx),
     )
     .await;
@@ -346,7 +305,6 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         PathBuf::from("nonexistent-definitely-not-here"),
         vec![],
-        None,
         EventSender::new(0, event_tx.clone()),
     )
     .await;
@@ -355,7 +313,6 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         stub_agent(),
         vec!["--exit-code".to_string(), "0".to_string()],
-        None,
         EventSender::new(0, event_tx),
     )
     .await;
@@ -365,45 +322,14 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     );
 }
 
-async fn next_probed_version(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> Option<String> {
     loop {
         let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
-            .expect("a probed description in time")
-            .expect("an open channel");
-        if let ProcessEvent::Description(description) = event {
-            return description
-                .identifying_attributes
-                .iter()
-                .find(|kv| kv.key == "service.version")
-                .and_then(|kv| kv.value.clone())
-                .and_then(|v| v.value)
-                .map(|v| match v {
-                    opamp::proto::any_value::Value::StringValue(s) => s,
-                    other => panic!("expected a string version, got {other:?}"),
-                });
-        }
-    }
-}
-
-/// A swapped program is a different program, and only the program knows its own version — so the
-/// swap has to ask again. Without this the Agent reports the package as installed while going on
-/// describing the version it replaced (or none at all, on a first install onto an empty
-/// `program/`), and only a restart of the Client ever corrects it.
-///
-/// Both probes here read the same stub and therefore the same version; what the second event
-/// proves is that the swap asked at all, which is the whole of the regression. Draining the
-/// startup probe's answer first is what makes "the second one" mean something: one probe emits at
-/// most one event, so anything arriving after it was asked by the swap.
-#[tokio::test]
-async fn a_swapped_binary_is_probed_again_for_its_version() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
@@ -411,32 +337,13 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
     let mut harness = runner(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
-        Some(VersionProbe {
-            program: binary.clone(),
-            args: vec!["--version".to_string()],
-            parse: None,
-        }),
-        || None, // an unconfigured Collector: nothing runs, the version is still owed
-    );
-    assert_eq!(
-        next_probed_version(&mut harness.events).await.as_deref(),
-        Some("9.9.9"),
-        "the startup probe reports what is on disk before the swap"
-    );
-
-    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
-    assert_eq!(result, Ok("9.9.9".to_string()));
-    assert_eq!(
-        next_probed_version(&mut harness.events).await.as_deref(),
-        Some("9.9.9"),
-        "the swap must ask the newly installed program for its version"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
-// ── Reload and uninstall (ADR-0011) ──────────────────────────────────────────
+// ── Reload and uninstall (ADR-0010) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -472,13 +379,7 @@ async fn ack_and_spawned_pids(
     }
 }
 
-/// Waits until the stub has written its marker file — the point at which it has run code of its
-/// own, rather than merely having been spawned.
 ///
-/// A pid says the process exists, not that it has got anywhere: between `spawn` and the stub's
-/// first statement lie process creation and dynamic loading. Two tests need the distinction for
-/// different reasons — a reload must not race the signal disposition the stub installs (Unix), and
-/// a test that compares the marker across a package apply must have one to compare.
 async fn wait_until_started(marker: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !marker.exists() {
@@ -490,7 +391,7 @@ async fn wait_until_started(marker: &Path) {
     }
 }
 
-/// A kind that declared a reload applies a configuration in place (ADR-0011): the process is
+/// A kind that declared a reload applies a configuration in place (ADR-0010): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -503,7 +404,6 @@ async fn a_declared_reload_applies_without_a_restart() {
         None,
         Duration::from_millis(300),
         Duration::ZERO,
-        None,
         None,
         Some(libc::SIGHUP),
         move || {
@@ -537,7 +437,7 @@ async fn a_declared_reload_applies_without_a_restart() {
     let _ = harness.task.await;
 }
 
-/// `reload-or-restart` (ADR-0011): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (ADR-0010): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
 #[cfg(unix)]
@@ -547,7 +447,6 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
         None,
         Duration::from_millis(300),
         Duration::ZERO,
-        None,
         None,
         Some(libc::SIGHUP),
         || Some(spec(&stub_agent())),
@@ -566,9 +465,9 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
     let _ = harness.task.await;
 }
 
-/// The generic uninstall (ADR-0011): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (ADR-0010): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (ADR-0029).
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0032).
 #[tokio::test]
 async fn an_uninstall_stops_the_process_answers_and_exits() {
     let mut harness = start(|| Some(spec(&stub_agent())));
@@ -655,7 +554,6 @@ async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).expect("chmod");
     }
 
     let mut harness = start(move || Some(spec(&program)));
@@ -763,7 +661,7 @@ async fn apply_config_restarts_and_acknowledges() {
     let _ = harness.task.await;
 }
 
-// ── The binary swap (ADR-0015) ───────────────────────────────────────────────
+// ── The binary swap (ADR-0018) ───────────────────────────────────────────────
 
 /// A Runner that swaps one file and runs whatever is at it.
 fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
@@ -771,17 +669,10 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
     runner(
         Some(InstallTarget::Binary(binary.to_path_buf())),
         apply_grace,
-        None,
         move || Some(spec(&program)),
     )
 }
 
-/// ADR-0033: a package is *proved to run* before it replaces what runs. The check fails here, so
-/// nothing is swapped and — the point of the whole exercise — the running process is never stopped
-/// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
-/// start, roll back, restart: an outage bought for nothing.
-#[tokio::test]
-async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     let good = bytes_of(&stub_agent());
@@ -789,56 +680,20 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let marker = dir.path().join("running");
-    let program = binary.clone();
     let mut harness = runner_full(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
-        Duration::ZERO,
-        None,
-        // The staged program is asked to exit non-zero: what a binary the host's libc cannot
-        // satisfy does, with the linker's message in its place.
-        Some(Preflight {
-            args: vec!["--exit-code".to_string(), "1".to_string()],
-            env: Vec::new(),
-        }),
-        None,
-        move || {
-            Some(ProcessSpec {
-                program: program.clone(),
-                args: vec!["--touch".to_string(), marker.display().to_string()],
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
                 ensure_dirs: Vec::new(),
-            })
-        },
-    );
     let _ = next_health(&mut harness.events).await;
-    wait_until_started(&dir.path().join("running")).await;
-    let running = std::fs::read_to_string(dir.path().join("running")).expect("the marker");
 
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
     let (hash, result) = apply_package(&mut harness, &staged, "9.9.9").await;
-
     assert_eq!(hash, b"9.9.9".to_vec());
-    let error = result.expect_err("a package that will not run is refused");
-    assert!(
-        error.contains("does not run on this host"),
-        "the refusal names what the program said: {error}"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
-        good,
-        "nothing was swapped"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("running")).expect("the marker"),
-        running,
-        "the running process was never restarted — the marker still holds its first pid"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
@@ -876,7 +731,7 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     let _ = harness.task.await;
 }
 
-/// The case ADR-0015 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
+/// The case ADR-0018 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
 #[tokio::test]
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
@@ -938,7 +793,6 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let mut harness = runner(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
-        None,
         || None,
     );
     let _ = next_health(&mut harness.events).await; // "awaiting configuration"
@@ -965,7 +819,6 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
     let mut harness = binary_harness(&binary, Duration::from_millis(500));
@@ -984,115 +837,47 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let _ = harness.task.await;
 }
 
-/// ADR-0015: a *first* install that will not start has nothing to roll back to, so it is **kept**
-/// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
-/// empty the directory and set the Server re-offering the same artifact in a loop.
-#[tokio::test]
-async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    // Nothing on disk yet: a first install onto an empty program directory.
     let mut harness = binary_harness(&binary, Duration::from_millis(200));
-
     let staged = dir.path().join("downloaded.staged");
-    let crasher = bytes_of(&stub_crasher());
-    std::fs::write(&staged, &crasher).expect("stage");
-    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
-    assert!(result.is_err(), "a crasher fails the install");
-    // Not rolled back to nothing: the verified program is still there.
-    assert!(
-        binary.exists(),
-        "the first install is kept, not discarded (ADR-0015)"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
-        crasher,
-        "and it is the installed bytes"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
-/// ADR-0015: a program that keeps failing to start is **held** after a few tries, not restarted
-/// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
-/// reports it plainly.
-#[tokio::test]
-async fn a_program_that_keeps_crashing_is_held_not_looped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    let mut harness = binary_harness(&binary, Duration::from_millis(100));
-
-    // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_crasher())).expect("stage");
-    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
-    assert!(result.is_err());
-
-    // Within a bounded time the Runner gives up and says so, instead of spinning forever.
-    let held = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let health = next_health(&mut harness.events).await;
-            if health.status.contains("not restarting") {
-                return health;
-            }
-        }
-    })
-    .await
-    .expect("the Runner holds instead of restarting forever");
-    assert!(held.status.contains("not restarting"), "{}", held.status);
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
-/// ADR-0015: a successful update does not delete the version it superseded — it is retained for the
-/// window, with a marker recording the deadline, so an operator has a fallback.
-#[tokio::test]
-async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    // A predecessor that stays up.
-    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let program = binary.clone();
-    let mut harness = runner_retaining(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
-        Duration::from_secs(3600), // keep the predecessor an hour
-        None,
         move || Some(spec(&program)),
-    );
     let _ = next_health(&mut harness.events).await;
-
-    // A new good version installs and stays up.
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
-    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
-    assert!(result.is_ok(), "a good binary applies");
-
-    // The predecessor is retained, not deleted on success — its file and a deadline marker remain.
-    let backup = binary.with_extension("rollback");
-    assert!(
-        backup.exists(),
-        "the previous version is kept for the retention window"
-    );
-    let mut marker = backup.clone().into_os_string();
-    marker.push(".until");
-    assert!(
-        PathBuf::from(marker).exists(),
-        "a marker records the deadline"
     );
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
 
-// ── The tree install (ADR-0015) ──────────────────────────────────────────────
+// ── The tree install (ADR-0018) ──────────────────────────────────────────────
 
 /// Writes a `.tar.gz` holding `members` — (path inside the archive, contents).
 fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
@@ -1112,7 +897,7 @@ fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
 }
 
 /// A release-shaped `.tar.gz`: the program and a library it "loads", under one version-named
-/// wrapper directory (ADR-0015).
+/// wrapper directory (ADR-0018).
 fn tree_release(path: &Path, wrapper: &str, program: &Path, library: &[u8]) {
     tar_gz(
         path,
@@ -1136,12 +921,11 @@ fn tree_harness(root: &Path) -> Harness {
             program_path: inside,
         }),
         Duration::from_millis(200),
-        None,
         move || Some(spec(&program)),
     )
 }
 
-/// The case ADR-0015 exists for: an agent that is a program *plus* what it loads, arriving with
+/// The case ADR-0018 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
 #[tokio::test]
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
@@ -1279,81 +1063,6 @@ async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
-
-// ── The trace an install leaves (ADR-0023) ───────────────────────────────────
-
-/// Every span this test binary's subscriber saw: its id, the parent the registry gave it, and its
-/// name. Enough to answer the one question worth asking of the instrumentation — *what hangs off
-/// what* — and nothing more, so no exporter and no OTLP is involved.
-#[derive(Default)]
-struct Recorded(std::sync::Mutex<Vec<(tracing::span::Id, Option<tracing::span::Id>, String)>>);
-
-struct RecordingLayer(std::sync::Arc<Recorded>);
-
-impl<S> tracing_subscriber::Layer<S> for RecordingLayer
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        // The registry's parent — the same one `tracing-opentelemetry` reads to build a trace, so
-        // asserting on it asserts on what would be exported.
-        let parent = ctx.span(id).and_then(|span| span.parent().map(|p| p.id()));
-        self.0 .0.lock().expect("the recorder").push((
-            id.clone(),
-            parent,
-            attrs.metadata().name().to_string(),
-        ));
-    }
-}
-
-/// The subscriber, installed once for this binary. Global rather than scoped on purpose: the
-/// Runner drives the install in a **task of its own**, and a thread-local subscriber would not
-/// reach it — which is exactly the boundary this test exists to cross.
-fn recorder() -> std::sync::Arc<Recorded> {
-    static RECORDER: std::sync::OnceLock<std::sync::Arc<Recorded>> = std::sync::OnceLock::new();
-    RECORDER
-        .get_or_init(|| {
-            use tracing_subscriber::layer::SubscriberExt as _;
-            let recorded = std::sync::Arc::new(Recorded::default());
-            let subscriber = tracing_subscriber::registry().with(RecordingLayer(recorded.clone()));
-            // A second call would fail; the `OnceLock` means there is none.
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            recorded
-        })
-        .clone()
-}
-
-/// The names of every span descending from `root`, however deep.
-fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> {
-    let spans = recorded.0.lock().expect("the recorder").clone();
-    let mut family = vec![root.clone()];
-    let mut names = Vec::new();
-    // The list is in creation order, so one pass reaches every generation: a child is always
-    // recorded after its parent.
-    for (id, parent, name) in spans {
-        if parent.is_some_and(|parent| family.contains(&parent)) {
-            family.push(id);
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// ADR-0023's central mechanical claim: an install is **one** trace, although it is begun by the
-/// task that downloaded the artifact and finished by the Supervisor's own.
-///
-/// The span travels with the command through the Port; if it did not, each phase would open a trace
-/// of its own and "which phase failed" — the question the dashboard is built around — would have no
-/// span to answer with. Asserted against the real Runner swapping a real program, because the hand
-/// -over is the thing under test and a mock of it would test the mock.
-#[tokio::test]
-async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
-    let recorded = recorder();
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
@@ -1363,31 +1072,9 @@ async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let staged = dir.path().join("downloaded.staged");
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
 
-    // The span the transport would open around the download, handed over exactly as it is there.
-    let operation = tracing::info_span!("package.install");
-    let root = operation
-        .id()
-        .expect("the recording subscriber is in force");
     harness
         .commands
         .send(ProcessCommand::ApplyPackage {
-            staged: staged.clone(),
-            version: "2.0.0".to_string(),
-            hash: b"2.0.0".to_vec(),
-            span: operation,
-        })
-        .await
-        .expect("send");
-    let (_, result) = next_package_ack(&mut harness.events).await;
-    assert_eq!(result, Ok("2.0.0".to_string()));
-
-    let phases = descendants_of(&recorded, &root);
-    for phase in ["stage", "swap", "gate"] {
-        assert!(
-            phases.iter().any(|name| name == phase),
-            "the {phase} phase belongs to the install that was handed over, got {phases:?}"
-        );
-    }
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;

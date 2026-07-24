@@ -1,4 +1,4 @@
-//! The product's name and display name, fixed at build time (ADR-0010).
+//! The product's name and display name, fixed at build time (ADR-0028).
 //!
 //! Three names sit side by side in this program, each naming a different thing, and conflating any
 //! two of them couples things that must be free to move apart:
@@ -20,7 +20,7 @@
 ///
 /// Lowercase `[a-z0-9-]`, 1–32 characters, never a Windows reserved device name — the intersection
 /// of the systemd-unit, launchd-label, SCM service-name and directory-name grammars, which is the
-/// same grammar ADR-0010 set for instance names and for the reason.
+/// same grammar ADR-0028 set for instance names and for the reason.
 pub const PRODUCT_NAME: &str = env!("OPAMP_FLEET_PRODUCT_NAME");
 
 /// The product's display name: prose, for the three places prose belongs — the Add/Remove Programs

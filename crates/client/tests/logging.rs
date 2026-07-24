@@ -1,4 +1,4 @@
-//! The Client's own log file, driven through the real binary (ADR-0026).
+//! The Client's own log file, driven through the real binary (ADR-0028).
 //!
 //! The unit tests cover the writer and the rotation; what they cannot show is the thing the
 //! decision exists for — that a process started the way a service manager starts it actually
@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 /// answers on: it must still log, because the failures worth reading are exactly the ones where
 /// there is no Server.
 fn spawn(dir: &Path, args: &[&str]) -> Child {
-    let config = dir.join("supervisor.toml");
     std::fs::write(
         &config,
         // Port 1 answers nothing, so this Client stays in its reconnect loop for the whole test.
@@ -28,7 +27,6 @@ fn spawn(dir: &Path, args: &[&str]) -> Child {
         ),
     )
     .expect("write config");
-    Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("run")
         .args(args)
         .arg("--config")
@@ -49,7 +47,6 @@ fn wait_for_log(dir: &Path, within: Duration) -> Option<std::path::PathBuf> {
                 if path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("supervisor"))
                     && std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 0
                 {
                     return Some(path);

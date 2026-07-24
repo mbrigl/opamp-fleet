@@ -1,4 +1,4 @@
-//! The downstream hop's TLS (ADR-0024, ADR-0013): a Gateway configured with `[gateway.tls]` serves
+//! The downstream hop's TLS (ADR-0034, ADR-0026): a Gateway configured with `[gateway.tls]` serves
 //! the downstream endpoint over TLS, and when a `client_ca_file` is set it *requires* a downstream
 //! Agent to present a certificate that chains to it.
 //!
@@ -143,10 +143,8 @@ fn report(uid: &InstanceUid) -> AgentToServer {
 /// A reqwest client that trusts `pki`'s CA and, given an identity, presents it as a client
 /// certificate.
 fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
-    client::tls::install_ring_provider();
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
-        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")]);
     if let Some((cert, key)) = identity {
         let mut pem = key.into_bytes();
         pem.extend_from_slice(cert.as_bytes());

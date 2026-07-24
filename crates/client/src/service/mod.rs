@@ -1,4 +1,4 @@
-//! Everything that makes the Client an OS service (ADR-0010) lives in this module: the daemon
+//! Everything that makes the Client an OS service (ADR-0028) lives in this module: the daemon
 //! runtime with graceful shutdown ([`runtime`]), the versioned install layout ([`layout`]), and
 //! the cross-platform service lifecycle ([`manager`]). The Windows SCM runtime shim joins as a
 //! `cfg(windows)` submodule.
@@ -48,7 +48,7 @@ impl ServiceState {
     }
 }
 
-/// The narrow lifecycle seam (ADR-0010): everything a future updater needs, and nothing more.
+/// The narrow lifecycle seam (ADR-0028): everything a future updater needs, and nothing more.
 pub trait ServiceControl {
     /// Start the installed service.
     ///
