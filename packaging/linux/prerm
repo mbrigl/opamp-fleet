@@ -1,0 +1,4 @@
+# the staged versions, the `current` pointer, the PATH symlink, and on purge the data root —
+# happens in the post-removal (ADR-0021), after the package's own files are gone.
+	systemctl stop opamp-fleet.service >/dev/null 2>&1 || true
+/usr/libexec/opamp-fleet/supervisor service uninstall || true

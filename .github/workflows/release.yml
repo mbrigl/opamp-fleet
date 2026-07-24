@@ -1,0 +1,116 @@
+#
+# The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
+# `version/*` tag from it (ADR-0011) — *before* it builds, so ADR-0011's `build.rs` finds a tag on
+# HEAD and bakes the same number into the binary with its commit metadata. Nothing about how a
+# binary learns its own version changed; only who decides it and who types the tag.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only — create no tag and no release"
+        type: boolean
+        default: true
+  # A hand-made tag still releases, for the case where someone tags deliberately. The tag this
+  # workflow pushes itself does not land here: events from the workflow's own token never start
+  # another run.
+  # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
+  # from this job's answer, so the artifacts cannot disagree with each other or with the binary.
+    permissions:
+      # Pushing the tag (ADR-0011). Read alone would be enough for everything else here.
+      contents: write
+      full: ${{ steps.baked.outputs.full }}
+      publish: ${{ steps.read.outputs.publish }}
+          # The baked version is resolved from the repository's tags; a shallow clone would bake
+      - name: Read the version out of Cargo.toml
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "client") | .version')
+          echo "Cargo.toml says $version"
+          case "$version" in
+            "" | *[!0-9.]* ) echo "::error::$version is not a release version (MAJOR.MINOR.PATCH)"; exit 1 ;;
+          esac
+
+          # A hand-pushed tag still releases, but only if the two agree — this is the drift
+          # ADR-0011 accepts and refuses to resolve silently.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tagged="${GITHUB_REF_NAME#version/}"
+            if [ "$tagged" != "$version" ]; then
+              echo "::error::the tag says $tagged and Cargo.toml says $version — bump one of them"
+              exit 1
+            fi
+            publish=true
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            publish=false
+          else
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Nothing is built until it is certain this number is still free. A version that already
+      # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
+      # to move a tag or replace an artifact somebody may already hold (ADR-0011). Both are asked
+      # because either can exist alone: a draft release reserves a tag name without the tag being
+      # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
+      # run — whether a version can be released does not depend on whether this run intends to.
+      - name: This version has not been released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.read.outputs.version }}'
+          tag="version/$version"
+          taken=""
+
+          on=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$on" ]; then
+            # On a push run this very tag is what started us; anywhere else it is a spent number.
+            if [ "${{ github.event_name }}" = "push" ] && [ "$on" = "$GITHUB_SHA" ]; then
+              echo "$tag is the tag that started this run"
+            else
+              echo "::error::the tag $tag already exists, on ${on:0:7}"
+              taken=yes
+            fi
+          fi
+
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::a release $tag already exists"
+            taken=yes
+          fi
+
+          if [ -n "$taken" ]; then
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0011)"
+            exit 1
+          fi
+          echo "$tag is free"
+      - name: Tag this commit
+        if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          tag="version/${{ steps.read.outputs.version }}"
+          # The guard above proved the tag is free; the push is what proves it still is, since it
+          # is refused rather than forced if a concurrent run got there first.
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          echo "created $tag"
+      # Debug: the version is baked identically and this build is only asked, never shipped.
+      - name: The binary agrees
+        id: baked
+        run: |
+          set -euo pipefail
+          # `-p client` is the package (its name is a build-time identifier); the binary it
+          # produces is the shipped name (ADR-0021).
+          version='${{ steps.read.outputs.version }}'
+          if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0011)"
+          # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
+        run: cargo build --release -p package-tools --bin opamp-package-sign --locked
+          # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
+          grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
+    # A dry run builds and packs everything and stops here.
+    if: needs.version.outputs.publish == 'true'
+          (ADR-0020, ADR-0011) — the commit this build carries,
+
+          Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
+
+          \`\`\`console
+          \`\`\`
+          gh release create "version/${{ needs.version.outputs.version }}" \

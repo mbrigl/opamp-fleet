@@ -27,7 +27,7 @@ spaces.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately to the
 project maintainers, who are obligated to respect the privacy and security of the reporter.
 
-- Reporting contact: <!-- TODO: add a contact address (email or private channel) -->
+- Reporting contact: [governance@hivevm.org](mailto:governance@hivevm.org)
 
 Maintainers will review and investigate every report and respond following the *Addressing and
 Repairing Harm* guidelines of the Contributor Covenant 3.0.

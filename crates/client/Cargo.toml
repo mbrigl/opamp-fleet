@@ -1,0 +1,69 @@
+[package]
+name = "client"
+description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0014)"
+# The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p client` means this one.
+# The operator tools are not here at all: they are `crates/package-tools` (ADR-0009).
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+opamp.workspace = true
+# ADR-0021: service lifecycle and the content hash in the install layout's manifest.
+service-manager.workspace = true
+# ADR-0021: the questionnaire `service install --interactive` runs, and the hidden prompt the
+# credential in it is typed into.
+dialoguer.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+prost.workspace = true
+serde.workspace = true
+toml.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+hex.workspace = true
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+# The downstream OpAMP endpoint of Gateway Mode (ADR-0014): a WebSocket upgrade and a plain-HTTP
+# POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
+# it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
+axum = { workspace = true, features = ["ws"] }
+
+# ADR-0017: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# which has no SIGTERM equivalent (there, kill is the stop).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# ADR-0021: the SCM runtime shim, so the daemon runs under the Windows Service Control Manager.
+# Not compiled on Linux/macOS.
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+
+# The package carries the **product's** name (ADR-0021 clause 5), not the program's: a second
+# instance is a second build, and two variants that shared a package name could not be installed
+# side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
+# would use to override it without templating this manifest.
+name = "opamp-fleet"
+#
+# A directory named after the product, holding a file named after the program (ADR-0021 clauses 4
+# and 10): two variant builds ship the same program under different products, so a bare
+# `usr/libexec/supervisor` would be one file two packages both claim to own.
+assets = [["target/release/supervisor", "usr/libexec/opamp-fleet/", "755"]]
+name = "opamp-fleet"
+    { source = "target/release/supervisor", dest = "/usr/libexec/opamp-fleet/supervisor", mode = "755" },
+[dev-dependencies]
+tempfile = "3"
+# Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
+# encoder rides here alone again now that `pack` has moved to its own crate (ADR-0009) — a
+# dev-dependency reaches the tests and no shipped binary.
+# ADR-0017: the end-to-end test runs the real Server in-process against the real Client binary.
+server = { path = "../server" }

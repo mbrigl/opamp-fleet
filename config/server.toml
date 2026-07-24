@@ -1,0 +1,37 @@
+# OpAMP Fleet Server configuration (ADR-0009). Every setting is optional; the values shown are the
+# defaults. Start with: cargo run -p server -- --config config/server.toml
+
+# TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0012, superseding ADR-0009 on this point).
+#
+# The AGENT PLANE: the OpAMP endpoint (/v1/opamp) and the package download the offers point at.
+# Port 4320 is the protocol's default, and it is open to the network because that is where the
+listen = "0.0.0.0:4320"
+
+
+# The largest OpAMP message accepted or sent, on either transport and in either direction. The
+# protocol requires the limit and recommends this default; a fleet of small status reports runs
+# comfortably on far less. An oversized request is answered 413, an oversized WebSocket message
+# closes the connection with 1009.
+max_message_size_bytes = 67108864
+
+# The absolute base URL advertised for downloads. Leave unset in the ordinary case: the offered
+# download_url is then a path, which the Client resolves against its own OpAMP endpoint — the
+# Agent plane, which is exactly where the download is served (ADR-0012). Set it only when
+# downloads must go through a different host, such as a mirror.
+
+# Optional TLS (ADR-0012): with a certificate and key BOTH listeners serve HTTPS/WSS instead.
+# client_ca_file turns on mutual TLS (ADR-0022) and belongs to the Agent plane alone: every request
+# to /v1/opamp must then arrive over a connection carrying a client certificate that bundle
+# verifies. Client authentication stays optional at the TLS layer, because the same listener serves
+# the package download, which a Client fetches presenting no certificate — so only the OpAMP route
+# requires one.
+# [tls]
+# cert_file = "cert.pem"
+# key_file = "key.pem"
+
+# THE OPERATOR PLANE (ADR-0012): the REST API, the API docs, and the bundled UI, on their own
+#
+# It must differ from the Agent plane's `listen` above; equal addresses are refused at startup,
+# by name, instead of surfacing later as "address already in use".
+[rest]
+listen = "127.0.0.1:4321"

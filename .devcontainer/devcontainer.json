@@ -1,32 +1,42 @@
 {
-  "name": "NUC DevContainer",
+  "name": "OpAMP Fleet DevContainer",
 
-  "image": "mcr.microsoft.com/devcontainers/base:debian",
   "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
 
   "remoteUser": "vscode",
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
+  // The host's agent config directory. HOME is set on Linux and macOS, USERPROFILE on Windows;
+  // exactly one of the two is non-empty, so concatenating both yields the home directory on every
+  // host (the pattern the Dev Containers documentation recommends).
   "mounts": [
-    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind"
   ],
 
-  "shutdownAction": "stopContainer",
 
   // Runs on the host before the container is created. Ensures the bind-mount source for the agent
   // config exists, so Docker does not auto-create it as a root-owned directory (which breaks
-  // credential writes inside the container).
-  "initializeCommand": "mkdir -p ${localEnv:HOME}/.claude",
+  // credential writes inside the container). Written to work in both a POSIX shell and cmd.exe:
+  // plain `mkdir` (cmd.exe knows no `-p`; the parent is the home directory and always exists) and
+  // `|| exit 0` so an already existing directory — an error for both shells — does not abort the
+  // container build.
+  "initializeCommand": "mkdir \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\" || exit 0",
+
+  // Runs inside the container once it is created. Git does not version its hooks, so the
+  // repository keeps them under .githooks/ and this points git at them: pre-commit refuses a
+  // commit on main, pre-push runs the checks first (AGENTS.md §5 and §6). Outside the container,
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
   // from a host-side VS Code extension instead (README → "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
-    // credential helper. Git writes still require explicit human approval (see AGENTS.md).
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
+    // toolchain (ADR-0009). The build chain needs no system protoc (ADR-0010 uses the
+    // pure-Rust protox), so no extra system packages are required here.
+    "ghcr.io/devcontainers/features/rust:1": {}
   },
 
   "customizations": {
@@ -35,12 +45,27 @@
       "extensions": [
         "anthropic.claude-code",
         "mistralai.mistral-vibe-code",
-        "ms-vscode-remote.remote-containers"
+        "ms-vscode-remote.remote-containers",
+        // Rust development: language server, debugger, and Cargo.toml support.
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml"
       ]
     }
   },
 
-  "forwardPorts": [],
+  // The Server's two planes (ADR-0012), published the way each one is meant to be reached.
+  //
+  // `forwardPorts` would bind the host side to 127.0.0.1 only; do not add 4320 to it, the two
+  // mechanisms fight over the same host port.
+  //
+  // The Operator plane (4321, REST API + UI) binds loopback *inside* the container by default,
+  // which Docker cannot publish — so it goes through `forwardPorts`, which tunnels into the
+  // container and reaches a loopback listener. That is also the right exposure for it: the
+  // developer, not the network.
+  "forwardPorts": [4321],
+  "portsAttributes": {
+  },
 
   "hostRequirements": {
     "cpus": 2,

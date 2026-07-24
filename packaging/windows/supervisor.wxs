@@ -1,0 +1,31 @@
+  The package delivers one file into `Program Files` and then calls the Client's own
+  `service install` (ADR-0021), which builds the layout and the state directory under
+  `%ProgramData%\opamp-fleet`. That division is ADR-0021 clause 8: `Program Files` is
+  `TrustedInstaller`-owned and read-only once installation finishes, and the layout is rewritten at
+  runtime by the daemon — the self-update stages a new version directory and swings `current`. It
+  is the same line the `.deb` and `.rpm` draw between `/usr/libexec` and `/opt`. The MSI therefore
+  passes **no root at all** and takes the platform defaults, which is also what makes a Windows
+  host installed from the archive and one installed by this package identical.
+
+  It registers no service of its own. An MSI `ServiceInstall` element would write a registration
+  <Package Name="OpAMP Fleet Agent"
+    <SummaryInformation Description="OpAMP Fleet Agent — places a machine under OpAMP management" />
+                INSTALLFOLDER="C:\Program Files\opamp-fleet" ^
+      One directory the operator configures (ADR-0021 clause 39), holding the payload this package
+      delivers: `supervisor.exe` and nothing else. The layout and the state directory are not here
+      — `service install` puts them under `%ProgramData%\opamp-fleet`, for ADR-0021 clause 8's
+      reason. The operator still configures one path; it simply is not the install root.
+
+      Named after the **product**, not its display name (ADR-0021 clause 7): `nodejs`, `Git` and
+      `PowerShell` sit under `Program Files` under their own slugs, and a directory named for the
+      display name would be the one place a variant build could not tell itself apart.
+      <Directory Id="INSTALLFOLDER" Name="opamp-fleet" />
+    <Feature Id="Main" Title="OpAMP Fleet Agent" Level="1">
+                  ExeCommand="service install --endpoint &quot;[ENDPOINT]&quot;[SELFUPDATEFLAG]"
+                  ExeCommand="service install[SELFUPDATEFLAG]"
+      `service uninstall` leaves both roots behind, as it does everywhere (ADR-0021) — deleting a
+      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0021
+      refused, one step later. What this package's uninstaller then empties is INSTALLFOLDER, which
+      holds only the payload it delivered: exactly right, and the reason ADR-0021 clause 8 moved
+      the data out of `Program Files`. The configuration and the state survive under
+      `%ProgramData%\opamp-fleet`, the same remove-versus-purge shape the `.deb` has.

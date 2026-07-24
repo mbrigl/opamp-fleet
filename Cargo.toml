@@ -1,0 +1,81 @@
+# Cargo workspace (ADR-0009): the Server and the Client are two binaries sharing one wire layer
+# (`opamp`). One workspace, one lockfile, one pinned toolchain (`rust-toolchain.toml`), so both ends
+# resolve the same compiler and dependency versions and cannot drift apart on the wire format.
+[workspace]
+resolver = "2"
+members = ["crates/opamp", "crates/server", "crates/client", "crates/package-tools"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+# Versions are pinned once here and referenced from each crate with `<dep>.workspace = true`.
+[workspace.dependencies]
+opamp = { path = "crates/opamp" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
+axum = { version = "0.8", features = ["ws"] }
+prost = "0.14"
+prost-build = "0.14"
+# Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0010).
+protox = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+futures-util = "0.3"
+tracing = "0.1"
+# The rolling file the Client writes while it runs as a service (ADR-0021) — the Windows SCM
+# discards a service's stderr, so without this a Client installed there has no readable log at all.
+# `tokio-rs/tracing`'s own appender, so the rotation lives beside the logging stack rather than
+# being hand-written inside the component whose job is to explain failures.
+tracing-appender = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v7"] }
+flate2 = "1"
+# off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
+# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0010 and ADR-0012
+# actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
+# `ring` compiles C and assembly in its build script, so a C compiler is required either way
+# (ADR-0022).
+# produce. Only `crates/package-tools` and the Client's own tests ask for it (ADR-0009); the
+# Client daemon never encodes, and does not enable it.
+sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256"] }
+# Reading the tar inside a `.tar.gz` package artifact (ADR-0028). Pure Rust and no system library,
+# which is what ADR-0010 and ADR-0012 keep this build free of; the Client extracts one member and
+# never writes a path the archive chose.
+# kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0017). Unix-only.
+libc = "0.2"
+# The Client's WebSocket transport; rustls enables `wss://` (ADR-0012).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0012).
+# The provider is installed once at each binary's startup.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0012): hyper defaults
+# that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
+# neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
+# `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
+# adds an entry to a manifest and no code to either binary.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+# Reads the repository in build.rs to compute the baked-in version (ADR-0011). Build-dependency
+# only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
+# build script only opens the local checkout.
+git2 = { version = "0.20", default-features = false }
+# The Client's subcommand CLI (ADR-0021). No `env` feature: the Client is file-configured
+# (ADR-0009), never configured through environment variables.
+clap = { version = "4", features = ["derive"] }
+# Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
+# (ADR-0021). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0012) holds.
+service-manager = "0.11"
+# The interactive first configuration `service install --interactive` writes (ADR-0021). It is
+# here for one thing that must not be hand-rolled three times: reading a credential without
+# echoing it, which is terminal control (termios / SetConsoleMode) rather than string handling.
+# `password` is the only feature asked for — no editor, no fuzzy select — and it pulls no
+# TLS/crypto backend, so ADR-0012 holds.
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
+# The Windows-only SCM runtime shim (ADR-0021): status reporting and the stop control handler,
+# without which the SCM kills the service with error 1053. Compiled on Windows targets only.
+windows-service = "0.8"

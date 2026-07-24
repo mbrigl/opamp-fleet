@@ -1,0 +1,6 @@
+    pub sequence_num: u64,
+    pub capabilities: u64,
+    pub description: Option<AgentDescription>,
+    pub health: Option<ComponentHealth>,
+    pub effective_config: Option<String>,
+    pub remote_config_status: Option<RemoteConfigStatus>,

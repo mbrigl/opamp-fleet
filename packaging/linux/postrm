@@ -1,0 +1,15 @@
+#   remove:  the PATH symlink and the executable layout — every staged version and the `current`
+#            pointer, which live under `/opt`. The data root stays: this host's identity and a
+#            credential the operator typed are not binaries, and a reinstall picks them back up.
+#   purge:   (dpkg only) all of the above and the data root itself — state, logs and
+# That distinction is ADR-0021's, with the paths redrawn across the two roots by ADR-0021 clause 8.
+#
+# The paths name the default system roots (`default_layout_root` and `default_root` in
+# crates/client/src/service/manager.rs) — the only roots a packaged install ever uses. An install
+# rooted elsewhere with `--root` is a manual one and is deliberately not touched.
+layout_root=/opt/opamp-fleet
+data_root=/var/lib/opamp-fleet
+	rm -rf "$data_root"
+if [ -L /usr/bin/opamp-fleet ]; then
+	rm -f /usr/bin/opamp-fleet
+rm -rf "$layout_root"
