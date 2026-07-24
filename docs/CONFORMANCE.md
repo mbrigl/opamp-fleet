@@ -131,14 +131,14 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsOwnTraces` | `0x0020` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnMetrics` | `0x0040` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
-| `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | planned | Needed for Server-driven credential rotation (goal 17). |
+| `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | implemented | Server-driven credential rotation (goal 17, ADR-0014). An offer is verified by actually connecting (the Baseline's MUST), persisted in the Client's state dir (overriding `client.toml`), then the connection switches — across transports if the offered endpoint demands it. An offered `heartbeat_interval_seconds` becomes the heartbeat (WebSocket) or polling interval (plain HTTP). |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
 | `AcceptsRestartCommand` | `0x0400` | Beta | optional | implemented | Declared by Supervisor-backed Agents only — the self-Agent has no process to restart. Queued via `POST /api/v1/agents/{uid}/restart`, delivered as the Baseline's command-only message on both transports (pushed over WebSocket, on the next poll over plain HTTP). |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
-| `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval arrives with `AcceptsOpAMPConnectionSettings`. |
+| `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval (ADR-0014) overrides the configured one on both transports. |
 | `ReportsAvailableComponents` | `0x4000` | Development | optional | implemented | Relayed from the Managed Process's `opampextension` through the Supervisor Endpoint; declared only once components are known. The hash rides full reports, the full map goes out on the Server's `ReportAvailableComponents` flag — which the Server sets while it only holds a hash. |
-| `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | planned | Reports the outcome of a connection-settings offer. |
+| `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | implemented | `APPLYING` on receipt, `APPLIED`/`FAILED` after verification, the hash echoed either way (ADR-0014) — which is what stops the Server re-offering. Survives restarts via the persisted settings. |
 
 ## Server capabilities
 
@@ -151,7 +151,7 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 | `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `OffersPackages` | `0x0008` | Beta | optional | planned | Software distribution (goal 10). |
 | `AcceptsPackagesStatus` | `0x0010` | Beta | optional | planned | Software distribution (goal 10). |
-| `OffersConnectionSettings` | `0x0020` | Beta | optional | planned | Server-driven credential rotation (goal 17). |
+| `OffersConnectionSettings` | `0x0020` | Beta | optional | implemented | Declared only while `server.toml` carries a `[connection_offer]` — credential, heartbeat interval, and/or endpoint, compiled into one hash-gated `OpAMPConnectionSettings` offered to Agents declaring `AcceptsOpAMPConnectionSettings` whose reported hash differs (ADR-0014). A credential that `[auth]` would reject fails startup. |
 | `AcceptsConnectionSettingsRequest` | `0x0040` | Development | optional | planned | Agent-initiated certificate signing request flow. |
 
 ## Protocol behaviour beyond capabilities
@@ -210,5 +210,8 @@ whole model exposed through the OpenAPI-described REST API v1. On top of that lo
 server-initiated restart command, periodic heartbeats on both transports, available-components
 relaying from the Managed Process, and duplicate-`instance_uid` handling with per-connection
 disconnect scoping. The OpAMP endpoint optionally requires Basic or Bearer authentication on both
-transports (ADR-0013). Every remaining *planned* row — packages, connection settings, own
-telemetry, custom messages — is future work; the rows above double as that work list.
+transports (ADR-0013), and the Server rotates those credentials — plus heartbeat interval and
+endpoint — fleet-wide through hash-gated connection-settings offers the Client verifies by
+actually connecting, persists, and acknowledges (ADR-0014). Every remaining *planned* row —
+packages, other/telemetry connection settings, the certificate-request flow, own telemetry,
+custom messages — is future work; the rows above double as that work list.

@@ -5,7 +5,7 @@
 //! reply to the owning Agent by `instance_uid` alone, never by connection. With one self-Agent
 //! it behaves exactly like the single-Agent Client did; with Supervisors it multiplexes them.
 
-use opamp::proto::{AgentToServer, ServerToAgent};
+use opamp::proto::{AgentToServer, ConnectionSettingsOffers, ServerToAgent};
 use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -27,6 +27,10 @@ pub struct Engine {
     agents: Vec<SupervisedAgent>,
     /// The shared event channel every adapter reports into, tagged with the Agent's index.
     events: mpsc::Receiver<(usize, ProcessEvent)>,
+    /// A connection-settings offer awaiting the transport's verification (ADR-0014). The offer
+    /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
+    /// pending offer — n Agents receiving the same offer verify and switch once.
+    pending_connection_offer: Option<ConnectionSettingsOffers>,
 }
 
 impl Engine {
@@ -57,7 +61,48 @@ impl Engine {
                 })
                 .collect(),
             events,
+            pending_connection_offer: None,
         }
+    }
+
+    /// Restores previously applied connection settings on every Agent (ADR-0014), so a restarted
+    /// Client reports `APPLIED` and is not re-offered what it already runs.
+    pub fn adopt_connection_settings(&mut self, hash: &[u8]) {
+        for agent in &mut self.agents {
+            agent.state.adopt_connection_settings(hash);
+        }
+    }
+
+    /// Declares one more capability on every Agent — e.g. `ReportsHeartbeat` once an offered
+    /// interval enables what the configuration had disabled.
+    pub fn declare_capability_all(&mut self, capability: opamp::proto::AgentCapabilities) {
+        for agent in &mut self.agents {
+            agent.state.declare_capability(capability);
+        }
+    }
+
+    /// The connection-settings offer the transport must verify by actually connecting, taken
+    /// exactly once (ADR-0014).
+    pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {
+        self.pending_connection_offer.take()
+    }
+
+    /// Closes a verified offer's lifecycle on every Agent: `APPLIED` (the transport switches
+    /// next) or `FAILED` with the error; either way every Agent owes the Server the outcome.
+    pub fn connection_settings_outcome(&mut self, hash: &[u8], result: Result<(), &str>) {
+        for agent in &mut self.agents {
+            agent.state.connection_settings_outcome(hash, result);
+            agent.owes_report = true;
+        }
+    }
+
+    /// One Agent's next report, for the plain-HTTP verification probe (ADR-0014): a real
+    /// exchange needs a real report. Delivered on success; a failed probe leaves a sequence gap
+    /// the Baseline's `ReportFullState` recovery heals on the next exchange.
+    pub fn probe_report(&mut self) -> Option<AgentToServer> {
+        self.agents
+            .first_mut()
+            .map(|agent| agent.state.next_report())
     }
 
     /// The identities carried, for logging.
@@ -111,9 +156,14 @@ impl Engine {
             warn!(agent = %uid, "dropping a reply for an unknown agent");
             return Handled::default();
         };
-        let handled = agent.state.handle(reply);
+        let mut handled = agent.state.handle(reply);
         if handled.send_report {
             agent.owes_report = true;
+        }
+        // The connection-scoped part of the reply moves to the Engine's single pending slot;
+        // whichever Agent's reply carried it last wins — they are all the same offer.
+        if let Some(offer) = handled.connection_offer.take() {
+            self.pending_connection_offer = Some(offer);
         }
         // A stored configuration awaiting application goes to the process adapter; its
         // ConfigApplied event closes the APPLYING → APPLIED/FAILED lifecycle.

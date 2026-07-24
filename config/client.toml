@@ -16,7 +16,9 @@ poll_interval_secs = 30
 # 0 disables heartbeats; on plain HTTP every poll already is the periodic report.
 heartbeat_interval_secs = 30
 
-# Where the Client persists its instance_uid and the received remote configuration.
+# Where the Client persists its instance_uid, the received remote configuration, and any
+# Server-offered connection settings (ADR-0014). Persisted connection settings override
+# endpoint, [auth], and the intervals above; delete <state_dir>/connection-settings.pb to revert.
 state_dir = "client-state"
 
 # Operator-defined attributes (ADR-0012), reported by every Agent this Client presents so the

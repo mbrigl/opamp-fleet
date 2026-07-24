@@ -42,5 +42,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0011](0011-supervisor-mode-hexagonal-core-and-plugins.md) | Supervisor Mode — hexagonal supervision core, compiled-in plugins, n Agents over one connection | 🟢 accepted |
 | [0012](0012-selector-targeted-configurations-and-openapi-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
 | [0013](0013-opamp-endpoint-authentication.md) | Static Basic and Bearer authentication on the OpAMP endpoint, optional by default | 🟢 accepted |
-| [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟡 proposed |
+| [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
 

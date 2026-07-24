@@ -10,15 +10,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
-    KeyValue, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse,
-    ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
+    OpAmpConnectionSettings, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities,
+    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
+use prost::Message as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
+use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
@@ -63,6 +67,9 @@ pub struct AgentRecord {
     pub restart_pending: bool,
     /// The Agent's available components — hash-only until the full map was demanded and arrived.
     pub available_components: Option<AvailableComponents>,
+    /// The outcome of the last connection-settings offer this Agent reported (ADR-0014); its
+    /// hash is what gates re-offering.
+    pub connection_settings_status: Option<ConnectionSettingsStatus>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
@@ -88,6 +95,32 @@ pub struct Processed {
     pub disconnected: bool,
 }
 
+/// The one `OpAMPConnectionSettings` this Server offers (ADR-0014), precompiled from the
+/// `[connection_offer]` section with the hash that gates its delivery.
+pub struct ConnectionOffer {
+    settings: OpAmpConnectionSettings,
+    hash: Vec<u8>,
+}
+
+impl ConnectionOffer {
+    pub fn from_config(config: &ConnectionOfferConfig) -> Result<Self, String> {
+        let settings = OpAmpConnectionSettings {
+            destination_endpoint: config.endpoint.clone().unwrap_or_default(),
+            headers: config.authorization()?.map(|value| Headers {
+                headers: vec![Header {
+                    key: "Authorization".to_string(),
+                    value,
+                }],
+            }),
+            heartbeat_interval_seconds: config.heartbeat_interval_secs.unwrap_or(0),
+            ..Default::default()
+        };
+        // The hash identifies the offer as a whole — an Agent echoing it needs nothing again.
+        let hash = Sha256::digest(settings.encode_to_vec()).to_vec();
+        Ok(ConnectionOffer { settings, hash })
+    }
+}
+
 /// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
@@ -96,6 +129,9 @@ pub struct AppState {
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
+    /// The connection settings offered to the fleet (ADR-0014); `None` offers nothing and leaves
+    /// `OffersConnectionSettings` undeclared.
+    connection_offer: Option<ConnectionOffer>,
 }
 
 impl AppState {
@@ -115,7 +151,26 @@ impl AppState {
             configs,
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
+            connection_offer: None,
         })
+    }
+
+    /// Arms the connection-settings offer (ADR-0014); with it the Server declares
+    /// `OffersConnectionSettings`.
+    #[must_use]
+    pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
+        self.connection_offer = offer;
+        self
+    }
+
+    /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
+    /// only while an offer is actually configured — an undeclared capability is never exercised,
+    /// a declared one never hollow.
+    fn capabilities(&self) -> u64 {
+        match self.connection_offer {
+            Some(_) => SERVER_CAPABILITIES | ServerCapabilities::OffersConnectionSettings as u64,
+            None => SERVER_CAPABILITIES,
+        }
     }
 
     /// A fresh identity for one WebSocket connection.
@@ -169,7 +224,7 @@ impl AppState {
             return None;
         }
         record.restart_pending = false;
-        Some(restart_command(uid))
+        Some(restart_command(uid, self.capabilities()))
     }
 
     /// Deletes a Configuration and wakes every WebSocket loop; `false` when none of that name
@@ -257,6 +312,7 @@ impl AppState {
                 last_seen_ms: now_ms(),
                 restart_pending: false,
                 available_components: None,
+                connection_settings_status: None,
                 owner: conn,
             }
         });
@@ -289,6 +345,12 @@ impl AppState {
         }
         if let Some(status) = msg.remote_config_status {
             record.remote_config_status = Some(status);
+        }
+        if let Some(status) = msg.connection_settings_status {
+            if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
+                warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
+            }
+            record.connection_settings_status = Some(status);
         }
         if let Some(incoming) = msg.available_components {
             // A routine hash-only update must not degrade an already-fetched full map of the
@@ -337,7 +399,7 @@ impl AppState {
         {
             record.restart_pending = false;
             return Processed {
-                reply: restart_command(&uid),
+                reply: restart_command(&uid, self.capabilities()),
                 uid: Some(uid),
                 disconnected: false,
             };
@@ -353,18 +415,54 @@ impl AppState {
             offer(record, desired.as_ref())
         };
 
+        // The connection-settings offer (ADR-0014), gated the same way: by capability and by
+        // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
+        let connection_settings = if disconnected {
+            None
+        } else {
+            self.settings_offer(record)
+        };
+
         Processed {
             reply: ServerToAgent {
                 instance_uid: uid.as_bytes().to_vec(),
-                capabilities: SERVER_CAPABILITIES,
+                capabilities: self.capabilities(),
                 flags: reply_flags,
                 remote_config,
+                connection_settings,
                 agent_identification: identification,
                 ..Default::default()
             },
             uid: Some(uid),
             disconnected,
         }
+    }
+
+    /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
+    /// reported hash says it already runs (or refused) exactly this offer.
+    fn settings_offer(&self, record: &AgentRecord) -> Option<ConnectionSettingsOffers> {
+        let offer = self.connection_offer.as_ref()?;
+        if record.capabilities
+            & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+            == 0
+        {
+            return None;
+        }
+        // The Baseline's gate: include the offer when the reported hash differs. An APPLYING
+        // echo of the same hash keeps the offer coming — a verification whose outcome was lost
+        // (a dropped connection mid-switch) must heal by retry, not hang.
+        if let Some(status) = &record.connection_settings_status {
+            if status.last_connection_settings_hash == offer.hash
+                && status.status != opamp::proto::ConnectionSettingsStatuses::Applying as i32
+            {
+                return None;
+            }
+        }
+        Some(ConnectionSettingsOffers {
+            hash: offer.hash.clone(),
+            opamp: Some(offer.settings.clone()),
+            ..Default::default()
+        })
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a Configuration changes; `None` when
@@ -377,7 +475,7 @@ impl AppState {
         let remote_config = offer(record, desired.as_ref())?;
         Some(ServerToAgent {
             instance_uid: uid.as_bytes().to_vec(),
-            capabilities: SERVER_CAPABILITIES,
+            capabilities: self.capabilities(),
             remote_config: Some(remote_config),
             ..Default::default()
         })
@@ -618,10 +716,10 @@ impl AgentView {
 }
 
 /// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
-fn restart_command(uid: &InstanceUid) -> ServerToAgent {
+fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToAgent {
     ServerToAgent {
         instance_uid: uid.as_bytes().to_vec(),
-        capabilities: SERVER_CAPABILITIES,
+        capabilities,
         command: Some(opamp::proto::ServerToAgentCommand {
             r#type: opamp::proto::CommandType::Restart as i32,
         }),

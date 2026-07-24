@@ -4,6 +4,7 @@
 
 mod cli;
 mod config;
+mod connection;
 mod engine;
 mod service;
 mod storage;
