@@ -137,7 +137,7 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `ReportsRemoteConfig` | `0x1000` | stable | optional | implemented | Reports acceptance or rejection (goals 3 and 4). |
 | `ReportsHeartbeat` | `0x2000` | Development | optional | implemented | Routine report every `heartbeat_interval_secs` (default 30 s, the Baseline's SHOULD; `0` disables and undeclares the bit) on the WebSocket transport; on plain HTTP every poll is the periodic report. A Server-offered interval arrives with `AcceptsOpAMPConnectionSettings`. |
-| `ReportsAvailableComponents` | `0x4000` | Development | optional | planned | Also reported by the Collector's `opampextension`. |
+| `ReportsAvailableComponents` | `0x4000` | Development | optional | implemented | Relayed from the Managed Process's `opampextension` through the Supervisor Endpoint; declared only once components are known. The hash rides full reports, the full map goes out on the Server's `ReportAvailableComponents` flag — which the Server sets while it only holds a hash. |
 | `ReportsConnectionSettingsStatus` | `0x8000` | Development | optional | planned | Reports the outcome of a connection-settings offer. |
 
 ## Server capabilities

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
-    AgentRemoteConfig, AgentToServer, AgentToServerFlags, ComponentHealth, KeyValue,
-    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse,
+    AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
+    KeyValue, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse,
     ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
@@ -55,6 +55,8 @@ pub struct AgentRecord {
     /// An operator-requested restart not yet delivered. Lives on the record, not a connection,
     /// so it reaches the Agent on its next exchange whichever transport carries it.
     pub restart_pending: bool,
+    /// The Agent's available components — hash-only until the full map was demanded and arrived.
+    pub available_components: Option<AvailableComponents>,
 }
 
 /// Why a restart request was refused (`POST /api/v1/agents/{uid}/restart`).
@@ -210,6 +212,7 @@ impl AppState {
                 connected: true,
                 last_seen_ms: now_ms(),
                 restart_pending: false,
+                available_components: None,
             }
         });
 
@@ -241,11 +244,37 @@ impl AppState {
         if let Some(status) = msg.remote_config_status {
             record.remote_config_status = Some(status);
         }
+        if let Some(incoming) = msg.available_components {
+            // A routine hash-only update must not degrade an already-fetched full map of the
+            // same hash; anything else (first sight, or a changed hash) replaces the stored value.
+            let keep_stored_full = record.available_components.as_ref().is_some_and(|stored| {
+                incoming.components.is_empty()
+                    && !stored.components.is_empty()
+                    && stored.hash == incoming.hash
+            });
+            if !keep_stored_full {
+                record.available_components = Some(incoming);
+            }
+        }
 
         let disconnected = msg.agent_disconnect.is_some();
         if disconnected {
             info!(agent = %uid, "agent disconnected");
             record.connected = false;
+        }
+
+        // A hash without the map is an offer to fetch: demand the full component list from an
+        // Agent that declared it can report one (the flag is meaningless toward any other).
+        if !disconnected
+            && record.capabilities
+                & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
+                != 0
+            && record
+                .available_components
+                .as_ref()
+                .is_some_and(|ac| ac.components.is_empty())
+        {
+            reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
         }
 
         // A queued restart goes out as the Baseline's command-only message: nothing but
@@ -389,6 +418,8 @@ pub struct AgentView {
     /// The Capability Set this Agent declared, as capability names from the Baseline's
     /// `AgentCapabilities` (see docs/CONFORMANCE.md).
     pub capabilities: Vec<String>,
+    /// The Agent's available components (top-level names, sorted); empty until reported.
+    pub available_components: Vec<String>,
     pub transport: String,
     pub connected: bool,
     pub healthy: bool,
@@ -507,6 +538,15 @@ impl AgentView {
             matched_configurations,
             desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
             capabilities: capability_names(record.capabilities),
+            available_components: record
+                .available_components
+                .as_ref()
+                .map(|ac| {
+                    let mut names: Vec<String> = ac.components.keys().cloned().collect();
+                    names.sort_unstable();
+                    names
+                })
+                .unwrap_or_default(),
             transport: record.transport.as_str().to_string(),
             connected: record.connected,
             healthy: record.health.as_ref().map(|h| h.healthy).unwrap_or(false),

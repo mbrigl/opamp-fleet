@@ -145,6 +145,11 @@ impl Endpoint {
                 .send(ProcessEvent::EffectiveConfig(effective))
                 .await;
         }
+        if let Some(components) = report.available_components {
+            self.events
+                .send(ProcessEvent::AvailableComponents(components))
+                .await;
+        }
     }
 }
 
@@ -198,6 +203,10 @@ mod tests {
                 ..Default::default()
             }),
             effective_config: Some(EffectiveConfig::default()),
+            available_components: Some(opamp::proto::AvailableComponents {
+                components: Default::default(),
+                hash: b"h".to_vec(),
+            }),
             ..Default::default()
         };
         socket
@@ -206,7 +215,7 @@ mod tests {
             .expect("send the report");
 
         let mut kinds = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let (index, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
                 .await
                 .expect("an event in time")
@@ -216,10 +225,14 @@ mod tests {
                 ProcessEvent::Description(_) => "description",
                 ProcessEvent::Health(_) => "health",
                 ProcessEvent::EffectiveConfig(_) => "effective",
+                ProcessEvent::AvailableComponents(_) => "components",
                 ProcessEvent::ConfigApplied { .. } => "applied",
             });
         }
-        assert_eq!(kinds, vec!["description", "health", "effective"]);
+        assert_eq!(
+            kinds,
+            vec!["description", "health", "effective", "components"]
+        );
 
         // The reply echoes the extension's uid and declares what this endpoint accepts.
         let reply = tokio::time::timeout(Duration::from_secs(10), socket.next())

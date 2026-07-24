@@ -208,6 +208,75 @@ async fn restart_requests_are_validated_against_the_fleet() {
 }
 
 #[tokio::test]
+async fn a_components_hash_is_answered_with_a_demand_for_the_full_map() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let with_bit = |mut report: AgentToServer| {
+        report.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+        report
+    };
+    let hash_only = opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h1".to_vec(),
+    };
+
+    // Hash-only announcement → the server flags ReportAvailableComponents.
+    let mut report = with_bit(full_report(&uid, "componentful", 1));
+    report.available_components = Some(hash_only.clone());
+    let reply = exchange(&client, &url, &report).await;
+    assert_ne!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+
+    // The full map arrives → stored, the demand stops, and the view names the components.
+    let mut answer = with_bit(compressed_report(&uid, 2));
+    answer.available_components = Some(opamp::proto::AvailableComponents {
+        components: std::collections::HashMap::from([(
+            "receiver/otlp".to_string(),
+            opamp::proto::ComponentDetails::default(),
+        )]),
+        hash: b"h1".to_vec(),
+    });
+    let reply = exchange(&client, &url, &answer).await;
+    assert_eq!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+
+    // A later hash-only heartbeat of the same hash must not degrade the stored map.
+    let mut routine = with_bit(compressed_report(&uid, 3));
+    routine.available_components = Some(hash_only);
+    exchange(&client, &url, &routine).await;
+    let view = &server.state.snapshot()[0];
+    assert_eq!(view.available_components, ["receiver/otlp"]);
+}
+
+#[tokio::test]
+async fn no_component_demand_without_the_declared_capability() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    // The report carries a components hash but not the capability bit: the flag stays unset —
+    // an undeclared capability is never exercised.
+    let mut report = full_report(&uid, "quiet", 1);
+    report.available_components = Some(opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h".to_vec(),
+    });
+    let reply = exchange(&client, &url, &report).await;
+    assert_eq!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+}
+
+#[tokio::test]
 async fn gzip_request_bodies_are_accepted() {
     let server = spawn().await;
     let client = reqwest::Client::new();

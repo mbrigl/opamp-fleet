@@ -10,9 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
-    AgentToServer, AnyValue, ComponentHealth, EffectiveConfig, KeyValue, RemoteConfigStatus,
-    RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType, ServerToAgent,
-    ServerToAgentFlags,
+    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, EffectiveConfig, KeyValue,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -72,6 +72,11 @@ pub struct AgentState {
     process_description: Option<AgentDescription>,
     /// The Managed Process's self-reported effective configuration; replaces the echo.
     process_effective_config: Option<EffectiveConfig>,
+    /// The Managed Process's available components, relayed from the Supervisor Endpoint.
+    /// Routine reports carry only the hash; the full map goes out when the Server asks.
+    available_components: Option<AvailableComponents>,
+    /// The Server flagged `ReportAvailableComponents`: the next report carries the full map.
+    send_components_full: bool,
     /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
@@ -108,6 +113,8 @@ impl AgentState {
             send_health: false,
             process_description: None,
             process_effective_config: None,
+            available_components: None,
+            send_components_full: false,
             configured_attributes: Vec::new(),
         })
     }
@@ -189,6 +196,15 @@ impl AgentState {
         self.send_status = true;
     }
 
+    /// The Managed Process reported its available components. Only now does the Agent declare
+    /// `ReportsAvailableComponents` — a capability without components would be a false promise —
+    /// and the next full report carries the hash (the Server flags for the full map on demand).
+    pub fn set_available_components(&mut self, components: AvailableComponents) {
+        self.available_components = Some(components);
+        self.declare_capability(AgentCapabilities::ReportsAvailableComponents);
+        self.send_full = true;
+    }
+
     /// The next report starts from a full status snapshot again — after (re)connecting, after an
     /// exchange failed, or when the Server demanded it.
     pub fn force_full(&mut self) {
@@ -224,9 +240,22 @@ impl AgentState {
                 });
             }
         }
+        // Available components ride the Baseline's two-step shape: the hash in every full
+        // snapshot, the full map only when the Server demanded it via ReportAvailableComponents.
+        if let Some(components) = &self.available_components {
+            if self.send_components_full {
+                msg.available_components = Some(components.clone());
+            } else if self.send_full {
+                msg.available_components = Some(AvailableComponents {
+                    components: Default::default(),
+                    hash: components.hash.clone(),
+                });
+            }
+        }
         self.send_full = false;
         self.send_status = false;
         self.send_health = false;
+        self.send_components_full = false;
         msg
     }
 
@@ -295,6 +324,13 @@ impl AgentState {
 
         if reply.flags & ServerToAgentFlags::ReportFullState as u64 != 0 {
             self.send_full = true;
+            handled.send_report = true;
+        }
+
+        if reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+            && self.available_components.is_some()
+        {
+            self.send_components_full = true;
             handled.send_report = true;
         }
 
@@ -672,6 +708,42 @@ mod tests {
         );
         this.handle(&command_with_config);
         assert!(!this.take_pending_restart());
+    }
+
+    #[test]
+    fn available_components_report_the_hash_and_the_map_only_on_demand() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        let full = AvailableComponents {
+            components: HashMap::from([(
+                "receiver/otlp".to_string(),
+                opamp::proto::ComponentDetails::default(),
+            )]),
+            hash: b"components-hash".to_vec(),
+        };
+        agent.set_available_components(full.clone());
+
+        // The next (full) report declares the bit and carries the hash only.
+        let report = agent.next_report();
+        assert_ne!(
+            report.capabilities & AgentCapabilities::ReportsAvailableComponents as u64,
+            0
+        );
+        let carried = report.available_components.expect("the hash announcement");
+        assert!(carried.components.is_empty());
+        assert_eq!(carried.hash, full.hash);
+
+        // The Server demands the full map: exactly the next report carries it, once.
+        let handled = agent.handle(&ServerToAgent {
+            flags: ServerToAgentFlags::ReportAvailableComponents as u64,
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        let demanded = agent.next_report().available_components.expect("the map");
+        assert!(demanded.components.contains_key("receiver/otlp"));
+        assert!(agent.next_report().available_components.is_none());
     }
 
     #[test]
