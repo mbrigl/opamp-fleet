@@ -64,6 +64,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             std::future::ready(body.into_response())
         }),
     )
+    // The interactive API docs (ADR-0005): a Redoc page rendering /api/v1/openapi.json, with
+    // Redoc vendored and served from this same origin so the docs work offline.
+    .route("/api/v1/docs", get(docs))
+    .route("/api/v1/docs/redoc.js", get(redoc_js))
     .route("/", get(index))
     .with_state(state)
 }
@@ -71,6 +75,20 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// The bundled UI: one embedded page, no frontend toolchain (ADR-0005).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
+}
+
+/// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (ADR-0005).
+async fn docs() -> Html<&'static str> {
+    Html(include_str!("../static/docs.html"))
+}
+
+/// The vendored Redoc standalone bundle, served same-origin so the docs page needs no CDN.
+async fn redoc_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../static/redoc.standalone.js"),
+    )
+        .into_response()
 }
 
 /// A machine-readable error, so generated clients get a body they can show.

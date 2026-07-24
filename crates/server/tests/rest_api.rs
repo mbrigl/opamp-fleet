@@ -135,6 +135,51 @@ async fn the_openapi_document_describes_the_contract() {
 }
 
 #[tokio::test]
+async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // The docs page renders the OpenAPI document and pulls its renderer from this same origin.
+    let page = client
+        .get(url(server.addr, "/api/v1/docs"))
+        .send()
+        .await
+        .expect("get docs");
+    assert_eq!(page.status(), 200);
+    assert!(page
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html")));
+    let html = page.text().await.expect("html");
+    assert!(
+        html.contains("spec-url=\"/api/v1/openapi.json\""),
+        "points at the document"
+    );
+    assert!(
+        html.contains("/api/v1/docs/redoc.js"),
+        "loads the vendored renderer"
+    );
+
+    // The vendored bundle is served as JavaScript — no CDN, so the docs work offline.
+    let js = client
+        .get(url(server.addr, "/api/v1/docs/redoc.js"))
+        .send()
+        .await
+        .expect("get renderer");
+    assert_eq!(js.status(), 200);
+    assert!(js
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("javascript")));
+    assert!(
+        js.text().await.expect("js").len() > 100_000,
+        "the real bundle, not a stub"
+    );
+}
+
+#[tokio::test]
 async fn configurations_survive_a_server_restart() {
     // The store is the persistence: a new AppState over the same directory restores everything.
     let dir = tempfile::tempdir().expect("tempdir");
