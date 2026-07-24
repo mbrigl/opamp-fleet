@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Server",
+      "cargo": {
+        "args": ["build", "--bin", "server", "--package", "server"],
+        "filter": { "name": "server", "kind": "bin" }
+      },
+      "args": ["--config", "config/server.toml"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      // `--package` takes the first, `--bin` and the filter take the second.
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+      },
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "compounds": [
+    {
+      "stopAll": true
+    }
+  ]
+}

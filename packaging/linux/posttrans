@@ -1,0 +1,1 @@
+ln -sfn /opt/opamp-fleet/current/supervisor /usr/bin/opamp-fleet
