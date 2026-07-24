@@ -62,6 +62,8 @@ pub struct AgentState {
     managed: bool,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
+    /// A Server-commanded restart awaiting dispatch to the process adapter.
+    pending_restart: bool,
     /// The Managed Process's health — derived or self-reported (ADR-0011). Absent for the
     /// self-Agent, whose health is being alive.
     process_health: Option<ComponentHealth>,
@@ -101,6 +103,7 @@ impl AgentState {
             send_status: false,
             managed: false,
             pending_apply: None,
+            pending_restart: false,
             process_health: None,
             send_health: false,
             process_description: None,
@@ -109,11 +112,18 @@ impl AgentState {
         })
     }
 
-    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011).
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011). Only
+    /// such an Agent accepts a restart command — the self-Agent has no process to restart.
     pub fn supervised(name: String, storage: Storage) -> std::io::Result<Self> {
         let mut state = Self::new(name, storage)?;
         state.managed = true;
+        state.declare_capability(AgentCapabilities::AcceptsRestartCommand);
         Ok(state)
+    }
+
+    /// A restart the Server commanded and the process adapter has not been handed yet.
+    pub fn take_pending_restart(&mut self) -> bool {
+        std::mem::take(&mut self.pending_restart)
     }
 
     /// Adds one capability to this Agent's declared set — heartbeats when enabled, and bits an
@@ -238,6 +248,20 @@ impl AgentState {
 
         if reply.capabilities != 0 {
             self.server_capabilities = Some(reply.capabilities);
+        }
+
+        // A command message carries only identity, capabilities, and the command — the Baseline
+        // says every other field is to be ignored, so this branch returns before touching them.
+        if let Some(command) = &reply.command {
+            if command.r#type == opamp::proto::CommandType::Restart as i32 && self.managed {
+                info!("the server commanded a restart");
+                self.pending_restart = true;
+            } else {
+                // Restart is the only command the Baseline defines; and the self-Agent never
+                // declares AcceptsRestartCommand, so a command toward it is a Server error.
+                warn!(r#type = command.r#type, "ignoring an unsupported command");
+            }
+            return handled;
         }
 
         if let Some(response) = &reply.error_response {
@@ -610,6 +634,44 @@ mod tests {
         let declared = agent.next_report().capabilities;
         assert_eq!(declared, base | AgentCapabilities::ReportsHeartbeat as u64);
         assert_eq!(agent.disconnect_message().capabilities, declared);
+    }
+
+    #[test]
+    fn a_restart_command_is_queued_by_supervised_agents_and_ignores_other_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised = AgentState::supervised("s".to_string(), storage).expect("agent");
+        assert_ne!(
+            supervised.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
+            0,
+            "a supervised agent declares restartability"
+        );
+
+        // A command message per the Baseline: every field besides identity, capabilities, and
+        // the command is ignored — the piggybacked remote_config must not be applied.
+        let command_with_config = ServerToAgent {
+            command: Some(opamp::proto::ServerToAgentCommand {
+                r#type: opamp::proto::CommandType::Restart as i32,
+            }),
+            remote_config: Some(remote_config(b"x: 1\n", b"sneaky")),
+            ..Default::default()
+        };
+        supervised.handle(&command_with_config);
+        assert!(supervised.take_pending_restart());
+        assert!(!supervised.take_pending_restart(), "taken exactly once");
+        assert!(
+            supervised.take_pending_apply().is_none(),
+            "the piggybacked config is ignored"
+        );
+
+        // The self-Agent never declares the capability and ignores the command.
+        let mut this = make_agent(&dir.path().join("self"));
+        assert_eq!(
+            this.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
+            0
+        );
+        this.handle(&command_with_config);
+        assert!(!this.take_pending_restart());
     }
 
     #[test]

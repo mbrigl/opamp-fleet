@@ -23,6 +23,10 @@ pub enum ProcessCommand {
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
     ApplyConfig { config: AgentRemoteConfig },
+    /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
+    /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —
+    /// the health events of the stop/spawn cycle are the visible outcome.
+    Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
 }

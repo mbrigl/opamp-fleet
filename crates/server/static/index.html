@@ -262,6 +262,9 @@
           const open = expandedCaps.has(a.instance_uid);
           chips.push(`<span class="chip clickable cap-toggle${open ? " selected" : ""}" data-uid="${esc(a.instance_uid)}" title="Click to ${open ? "hide" : "show"} the declared capabilities">capabilities: ${caps.length} ${open ? "▴" : "▾"}</span>`);
         }
+        if (caps.includes("AcceptsRestartCommand")) {
+          chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
+        }
         return `<div class="chips">${chips.join("")}</div>`;
       }
       function matchedConfigs(a) {
@@ -330,6 +333,12 @@
       });
       $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
       $("agents").addEventListener("click", (e) => {
+        const restart = e.target.closest(".restart-btn");
+        if (restart) {
+          fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
+            .then(() => refreshAgents());
+          return;
+        }
         const toggle = e.target.closest(".cap-toggle");
         if (!toggle) return;
         const uid = toggle.dataset.uid;
