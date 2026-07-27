@@ -15,7 +15,7 @@ publish = false
 # Versions are pinned once here and referenced from each crate with `<dep>.workspace = true`.
 [workspace.dependencies]
 opamp = { path = "crates/opamp" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
 axum = { version = "0.8", features = ["ws"] }
 prost = "0.14"
 prost-build = "0.14"
@@ -32,6 +32,8 @@ hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
 # Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007).
 flate2 = "1"
+# kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0011). Unix-only.
+libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0007).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # The Client's plain-HTTP(S) polling transport (ADR-0007).

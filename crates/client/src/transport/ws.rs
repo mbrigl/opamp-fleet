@@ -1,9 +1,12 @@
 //! The WebSocket transport (ADR-0007): one persistent connection, either side sends at will —
 //! this is what makes a configuration change arrive within seconds instead of a poll interval.
+//!
+//! The connection carries every Agent the [`Engine`] holds, disambiguated by `instance_uid`
+//! alone (ADR-0003): n Agents over one connection, routed by the Engine, never by this loop.
 
 use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
-use opamp::proto::ServerToAgent;
+use opamp::proto::{AgentToServer, ServerToAgent};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
@@ -11,22 +14,22 @@ use tokio_tungstenite::{
 };
 use tracing::{info, warn};
 
-use crate::agent::Agent;
 use crate::config::ClientConfig;
+use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
 use crate::transport::Backoff;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 enum Served {
-    /// The operator stopped the Client; the goodbye is already sent.
+    /// The operator stopped the Client; the goodbyes are already sent.
     Shutdown,
     /// The connection is gone; reconnect with backoff and report full state again.
     ConnectionLost,
 }
 
 pub async fn run(
-    mut agent: Agent,
+    mut engine: Engine,
     config: &ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<(), String> {
@@ -44,8 +47,12 @@ pub async fn run(
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, &mut agent, shutdown).await {
-                    Served::Shutdown => return Ok(()),
+                match serve(socket, &mut engine, shutdown).await {
+                    Served::Shutdown => {
+                        // Usually already stopped before the goodbyes went out; idempotent.
+                        engine.shutdown_processes().await;
+                        return Ok(());
+                    }
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
             }
@@ -55,15 +62,20 @@ pub async fn run(
         let delay = backoff.advance();
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = shutdown.requested() => return Ok(()),
+            _ = shutdown.requested() => {
+                // Stopped while disconnected: no goodbyes to send, but the Managed Processes
+                // still stop before the runtime goes away.
+                engine.shutdown_processes().await;
+                return Ok(());
+            }
         }
     }
 }
 
-async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -> Served {
-    // A (re)connected Server may know nothing about us: start from a full snapshot.
-    agent.force_full();
-    if send(&mut socket, agent).await.is_err() {
+async fn serve(mut socket: Socket, engine: &mut Engine, shutdown: &mut Shutdown) -> Served {
+    // A (re)connected Server may know nothing about us: every Agent starts from a full snapshot.
+    engine.force_full_all();
+    if send_all(&mut socket, engine.poll_reports()).await.is_err() {
         return Served::ConnectionLost;
     }
 
@@ -82,7 +94,7 @@ async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -
                                 continue;
                             }
                         };
-                        let handled = agent.handle(&reply);
+                        let handled = engine.handle(&reply);
                         if let Some(delay) = handled.retry_after {
                             // The server is throttling: drop the connection and come back later.
                             let _ = socket.close(None).await;
@@ -92,7 +104,7 @@ async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -
                             }
                             return Served::ConnectionLost;
                         }
-                        if handled.send_report && send(&mut socket, agent).await.is_err() {
+                        if send_all(&mut socket, engine.owed_reports()).await.is_err() {
                             return Served::ConnectionLost;
                         }
                     }
@@ -101,12 +113,17 @@ async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -
                     _ => {}
                 }
             }
+            // A Managed Process changed some Agent's state: push it now, not at the next poll.
+            _ = engine.changed() => {
+                if send_all(&mut socket, engine.owed_reports()).await.is_err() {
+                    return Served::ConnectionLost;
+                }
+            }
             _ = shutdown.requested() => {
-                // The Baseline: the final message sets agent_disconnect.
-                let goodbye = agent.disconnect_message();
-                let _ = socket
-                    .send(Message::Binary(frame::encode(&goodbye).into()))
-                    .await;
+                // Managed Processes stop first; then the Baseline's final messages, one
+                // agent_disconnect per Agent.
+                engine.shutdown_processes().await;
+                let _ = send_all(&mut socket, engine.disconnect_messages()).await;
                 let _ = socket.close(None).await;
                 info!("disconnected");
                 return Served::Shutdown;
@@ -115,12 +132,14 @@ async fn serve(mut socket: Socket, agent: &mut Agent, shutdown: &mut Shutdown) -
     }
 }
 
-async fn send(socket: &mut Socket, agent: &mut Agent) -> Result<(), ()> {
-    let report = agent.next_report();
-    socket
-        .send(Message::Binary(frame::encode(&report).into()))
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "cannot send a report");
-        })
+async fn send_all(socket: &mut Socket, reports: Vec<AgentToServer>) -> Result<(), ()> {
+    for report in reports {
+        socket
+            .send(Message::Binary(frame::encode(&report).into()))
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "cannot send a report");
+            })?;
+    }
+    Ok(())
 }

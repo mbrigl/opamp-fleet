@@ -1,6 +1,6 @@
 # ADR-0011: Supervisor Mode — hexagonal supervision core, compiled-in plugins, n Agents over one connection
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 

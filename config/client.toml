@@ -18,3 +18,54 @@ state_dir = "client-state"
 # Optional TLS trust override (ADR-0007) for wss:// / https:// against a private CA:
 # [tls]
 # ca_file = "ca.pem"
+
+# ── Supervisor Mode (ADR-0003, ADR-0011) ────────────────────────────────────────
+# Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
+# Server as its own Agent, all sharing this Client's one connection. Without any block, the
+# Client presents itself as a single Agent, as above. The three blocks below show the three
+# ways a Managed Process is brought into the fleet.
+
+# 1. A Collector WITH the opampextension — it reports its own description, health, and
+# effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
+# distribution, hence otelcol-contrib. Pin endpoint_port and make sure the configuration the
+# Server distributes carries the extension pointing at it:
+#
+#   extensions:
+#     opamp:
+#       server:
+#         ws:
+#           endpoint: ws://127.0.0.1:4321/v1/opamp
+#           tls:
+#             insecure: true
+#   service:
+#     extensions: [opamp]
+#
+# [[supervisor]]
+# type = "collector"
+# name = "otelcol"
+# binary = "/usr/local/bin/otelcol-contrib"
+# args = []                # extra arguments, appended after the --config flags
+# endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
+# stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+
+# 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
+# Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
+# the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
+# Received remote configuration is written to <state_dir>/supervisors/<name>/config/ and every
+# entry is passed as --config; a change restarts the collector.
+# [[supervisor]]
+# type = "collector"
+# name = "otelcol-plain"
+# binary = "/usr/local/bin/otelcol"
+
+# 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
+# Bit speaks no OpAMP and reads its configuration from a file: point -c at the written remote
+# config and the Supervisor restarts the process on a change so it re-reads it.
+# [[supervisor]]
+# type = "command"
+# name = "fluent-bit"
+# command = "/opt/fluent-bit/bin/fluent-bit"
+# args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/config"]
+# working_dir = "/var/lib/fluent-bit"   # optional
+# [supervisor.env]                      # optional environment for the process
+# FLB_LOG_LEVEL = "info"
