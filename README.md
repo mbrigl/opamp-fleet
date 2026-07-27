@@ -211,6 +211,39 @@ $ curl -X PUT --data-binary @my-config.yaml \
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
 `https://` endpoint — plus `ca_file` under `[tls]` when the certificate comes from a private CA.
 
+### Running as an OS service
+
+The Client registers *itself* as a native service on Linux (systemd), macOS (launchd), and Windows
+(SCM) — [ADR-0010](docs/adr/0010-client-os-service-and-cli.md):
+
+```console
+$ client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
+$ client service start
+$ client service status
+$ client service stop
+$ client service uninstall                                   # never deletes layout or state
+```
+
+- **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
+  independent service (`io.opamp-fleet.client.<name>`) with its own configuration, install root,
+  and state — several differently-configured Clients coexist on one host.
+- **Install root:** `--root <dir>` overrides the per-platform default (Linux:
+  `/var/lib/opamp-fleet/client/<instance>`); nothing is ever installed to a fixed path. The
+  root holds `versions/opamp-client-<version>-<commit>/`, the `current` pointer the service runs
+  from, and the default `state/` directory.
+- **Scope:** `--user` targets the user-level manager (development); the default is a system
+  service that starts at boot.
+- Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
+  control on Windows); after a crash the manager restarts the service, after an explicit stop it
+  stays down.
+
+Real service registration cannot run in CI. The manual smoke checklist per platform: install →
+start → status → stop → start → status → uninstall, then the same with a second `--instance`;
+verify logs (`journalctl -u io.opamp-fleet.client.default` on Linux, Console/`log show` on macOS)
+and that the Agent appears in the fleet UI. Known platform gaps (tracked in the ADR): launchd
+`status` is advisory and `install` does not auto-start there; the SCM discards stderr, so Windows
+service logs are lost until a log-to-file follow-up.
+
 ## Project Layout
 
 ```

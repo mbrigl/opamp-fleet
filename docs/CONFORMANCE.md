@@ -173,7 +173,7 @@ separately because conformance depends on them just as much.
 | `agent_disconnect` | MUST be set in the final message | implemented | The Client sends it on shutdown on both transports; the Server marks the Agent disconnected (also on abrupt WebSocket loss). |
 | `AgentIdentification` | The Agent MUST adopt a new `instance_uid` | implemented | The Client adopts and persists the new identity. |
 | `RequestInstanceUid` | Server-generated identity on request | implemented | The Server mints a UUID v7 and re-keys the Agent. The Client does not use the flag (it self-generates), which the protocol permits. |
-| Connection multiplexing | Distinguish Agents by `instance_uid` | implemented | The Server keys all state on `instance_uid` and serves n Agents over one WebSocket connection (tested). The Client presents one Agent today; n-over-m arrives with the Supervisors (ADR-0003). |
+| Connection multiplexing | Distinguish Agents by `instance_uid` | implemented | Both ends. The Server keys all state on `instance_uid` and serves n Agents over one WebSocket connection (tested). The Client carries one Agent per Supervisor over one shared connection, routed by `instance_uid` alone (ADR-0003, ADR-0011); connection pools larger than one arrive with Gateway Mode. |
 | Duplicate `instance_uid` | Detection and handling | planned | |
 | Duplicate WebSocket connections | Handling defined by the spec | planned | |
 | Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
@@ -197,7 +197,12 @@ resolving one by inventing semantics of this project's own.
 The base control loop is implemented on both ends and on both transports (ADR-0005 through
 ADR-0008): status reporting, remote configuration gated by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
-recovery via `ReportFullState`, disconnect handling, and TLS. Every remaining *planned* row —
+recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0011) puts real
+processes behind that loop: each configured Supervisor is its own Agent multiplexed over the
+Client's one connection, a received configuration restarts the Managed Process on the written
+files and is acknowledged `APPLYING` → `APPLIED`/`FAILED` by outcome, and every Supervisor serves
+a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
+health, and effective configuration into its Agent. Every remaining *planned* row —
 packages, connection settings, own telemetry, restart command, heartbeats, available components,
 custom messages, authentication, duplicate handling — is future work; the rows above double as that
 work list.

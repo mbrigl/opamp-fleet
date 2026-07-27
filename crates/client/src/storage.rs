@@ -47,6 +47,13 @@ impl Storage {
         std::fs::write(self.dir.join(UID_FILE), format!("{uid}\n"))
     }
 
+    /// Where [`store_remote_config`](Self::store_remote_config) writes the plain entry files —
+    /// what a Managed Process is pointed at (ADR-0011).
+    #[must_use]
+    pub fn config_dir(&self) -> PathBuf {
+        self.dir.join(CONFIG_DIR)
+    }
+
     /// The last stored remote configuration, if any survived a previous run.
     pub fn load_remote_config(&self) -> Option<AgentRemoteConfig> {
         let bytes = std::fs::read(self.dir.join(CONFIG_PB_FILE)).ok()?;
