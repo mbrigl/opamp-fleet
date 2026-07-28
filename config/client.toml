@@ -35,6 +35,8 @@ state_dir = "client-state"
 # carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
 # its content hash alone and a signed one is refused. A [[supervisor]] block opts into package
 # delivery by naming the package that updates its binary (its `package = "..."` key below).
+# Generate a key and sign artifacts with the `opamp-package-sign` helper
+# (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
 # [packages]
 # verification_key = "<hex-encoded Ed25519 public key>"
 
