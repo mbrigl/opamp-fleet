@@ -2,6 +2,8 @@
 //! macOS, and Windows CI — no shell scripts.
 //!
 //! Behaviour, driven entirely by arguments:
+//! - `--version` — print a version line the way real agents do (free text around a SemVer),
+//!   then exit; what the plugins' version probe invokes.
 //! - `--touch <path>` — write a marker file, then keep running. The marker holds this run's
 //!   process id and every argument, one per line, so a test observes both *that* the stub ran
 //!   and *with what*; a restart rewrites it with a fresh pid.
@@ -12,6 +14,10 @@ use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version") {
+        println!("stub_agent version 9.9.9 (test build)");
+        return;
+    }
     let flag = |name: &str| {
         args.iter()
             .position(|a| a == name)

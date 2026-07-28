@@ -15,18 +15,34 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
+use crate::transport::RunOutcome;
 
 /// The media type the Baseline requires the Client to set.
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 pub async fn run(
-    mut engine: Engine,
+    engine: &mut Engine,
     config: &ClientConfig,
     shutdown: &mut Shutdown,
-) -> Result<(), String> {
+) -> Result<RunOutcome, String> {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .timeout(Duration::from_secs(30));
+    if let Some(value) = config.authorization_value()? {
+        // The Authorization header (ADR-0013, rotated per ADR-0014) rides every request, the
+        // disconnect included.
+        let mut value = reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
+        value.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+        if config.sends_credentials_in_cleartext() {
+            warn!(
+                "sending credentials over unencrypted http:// beyond the loopback — use https://"
+            );
+        }
+    }
     if let Some(tls) = &config.tls {
         let pem = std::fs::read(&tls.ca_file)
             .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
@@ -68,6 +84,31 @@ pub async fn run(
                     }
                 }
             }
+            // A connection-settings offer (ADR-0014): verify by actually connecting. Success
+            // persists the settings and leaves this loop so the runtime reconnects with them;
+            // failure reports FAILED with the owed reports of the next round.
+            if let Some(offer) = engine.take_connection_offer() {
+                let settings = offer.opamp.clone().unwrap_or_default();
+                let probe = || engine.probe_report();
+                match crate::connection::verify(&settings, config, probe).await {
+                    Ok(()) => {
+                        engine.connection_settings_outcome(&offer.hash, Ok(()));
+                        let merged = crate::connection::merge(
+                            crate::connection::load(&config.state_dir).as_ref(),
+                            &offer,
+                        );
+                        if let Err(e) = crate::connection::store(&config.state_dir, &merged) {
+                            warn!(error = %e, "cannot persist the connection settings");
+                        }
+                        info!("connection settings verified; reconnecting with them");
+                        return Ok(RunOutcome::Reconfigured);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "offered connection settings failed verification");
+                        engine.connection_settings_outcome(&offer.hash, Err(&e));
+                    }
+                }
+            }
             reports = engine.owed_reports();
             if reports.is_empty() {
                 break;
@@ -87,7 +128,7 @@ pub async fn run(
         let _ = exchange(&client, &config.endpoint, goodbye).await;
     }
     info!("disconnected");
-    Ok(())
+    Ok(RunOutcome::Shutdown)
 }
 
 /// One exchange: `AgentToServer` out, `ServerToAgent` back.
@@ -104,6 +145,9 @@ async fn exchange(
         .await
         .map_err(|e| format!("cannot reach {endpoint}: {e}"))?;
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("the server rejected the credentials (HTTP 401) — check [auth]".to_string());
+    }
     if !status.is_success() {
         return Err(format!("the server answered {status}"));
     }

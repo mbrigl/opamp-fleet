@@ -12,7 +12,7 @@ use opamp::proto::{
 use opamp::uid::InstanceUid;
 use prost::Message;
 use server::fleet::SERVER_CAPABILITIES;
-use support::{compressed_report, full_report, spawn};
+use support::{compressed_report, distribute, full_report, spawn};
 
 const PROTOBUF: &str = "application/x-protobuf";
 
@@ -50,7 +50,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
 
     let agents: serde_json::Value = serde_json::from_slice(
         &client
-            .get(format!("http://{}/api/agents", server.addr))
+            .get(format!("http://{}/api/v1/agents", server.addr))
             .send()
             .await
             .expect("get")
@@ -63,6 +63,13 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     assert_eq!(agents[0]["service_name"], "itest");
     assert_eq!(agents[0]["transport"], "http");
     assert_eq!(agents[0]["connected"], true);
+    assert_eq!(agents[0]["identifying_attributes"]["service.name"], "itest");
+    // The OS column prefers the human-readable description over the bare os.type.
+    assert_eq!(agents[0]["os"], "Testix 1.0 LTS");
+    assert_eq!(agents[0]["non_identifying_attributes"]["os.type"], "linux");
+    let capabilities = agents[0]["capabilities"].as_array().expect("capabilities");
+    assert!(capabilities.contains(&serde_json::json!("ReportsStatus")));
+    assert!(capabilities.contains(&serde_json::json!("AcceptsRemoteConfig")));
 }
 
 #[tokio::test]
@@ -73,25 +80,32 @@ async fn the_offer_is_gated_by_the_config_hash() {
     let uid = InstanceUid::default();
     exchange(&client, &url, &full_report(&uid, "itest", 1)).await;
 
-    // The operator distributes a configuration through the REST API.
-    let put: serde_json::Value = serde_json::from_slice(
+    // The operator distributes a configuration through the REST API; the fleet view names the
+    // hash this Agent's composed configuration should have.
+    distribute(server.addr, "fleet", &[], "receivers: {}\n").await;
+    let agents: serde_json::Value = serde_json::from_slice(
         &client
-            .put(format!("http://{}/api/config", server.addr))
-            .body("receivers: {}\n")
+            .get(format!("http://{}/api/v1/agents", server.addr))
             .send()
             .await
-            .expect("put")
+            .expect("get")
             .bytes()
             .await
             .expect("body"),
     )
     .expect("json");
-    let hash_hex = put["hash"].as_str().expect("hash").to_string();
+    let hash_hex = agents[0]["desired_hash"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    assert_eq!(agents[0]["matched_configurations"][0], "fleet");
 
-    // The next poll gets the offer.
+    // The next poll gets the offer — the Configuration as a named entry.
     let reply = exchange(&client, &url, &compressed_report(&uid, 2)).await;
     let offer = reply.remote_config.expect("an offer");
     assert_eq!(hex::encode(&offer.config_hash), hash_hex);
+    let map = offer.config.as_ref().expect("a config map");
+    assert!(map.config_map.contains_key("fleet"));
 
     // The Agent reports it applied — and is never offered the same configuration again.
     let mut ack = compressed_report(&uid, 3);
@@ -104,6 +118,181 @@ async fn the_offer_is_gated_by_the_config_hash() {
     assert!(
         reply.remote_config.is_none(),
         "no redundant reconfiguration"
+    );
+}
+
+#[tokio::test]
+async fn a_queued_restart_is_delivered_once_as_a_command_only_reply() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    // The agent declares AcceptsRestartCommand on top of the usual set.
+    let mut report = full_report(&uid, "restartable", 1);
+    report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+    exchange(&client, &url, &report).await;
+
+    // A configuration is pending too — the command must never be combined with the offer.
+    distribute(server.addr, "fleet", &[], "receivers: {}\n").await;
+    let restart = client
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(restart.status(), 202);
+
+    // The next exchange carries the command and nothing else; the offer follows afterwards.
+    // (A real client always reports its full capability mask, so the follow-ups carry the
+    // restart bit too — the Server caches the last non-zero mask.)
+    let follow_up = |sequence_num| {
+        let mut report = compressed_report(&uid, sequence_num);
+        report.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+        report
+    };
+    let reply = exchange(&client, &url, &follow_up(2)).await;
+    let command = reply.command.expect("the restart command");
+    assert_eq!(command.r#type, opamp::proto::CommandType::Restart as i32);
+    assert!(reply.remote_config.is_none(), "command-only message");
+    assert_eq!(reply.flags, 0);
+
+    let reply = exchange(&client, &url, &follow_up(3)).await;
+    assert!(reply.command.is_none(), "delivered exactly once");
+    assert!(reply.remote_config.is_some(), "the deferred offer arrives");
+}
+
+#[tokio::test]
+async fn restart_requests_are_validated_against_the_fleet() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+
+    // Malformed uid.
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/nonsense/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 400);
+
+    // Unknown agent.
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/{}/restart",
+            server.addr,
+            InstanceUid::default()
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 404);
+
+    // Known agent without the capability: refused, not silently dropped.
+    let uid = InstanceUid::default();
+    exchange(&client, &url, &full_report(&uid, "fixed", 1)).await;
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/restart",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 409);
+}
+
+#[tokio::test]
+async fn a_components_hash_is_answered_with_a_demand_for_the_full_map() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let with_bit = |mut report: AgentToServer| {
+        report.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+        report
+    };
+    let hash_only = opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h1".to_vec(),
+    };
+
+    // Hash-only announcement → the server flags ReportAvailableComponents.
+    let mut report = with_bit(full_report(&uid, "componentful", 1));
+    report.available_components = Some(hash_only.clone());
+    let reply = exchange(&client, &url, &report).await;
+    assert_ne!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+
+    // The full map arrives → stored, the demand stops, and the view names the components.
+    let mut answer = with_bit(compressed_report(&uid, 2));
+    answer.available_components = Some(opamp::proto::AvailableComponents {
+        components: std::collections::HashMap::from([(
+            "receiver/otlp".to_string(),
+            opamp::proto::ComponentDetails::default(),
+        )]),
+        hash: b"h1".to_vec(),
+    });
+    let reply = exchange(&client, &url, &answer).await;
+    assert_eq!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+
+    // A later hash-only heartbeat of the same hash must not degrade the stored map.
+    let mut routine = with_bit(compressed_report(&uid, 3));
+    routine.available_components = Some(hash_only);
+    exchange(&client, &url, &routine).await;
+    let view = &server.state.snapshot()[0];
+    assert_eq!(view.available_components, ["receiver/otlp"]);
+}
+
+#[tokio::test]
+async fn no_component_demand_without_the_declared_capability() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    // The report carries a components hash but not the capability bit: the flag stays unset —
+    // an undeclared capability is never exercised.
+    let mut report = full_report(&uid, "quiet", 1);
+    report.available_components = Some(opamp::proto::AvailableComponents {
+        components: Default::default(),
+        hash: b"h".to_vec(),
+    });
+    let reply = exchange(&client, &url, &report).await;
+    assert_eq!(
+        reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64,
+        0
+    );
+}
+
+#[tokio::test]
+async fn stateless_http_polling_never_triggers_the_duplicate_rekey() {
+    // Two pollers sharing one uid are indistinguishable from one over stateless plain HTTP —
+    // detection is deliberately WebSocket-only, so no identification is ever minted here.
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+
+    let reply = exchange(&client, &url, &full_report(&uid, "poller-a", 1)).await;
+    assert!(reply.agent_identification.is_none());
+    let reply = exchange(&client, &url, &full_report(&uid, "poller-b", 1)).await;
+    assert!(reply.agent_identification.is_none());
+    assert_eq!(
+        server.state.snapshot().len(),
+        1,
+        "one record, last writer wins"
     );
 }
 

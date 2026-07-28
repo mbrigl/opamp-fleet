@@ -1,27 +1,39 @@
 //! In-memory fleet state and the OpAMP control loop, keyed by Instance UID — never by the
 //! connection that carried a message (ADR-0003).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
-    AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification, AgentRemoteConfig,
-    AgentToServer, AgentToServerFlags, ComponentHealth, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerCapabilities, ServerErrorResponse, ServerErrorResponseType, ServerToAgent,
-    ServerToAgentFlags,
+    any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
+    AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
+    ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
+    OpAmpConnectionSettings, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities,
+    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
+use prost::Message as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
+use utoipa::ToSchema;
+
+use crate::config::ConnectionOfferConfig;
+use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
     | ServerCapabilities::AcceptsEffectiveConfig as u64;
+
+/// Identifies one WebSocket connection for the duplicate detection the Baseline asks of the
+/// Server. Never a routing key — Agents are routed by `instance_uid` alone (ADR-0003); this only
+/// answers "is this identity already alive on *another* connection?".
+pub type ConnId = u64;
 
 /// Which transport a report arrived on. Recorded for the operator; it never keys any state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,21 +51,6 @@ impl Transport {
     }
 }
 
-/// The configuration the Server wants the fleet to run, with its identity — the hash that gates
-/// every push (specification: no redundant reconfiguration).
-#[derive(Clone)]
-pub struct DesiredConfig {
-    pub body: String,
-    pub hash: Vec<u8>,
-}
-
-impl DesiredConfig {
-    pub fn new(body: String) -> Self {
-        let hash = Sha256::digest(body.as_bytes()).to_vec();
-        DesiredConfig { body, hash }
-    }
-}
-
 /// Everything the Server knows about one Agent.
 pub struct AgentRecord {
     pub sequence_num: u64,
@@ -65,6 +62,27 @@ pub struct AgentRecord {
     pub transport: Transport,
     pub connected: bool,
     pub last_seen_ms: u64,
+    /// An operator-requested restart not yet delivered. Lives on the record, not a connection,
+    /// so it reaches the Agent on its next exchange whichever transport carries it.
+    pub restart_pending: bool,
+    /// The Agent's available components — hash-only until the full map was demanded and arrived.
+    pub available_components: Option<AvailableComponents>,
+    /// The outcome of the last connection-settings offer this Agent reported (ADR-0014); its
+    /// hash is what gates re-offering.
+    pub connection_settings_status: Option<ConnectionSettingsStatus>,
+    /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
+    /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
+    /// report from a *different* live connection is the duplicate the Baseline wants detected.
+    pub owner: Option<ConnId>,
+}
+
+/// Why a restart request was refused (`POST /api/v1/agents/{uid}/restart`).
+pub enum RestartError {
+    /// No Agent of that identity is known.
+    UnknownAgent,
+    /// The Agent does not declare `AcceptsRestartCommand` — capability negotiation is binding,
+    /// so the Server refuses rather than sending a command the Agent would ignore.
+    NoCapability,
 }
 
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
@@ -77,57 +95,158 @@ pub struct Processed {
     pub disconnected: bool,
 }
 
-/// Shared state behind every handler: the fleet, the desired configuration, and the push channel
+/// The one `OpAMPConnectionSettings` this Server offers (ADR-0014), precompiled from the
+/// `[connection_offer]` section with the hash that gates its delivery.
+pub struct ConnectionOffer {
+    settings: OpAmpConnectionSettings,
+    hash: Vec<u8>,
+}
+
+impl ConnectionOffer {
+    pub fn from_config(config: &ConnectionOfferConfig) -> Result<Self, String> {
+        let settings = OpAmpConnectionSettings {
+            destination_endpoint: config.endpoint.clone().unwrap_or_default(),
+            headers: config.authorization()?.map(|value| Headers {
+                headers: vec![Header {
+                    key: "Authorization".to_string(),
+                    value,
+                }],
+            }),
+            heartbeat_interval_seconds: config.heartbeat_interval_secs.unwrap_or(0),
+            ..Default::default()
+        };
+        // The hash identifies the offer as a whole — an Agent echoing it needs nothing again.
+        let hash = Sha256::digest(settings.encode_to_vec()).to_vec();
+        Ok(ConnectionOffer { settings, hash })
+    }
+}
+
+/// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
-    desired: RwLock<Option<DesiredConfig>>,
-    fleet_config_file: PathBuf,
+    configs: ConfigStore,
     push: watch::Sender<u64>,
+    /// Hands every WebSocket connection its identity for the duplicate detection.
+    next_conn: AtomicU64,
+    /// The connection settings offered to the fleet (ADR-0014); `None` offers nothing and leaves
+    /// `OffersConnectionSettings` undeclared.
+    connection_offer: Option<ConnectionOffer>,
 }
 
 impl AppState {
-    /// Builds the state, restoring the desired configuration from disk when one was persisted.
-    pub fn new(fleet_config_file: PathBuf) -> Self {
-        let desired = match std::fs::read_to_string(&fleet_config_file) {
-            Ok(body) if !body.trim().is_empty() => {
-                info!(file = %fleet_config_file.display(), "restored the fleet configuration");
-                Some(DesiredConfig::new(body))
-            }
-            _ => None,
-        };
-        AppState {
+    /// Builds the state, restoring every persisted Configuration from `config_dir`. A store that
+    /// cannot be opened (or holds an unparsable file) fails startup loudly.
+    pub fn new(config_dir: PathBuf) -> Result<Self, String> {
+        let configs = ConfigStore::open(config_dir)?;
+        let restored = configs.list().len();
+        if restored > 0 {
+            info!(
+                configurations = restored,
+                "restored the Configuration store"
+            );
+        }
+        Ok(AppState {
             fleet: Mutex::new(HashMap::new()),
-            desired: RwLock::new(desired),
-            fleet_config_file,
+            configs,
             push: watch::channel(0).0,
+            next_conn: AtomicU64::new(1),
+            connection_offer: None,
+        })
+    }
+
+    /// Arms the connection-settings offer (ADR-0014); with it the Server declares
+    /// `OffersConnectionSettings`.
+    #[must_use]
+    pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
+        self.connection_offer = offer;
+        self
+    }
+
+    /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
+    /// only while an offer is actually configured — an undeclared capability is never exercised,
+    /// a declared one never hollow.
+    fn capabilities(&self) -> u64 {
+        match self.connection_offer {
+            Some(_) => SERVER_CAPABILITIES | ServerCapabilities::OffersConnectionSettings as u64,
+            None => SERVER_CAPABILITIES,
         }
     }
 
-    /// A receiver that fires whenever the desired configuration changes; WebSocket loops use it to
-    /// push offers without waiting for the Agent to speak.
+    /// A fresh identity for one WebSocket connection.
+    pub fn connection_id(&self) -> ConnId {
+        self.next_conn.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
+    /// offers without waiting for the Agent to speak.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.push.subscribe()
     }
 
-    pub fn desired_config(&self) -> Option<DesiredConfig> {
-        self.desired.read().expect("desired lock").clone()
+    /// Read access to the Configuration store (the REST API's `GET` routes).
+    pub fn configurations(&self) -> &ConfigStore {
+        &self.configs
     }
 
-    /// Replaces the desired configuration, persists it, and wakes every WebSocket loop.
-    pub fn set_desired_config(&self, body: String) -> Result<DesiredConfig, String> {
-        let config = DesiredConfig::new(body);
-        std::fs::write(&self.fleet_config_file, &config.body)
-            .map_err(|e| format!("cannot persist {}: {e}", self.fleet_config_file.display()))?;
-        *self.desired.write().expect("desired lock") = Some(config.clone());
+    /// Creates or replaces a Configuration, persists it, and wakes every WebSocket loop — the
+    /// matching Agents are offered the change without being asked.
+    pub fn put_configuration(&self, config: Configuration) -> Result<(), String> {
+        let name = config.name.clone();
+        self.configs.put(config)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(hash = %hex::encode(&config.hash), "fleet configuration updated");
-        Ok(config)
+        info!(configuration = %name, "configuration stored and distributed");
+        Ok(())
+    }
+
+    /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so
+    /// a connected Agent hears it now; a polling one picks it up on its next exchange.
+    pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid).ok_or(RestartError::UnknownAgent)?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64 == 0
+        {
+            return Err(RestartError::NoCapability);
+        }
+        record.restart_pending = true;
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "restart requested");
+        Ok(())
+    }
+
+    /// The queued restart for this Agent as the Baseline's command-only message, taken exactly
+    /// once — `None` when nothing is queued (or the Agent went away).
+    pub fn restart_command_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid)?;
+        if !record.restart_pending || !record.connected {
+            return None;
+        }
+        record.restart_pending = false;
+        Some(restart_command(uid, self.capabilities()))
+    }
+
+    /// Deletes a Configuration and wakes every WebSocket loop; `false` when none of that name
+    /// exists. Agents that applied it keep running it — narrowing never revokes (ADR-0012).
+    pub fn delete_configuration(&self, name: &str) -> Result<bool, String> {
+        let deleted = self.configs.delete(name)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(configuration = %name, "configuration deleted");
+        }
+        Ok(deleted)
     }
 
     /// The control loop for one report, shared by both transports (ADR-0007): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
-    pub fn process(&self, msg: AgentToServer, transport: Transport) -> Processed {
+    /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
+    pub fn process(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+    ) -> Processed {
         let Some(mut uid) = InstanceUid::from_wire(&msg.instance_uid) else {
             warn!(
                 len = msg.instance_uid.len(),
@@ -158,6 +277,26 @@ impl AppState {
             uid = new_uid;
         }
 
+        // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on
+        // *another* WebSocket connection — bad UID generators, cloned VMs — is rekeyed exactly
+        // as the Baseline prescribes: mint a fresh uid and answer with AgentIdentification,
+        // which the Client adopts. The newcomer starts a record of its own; the incumbent and
+        // its connection stay untouched. (Stateless plain-HTTP polling offers nothing to
+        // distinguish two pollers by, so detection is WebSocket-only.)
+        if let Some(this_conn) = conn {
+            let duplicate = fleet.get(&uid).is_some_and(|existing| {
+                existing.connected && existing.owner.is_some_and(|owner| owner != this_conn)
+            });
+            if duplicate {
+                let new_uid = InstanceUid::default();
+                warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
+                identification = Some(AgentIdentification {
+                    new_instance_uid: new_uid.as_bytes().to_vec(),
+                });
+                uid = new_uid;
+            }
+        }
+
         let known = fleet.contains_key(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
@@ -171,6 +310,10 @@ impl AppState {
                 transport,
                 connected: true,
                 last_seen_ms: now_ms(),
+                restart_pending: false,
+                available_components: None,
+                connection_settings_status: None,
+                owner: conn,
             }
         });
 
@@ -186,6 +329,7 @@ impl AppState {
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
         record.connected = true;
+        record.owner = conn;
         record.last_seen_ms = now_ms();
         if msg.capabilities != 0 {
             record.capabilities = msg.capabilities;
@@ -202,27 +346,90 @@ impl AppState {
         if let Some(status) = msg.remote_config_status {
             record.remote_config_status = Some(status);
         }
+        if let Some(status) = msg.connection_settings_status {
+            if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
+                warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
+            }
+            record.connection_settings_status = Some(status);
+        }
+        if let Some(incoming) = msg.available_components {
+            // A routine hash-only update must not degrade an already-fetched full map of the
+            // same hash; anything else (first sight, or a changed hash) replaces the stored value.
+            let keep_stored_full = record.available_components.as_ref().is_some_and(|stored| {
+                incoming.components.is_empty()
+                    && !stored.components.is_empty()
+                    && stored.hash == incoming.hash
+            });
+            if !keep_stored_full {
+                record.available_components = Some(incoming);
+            }
+        }
 
         let disconnected = msg.agent_disconnect.is_some();
         if disconnected {
             info!(agent = %uid, "agent disconnected");
             record.connected = false;
+            record.owner = None;
         }
 
-        // The config offer — gated by the hash comparison, and only toward an Agent that both said
+        // A hash without the map is an offer to fetch: demand the full component list from an
+        // Agent that declared it can report one (the flag is meaningless toward any other).
+        if !disconnected
+            && record.capabilities
+                & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
+                != 0
+            && record
+                .available_components
+                .as_ref()
+                .is_some_and(|ac| ac.components.is_empty())
+        {
+            reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+        }
+
+        // A queued restart goes out as the Baseline's command-only message: nothing but
+        // identity, capabilities, and the command. Anything else the reply would carry —
+        // an identity reassignment, a demanded full report — defers the command to the next
+        // exchange instead of being combined with it.
+        if record.restart_pending
+            && !disconnected
+            && identification.is_none()
+            && reply_flags == 0
+            && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
+                != 0
+        {
+            record.restart_pending = false;
+            return Processed {
+                reply: restart_command(&uid, self.capabilities()),
+                uid: Some(uid),
+                disconnected: false,
+            };
+        }
+
+        // The config offer — composed from the Configurations whose Selectors match this Agent
+        // (ADR-0012), gated by the hash comparison, and only toward an Agent that both said
         // goodbye ≠ true and declared AcceptsRemoteConfig (capability negotiation is binding).
         let remote_config = if disconnected {
             None
         } else {
-            offer(record, self.desired_config().as_ref())
+            let desired = self.configs.desired_for(record.description.as_ref());
+            offer(record, desired.as_ref())
+        };
+
+        // The connection-settings offer (ADR-0014), gated the same way: by capability and by
+        // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
+        let connection_settings = if disconnected {
+            None
+        } else {
+            self.settings_offer(record)
         };
 
         Processed {
             reply: ServerToAgent {
                 instance_uid: uid.as_bytes().to_vec(),
-                capabilities: SERVER_CAPABILITIES,
+                capabilities: self.capabilities(),
                 flags: reply_flags,
                 remote_config,
+                connection_settings,
                 agent_identification: identification,
                 ..Default::default()
             },
@@ -231,39 +438,75 @@ impl AppState {
         }
     }
 
-    /// The unsolicited offer a WebSocket loop pushes when the desired configuration changes; `None`
-    /// when the Agent already runs it (or cannot accept one), so nothing redundant crosses the wire.
+    /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
+    /// reported hash says it already runs (or refused) exactly this offer.
+    fn settings_offer(&self, record: &AgentRecord) -> Option<ConnectionSettingsOffers> {
+        let offer = self.connection_offer.as_ref()?;
+        if record.capabilities
+            & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+            == 0
+        {
+            return None;
+        }
+        // The Baseline's gate: include the offer when the reported hash differs. An APPLYING
+        // echo of the same hash keeps the offer coming — a verification whose outcome was lost
+        // (a dropped connection mid-switch) must heal by retry, not hang.
+        if let Some(status) = &record.connection_settings_status {
+            if status.last_connection_settings_hash == offer.hash
+                && status.status != opamp::proto::ConnectionSettingsStatuses::Applying as i32
+            {
+                return None;
+            }
+        }
+        Some(ConnectionSettingsOffers {
+            hash: offer.hash.clone(),
+            opamp: Some(offer.settings.clone()),
+            ..Default::default()
+        })
+    }
+
+    /// The unsolicited offer a WebSocket loop pushes when a Configuration changes; `None` when
+    /// the Agent already runs its composed set (or nothing matches it, or it cannot accept one),
+    /// so nothing redundant crosses the wire.
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
-        let desired = self.desired_config();
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
+        let desired = self.configs.desired_for(record.description.as_ref());
         let remote_config = offer(record, desired.as_ref())?;
         Some(ServerToAgent {
             instance_uid: uid.as_bytes().to_vec(),
-            capabilities: SERVER_CAPABILITIES,
+            capabilities: self.capabilities(),
             remote_config: Some(remote_config),
             ..Default::default()
         })
     }
 
-    /// Marks the Agents a closing WebSocket connection carried as no longer connected. State stays:
-    /// the fleet remembers what each Agent last reported.
-    pub fn mark_disconnected(&self, uids: &[InstanceUid]) {
+    /// Marks the Agents a closing WebSocket connection carried as no longer connected — but only
+    /// those the connection still *owns*: after a rekey (or a transport switch) another live
+    /// connection may legitimately carry an identity this one once saw, and a closing socket
+    /// must not take it down. State stays: the fleet remembers what each Agent last reported.
+    pub fn mark_disconnected(&self, uids: &[InstanceUid], conn: ConnId) {
         let mut fleet = self.fleet.lock().expect("fleet lock");
         for uid in uids {
             if let Some(record) = fleet.get_mut(uid) {
-                record.connected = false;
+                if record.owner == Some(conn) {
+                    record.connected = false;
+                    record.owner = None;
+                }
             }
         }
     }
 
-    /// The REST view of the fleet (`GET /api/agents`).
+    /// The REST view of the fleet (`GET /api/v1/agents`).
     pub fn snapshot(&self) -> Vec<AgentView> {
-        let desired = self.desired_config();
         let fleet = self.fleet.lock().expect("fleet lock");
         let mut agents: Vec<AgentView> = fleet
             .iter()
-            .map(|(uid, record)| AgentView::from_record(uid, record, desired.as_ref()))
+            .map(|(uid, record)| {
+                let desired = self.configs.desired_for(record.description.as_ref());
+                let matched = self.configs.matching_names(record.description.as_ref());
+                AgentView::from_record(uid, record, desired.as_ref(), matched)
+            })
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
         agents
@@ -271,7 +514,8 @@ impl AppState {
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
-/// it — the "no redundant reconfiguration" goal in one place.
+/// it — the "no redundant reconfiguration" goal in one place. Every matching Configuration is one
+/// named entry; the Managed Process does its own merging (ADR-0012).
 fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentRemoteConfig> {
     let desired = desired?;
     if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRemoteConfig as u64 == 0 {
@@ -287,26 +531,46 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
     }
     Some(AgentRemoteConfig {
         config: Some(AgentConfigMap {
-            config_map: HashMap::from([(
-                String::new(),
-                AgentConfigFile {
-                    body: desired.body.clone().into_bytes(),
-                    content_type: String::new(),
-                },
-            )]),
+            config_map: desired
+                .entries
+                .iter()
+                .map(|(name, body)| {
+                    (
+                        name.clone(),
+                        AgentConfigFile {
+                            body: body.clone().into_bytes(),
+                            content_type: String::new(),
+                        },
+                    )
+                })
+                .collect(),
         }),
         config_hash: desired.hash.clone(),
     })
 }
 
 /// One Agent as the REST API and the UI see it.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AgentView {
     pub instance_uid: String,
     pub service_name: String,
     pub service_version: String,
+    /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
-    pub transport: &'static str,
+    /// Every reported identifying attribute — what a Selector can match on (ADR-0012).
+    pub identifying_attributes: BTreeMap<String, String>,
+    /// Every reported non-identifying attribute — Selectors match these too.
+    pub non_identifying_attributes: BTreeMap<String, String>,
+    /// The Configurations currently matching this Agent, in name order.
+    pub matched_configurations: Vec<String>,
+    /// Hex hash of the composed configuration this Agent should run; empty when nothing matches.
+    pub desired_hash: String,
+    /// The Capability Set this Agent declared, as capability names from the Baseline's
+    /// `AgentCapabilities` (see docs/CONFORMANCE.md).
+    pub capabilities: Vec<String>,
+    /// The Agent's available components (top-level names, sorted); empty until reported.
+    pub available_components: Vec<String>,
+    pub transport: String,
     pub connected: bool,
     pub healthy: bool,
     pub health_status: String,
@@ -318,30 +582,83 @@ pub struct AgentView {
     pub last_seen_ms: u64,
 }
 
+/// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
+/// bits are surfaced verbatim rather than dropped — a peer declaring them is worth seeing.
+fn capability_names(mask: u64) -> Vec<String> {
+    use opamp::proto::AgentCapabilities as C;
+    const KNOWN: [(C, &str); 16] = [
+        (C::ReportsStatus, "ReportsStatus"),
+        (C::AcceptsRemoteConfig, "AcceptsRemoteConfig"),
+        (C::ReportsEffectiveConfig, "ReportsEffectiveConfig"),
+        (C::AcceptsPackages, "AcceptsPackages"),
+        (C::ReportsPackageStatuses, "ReportsPackageStatuses"),
+        (C::ReportsOwnTraces, "ReportsOwnTraces"),
+        (C::ReportsOwnMetrics, "ReportsOwnMetrics"),
+        (C::ReportsOwnLogs, "ReportsOwnLogs"),
+        (
+            C::AcceptsOpAmpConnectionSettings,
+            "AcceptsOpAMPConnectionSettings",
+        ),
+        (
+            C::AcceptsOtherConnectionSettings,
+            "AcceptsOtherConnectionSettings",
+        ),
+        (C::AcceptsRestartCommand, "AcceptsRestartCommand"),
+        (C::ReportsHealth, "ReportsHealth"),
+        (C::ReportsRemoteConfig, "ReportsRemoteConfig"),
+        (C::ReportsHeartbeat, "ReportsHeartbeat"),
+        (C::ReportsAvailableComponents, "ReportsAvailableComponents"),
+        (
+            C::ReportsConnectionSettingsStatus,
+            "ReportsConnectionSettingsStatus",
+        ),
+    ];
+    let mut names = Vec::new();
+    let mut undefined = mask;
+    for (bit, name) in KNOWN {
+        if mask & bit as u64 != 0 {
+            names.push(name.to_string());
+            undefined &= !(bit as u64);
+        }
+    }
+    if undefined != 0 {
+        names.push(format!("unknown bits 0x{undefined:x}"));
+    }
+    names
+}
+
+/// Reported attributes as the API shows them: string values as-is, other value kinds in their
+/// debug form — the view is for reading, the wire keeps the typed original.
+fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+    attributes
+        .iter()
+        .filter_map(|kv| {
+            let value = kv.value.as_ref()?.value.as_ref()?;
+            let text = match value {
+                any_value::Value::StringValue(s) => s.clone(),
+                other => format!("{other:?}"),
+            };
+            Some((kv.key.clone(), text))
+        })
+        .collect()
+}
+
 impl AgentView {
     fn from_record(
         uid: &InstanceUid,
         record: &AgentRecord,
         desired: Option<&DesiredConfig>,
+        matched_configurations: Vec<String>,
     ) -> Self {
-        let attr = |list: &[opamp::proto::KeyValue], key: &str| -> String {
-            list.iter()
-                .find(|kv| kv.key == key)
-                .and_then(|kv| kv.value.as_ref())
-                .and_then(|v| v.value.as_ref())
-                .map(|v| match v {
-                    opamp::proto::any_value::Value::StringValue(s) => s.clone(),
-                    other => format!("{other:?}"),
-                })
-                .unwrap_or_default()
-        };
-        let (name, version, os) = match &record.description {
+        let (identifying, non_identifying) = match &record.description {
             Some(d) => (
-                attr(&d.identifying_attributes, "service.name"),
-                attr(&d.identifying_attributes, "service.version"),
-                attr(&d.non_identifying_attributes, "os.type"),
+                attr_map(&d.identifying_attributes),
+                attr_map(&d.non_identifying_attributes),
             ),
-            None => (String::new(), String::new(), String::new()),
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
+        let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
+            map.get(key).cloned().unwrap_or_default()
         };
         let status = record.remote_config_status.as_ref();
         let status_name = match status.map(|s| s.status) {
@@ -350,6 +667,8 @@ impl AgentView {
             Some(s) if s == RemoteConfigStatuses::Failed as i32 => "FAILED",
             _ => "UNSET",
         };
+        // In sync means: runs exactly the composed set — trivially true when nothing matches,
+        // since an unmatched Agent is deliberately left alone (goal 9).
         let in_sync = match desired {
             None => true,
             Some(d) => {
@@ -358,10 +677,27 @@ impl AgentView {
         };
         AgentView {
             instance_uid: uid.to_string(),
-            service_name: name,
-            service_version: version,
-            os,
-            transport: record.transport.as_str(),
+            service_name: lookup(&identifying, "service.name"),
+            service_version: lookup(&identifying, "service.version"),
+            os: match lookup(&non_identifying, "os.description") {
+                description if !description.is_empty() => description,
+                _ => lookup(&non_identifying, "os.type"),
+            },
+            identifying_attributes: identifying,
+            non_identifying_attributes: non_identifying,
+            matched_configurations,
+            desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
+            capabilities: capability_names(record.capabilities),
+            available_components: record
+                .available_components
+                .as_ref()
+                .map(|ac| {
+                    let mut names: Vec<String> = ac.components.keys().cloned().collect();
+                    names.sort_unstable();
+                    names
+                })
+                .unwrap_or_default(),
+            transport: record.transport.as_str().to_string(),
             connected: record.connected,
             healthy: record.health.as_ref().map(|h| h.healthy).unwrap_or(false),
             health_status: record
@@ -376,6 +712,18 @@ impl AgentView {
             sequence_num: record.sequence_num,
             last_seen_ms: record.last_seen_ms,
         }
+    }
+}
+
+/// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
+fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToAgent {
+    ServerToAgent {
+        instance_uid: uid.as_bytes().to_vec(),
+        capabilities,
+        command: Some(opamp::proto::ServerToAgentCommand {
+            r#type: opamp::proto::CommandType::Restart as i32,
+        }),
+        ..Default::default()
     }
 }
 
@@ -419,4 +767,24 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_names_decode_known_bits_and_surface_undefined_ones() {
+        use opamp::proto::AgentCapabilities as C;
+        assert!(capability_names(0).is_empty());
+        assert_eq!(
+            capability_names(C::ReportsStatus as u64 | C::ReportsHealth as u64),
+            ["ReportsStatus", "ReportsHealth"]
+        );
+        let with_undefined = capability_names(C::ReportsStatus as u64 | 1 << 60);
+        assert_eq!(
+            with_undefined,
+            ["ReportsStatus", "unknown bits 0x1000000000000000"]
+        );
+    }
 }

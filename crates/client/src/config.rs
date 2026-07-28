@@ -1,7 +1,9 @@
 //! The Client's own configuration file — TOML (ADR-0008).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use serde::Deserialize;
 
 /// `client.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
@@ -20,11 +22,29 @@ pub struct ClientConfig {
     /// WebSocket, where the Server pushes.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// How often each Agent heartbeats over the WebSocket transport (`ReportsHeartbeat`). The
+    /// Baseline's default is 30 seconds; `0` disables heartbeats and undeclares the capability.
+    /// Ignored on plain HTTP, where every poll is the periodic report.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Operator-defined attributes (ADR-0012), reported as non-identifying attributes of **every**
+    /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
+    /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
+    /// code or the Managed Process reports win over configured ones.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
+    /// Optional authentication toward the Server (ADR-0013); absent means no `Authorization`
+    /// header, as before.
+    pub auth: Option<AuthConfig>,
+    /// A Server-rotated `Authorization` value (ADR-0014), applied from the persisted connection
+    /// settings at startup — never from the file, and it wins over `[auth]`.
+    #[serde(skip)]
+    pub authorization_override: Option<String>,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -49,6 +69,12 @@ pub struct SupervisorBlock {
     pub endpoint_port: u16,
     /// How long a graceful stop may take before the Managed Process is killed.
     pub stop_timeout_secs: u64,
+    /// How long a freshly (re)started Managed Process must survive before a received
+    /// configuration is acknowledged `APPLIED`; exiting within the grace reports `FAILED`
+    /// (the health-gated acknowledgement ADR-0011 names). `0` acknowledges on start, as before.
+    pub apply_grace_secs: u64,
+    /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
+    pub attributes: BTreeMap<String, String>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
@@ -74,11 +100,21 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: stop_timeout_secs must not be negative")
             })?,
         };
+        let apply_grace_secs = match take_integer(&mut table, "apply_grace_secs")? {
+            None => default_apply_grace_secs(),
+            Some(secs) => u64::try_from(secs).map_err(|_| {
+                format!("supervisor {name:?}: apply_grace_secs must not be negative")
+            })?,
+        };
+        let attributes = take_string_table(&mut table, "attributes")
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
         Ok(SupervisorBlock {
             kind,
             name,
             endpoint_port,
             stop_timeout_secs,
+            apply_grace_secs,
+            attributes,
             settings: table,
         })
     }
@@ -103,6 +139,58 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
             "`{key}` must be an integer, not {}",
             other.type_str()
         )),
+    }
+}
+
+fn take_string_table(
+    table: &mut toml::Table,
+    key: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    match table.remove(key) {
+        None => Ok(BTreeMap::new()),
+        Some(toml::Value::Table(entries)) => entries
+            .into_iter()
+            .map(|(k, v)| match v {
+                toml::Value::String(s) => Ok((k, s)),
+                other => Err(format!(
+                    "`{key}.{k}` must be a string, not {}",
+                    other.type_str()
+                )),
+            })
+            .collect(),
+        Some(other) => Err(format!(
+            "`{key}` must be a table of strings, not {}",
+            other.type_str()
+        )),
+    }
+}
+
+/// The `[auth]` block (ADR-0013): exactly one scheme — `bearer_token`, or `username` and
+/// `password` together. Mixing or halving them fails loudly at startup (ADR-0008).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    pub bearer_token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl AuthConfig {
+    /// The `Authorization` header value this block yields, sent on every plain-HTTP request and
+    /// on the WebSocket upgrade.
+    pub fn authorization(&self) -> Result<String, String> {
+        match (&self.bearer_token, &self.username, &self.password) {
+            (Some(token), None, None) => Ok(format!("Bearer {token}")),
+            (None, Some(user), Some(password)) => {
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                Ok(format!("Basic {encoded}"))
+            }
+            (Some(_), _, _) => Err(
+                "[auth] must set either bearer_token or username/password, not both".to_string(),
+            ),
+            _ => Err("[auth] needs bearer_token, or username and password together".to_string()),
+        }
     }
 }
 
@@ -133,6 +221,11 @@ fn default_poll_interval_secs() -> u64 {
     30
 }
 
+fn default_heartbeat_interval_secs() -> u64 {
+    // The Baseline: "The interval between the heartbeats SHOULD be 30 seconds".
+    30
+}
+
 fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
@@ -141,14 +234,22 @@ fn default_stop_timeout_secs() -> u64 {
     10
 }
 
+fn default_apply_grace_secs() -> u64 {
+    3
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
             poll_interval_secs: default_poll_interval_secs(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
+            attributes: BTreeMap::new(),
             tls: None,
+            auth: None,
+            authorization_override: None,
             supervisors: Vec::new(),
         }
     }
@@ -166,6 +267,11 @@ impl ClientConfig {
         let config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         config.check_supervisor_names()?;
+        if let Some(auth) = &config.auth {
+            // A half-configured block must fail now, not at the first exchange.
+            auth.authorization()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         Ok(config)
     }
 
@@ -179,6 +285,47 @@ impl ClientConfig {
             }
         }
         Ok(())
+    }
+
+    /// The operator-defined attributes one Agent reports (ADR-0012): the machine-level table,
+    /// with a Supervisor's own entries merged over it per key.
+    pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
+        let mut merged = self.attributes.clone();
+        if let Some(block) = block {
+            merged.extend(block.attributes.clone());
+        }
+        merged
+    }
+
+    /// The `Authorization` value this Client sends, if any: a Server-rotated credential
+    /// (ADR-0014) wins over the `[auth]` block (ADR-0013).
+    pub fn authorization_value(&self) -> Result<Option<String>, String> {
+        if let Some(rotated) = &self.authorization_override {
+            return Ok(Some(rotated.clone()));
+        }
+        self.auth.as_ref().map(|a| a.authorization()).transpose()
+    }
+
+    /// Basic and Bearer are cleartext without TLS: sending them beyond the loopback over `ws://`
+    /// or `http://` deserves a warning (ADR-0013) — ultimately the operator's choice, so never
+    /// an error.
+    pub fn sends_credentials_in_cleartext(&self) -> bool {
+        if self.auth.is_none() && self.authorization_override.is_none() {
+            return false;
+        }
+        let Some((scheme, rest)) = self.endpoint.split_once("://") else {
+            return false;
+        };
+        if scheme == "wss" || scheme == "https" {
+            return false;
+        }
+        let host_port = rest.split(['/', '?']).next().unwrap_or("");
+        // A bracketed IPv6 host keeps its brackets; only a trailing `:port` is cut off.
+        let host = match host_port.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(""),
+            None => host_port.split(':').next().unwrap_or(""),
+        };
+        !matches!(host, "localhost" | "127.0.0.1" | "::1")
     }
 
     pub fn transport(&self) -> Result<TransportKind, String> {
@@ -206,6 +353,10 @@ mod tests {
         );
         assert!(cfg.endpoint.contains(":4320/v1/opamp"));
         assert_eq!(cfg.poll_interval_secs, 30);
+        // The Baseline's heartbeat default; 0 is the documented way to disable.
+        assert_eq!(cfg.heartbeat_interval_secs, 30);
+        let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
+        assert_eq!(disabled.heartbeat_interval_secs, 0);
     }
 
     #[test]
@@ -259,6 +410,7 @@ mod tests {
         assert_eq!(collector.name, "otelcol");
         assert_eq!(collector.endpoint_port, 4321);
         assert_eq!(collector.stop_timeout_secs, 10);
+        assert_eq!(collector.apply_grace_secs, 3, "the default grace");
         assert_eq!(
             collector.settings.get("binary").and_then(|v| v.as_str()),
             Some("/usr/local/bin/otelcol")
@@ -294,6 +446,121 @@ mod tests {
         let not_an_int =
             "[[supervisor]]\ntype = \"command\"\nname = \"x\"\nendpoint_port = \"a\"\n";
         assert!(toml::from_str::<ClientConfig>(not_an_int).is_err());
+        let negative_grace =
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\napply_grace_secs = -1\n";
+        assert!(toml::from_str::<ClientConfig>(negative_grace).is_err());
+        let zero_grace: ClientConfig = toml::from_str(
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\napply_grace_secs = 0\n",
+        )
+        .expect("parse");
+        assert_eq!(zero_grace.supervisors[0].apply_grace_secs, 0);
+    }
+
+    #[test]
+    fn attributes_parse_at_both_levels_and_merge_per_agent() {
+        let cfg: ClientConfig = toml::from_str(
+            r#"
+            [attributes]
+            env = "prod"
+            role = "machine"
+
+            [[supervisor]]
+            type = "command"
+            name = "stub"
+            command = "/bin/true"
+            [supervisor.attributes]
+            role = "edge"
+            "#,
+        )
+        .expect("parse");
+
+        // The self-Agent case: the machine-level table alone.
+        assert_eq!(
+            cfg.agent_attributes(None).get("env").map(String::as_str),
+            Some("prod")
+        );
+
+        // A Supervisor's own entries override the machine-level ones per key.
+        let merged = cfg.agent_attributes(Some(&cfg.supervisors[0]));
+        assert_eq!(merged.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(merged.get("role").map(String::as_str), Some("edge"));
+
+        // `attributes` is a common key, never plugin settings.
+        assert!(!cfg.supervisors[0].settings.contains_key("attributes"));
+    }
+
+    #[test]
+    fn non_string_attributes_are_rejected() {
+        assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
+        let block = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\n[supervisor.attributes]\nflag = true\n";
+        assert!(toml::from_str::<ClientConfig>(block).is_err());
+    }
+
+    #[test]
+    fn auth_yields_exactly_one_authorization_scheme() {
+        let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
+        assert_eq!(
+            bearer.auth.expect("auth").authorization().expect("value"),
+            "Bearer tok"
+        );
+
+        let basic: ClientConfig =
+            toml::from_str("[auth]\nusername = \"fleet\"\npassword = \"secret\"").expect("parse");
+        assert_eq!(
+            basic.auth.expect("auth").authorization().expect("value"),
+            // base64("fleet:secret")
+            "Basic ZmxlZXQ6c2VjcmV0"
+        );
+
+        // Mixing the schemes, halving Basic, or an empty block all fail loudly.
+        for bad in [
+            "[auth]\nbearer_token = \"tok\"\nusername = \"fleet\"\npassword = \"s\"",
+            "[auth]\nusername = \"fleet\"",
+            "[auth]\npassword = \"secret\"",
+            "[auth]",
+        ] {
+            let cfg: ClientConfig = toml::from_str(bad).expect("parses; the mix is semantic");
+            assert!(
+                cfg.auth.expect("auth").authorization().is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
+    }
+
+    #[test]
+    fn cleartext_credentials_are_flagged_beyond_the_loopback() {
+        for (endpoint, cleartext) in [
+            ("ws://fleet.example:4320/v1/opamp", true),
+            ("http://10.0.0.7:4320/v1/opamp", true),
+            ("ws://127.0.0.1:4320/v1/opamp", false),
+            ("http://localhost:4320/v1/opamp", false),
+            ("ws://[::1]:4320/v1/opamp", false),
+            ("wss://fleet.example:4320/v1/opamp", false),
+            ("https://fleet.example:4320/v1/opamp", false),
+        ] {
+            let cfg = ClientConfig {
+                endpoint: endpoint.to_string(),
+                auth: Some(AuthConfig {
+                    bearer_token: Some("tok".to_string()),
+                    username: None,
+                    password: None,
+                }),
+                ..ClientConfig::default()
+            };
+            assert_eq!(
+                cfg.sends_credentials_in_cleartext(),
+                cleartext,
+                "{endpoint}"
+            );
+        }
+
+        // Without [auth] there is nothing to leak.
+        let no_auth = ClientConfig {
+            endpoint: "ws://fleet.example:4320/v1/opamp".to_string(),
+            ..ClientConfig::default()
+        };
+        assert!(!no_auth.sends_credentials_in_cleartext());
     }
 
     #[test]

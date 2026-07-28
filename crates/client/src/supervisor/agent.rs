@@ -10,36 +10,49 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
-    AgentToServer, AnyValue, ComponentHealth, EffectiveConfig, KeyValue, RemoteConfigStatus,
-    RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType, ServerToAgent,
-    ServerToAgentFlags,
+    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
+    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
 
 use crate::storage::Storage;
 
-/// The Capability Set this Client declares (see docs/CONFORMANCE.md).
+/// The base Capability Set every Agent of this Client declares (see docs/CONFORMANCE.md).
+/// Individual Agents declare more via [`AgentState::declare_capability`] — e.g. heartbeats when
+/// enabled, restartability only where a Managed Process exists.
 pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::AcceptsRemoteConfig as u64
     | AgentCapabilities::ReportsEffectiveConfig as u64
     | AgentCapabilities::ReportsRemoteConfig as u64
-    | AgentCapabilities::ReportsHealth as u64;
+    | AgentCapabilities::ReportsHealth as u64
+    | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+    | AgentCapabilities::ReportsConnectionSettingsStatus as u64;
 
 /// What a handled `ServerToAgent` asks of the transport loop.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Handled {
     /// Something changed that the Server must hear about now (a config outcome, a demanded full
     /// report) — send the next report immediately instead of waiting for the poll interval.
     pub send_report: bool,
     /// The Server is throttling us (`UNAVAILABLE` + retry info): back off this long first.
     pub retry_after: Option<Duration>,
+    /// A connection-settings offer to verify by actually connecting (ADR-0014). The state
+    /// machine has already acknowledged `APPLYING`; the transport owns the verification, the
+    /// switch, and reporting the outcome back through the [`Engine`](crate::engine).
+    pub connection_offer: Option<ConnectionSettingsOffers>,
 }
 
 pub struct AgentState {
     uid: InstanceUid,
     sequence_num: u64,
     name: String,
+    /// This Agent's declared Capability Set: the base set plus whatever
+    /// [`declare_capability`](Self::declare_capability) added. Carried in every report, so the
+    /// Server's cached mask follows on the next exchange.
+    capabilities: u64,
     start_time_ns: u64,
     storage: Storage,
     /// The last stored remote configuration; what `effective_config` echoes unless the Managed
@@ -56,6 +69,8 @@ pub struct AgentState {
     managed: bool,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
+    /// A Server-commanded restart awaiting dispatch to the process adapter.
+    pending_restart: bool,
     /// The Managed Process's health — derived or self-reported (ADR-0011). Absent for the
     /// self-Agent, whose health is being alive.
     process_health: Option<ComponentHealth>,
@@ -64,6 +79,18 @@ pub struct AgentState {
     process_description: Option<AgentDescription>,
     /// The Managed Process's self-reported effective configuration; replaces the echo.
     process_effective_config: Option<EffectiveConfig>,
+    /// The Managed Process's available components, relayed from the Supervisor Endpoint.
+    /// Routine reports carry only the hash; the full map goes out when the Server asks.
+    available_components: Option<AvailableComponents>,
+    /// The Server flagged `ReportAvailableComponents`: the next report carries the full map.
+    send_components_full: bool,
+    /// The outcome of the last connection-settings offer (ADR-0014): `APPLYING` on receipt,
+    /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
+    connection_settings_status: Option<ConnectionSettingsStatus>,
+    send_settings_status: bool,
+    /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
+    /// attributes so Selectors can target them. Reported attributes win on key collision.
+    configured_attributes: Vec<(String, String)>,
 }
 
 impl AgentState {
@@ -82,6 +109,7 @@ impl AgentState {
             uid,
             sequence_num: 0,
             name,
+            capabilities: AGENT_CAPABILITIES,
             start_time_ns: now_ns(),
             storage,
             applied,
@@ -91,18 +119,76 @@ impl AgentState {
             send_status: false,
             managed: false,
             pending_apply: None,
+            pending_restart: false,
             process_health: None,
             send_health: false,
             process_description: None,
             process_effective_config: None,
+            available_components: None,
+            send_components_full: false,
+            connection_settings_status: None,
+            send_settings_status: false,
+            configured_attributes: Vec::new(),
         })
     }
 
-    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011).
+    /// Restores the outcome of a previously applied connection-settings offer (ADR-0014): the
+    /// persisted hash reports `APPLIED`, so a restarted Client is not re-offered what it runs.
+    pub fn adopt_connection_settings(&mut self, hash: &[u8]) {
+        self.connection_settings_status = Some(ConnectionSettingsStatus {
+            last_connection_settings_hash: hash.to_vec(),
+            status: ConnectionSettingsStatuses::Applied as i32,
+            error_message: String::new(),
+        });
+    }
+
+    /// Closes the connection-settings lifecycle the transport verified (ADR-0014): `APPLIED`
+    /// keeps the hash and the switch follows; `FAILED` keeps the hash too — the Baseline's
+    /// gating stops the Server re-offering the exact settings this Agent could not use.
+    pub fn connection_settings_outcome(&mut self, hash: &[u8], result: Result<(), &str>) {
+        self.connection_settings_status = Some(match result {
+            Ok(()) => ConnectionSettingsStatus {
+                last_connection_settings_hash: hash.to_vec(),
+                status: ConnectionSettingsStatuses::Applied as i32,
+                error_message: String::new(),
+            },
+            Err(error) => ConnectionSettingsStatus {
+                last_connection_settings_hash: hash.to_vec(),
+                status: ConnectionSettingsStatuses::Failed as i32,
+                error_message: error.to_string(),
+            },
+        });
+        self.send_settings_status = true;
+    }
+
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011). Only
+    /// such an Agent accepts a restart command — the self-Agent has no process to restart.
     pub fn supervised(name: String, storage: Storage) -> std::io::Result<Self> {
         let mut state = Self::new(name, storage)?;
         state.managed = true;
+        state.declare_capability(AgentCapabilities::AcceptsRestartCommand);
         Ok(state)
+    }
+
+    /// A restart the Server commanded and the process adapter has not been handed yet.
+    pub fn take_pending_restart(&mut self) -> bool {
+        std::mem::take(&mut self.pending_restart)
+    }
+
+    /// Adds one capability to this Agent's declared set — heartbeats when enabled, and bits an
+    /// Agent only earns situationally (a Managed Process to restart, components to report).
+    pub fn declare_capability(&mut self, capability: AgentCapabilities) {
+        self.capabilities |= capability as u64;
+    }
+
+    /// Attaches the operator-defined attributes this Agent reports (ADR-0012).
+    #[must_use]
+    pub fn with_attributes(
+        mut self,
+        attributes: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.configured_attributes = attributes.into_iter().collect();
+        self
     }
 
     pub fn uid(&self) -> InstanceUid {
@@ -152,6 +238,15 @@ impl AgentState {
         self.send_status = true;
     }
 
+    /// The Managed Process reported its available components. Only now does the Agent declare
+    /// `ReportsAvailableComponents` — a capability without components would be a false promise —
+    /// and the next full report carries the hash (the Server flags for the full map on demand).
+    pub fn set_available_components(&mut self, components: AvailableComponents) {
+        self.available_components = Some(components);
+        self.declare_capability(AgentCapabilities::ReportsAvailableComponents);
+        self.send_full = true;
+    }
+
     /// The next report starts from a full status snapshot again — after (re)connecting, after an
     /// exchange failed, or when the Server demanded it.
     pub fn force_full(&mut self) {
@@ -167,7 +262,7 @@ impl AgentState {
         let mut msg = AgentToServer {
             instance_uid: self.uid.as_bytes().to_vec(),
             sequence_num: self.sequence_num,
-            capabilities: AGENT_CAPABILITIES,
+            capabilities: self.capabilities,
             ..Default::default()
         };
         if self.send_full {
@@ -187,9 +282,26 @@ impl AgentState {
                 });
             }
         }
+        if self.send_full || self.send_settings_status {
+            msg.connection_settings_status = self.connection_settings_status.clone();
+        }
+        // Available components ride the Baseline's two-step shape: the hash in every full
+        // snapshot, the full map only when the Server demanded it via ReportAvailableComponents.
+        if let Some(components) = &self.available_components {
+            if self.send_components_full {
+                msg.available_components = Some(components.clone());
+            } else if self.send_full {
+                msg.available_components = Some(AvailableComponents {
+                    components: Default::default(),
+                    hash: components.hash.clone(),
+                });
+            }
+        }
         self.send_full = false;
         self.send_status = false;
         self.send_health = false;
+        self.send_components_full = false;
+        self.send_settings_status = false;
         msg
     }
 
@@ -199,7 +311,7 @@ impl AgentState {
         AgentToServer {
             instance_uid: self.uid.as_bytes().to_vec(),
             sequence_num: self.sequence_num,
-            capabilities: AGENT_CAPABILITIES,
+            capabilities: self.capabilities,
             agent_disconnect: Some(AgentDisconnect {}),
             ..Default::default()
         }
@@ -211,6 +323,20 @@ impl AgentState {
 
         if reply.capabilities != 0 {
             self.server_capabilities = Some(reply.capabilities);
+        }
+
+        // A command message carries only identity, capabilities, and the command — the Baseline
+        // says every other field is to be ignored, so this branch returns before touching them.
+        if let Some(command) = &reply.command {
+            if command.r#type == opamp::proto::CommandType::Restart as i32 && self.managed {
+                info!("the server commanded a restart");
+                self.pending_restart = true;
+            } else {
+                // Restart is the only command the Baseline defines; and the self-Agent never
+                // declares AcceptsRestartCommand, so a command toward it is a Server error.
+                warn!(r#type = command.r#type, "ignoring an unsupported command");
+            }
+            return handled;
         }
 
         if let Some(response) = &reply.error_response {
@@ -247,9 +373,38 @@ impl AgentState {
             handled.send_report = true;
         }
 
+        if reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+            && self.available_components.is_some()
+        {
+            self.send_components_full = true;
+            handled.send_report = true;
+        }
+
         if let Some(remote_config) = &reply.remote_config {
             self.apply(remote_config);
             handled.send_report = true;
+        }
+
+        // A connection-settings offer (ADR-0014): acknowledge APPLYING and hand it to the
+        // transport, which alone can verify by actually connecting — the Baseline's MUST. Only
+        // an offer this Agent already runs (APPLIED, same hash) is not re-entered; a re-offer
+        // after FAILED or a lost in-flight verification retries.
+        if let Some(offers) = &reply.connection_settings {
+            let applied = self.connection_settings_status.as_ref().is_some_and(|s| {
+                s.last_connection_settings_hash == offers.hash
+                    && s.status == ConnectionSettingsStatuses::Applied as i32
+            });
+            if offers.opamp.is_some() && !applied {
+                info!(hash = %hex::encode(&offers.hash), "connection settings offered; verifying");
+                self.connection_settings_status = Some(ConnectionSettingsStatus {
+                    last_connection_settings_hash: offers.hash.clone(),
+                    status: ConnectionSettingsStatuses::Applying as i32,
+                    error_message: String::new(),
+                });
+                self.send_settings_status = true;
+                handled.send_report = true;
+                handled.connection_offer = Some(offers.clone());
+            }
         }
 
         handled
@@ -301,17 +456,38 @@ impl AgentState {
     }
 
     fn describe(&self) -> AgentDescription {
+        let mut identifying_attributes = vec![string_attr("service.name", &self.name)];
+        // `service.version` is the *Agent's* version. The self-Agent is the Client, so its baked
+        // version is the truth; a Supervisor-backed Agent stands for its Managed Process, whose
+        // version only the process itself can report (folded in below, goal 16) — never invented
+        // from the Client's.
+        if !self.managed {
+            identifying_attributes.push(string_attr("service.version", crate::version::version()));
+        }
+        identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
+        let mut non_identifying_attributes = vec![
+            string_attr("os.type", os_type()),
+            string_attr("host.arch", std::env::consts::ARCH),
+        ];
+        if let Some(os) = os_description() {
+            non_identifying_attributes.push(string_attr("os.description", os));
+        }
         let mut description = AgentDescription {
-            identifying_attributes: vec![
-                string_attr("service.name", &self.name),
-                string_attr("service.version", crate::version::version()),
-                string_attr("service.instance.id", &self.uid.to_string()),
-            ],
-            non_identifying_attributes: vec![
-                string_attr("os.type", os_type()),
-                string_attr("host.arch", std::env::consts::ARCH),
-            ],
+            identifying_attributes,
+            non_identifying_attributes,
         };
+        // Operator-defined attributes (ADR-0012) — added only where nothing is reported under the
+        // same key, so what the code (and below, the Managed Process) reports always wins.
+        for (key, value) in &self.configured_attributes {
+            let taken = |list: &[KeyValue]| list.iter().any(|kv| kv.key == *key);
+            if !taken(&description.identifying_attributes)
+                && !taken(&description.non_identifying_attributes)
+            {
+                description
+                    .non_identifying_attributes
+                    .push(string_attr(key, value));
+            }
+        }
         // Fold in what the Managed Process reported about itself — except its identity: the
         // Agent the Server sees is the Supervisor, keyed by the Supervisor's uid (goal 16).
         if let Some(reported) = &self.process_description {
@@ -373,6 +549,56 @@ fn os_type() -> &'static str {
     }
 }
 
+/// Human-readable operating-system description (OTel `os.description`, e.g. "Ubuntu 24.04.2
+/// LTS") — best effort per platform, computed once, absent when the platform gives none.
+fn os_description() -> Option<&'static str> {
+    static DESCRIPTION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DESCRIPTION.get_or_init(read_os_description).as_deref()
+}
+
+#[cfg(target_os = "linux")]
+fn read_os_description() -> Option<String> {
+    // os-release(5): PRETTY_NAME="Ubuntu 24.04.2 LTS"
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn read_os_description() -> Option<String> {
+    // `sw_vers` prints ProductName/ProductVersion/BuildVersion lines, e.g. "macOS" / "15.5".
+    let output = std::process::Command::new("sw_vers").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|value| value.trim_start_matches(':').trim().to_string())
+    };
+    match (field("ProductName"), field("ProductVersion")) {
+        (Some(name), Some(version)) => Some(format!("{name} {version}")),
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn read_os_description() -> Option<String> {
+    // `cmd /c ver` prints e.g. "Microsoft Windows [Version 10.0.26100.2033]".
+    let output = std::process::Command::new("cmd")
+        .args(["/c", "ver"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn read_os_description() -> Option<String> {
+    None
+}
+
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -404,6 +630,279 @@ mod tests {
             }),
             config_hash: hash.to_vec(),
         }
+    }
+
+    #[test]
+    fn configured_attributes_are_reported_but_never_shadow_reported_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::new("test-agent".to_string(), storage)
+            .expect("agent")
+            .with_attributes(
+                [
+                    ("env".to_string(), "prod".to_string()),
+                    // Collides with what the code reports — the reported value must win.
+                    ("os.type".to_string(), "configured".to_string()),
+                ]
+                .into(),
+            );
+
+        let description = agent.describe();
+        let value = |key: &str| {
+            description
+                .non_identifying_attributes
+                .iter()
+                .find(|kv| kv.key == key)
+                .and_then(|kv| kv.value.as_ref())
+                .and_then(|v| v.value.as_ref())
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s.clone(),
+                    other => format!("{other:?}"),
+                })
+        };
+        assert_eq!(value("env").as_deref(), Some("prod"));
+        assert_eq!(value("os.type").as_deref(), Some(os_type()));
+        assert_eq!(
+            description
+                .non_identifying_attributes
+                .iter()
+                .filter(|kv| kv.key == "os.type")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_description_names_the_distribution_not_only_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let description = make_agent(dir.path()).describe();
+        let os = description
+            .non_identifying_attributes
+            .iter()
+            .find(|kv| kv.key == "os.description")
+            .expect("an os.description on a distribution with /etc/os-release");
+        let text = match &os.value.as_ref().and_then(|v| v.value.as_ref()) {
+            Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+            other => panic!("os.description must be a string, got {other:?}"),
+        };
+        assert!(!text.is_empty());
+        assert_ne!(text, "linux", "the PRETTY_NAME, not the os.type");
+    }
+
+    #[test]
+    fn only_the_self_agent_carries_the_client_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let version_of = |agent: &AgentState| {
+            agent
+                .describe()
+                .identifying_attributes
+                .iter()
+                .find(|kv| kv.key == "service.version")
+                .and_then(|kv| kv.value.clone())
+                .and_then(|v| v.value)
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s,
+                    other => format!("{other:?}"),
+                })
+        };
+
+        // The self-Agent *is* the Client — its baked version is the Agent's version.
+        let this = make_agent(&dir.path().join("self"));
+        assert_eq!(
+            version_of(&this).as_deref(),
+            Some(crate::version::version())
+        );
+
+        // A Supervisor-backed Agent reports no version until its Managed Process states one.
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        assert_eq!(version_of(&supervised), None);
+
+        supervised.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.version", "0.142.0")],
+            non_identifying_attributes: vec![],
+        });
+        assert_eq!(version_of(&supervised).as_deref(), Some("0.142.0"));
+    }
+
+    #[test]
+    fn declared_capabilities_ride_every_report_and_the_goodbye() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let base = agent.next_report().capabilities;
+        assert_eq!(base, AGENT_CAPABILITIES);
+        assert_eq!(base & AgentCapabilities::ReportsHeartbeat as u64, 0);
+
+        agent.declare_capability(AgentCapabilities::ReportsHeartbeat);
+        let declared = agent.next_report().capabilities;
+        assert_eq!(declared, base | AgentCapabilities::ReportsHeartbeat as u64);
+        assert_eq!(agent.disconnect_message().capabilities, declared);
+    }
+
+    #[test]
+    fn a_restart_command_is_queued_by_supervised_agents_and_ignores_other_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised = AgentState::supervised("s".to_string(), storage).expect("agent");
+        assert_ne!(
+            supervised.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
+            0,
+            "a supervised agent declares restartability"
+        );
+
+        // A command message per the Baseline: every field besides identity, capabilities, and
+        // the command is ignored — the piggybacked remote_config must not be applied.
+        let command_with_config = ServerToAgent {
+            command: Some(opamp::proto::ServerToAgentCommand {
+                r#type: opamp::proto::CommandType::Restart as i32,
+            }),
+            remote_config: Some(remote_config(b"x: 1\n", b"sneaky")),
+            ..Default::default()
+        };
+        supervised.handle(&command_with_config);
+        assert!(supervised.take_pending_restart());
+        assert!(!supervised.take_pending_restart(), "taken exactly once");
+        assert!(
+            supervised.take_pending_apply().is_none(),
+            "the piggybacked config is ignored"
+        );
+
+        // The self-Agent never declares the capability and ignores the command.
+        let mut this = make_agent(&dir.path().join("self"));
+        assert_eq!(
+            this.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
+            0
+        );
+        this.handle(&command_with_config);
+        assert!(!this.take_pending_restart());
+    }
+
+    #[test]
+    fn a_connection_offer_is_acknowledged_applying_and_handed_to_the_transport() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        // Every Agent declares it can accept and report on connection settings (ADR-0014).
+        let caps = agent.next_report().capabilities;
+        assert_ne!(
+            caps & AgentCapabilities::AcceptsOpAmpConnectionSettings as u64,
+            0
+        );
+        assert_ne!(
+            caps & AgentCapabilities::ReportsConnectionSettingsStatus as u64,
+            0
+        );
+
+        let offer = ConnectionSettingsOffers {
+            hash: b"offer-1".to_vec(),
+            opamp: Some(opamp::proto::OpAmpConnectionSettings {
+                destination_endpoint: "wss://new/v1/opamp".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer.clone()),
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        assert_eq!(handled.connection_offer, Some(offer.clone()));
+
+        // The next report acknowledges APPLYING with the offer hash.
+        let status = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(status.last_connection_settings_hash, b"offer-1");
+        assert_eq!(status.status, ConnectionSettingsStatuses::Applying as i32);
+
+        // The transport verified: APPLIED, and the same offer is not re-entered.
+        agent.connection_settings_outcome(b"offer-1", Ok(()));
+        let applied = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(applied.status, ConnectionSettingsStatuses::Applied as i32);
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer),
+            ..Default::default()
+        });
+        assert_eq!(
+            handled.connection_offer, None,
+            "an already-applied offer is not verified again"
+        );
+    }
+
+    #[test]
+    fn a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        let offer = ConnectionSettingsOffers {
+            hash: b"offer-2".to_vec(),
+            opamp: Some(opamp::proto::OpAmpConnectionSettings::default()),
+            ..Default::default()
+        };
+        agent.handle(&ServerToAgent {
+            connection_settings: Some(offer.clone()),
+            ..Default::default()
+        });
+        let _ = agent.next_report();
+        agent.connection_settings_outcome(b"offer-2", Err("could not connect"));
+
+        let failed = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(failed.status, ConnectionSettingsStatuses::Failed as i32);
+        assert_eq!(failed.last_connection_settings_hash, b"offer-2");
+        assert_eq!(failed.error_message, "could not connect");
+
+        // A re-offer of the failed hash is retried (the Server may have fixed the credential).
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer),
+            ..Default::default()
+        });
+        assert!(handled.connection_offer.is_some());
+    }
+
+    #[test]
+    fn available_components_report_the_hash_and_the_map_only_on_demand() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        let full = AvailableComponents {
+            components: HashMap::from([(
+                "receiver/otlp".to_string(),
+                opamp::proto::ComponentDetails::default(),
+            )]),
+            hash: b"components-hash".to_vec(),
+        };
+        agent.set_available_components(full.clone());
+
+        // The next (full) report declares the bit and carries the hash only.
+        let report = agent.next_report();
+        assert_ne!(
+            report.capabilities & AgentCapabilities::ReportsAvailableComponents as u64,
+            0
+        );
+        let carried = report.available_components.expect("the hash announcement");
+        assert!(carried.components.is_empty());
+        assert_eq!(carried.hash, full.hash);
+
+        // The Server demands the full map: exactly the next report carries it, once.
+        let handled = agent.handle(&ServerToAgent {
+            flags: ServerToAgentFlags::ReportAvailableComponents as u64,
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        let demanded = agent.next_report().available_components.expect("the map");
+        assert!(demanded.components.contains_key("receiver/otlp"));
+        assert!(agent.next_report().available_components.is_none());
     }
 
     #[test]

@@ -54,8 +54,38 @@ async fn main() {
         }
     };
 
-    let state = Arc::new(AppState::new(config.fleet_config_file.clone()));
-    let app = server::app(state);
+    let connection_offer = match config
+        .connection_offer
+        .as_ref()
+        .map(server::fleet::ConnectionOffer::from_config)
+        .transpose()
+    {
+        Ok(offer) => {
+            if offer.is_some() {
+                info!("offering connection settings to the fleet (ADR-0014)");
+            }
+            offer
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let state = match AppState::new(config.config_dir.clone()) {
+        Ok(state) => Arc::new(state.with_connection_offer(connection_offer)),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let auth = config
+        .auth
+        .as_ref()
+        .map(server::transport::OpampAuth::from_config);
+    if auth.is_some() {
+        info!("the OpAMP endpoint requires authentication (ADR-0013)");
+    }
+    let app = server::app(state, auth);
 
     match &config.tls {
         Some(tls) => {
