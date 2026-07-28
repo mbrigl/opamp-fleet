@@ -7,7 +7,7 @@
 /target/
 
 # Local runtime state (default paths of server.toml / client.toml)
-/fleet-config.yaml
+/fleet-configs/
 /client-state/
 
 # Environment files
