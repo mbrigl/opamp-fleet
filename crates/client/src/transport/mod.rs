@@ -6,6 +6,16 @@ pub mod ws;
 
 use std::time::Duration;
 
+/// Why a transport run ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The operator stopped the Client; processes are down, goodbyes sent.
+    Shutdown,
+    /// Verified connection settings took effect (ADR-0014): the runtime re-resolves the
+    /// effective configuration and reconnects — possibly on the other transport.
+    Reconfigured,
+}
+
 /// Reconnect backoff: exponential from one second, capped at a minute.
 pub struct Backoff {
     next: Duration,

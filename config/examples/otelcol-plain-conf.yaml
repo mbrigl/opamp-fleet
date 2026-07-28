@@ -1,0 +1,22 @@
+# Minimal test Configuration for the "otelcol-plain" supervisor example in config/client.toml —
+# the core otelcol distribution, no opampextension: the Supervisor observes it from the outside.
+# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-plain-conf" (ADR-0012).
+# Ports are offset so it can run alongside the otelcol-conf collector on the same host.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:14318
+
+exporters:
+  debug: {}
+
+service:
+  telemetry:
+    metrics:
+      level: none # no internal-metrics listener — avoids the 8888 clash with otelcol-conf
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]

@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
-    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, EffectiveConfig, KeyValue,
+    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
+    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
     RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
     ServerToAgent, ServerToAgentFlags,
 };
@@ -26,16 +27,22 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::AcceptsRemoteConfig as u64
     | AgentCapabilities::ReportsEffectiveConfig as u64
     | AgentCapabilities::ReportsRemoteConfig as u64
-    | AgentCapabilities::ReportsHealth as u64;
+    | AgentCapabilities::ReportsHealth as u64
+    | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+    | AgentCapabilities::ReportsConnectionSettingsStatus as u64;
 
 /// What a handled `ServerToAgent` asks of the transport loop.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Handled {
     /// Something changed that the Server must hear about now (a config outcome, a demanded full
     /// report) — send the next report immediately instead of waiting for the poll interval.
     pub send_report: bool,
     /// The Server is throttling us (`UNAVAILABLE` + retry info): back off this long first.
     pub retry_after: Option<Duration>,
+    /// A connection-settings offer to verify by actually connecting (ADR-0014). The state
+    /// machine has already acknowledged `APPLYING`; the transport owns the verification, the
+    /// switch, and reporting the outcome back through the [`Engine`](crate::engine).
+    pub connection_offer: Option<ConnectionSettingsOffers>,
 }
 
 pub struct AgentState {
@@ -77,6 +84,10 @@ pub struct AgentState {
     available_components: Option<AvailableComponents>,
     /// The Server flagged `ReportAvailableComponents`: the next report carries the full map.
     send_components_full: bool,
+    /// The outcome of the last connection-settings offer (ADR-0014): `APPLYING` on receipt,
+    /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
+    connection_settings_status: Option<ConnectionSettingsStatus>,
+    send_settings_status: bool,
     /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
@@ -115,8 +126,39 @@ impl AgentState {
             process_effective_config: None,
             available_components: None,
             send_components_full: false,
+            connection_settings_status: None,
+            send_settings_status: false,
             configured_attributes: Vec::new(),
         })
+    }
+
+    /// Restores the outcome of a previously applied connection-settings offer (ADR-0014): the
+    /// persisted hash reports `APPLIED`, so a restarted Client is not re-offered what it runs.
+    pub fn adopt_connection_settings(&mut self, hash: &[u8]) {
+        self.connection_settings_status = Some(ConnectionSettingsStatus {
+            last_connection_settings_hash: hash.to_vec(),
+            status: ConnectionSettingsStatuses::Applied as i32,
+            error_message: String::new(),
+        });
+    }
+
+    /// Closes the connection-settings lifecycle the transport verified (ADR-0014): `APPLIED`
+    /// keeps the hash and the switch follows; `FAILED` keeps the hash too — the Baseline's
+    /// gating stops the Server re-offering the exact settings this Agent could not use.
+    pub fn connection_settings_outcome(&mut self, hash: &[u8], result: Result<(), &str>) {
+        self.connection_settings_status = Some(match result {
+            Ok(()) => ConnectionSettingsStatus {
+                last_connection_settings_hash: hash.to_vec(),
+                status: ConnectionSettingsStatuses::Applied as i32,
+                error_message: String::new(),
+            },
+            Err(error) => ConnectionSettingsStatus {
+                last_connection_settings_hash: hash.to_vec(),
+                status: ConnectionSettingsStatuses::Failed as i32,
+                error_message: error.to_string(),
+            },
+        });
+        self.send_settings_status = true;
     }
 
     /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011). Only
@@ -240,6 +282,9 @@ impl AgentState {
                 });
             }
         }
+        if self.send_full || self.send_settings_status {
+            msg.connection_settings_status = self.connection_settings_status.clone();
+        }
         // Available components ride the Baseline's two-step shape: the hash in every full
         // snapshot, the full map only when the Server demanded it via ReportAvailableComponents.
         if let Some(components) = &self.available_components {
@@ -256,6 +301,7 @@ impl AgentState {
         self.send_status = false;
         self.send_health = false;
         self.send_components_full = false;
+        self.send_settings_status = false;
         msg
     }
 
@@ -337,6 +383,28 @@ impl AgentState {
         if let Some(remote_config) = &reply.remote_config {
             self.apply(remote_config);
             handled.send_report = true;
+        }
+
+        // A connection-settings offer (ADR-0014): acknowledge APPLYING and hand it to the
+        // transport, which alone can verify by actually connecting — the Baseline's MUST. Only
+        // an offer this Agent already runs (APPLIED, same hash) is not re-entered; a re-offer
+        // after FAILED or a lost in-flight verification retries.
+        if let Some(offers) = &reply.connection_settings {
+            let applied = self.connection_settings_status.as_ref().is_some_and(|s| {
+                s.last_connection_settings_hash == offers.hash
+                    && s.status == ConnectionSettingsStatuses::Applied as i32
+            });
+            if offers.opamp.is_some() && !applied {
+                info!(hash = %hex::encode(&offers.hash), "connection settings offered; verifying");
+                self.connection_settings_status = Some(ConnectionSettingsStatus {
+                    last_connection_settings_hash: offers.hash.clone(),
+                    status: ConnectionSettingsStatuses::Applying as i32,
+                    error_message: String::new(),
+                });
+                self.send_settings_status = true;
+                handled.send_report = true;
+                handled.connection_offer = Some(offers.clone());
+            }
         }
 
         handled
@@ -708,6 +776,97 @@ mod tests {
         );
         this.handle(&command_with_config);
         assert!(!this.take_pending_restart());
+    }
+
+    #[test]
+    fn a_connection_offer_is_acknowledged_applying_and_handed_to_the_transport() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        // Every Agent declares it can accept and report on connection settings (ADR-0014).
+        let caps = agent.next_report().capabilities;
+        assert_ne!(
+            caps & AgentCapabilities::AcceptsOpAmpConnectionSettings as u64,
+            0
+        );
+        assert_ne!(
+            caps & AgentCapabilities::ReportsConnectionSettingsStatus as u64,
+            0
+        );
+
+        let offer = ConnectionSettingsOffers {
+            hash: b"offer-1".to_vec(),
+            opamp: Some(opamp::proto::OpAmpConnectionSettings {
+                destination_endpoint: "wss://new/v1/opamp".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer.clone()),
+            ..Default::default()
+        });
+        assert!(handled.send_report);
+        assert_eq!(handled.connection_offer, Some(offer.clone()));
+
+        // The next report acknowledges APPLYING with the offer hash.
+        let status = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(status.last_connection_settings_hash, b"offer-1");
+        assert_eq!(status.status, ConnectionSettingsStatuses::Applying as i32);
+
+        // The transport verified: APPLIED, and the same offer is not re-entered.
+        agent.connection_settings_outcome(b"offer-1", Ok(()));
+        let applied = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(applied.status, ConnectionSettingsStatuses::Applied as i32);
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer),
+            ..Default::default()
+        });
+        assert_eq!(
+            handled.connection_offer, None,
+            "an already-applied offer is not verified again"
+        );
+    }
+
+    #[test]
+    fn a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = make_agent(dir.path());
+        let _ = agent.next_report();
+
+        let offer = ConnectionSettingsOffers {
+            hash: b"offer-2".to_vec(),
+            opamp: Some(opamp::proto::OpAmpConnectionSettings::default()),
+            ..Default::default()
+        };
+        agent.handle(&ServerToAgent {
+            connection_settings: Some(offer.clone()),
+            ..Default::default()
+        });
+        let _ = agent.next_report();
+        agent.connection_settings_outcome(b"offer-2", Err("could not connect"));
+
+        let failed = agent
+            .next_report()
+            .connection_settings_status
+            .expect("status");
+        assert_eq!(failed.status, ConnectionSettingsStatuses::Failed as i32);
+        assert_eq!(failed.last_connection_settings_hash, b"offer-2");
+        assert_eq!(failed.error_message, "could not connect");
+
+        // A re-offer of the failed hash is retried (the Server may have fixed the credential).
+        let handled = agent.handle(&ServerToAgent {
+            connection_settings: Some(offer),
+            ..Default::default()
+        });
+        assert!(handled.connection_offer.is_some());
     }
 
     #[test]

@@ -54,8 +54,25 @@ async fn main() {
         }
     };
 
+    let connection_offer = match config
+        .connection_offer
+        .as_ref()
+        .map(server::fleet::ConnectionOffer::from_config)
+        .transpose()
+    {
+        Ok(offer) => {
+            if offer.is_some() {
+                info!("offering connection settings to the fleet (ADR-0014)");
+            }
+            offer
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let state = match AppState::new(config.config_dir.clone()) {
-        Ok(state) => Arc::new(state),
+        Ok(state) => Arc::new(state.with_connection_offer(connection_offer)),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
