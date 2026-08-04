@@ -12,7 +12,7 @@ use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
     AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
     ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageStatus,
-    PackageStatusEnum, PackageStatuses, RemoteConfigStatus, RemoteConfigStatuses,
+    PackageStatusEnum, PackageStatuses, PackageType, RemoteConfigStatus, RemoteConfigStatuses,
     ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
@@ -534,6 +534,26 @@ impl AgentState {
             return;
         };
         self.server_offered = Some((available.version.clone(), available.hash.clone()));
+        // The Baseline distinguishes a `TopLevel` package — the Managed Process's own binary —
+        // from an `Addon`. A Supervisor knows how to replace the former and nothing about the
+        // latter, and installing an Addon the only way this Client can would overwrite the very
+        // binary the addon was meant to extend. So it is refused, and refusing is a *report*: the
+        // aggregate hash is echoed with `InstallFailed`, which both tells the operator why and
+        // stops the Server offering the same bytes forever.
+        if available.r#type == PackageType::Addon as i32 {
+            error!(
+                package = %name,
+                "refusing an addon package: this Client installs top-level packages only"
+            );
+            self.installing = None;
+            self.package_error =
+                "this Client installs top-level packages only; the offered package is an addon"
+                    .to_string();
+            self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+            self.send_package_status = true;
+            handled.send_report = true;
+            return;
+        }
         let installed_hash = self
             .installed_package
             .as_ref()
@@ -1056,6 +1076,56 @@ mod tests {
             ..Default::default()
         });
         assert!(settled.package_download.is_none(), "already installed");
+    }
+
+    /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
+    /// package is *be* that binary — so an addon offer must be refused rather than installed over
+    /// the process it was meant to extend, and the refusal must be reported.
+    #[test]
+    fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
+        use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        agent.accept_package("otelcol".to_string());
+        let _ = agent.next_report();
+
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        r#type: PackageType::Addon as i32,
+                        version: "2.0.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "/api/v1/packages/otelcol/file".to_string(),
+                            content_hash: b"chash".to_vec(),
+                            ..Default::default()
+                        }),
+                        hash: b"addon-hash".to_vec(),
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg-addon".to_vec(),
+            }),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_none(),
+            "an addon is never downloaded, let alone swapped over the binary"
+        );
+        assert!(handled.send_report, "the refusal is reported at once");
+
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        assert!(
+            status.error_message.contains("addon"),
+            "the reason names what was refused: {}",
+            status.error_message
+        );
+        // A refusal is a report, not a loop: the aggregate is echoed so the offer ends.
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
 
     #[test]
