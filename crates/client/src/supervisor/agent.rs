@@ -813,6 +813,7 @@ mod tests {
                 config_map: HashMap::from([(
                     String::new(),
                     AgentConfigFile {
+                        role: String::new(),
                         body: body.to_vec(),
                         content_type: String::new(),
                     },

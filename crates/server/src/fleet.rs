@@ -162,6 +162,8 @@ pub struct AppState {
     /// The packages offered to the fleet (ADR-0015); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
+    /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
+    max_message_size: usize,
 }
 
 impl AppState {
@@ -183,7 +185,21 @@ impl AppState {
             next_conn: AtomicU64::new(1),
             connection_offer: None,
             packages: None,
+            max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
         })
+    }
+
+    /// Sets the message size limit both transports enforce (the Baseline recommends the default
+    /// [`opamp::frame::DEFAULT_MAX_MESSAGE_SIZE`] and asks that it be configurable).
+    #[must_use]
+    pub fn with_max_message_size(mut self, limit: usize) -> Self {
+        self.max_message_size = limit;
+        self
+    }
+
+    /// The message size limit in force, for the transports to enforce in both directions.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -667,6 +683,11 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
                         AgentConfigFile {
                             body: body.clone().into_bytes(),
                             content_type: String::new(),
+                            // `role` arrived with Baseline v0.19.0 and is Agent-type-specific.
+                            // Carrying an operator-chosen value into it changes the REST API's
+                            // Configuration model, which is a public contract — proposed in
+                            // ADR-0016, deliberately left unset until that is decided.
+                            role: String::new(),
                         },
                     )
                 })

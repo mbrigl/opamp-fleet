@@ -38,6 +38,11 @@ pub struct ServerConfig {
     /// that the Client resolves against its own OpAMP endpoint — right for the common
     /// single-listener deployment; set it when downloads must go through a different host.
     pub advertised_url: Option<String>,
+    /// The largest OpAMP message the Server accepts or sends, on either transport and in either
+    /// direction. The Baseline requires the limit, recommends this default, and asks that it be
+    /// configurable — a fleet of small status reports can be served with far less.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size_bytes: usize,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -183,6 +188,10 @@ fn default_packages_dir() -> PathBuf {
     PathBuf::from("fleet-packages")
 }
 
+fn default_max_message_size() -> usize {
+    opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -193,6 +202,7 @@ impl Default for ServerConfig {
             connection_offer: None,
             packages_dir: default_packages_dir(),
             advertised_url: None,
+            max_message_size_bytes: default_max_message_size(),
         }
     }
 }
@@ -216,6 +226,14 @@ impl ServerConfig {
             offer
                 .check(config.auth.as_ref())
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
+        // limit is mandatory, so a value that cannot carry a message fails startup.
+        if config.max_message_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
         }
         Ok(config)
     }
@@ -246,6 +264,23 @@ mod tests {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen.port(), 4320);
         assert!(cfg.tls.is_none());
+    }
+
+    /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
+    /// configurable; zero is not "unlimited" but a limit that could carry nothing, so it fails.
+    #[test]
+    fn the_message_size_limit_defaults_to_the_recommended_value_and_is_configurable() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.max_message_size_bytes, 64 * 1024 * 1024);
+        let tightened: ServerConfig =
+            toml::from_str("max_message_size_bytes = 65536").expect("parse");
+        assert_eq!(tightened.max_message_size_bytes, 65536);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_message_size_bytes"), "{err}");
     }
 
     #[test]

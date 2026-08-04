@@ -160,6 +160,7 @@ mod tests {
                 config_map: HashMap::from([(
                     String::new(),
                     AgentConfigFile {
+                        role: String::new(),
                         body: b"receivers: {}\n".to_vec(),
                         content_type: String::new(),
                     },
@@ -187,6 +188,7 @@ mod tests {
                         (
                             name.to_string(),
                             AgentConfigFile {
+                                role: String::new(),
                                 body: body.to_vec(),
                                 content_type: String::new(),
                             },

@@ -57,6 +57,7 @@ pub async fn run(
         .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
 
     let poll = Duration::from_secs(config.poll_interval_secs.max(1));
+    let limit = config.max_message_size_bytes;
     info!(endpoint = %config.endpoint, interval = ?poll, "polling");
     engine.force_full_all();
 
@@ -66,7 +67,7 @@ pub async fn run(
         let mut reports = engine.poll_reports();
         loop {
             for report in reports {
-                match exchange(&client, &config.endpoint, report).await {
+                match exchange(&client, &config.endpoint, report, limit).await {
                     Ok(reply) => {
                         let handled = engine.handle(&reply);
                         if let Some(delay) = handled.retry_after {
@@ -124,25 +125,37 @@ pub async fn run(
         }
     }
 
-    // Managed Processes stop first; then the Baseline's final messages, one per Agent.
+    // Managed Processes stop first; then the Baseline's final messages, one per Agent — which
+    // v0.19.0 asks the plain-HTTP transport for too, so the Server marks the Agent disconnected
+    // now instead of after a missed poll.
     engine.shutdown_processes().await;
     for goodbye in engine.disconnect_messages() {
-        let _ = exchange(&client, &config.endpoint, goodbye).await;
+        let _ = exchange(&client, &config.endpoint, goodbye, limit).await;
     }
     info!("disconnected");
     Ok(RunOutcome::Shutdown)
 }
 
-/// One exchange: `AgentToServer` out, `ServerToAgent` back.
+/// One exchange: `AgentToServer` out, `ServerToAgent` back — both under `limit`, the size limit
+/// the Baseline requires on this transport in either direction.
 async fn exchange(
     client: &reqwest::Client,
     endpoint: &str,
     report: AgentToServer,
+    limit: usize,
 ) -> Result<ServerToAgent, String> {
+    // The send side: a request past the limit is not made at all.
+    let body = report.encode_to_vec();
+    if body.len() > limit {
+        return Err(format!(
+            "discarding a report of {} bytes: it exceeds the {limit}-byte message size limit",
+            body.len()
+        ));
+    }
     let response = client
         .post(endpoint)
         .header(reqwest::header::CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)
-        .body(report.encode_to_vec())
+        .body(body)
         .send()
         .await
         .map_err(|e| format!("cannot reach {endpoint}: {e}"))?;
@@ -153,9 +166,98 @@ async fn exchange(
     if !status.is_success() {
         return Err(format!("the server answered {status}"));
     }
-    let body = response
-        .bytes()
+    let body = read_within(response, limit).await?;
+    ServerToAgent::decode(body.as_slice()).map_err(|e| format!("undecodable response: {e}"))
+}
+
+/// Reads a response body, refusing one that grows past `limit`.
+///
+/// The Baseline requires the Client to enforce the limit on what it *receives*, after any
+/// decompression — so the body is taken chunk by chunk (reqwest has already inflated gzip by
+/// then) and abandoned the moment it grows too big, rather than buffered whole and measured
+/// afterwards, which is the allocation the limit exists to prevent.
+async fn read_within(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("cannot read the response: {e}"))?;
-    ServerToAgent::decode(body.as_ref()).map_err(|e| format!("undecodable response: {e}"))
+        .map_err(|e| format!("cannot read the response: {e}"))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(format!(
+                "discarding the response: it exceeds the {limit}-byte message size limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The Baseline: the Client MUST NOT make a request whose body exceeds the size limit — it
+    /// never reaches the network, so no server has to refuse it.
+    #[tokio::test]
+    async fn an_oversized_report_is_never_sent() {
+        let report = AgentToServer {
+            instance_uid: vec![9; 512],
+            ..Default::default()
+        };
+        // Port 1 is unreachable: if the check did not fire first, this would fail as a connection
+        // error instead — which is exactly what the assertion tells apart.
+        let err = exchange(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1/v1/opamp",
+            report,
+            64,
+        )
+        .await
+        .expect_err("the report exceeds the limit");
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    /// And the receive side: a response body past the limit is discarded rather than decoded,
+    /// with the limit applied as the body arrives instead of after it is buffered whole.
+    #[tokio::test]
+    async fn an_oversized_response_is_discarded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // A minimal HTTP server: one response, 4 KiB of body, no protobuf in sight — the limit
+        // decides before anything is decoded.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut scratch = [0u8; 1024];
+                let _ = stream.read(&mut scratch).await;
+                let body = vec![0u8; 4096];
+                // `connection: close` keeps each exchange on a fresh connection: this stub serves
+                // one request per connection, so a pooled keep-alive would fail the next one.
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        let url = format!("http://{addr}/v1/opamp");
+        let client = reqwest::Client::new();
+        let err = exchange(&client, &url, AgentToServer::default(), 1024)
+            .await
+            .expect_err("the response exceeds the limit");
+        assert!(err.contains("exceeds"), "{err}");
+
+        // The same exchange with room for the body gets past the limit check and fails only on
+        // the payload not being a message — proof the limit, not the transport, refused it above.
+        let err = exchange(&client, &url, AgentToServer::default(), 8192)
+            .await
+            .expect_err("the body is not a valid message");
+        assert!(err.contains("undecodable"), "{err}");
+    }
 }
