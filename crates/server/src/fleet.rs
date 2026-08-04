@@ -27,6 +27,10 @@ use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 use crate::packages::PackageStore;
 
+/// The package upload limit in force when nothing configures one — roomy, because a real agent
+/// binary is (see `server.toml`, `max_package_size_bytes`).
+pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
@@ -164,6 +168,9 @@ pub struct AppState {
     packages: Option<PackageOffering>,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
+    /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
+    /// message, so it is bounded separately and far more generously.
+    max_package_size: usize,
 }
 
 impl AppState {
@@ -186,6 +193,7 @@ impl AppState {
             connection_offer: None,
             packages: None,
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
         })
     }
 
@@ -200,6 +208,18 @@ impl AppState {
     /// The message size limit in force, for the transports to enforce in both directions.
     pub fn max_message_size(&self) -> usize {
         self.max_message_size
+    }
+
+    /// Sets the largest package artifact the REST API accepts on upload (ADR-0015).
+    #[must_use]
+    pub fn with_max_package_size(mut self, limit: usize) -> Self {
+        self.max_package_size = limit;
+        self
+    }
+
+    /// The package upload limit in force, for the REST API's package route.
+    pub fn max_package_size(&self) -> usize {
+        self.max_package_size
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -588,25 +608,34 @@ impl AppState {
         })
     }
 
-    /// Creates or replaces a package (ADR-0015), persists it, and wakes every WebSocket loop so a
-    /// matching connected Agent is offered it now.
+    /// Creates or replaces a package (ADR-0015) from a streamed upload, persists it, and wakes
+    /// every WebSocket loop so a matching connected Agent is offered it now.
     pub fn put_package(
         &self,
         name: String,
         version: String,
         addon: bool,
         signature: Option<Vec<u8>>,
-        artifact: Vec<u8>,
+        staged: &std::path::Path,
     ) -> Result<(), String> {
         let store = self
             .packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.put(name.clone(), version, addon, signature, artifact)?;
+        store.put_staged(name.clone(), version, addon, signature, staged)?;
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package stored and offered");
         Ok(())
+    }
+
+    /// Where an upload for `name` is streamed before it becomes a package.
+    pub fn package_staging_path(&self, name: &str) -> Result<std::path::PathBuf, String> {
+        self.packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store()
+            .staging_path(name)
     }
 
     /// Deletes a package; `Ok(false)` when none of that name exists.

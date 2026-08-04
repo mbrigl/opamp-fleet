@@ -175,55 +175,72 @@ impl Runner {
         stop(&mut child, self.stop_timeout, &self.name).await;
     }
 
-    /// Swaps the staged bytes over the binary, respawns, and health-gates on the apply grace,
+    /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
     /// rolling the binary back on failure (ADR-0015). The process is already stopped. On success
     /// `child` holds the running process; on failure the previous binary is restored (and the
     /// caller respawns it).
+    ///
+    /// Everything here moves *files*: the old binary is renamed aside rather than read into
+    /// memory, and the artifact is copied in a stream. A program can weigh hundreds of megabytes,
+    /// and holding two copies of one in RAM to update it is not a trade this makes.
     async fn swap_and_gate(
         &self,
-        staged: Vec<u8>,
+        staged: PathBuf,
         version: &str,
         child: &mut Option<Child>,
         shutdown: &mut Shutdown,
     ) -> GraceOutcome {
         let Some(binary) = self.binary.clone() else {
+            let _ = std::fs::remove_file(&staged);
             return GraceOutcome::Failed(
                 "this supervisor manages no single binary to replace".to_string(),
             );
         };
-        // Keep the bytes we are replacing, so a binary that will not run can be rolled back.
-        let backup = match std::fs::read(&binary) {
-            Ok(bytes) => Some(bytes),
+        // Move the binary we are replacing aside — same directory, so the rename is atomic and
+        // costs nothing — and it is what a failed package is rolled back from.
+        let backup = binary.with_extension("rollback");
+        let has_backup = match std::fs::rename(&binary, &backup) {
+            Ok(()) => true,
             // No existing binary (first install) — nothing to roll back to.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => {
+                let _ = std::fs::remove_file(&staged);
                 return GraceOutcome::Failed(format!(
-                    "cannot read the current binary {}: {e}",
+                    "cannot set the current binary {} aside: {e}",
                     binary.display()
-                ))
+                ));
             }
         };
-        if let Err(e) = write_executable(&binary, &staged) {
+        if let Err(e) = install_executable(&staged, &binary) {
+            // Put the old binary back before reporting: the process must not be left with none.
+            if has_backup {
+                let _ = std::fs::rename(&backup, &binary);
+            }
+            let _ = std::fs::remove_file(&staged);
             return GraceOutcome::Failed(e);
         }
+        let _ = std::fs::remove_file(&staged);
         info!(supervisor = %self.name, version = %version, binary = %binary.display(), "package binary staged; restarting");
 
         let started = self.spawn_if_due().await;
         let outcome = self.gate(started, child, shutdown).await;
-        if let GraceOutcome::Failed(_) = &outcome {
+        match (&outcome, has_backup) {
             // Roll the binary back to what ran before, so the next respawn is the old, known one.
-            match &backup {
-                Some(bytes) => {
-                    if let Err(e) = write_executable(&binary, bytes) {
-                        warn!(supervisor = %self.name, error = %e, "cannot roll the binary back");
-                    } else {
-                        warn!(supervisor = %self.name, "rolled the binary back after a failed package");
-                    }
-                }
-                None => {
-                    let _ = std::fs::remove_file(&binary);
+            (GraceOutcome::Failed(_), true) => {
+                if let Err(e) = std::fs::rename(&backup, &binary) {
+                    warn!(supervisor = %self.name, error = %e, "cannot roll the binary back");
+                } else {
+                    warn!(supervisor = %self.name, "rolled the binary back after a failed package");
                 }
             }
+            (GraceOutcome::Failed(_), false) => {
+                let _ = std::fs::remove_file(&binary);
+            }
+            // Applied: the previous binary is no longer needed.
+            (_, true) => {
+                let _ = std::fs::remove_file(&backup);
+            }
+            (_, false) => {}
         }
         outcome
     }
@@ -449,9 +466,18 @@ enum GraceOutcome {
 /// Writes `bytes` to `path` atomically (temp + rename) and marks it executable on Unix — the
 /// binary swap a package apply performs (ADR-0015). A rename is atomic within a directory, so a
 /// crash mid-write never leaves a half-written binary in place.
-fn write_executable(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+/// Installs a downloaded artifact as `path`: copied in a stream (the download lives in the state
+/// directory, which may be on another filesystem, so this cannot be a rename), made executable,
+/// then renamed into place — the rename being what makes the swap atomic.
+fn install_executable(artifact: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
     let temp = path.with_extension("staged");
-    std::fs::write(&temp, bytes).map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    let mut source = std::fs::File::open(artifact)
+        .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
+    let mut target = std::fs::File::create(&temp)
+        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    std::io::copy(&mut source, &mut target)
+        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    drop(target);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -810,12 +836,15 @@ mod tests {
         };
         let _ = next_health(&mut harness.events).await; // initial spawn
 
-        // A new binary that also stays up — it must survive the grace and be acknowledged.
+        // A new binary that also stays up — it must survive the grace and be acknowledged. It
+        // arrives as a downloaded *file*, the way the transport stages one.
         let new_bytes = b"#!/bin/sh\nexec sleep 600\n".to_vec();
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, &new_bytes).expect("stage");
         harness
             .commands
             .send(ProcessCommand::ApplyPackage {
-                staged: new_bytes.clone(),
+                staged: staged.clone(),
                 version: "2.0.0".to_string(),
                 hash: b"pkg-hash".to_vec(),
             })
@@ -824,8 +853,13 @@ mod tests {
         let (hash, result) = next_package_ack(&mut harness.events).await;
         assert_eq!(hash, b"pkg-hash".to_vec());
         assert_eq!(result, Ok("2.0.0".to_string()));
-        // The binary on disk is the swapped one.
+        // The binary on disk is the swapped one, and the staged download is cleaned up.
         assert_eq!(std::fs::read(&binary).expect("read"), new_bytes);
+        assert!(!staged.exists(), "the staged artifact is not left behind");
+        assert!(
+            !binary.with_extension("rollback").exists(),
+            "a succeeded install keeps no backup"
+        );
 
         harness.shutdown_tx.send(true).expect("shutdown");
         let _ = harness.task.await;
@@ -869,11 +903,12 @@ mod tests {
         let _ = next_health(&mut harness.events).await;
 
         // A binary that exits at once: it fails the grace and must be rolled back.
-        let bad = b"#!/bin/sh\nexit 1\n".to_vec();
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, b"#!/bin/sh\nexit 1\n").expect("stage");
         harness
             .commands
             .send(ProcessCommand::ApplyPackage {
-                staged: bad,
+                staged,
                 version: "9.9.9".to_string(),
                 hash: b"bad-hash".to_vec(),
             })

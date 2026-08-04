@@ -7,16 +7,16 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use utoipa::{IntoParams, OpenApi, ToSchema};
-use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec};
@@ -48,7 +48,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             delete_configuration
         ))
         .routes(routes!(list_packages))
-        .routes(routes!(put_package, delete_package))
+        // The one route that legitimately carries a program: the framework's 2 MiB default would
+        // refuse every real agent binary, so the upload streams past it and the handler bounds it
+        // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
+        .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
         .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
@@ -328,7 +331,7 @@ async fn put_package(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Query(upload): Query<PackageUpload>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     if let Err(e) = configs::validate_name(&name) {
         return error(
@@ -348,15 +351,38 @@ async fn put_package(
         },
         None => None,
     };
+    let staged = match state.package_staging_path(&name) {
+        Ok(path) => path,
+        Err(e) => return error(StatusCode::NOT_FOUND, e),
+    };
+    // The artifact is streamed to the store's own directory and bounded as it arrives: taking it
+    // as `Bytes` would mean holding a whole program in memory — twice — before writing it out.
+    let written = match stream_to_file(body, &staged, state.max_package_size()).await {
+        Ok(written) => written,
+        Err(UploadError::TooLarge(limit)) => {
+            let _ = tokio::fs::remove_file(&staged).await;
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("the artifact exceeds the {limit}-byte package size limit"),
+            );
+        }
+        Err(UploadError::Io(e)) => {
+            let _ = tokio::fs::remove_file(&staged).await;
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the upload could not be stored: {e}"),
+            );
+        }
+    };
     match state.put_package(
         name.clone(),
         upload.version.clone(),
         upload.addon,
         signature,
-        body.to_vec(),
+        &staged,
     ) {
         Ok(()) => {
-            info!(package = %name, bytes = body.len(), "package stored from the API");
+            info!(package = %name, bytes = written, "package stored from the API");
             Json(PackageView {
                 name,
                 version: upload.version,
@@ -410,10 +436,87 @@ async fn download_package(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Response {
-    match state.packages().and_then(|store| store.artifact(&name)) {
-        Some(bytes) => {
-            ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
+    let Some(path) = state
+        .packages()
+        .and_then(|store| store.artifact_path(&name))
+    else {
+        return error(StatusCode::NOT_FOUND, format!("no package {name:?}"));
+    };
+    // Streamed from disk, never buffered: a fleet updating at once means many concurrent
+    // downloads of the same artifact, and each one holding a copy of a program in memory is how a
+    // rollout takes the Server down with it.
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(e) => {
+            warn!(package = %name, error = %e, "cannot open the stored artifact");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the artifact of {name:?} cannot be read"),
+            );
         }
-        None => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
+    };
+    let mut response = Response::builder().header(header::CONTENT_TYPE, "application/octet-stream");
+    if let Ok(metadata) = file.metadata().await {
+        // So the Agent can size the download, and a truncated transfer is detectable as one.
+        response = response.header(header::CONTENT_LENGTH, metadata.len());
     }
+    response
+        .body(Body::from_stream(read_chunks(file)))
+        .unwrap_or_else(|e| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot serve the artifact of {name:?}: {e}"),
+            )
+        })
+}
+
+/// Why a streamed upload did not become a file.
+enum UploadError {
+    /// The body grew past the configured package limit; the number is that limit.
+    TooLarge(usize),
+    Io(std::io::Error),
+}
+
+/// Streams a request body into `path`, refusing it the moment it grows past `limit`. Returns how
+/// many bytes were written.
+async fn stream_to_file(
+    body: Body,
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<u64, UploadError> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(UploadError::Io)?;
+    let mut stream = body.into_data_stream();
+    let mut written = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| UploadError::Io(std::io::Error::other(e)))?;
+        written += chunk.len() as u64;
+        if written > limit as u64 {
+            return Err(UploadError::TooLarge(limit));
+        }
+        file.write_all(&chunk).await.map_err(UploadError::Io)?;
+    }
+    file.flush().await.map_err(UploadError::Io)?;
+    Ok(written)
+}
+
+/// A stream of the file's chunks, so a response body never materialises whole.
+fn read_chunks(
+    file: tokio::fs::File,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
+    futures_util::stream::unfold(file, |mut file| async move {
+        let mut buffer = vec![0u8; 64 * 1024];
+        match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
+            Ok(0) => None,
+            Ok(read) => {
+                buffer.truncate(read);
+                Some((Ok(buffer), file))
+            }
+            Err(e) => Some((Err(e), file)),
+        }
+    })
 }

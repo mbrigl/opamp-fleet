@@ -3,6 +3,8 @@
 //! operator configured a verification key. What protects an installed binary is verification, not
 //! transport secrecy, so this is where the security of the feature lives.
 
+use std::path::{Path, PathBuf};
+
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -48,16 +50,24 @@ pub fn resolve_url(download_url: &str, endpoint: &str) -> Result<String, String>
     Ok(format!("{http_scheme}://{host_port}{path}"))
 }
 
-/// Downloads the artifact and verifies it (ADR-0015). Returns the verified bytes, ready to swap
-/// over the Managed Process's binary.
+/// Downloads the artifact to a file and verifies it (ADR-0015). Returns the path of the verified
+/// artifact, ready for the Supervisor to swap over the Managed Process's binary.
+///
+/// The artifact is a program — tens or hundreds of megabytes — so it is streamed to
+/// `<state_dir>/packages/` and hashed as it arrives, never assembled in memory. Only a signature
+/// check reads it back, because Ed25519 verifies over the whole message.
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<PathBuf, String> {
     let url = resolve_url(&package.download_url, &config.endpoint)?;
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
-        .timeout(std::time::Duration::from_secs(120));
+        // Per-operation timeouts, not one for the whole transfer: a large artifact over a modest
+        // link legitimately takes minutes, and a total timeout would abort it forever while a
+        // stalled connection is what actually needs cutting.
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60));
     if let Some(tls) = &config.tls {
         let pem = std::fs::read(&tls.ca_file)
             .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
@@ -71,7 +81,7 @@ pub async fn download_and_verify(
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;
     info!(package = %package.name, url = %url, "downloading package");
-    let response = client
+    let mut response = client
         .get(&url)
         .send()
         .await
@@ -79,51 +89,108 @@ pub async fn download_and_verify(
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("cannot read the download: {e}"))?
-        .to_vec();
 
-    verify(
-        &bytes,
-        &package.content_hash,
-        &package.signature,
-        config.package_key(),
-    )?;
-    info!(package = %package.name, version = %package.version, "package verified");
-    Ok(bytes)
+    let dir = config.state_dir.join("packages");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{}.staged", package.name));
+
+    // Stream to disk, hashing on the way past: peak memory is one chunk, whatever the artifact
+    // weighs. A failure anywhere leaves no half-written file behind for the next attempt to trip
+    // over.
+    let staged = match write_stream(&path, &mut response).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    if let Err(e) = verify_staged(&path, &staged, package, config.package_key()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    info!(package = %package.name, version = %package.version, bytes = staged.len, "package verified");
+    Ok(path)
 }
 
-/// Verifies an artifact against its content hash and, per the configured key, its signature.
-///
-/// Policy (ADR-0015): the content hash must always match. If a verification key is configured,
-/// the artifact MUST carry a valid signature — an unsigned or badly signed artifact is refused. If
-/// no key is configured, a signature that was nonetheless offered is refused (it cannot be
-/// checked); an unsigned artifact is accepted on its content hash alone.
-pub fn verify(
-    bytes: &[u8],
-    content_hash: &[u8],
-    signature: &[u8],
+/// What streaming the download to disk produced: its size and its content hash.
+struct Staged {
+    len: u64,
+    content_hash: Vec<u8>,
+}
+
+async fn write_stream(path: &Path, response: &mut reqwest::Response) -> Result<Staged, String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut len = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("cannot read the download: {e}"))?
+    {
+        hasher.update(&chunk);
+        len += chunk.len() as u64;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(Staged {
+        len,
+        content_hash: hasher.finalize().to_vec(),
+    })
+}
+
+/// Verifies the streamed artifact: the content hash from the stream, and — only when the policy
+/// demands a signature check — the file read back, since Ed25519 verifies over the whole message.
+fn verify_staged(
+    path: &Path,
+    staged: &Staged,
+    package: &PackageDownload,
     key: Option<&[u8]>,
 ) -> Result<(), String> {
-    if Sha256::digest(bytes).as_slice() != content_hash {
+    if staged.content_hash != package.content_hash {
         return Err("the downloaded artifact does not match its content hash".to_string());
     }
+    if !signature_required(&package.signature, key)? {
+        return Ok(());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    check_signature(&bytes, &package.signature, key.unwrap_or_default())
+}
+
+/// The signature half of the verification policy (ADR-0015): the content hash must always match.
+/// If a verification key is configured, the artifact MUST carry a valid signature — an unsigned or
+/// badly signed artifact is refused. If no key is configured, a signature that was nonetheless
+/// offered is refused (it cannot be checked); an unsigned artifact is accepted on its content hash
+/// alone.
+///
+/// Decided without touching the artifact, so the file is only read back when it must be: `Ok(true)`
+/// means a
+/// signature must now be checked, `Ok(false)` that the content hash was the whole of it, `Err`
+/// that the pairing of key and signature is refused outright.
+fn signature_required(signature: &[u8], key: Option<&[u8]>) -> Result<bool, String> {
     match (key, signature.is_empty()) {
-        (Some(key), false) => {
-            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-                .verify(bytes, signature)
-                .map_err(|_| "the artifact's signature is invalid".to_string())
-        }
+        (Some(_), false) => Ok(true),
         (Some(_), true) => {
             Err("a verification key is configured but the artifact is unsigned".to_string())
         }
         (None, false) => {
             Err("the artifact is signed but no verification key is configured".to_string())
         }
-        (None, true) => Ok(()),
+        (None, true) => Ok(false),
     }
+}
+
+fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), String> {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(bytes, signature)
+        .map_err(|_| "the artifact's signature is invalid".to_string())
 }
 
 #[cfg(test)]
@@ -148,13 +215,40 @@ mod tests {
         );
     }
 
+    /// A staged artifact, written where a real download would leave it.
+    fn stage(dir: &tempfile::TempDir, bytes: &[u8]) -> (PathBuf, Staged) {
+        let path = dir.path().join("otelcol.staged");
+        std::fs::write(&path, bytes).expect("write");
+        (
+            path,
+            Staged {
+                len: bytes.len() as u64,
+                content_hash: Sha256::digest(bytes).to_vec(),
+            },
+        )
+    }
+
+    fn offer(content_hash: Vec<u8>, signature: Vec<u8>) -> PackageDownload {
+        PackageDownload {
+            name: "otelcol".to_string(),
+            version: "1.0.0".to_string(),
+            hash: b"pkg".to_vec(),
+            download_url: "/x".to_string(),
+            content_hash,
+            signature,
+        }
+    }
+
     #[test]
     fn content_hash_mismatch_is_refused() {
-        let bytes = b"artifact";
-        let wrong = Sha256::digest(b"other").to_vec();
-        assert!(verify(bytes, &wrong, &[], None).is_err());
-        let right = Sha256::digest(bytes).to_vec();
-        assert!(verify(bytes, &right, &[], None).is_ok());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, staged) = stage(&dir, b"artifact");
+
+        let wrong = offer(Sha256::digest(b"other").to_vec(), Vec::new());
+        assert!(verify_staged(&path, &staged, &wrong, None).is_err());
+
+        let right = offer(staged.content_hash.clone(), Vec::new());
+        assert!(verify_staged(&path, &staged, &right, None).is_ok());
     }
 
     #[test]
@@ -164,21 +258,26 @@ mod tests {
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
         let public = keypair.public_key().as_ref().to_vec();
 
+        let dir = tempfile::tempdir().expect("tempdir");
         let bytes = b"the-binary";
-        let hash = Sha256::digest(bytes).to_vec();
+        let (path, staged) = stage(&dir, bytes);
+        let hash = staged.content_hash.clone();
         let signature = keypair.sign(bytes).as_ref().to_vec();
 
+        let check = |signature: Vec<u8>, key: Option<&[u8]>| {
+            verify_staged(&path, &staged, &offer(hash.clone(), signature), key)
+        };
         // Valid signature against the configured key: accepted.
-        assert!(verify(bytes, &hash, &signature, Some(&public)).is_ok());
+        assert!(check(signature.clone(), Some(&public)).is_ok());
         // Tampered signature: refused.
         let mut bad = signature.clone();
         bad[0] ^= 0xff;
-        assert!(verify(bytes, &hash, &bad, Some(&public)).is_err());
+        assert!(check(bad, Some(&public)).is_err());
         // Key configured but artifact unsigned: refused.
-        assert!(verify(bytes, &hash, &[], Some(&public)).is_err());
+        assert!(check(Vec::new(), Some(&public)).is_err());
         // Signed but no key to check it: refused.
-        assert!(verify(bytes, &hash, &signature, None).is_err());
+        assert!(check(signature, None).is_err());
         // Unsigned and no key: accepted on the content hash alone.
-        assert!(verify(bytes, &hash, &[], None).is_ok());
+        assert!(check(Vec::new(), None).is_ok());
     }
 }

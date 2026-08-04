@@ -43,6 +43,11 @@ pub struct ServerConfig {
     /// configurable — a fleet of small status reports can be served with far less.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
+    /// The largest package artifact the REST API accepts on upload (ADR-0015). Nothing to do with
+    /// the OpAMP message limit above: a package is a *program*, routinely hundreds of megabytes,
+    /// and it travels over the REST plane, never in an OpAMP message.
+    #[serde(default = "default_max_package_size")]
+    pub max_package_size_bytes: usize,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -192,6 +197,11 @@ fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
 }
 
+/// Roomy enough for the real thing: an `otelcol-contrib` binary is a few hundred megabytes.
+fn default_max_package_size() -> usize {
+    crate::fleet::DEFAULT_MAX_PACKAGE_SIZE
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -203,6 +213,7 @@ impl Default for ServerConfig {
             packages_dir: default_packages_dir(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
+            max_package_size_bytes: default_max_package_size(),
         }
     }
 }
@@ -232,6 +243,12 @@ impl ServerConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        if config.max_package_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_package_size_bytes must be greater than zero",
                 path.display()
             ));
         }

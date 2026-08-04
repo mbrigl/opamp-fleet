@@ -91,7 +91,8 @@ async fn main() {
             state
                 .with_connection_offer(connection_offer)
                 .with_packages(packages)
-                .with_max_message_size(config.max_message_size_bytes),
+                .with_max_message_size(config.max_message_size_bytes)
+                .with_max_package_size(config.max_package_size_bytes),
         ),
         Err(e) => {
             eprintln!("{e}");

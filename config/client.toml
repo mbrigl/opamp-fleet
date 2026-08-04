@@ -24,6 +24,8 @@ max_message_size_bytes = 67108864
 # Where the Client persists its instance_uid, the received remote configuration, and any
 # Server-offered connection settings (ADR-0014). Persisted connection settings override
 # endpoint, [auth], and the intervals above; delete <state_dir>/connection-settings.pb to revert.
+# A package being installed (ADR-0015) is streamed to <state_dir>/packages/ first, so this
+# directory needs room for one agent binary.
 state_dir = "client-state"
 
 # Operator-defined attributes (ADR-0012), reported by every Agent this Client presents so the

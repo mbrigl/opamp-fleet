@@ -9,6 +9,9 @@
 # Local runtime state (default paths of server.toml / client.toml)
 /fleet-configs/
 /client-state/
+# Package artifacts are programs — hundreds of megabytes each; they belong in a store, never in
+# the repository (ADR-0015).
+/fleet-packages/
 
 # Environment files
 /.env

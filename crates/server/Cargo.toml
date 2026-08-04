@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 opamp.workspace = true
+# Streaming a stored package artifact into the response body (ADR-0015) — the same workspace
+# dependency the Client already builds on, promoted from dev-only.
+futures-util.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-server.workspace = true
@@ -28,7 +31,6 @@ utoipa.workspace = true
 utoipa-axum.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
 tokio-tungstenite.workspace = true
 reqwest.workspace = true
 tempfile = "3"

@@ -101,7 +101,13 @@ impl Engine {
     /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0015).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
-    pub fn apply_package(&mut self, index: usize, staged: Vec<u8>, version: String, hash: Vec<u8>) {
+    pub fn apply_package(
+        &mut self,
+        index: usize,
+        staged: std::path::PathBuf,
+        version: String,
+        hash: Vec<u8>,
+    ) {
         let Some(agent) = self.agents.get_mut(index) else {
             return;
         };

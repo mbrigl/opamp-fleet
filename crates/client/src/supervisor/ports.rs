@@ -28,10 +28,11 @@ pub enum ProcessCommand {
     /// A package was downloaded and verified (content hash and signature; ADR-0015): swap its
     /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
-    /// [`ProcessEvent::PackageApplied`]. `staged` holds the verified artifact bytes; `hash` is the
-    /// package hash the status refers to; `version` is what the Agent then reports it has.
+    /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
+    /// not its bytes, since a program is too big to carry through the core; `hash` is the package
+    /// hash the status refers to; `version` is what the Agent then reports it has.
     ApplyPackage {
-        staged: Vec<u8>,
+        staged: PathBuf,
         version: String,
         hash: Vec<u8>,
     },

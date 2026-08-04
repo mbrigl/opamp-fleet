@@ -47,6 +47,11 @@ max_message_size_bytes = 67108864
 # what protect an installed binary, so sign packages and configure the key on the Client.
 packages_dir = "fleet-packages"
 
+# The largest package artifact the REST API accepts on upload. A package is a program, not a
+# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
+# max_message_size_bytes above and applies to the package upload route alone.
+max_package_size_bytes = 1073741824
+
 # The absolute base URL advertised for downloads. Leave unset for the common single-listener
 # case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when
 # downloads must go through a different host.
