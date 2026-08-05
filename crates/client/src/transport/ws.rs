@@ -234,7 +234,8 @@ async fn serve(
                         // A package offer (ADR-0015): download and verify; the Installed/Failed
                         // status flows back through the process events, but a synchronous
                         // download failure is reported now.
-                        if crate::transport::process_package_downloads(engine, config).await
+                        let mut sink = FrameSink { socket: &mut socket, limit };
+                        if crate::transport::process_package_downloads(engine, config, &mut sink).await
                             && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
                         {
                             return Served::ConnectionLost;
@@ -293,6 +294,19 @@ async fn send_all(
             })?;
     }
     Ok(())
+}
+
+/// This transport's way of putting reports on the wire, for jobs that report while they run —
+/// a package download reporting its progress (ADR-0015).
+struct FrameSink<'a> {
+    socket: &'a mut Socket,
+    limit: usize,
+}
+
+impl crate::transport::ReportSink for FrameSink<'_> {
+    async fn send(&mut self, reports: Vec<AgentToServer>) -> Result<(), ()> {
+        send_all(self.socket, reports, self.limit).await
+    }
 }
 
 /// The close the Baseline names for a message past the size limit: 1009, Message Too Big.

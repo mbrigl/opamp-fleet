@@ -111,7 +111,12 @@ pub async fn run(
                 }
             }
             // A package offer (ADR-0015): download and verify; the outcome rides the owed reports.
-            crate::transport::process_package_downloads(engine, config).await;
+            let mut sink = PollSink {
+                client: &client,
+                endpoint: &config.endpoint,
+                limit,
+            };
+            crate::transport::process_package_downloads(engine, config, &mut sink).await;
             reports = engine.owed_reports();
             if reports.is_empty() {
                 break;
@@ -134,6 +139,27 @@ pub async fn run(
     }
     info!("disconnected");
     Ok(RunOutcome::Shutdown)
+}
+
+/// This transport's way of putting reports on the wire — one exchange each — for jobs that report
+/// while they run: a package download reporting its progress (ADR-0015). The Server's replies are
+/// discarded: an interim progress report asks nothing, and anything the Server wants to say is
+/// picked up by the polling loop that resumes right after.
+struct PollSink<'a> {
+    client: &'a reqwest::Client,
+    endpoint: &'a str,
+    limit: usize,
+}
+
+impl crate::transport::ReportSink for PollSink<'_> {
+    async fn send(&mut self, reports: Vec<AgentToServer>) -> Result<(), ()> {
+        for report in reports {
+            exchange(self.client, self.endpoint, report, self.limit)
+                .await
+                .map_err(|_| ())?;
+        }
+        Ok(())
+    }
 }
 
 /// One exchange: `AgentToServer` out, `ServerToAgent` back — both under `limit`, the size limit

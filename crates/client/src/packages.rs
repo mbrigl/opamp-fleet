@@ -4,7 +4,9 @@
 //! transport secrecy, so this is where the security of the feature lives.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use opamp::proto::PackageDownloadDetails;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -59,6 +61,7 @@ pub fn resolve_url(download_url: &str, endpoint: &str) -> Result<String, String>
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
+    progress: &Progress,
 ) -> Result<PathBuf, String> {
     let url = resolve_url(&package.download_url, &config.endpoint)?;
     let mut builder = reqwest::Client::builder()
@@ -97,7 +100,7 @@ pub async fn download_and_verify(
     // Stream to disk, hashing on the way past: peak memory is one chunk, whatever the artifact
     // weighs. A failure anywhere leaves no half-written file behind for the next attempt to trip
     // over.
-    let staged = match write_stream(&path, &mut response).await {
+    let staged = match write_stream(&path, &mut response, progress).await {
         Ok(hash) => hash,
         Err(e) => {
             let _ = std::fs::remove_file(&path);
@@ -118,9 +121,53 @@ struct Staged {
     content_hash: Vec<u8>,
 }
 
-async fn write_stream(path: &Path, response: &mut reqwest::Response) -> Result<Staged, String> {
+/// How far an artifact download has got, shared with whoever reports it.
+///
+/// The download is a plain `await` inside the transport loop; this is how that loop learns the
+/// progress of the future it is polling without the download having to know anything about
+/// reporting. Cheap enough to update per chunk.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// Bytes written so far.
+    downloaded: AtomicU64,
+    /// The artifact's total size, from `Content-Length`; `0` when the Server did not say.
+    total: AtomicU64,
+}
+
+impl Progress {
+    /// The Baseline's `PackageDownloadDetails` as of now: how far along, and how fast since
+    /// `started`. Percent stays `0` while the total is unknown — a made-up percentage would be
+    /// worse than none.
+    pub fn details(&self, started: std::time::Instant) -> PackageDownloadDetails {
+        let downloaded = self.downloaded.load(Ordering::Relaxed);
+        let total = self.total.load(Ordering::Relaxed);
+        let seconds = started.elapsed().as_secs_f64();
+        PackageDownloadDetails {
+            download_percent: if total > 0 {
+                (downloaded as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            },
+            download_bytes_per_second: if seconds > 0.0 {
+                downloaded as f64 / seconds
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+async fn write_stream(
+    path: &Path,
+    response: &mut reqwest::Response,
+    progress: &Progress,
+) -> Result<Staged, String> {
     use tokio::io::AsyncWriteExt;
 
+    // What the Server advertises, so a percentage is possible at all.
+    progress
+        .total
+        .store(response.content_length().unwrap_or(0), Ordering::Relaxed);
     let mut file = tokio::fs::File::create(path)
         .await
         .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
@@ -133,6 +180,7 @@ async fn write_stream(path: &Path, response: &mut reqwest::Response) -> Result<S
     {
         hasher.update(&chunk);
         len += chunk.len() as u64;
+        progress.downloaded.store(len, Ordering::Relaxed);
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;

@@ -120,7 +120,7 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `AcceptsRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). |
 | `ReportsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `AcceptsPackages` | `0x0008` | Beta | optional | implemented | Software distribution for Managed Processes (goal 10, ADR-0015). Declared by a Supervisor-backed Agent whose block names a `package`; the offered artifact is streamed to disk, verified (content hash always, Ed25519 signature when a key is configured), swapped over the Managed Process's binary by the Supervisor, health-gated on `apply_grace_secs`, and rolled back if it will not stay up. Only a `TopLevel` package is installed: an `Addon` is what a Supervisor has no way to apply, so it is refused with `InstallFailed` rather than written over the binary it was meant to extend. The Client's own self-update (goal 11) is future work. |
-| `ReportsPackageStatuses` | `0x0010` | Beta | optional | implemented | `Installing` on receipt, `Installed`/`InstallFailed` after the Supervisor applies (ADR-0015), the offered `all_packages_hash` echoed once terminal — which is what stops the Server re-offering. Survives restarts via the persisted installed-package record. |
+| `ReportsPackageStatuses` | `0x0010` | Beta | optional | implemented | `Downloading` while the artifact is on the wire, `Installing` once the Supervisor applies it, then `Installed`/`InstallFailed` (ADR-0015), with the offered `all_packages_hash` echoed once terminal — which is what stops the Server re-offering. The `Downloading` reports repeat every 5 s and carry `PackageDownloadDetails` (percent, bytes per second), so a transfer of hundreds of megabytes stays distinguishable from a stuck install; both that status and the details are `[Development]` upstream. Survives restarts via the persisted installed-package record. |
 | `ReportsOwnTraces` | `0x0020` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnMetrics` | `0x0040` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
@@ -174,6 +174,7 @@ separately because conformance depends on them just as much.
 | Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | implemented | `[Beta]`. The Server's optional `[auth]` section guards `/v1/opamp` (ADR-0013): Basic and Bearer accepted, checked on every plain-HTTP POST and before the WebSocket upgrade completes, `401` with a `WWW-Authenticate` challenge otherwise. The Client sends the header on both transports. Without `[auth]` the endpoint stays open. Underpins goal 17. |
 | Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | The Server offers configuration only to Agents declaring `AcceptsRemoteConfig`; the Client stops reporting effective config to a Server without `AcceptsEffectiveConfig`. |
 | Retrying, throttling, bad request | Defined error and backoff behaviour | implemented | The Server answers malformed input with `BAD_REQUEST` error responses; the Client honours `UNAVAILABLE` retry hints and reconnects with capped exponential backoff. The Server does not yet emit throttling itself. |
+| Interim status reporting | The Client MAY report progress while it downloads and installs | implemented | While an artifact downloads the Client reports `Downloading` with `PackageDownloadDetails` every 5 s, and reports the terminal status once done — the Baseline's "status reports allow the Server to stay informed" for processing that takes a long time. |
 | Custom messages | `CustomCapabilities` / `CustomMessage` exchange | planned | `[Development]`. Outside the capability bitmask: each side lists supported custom capabilities as reverse-FQDN strings; a `CustomMessage` for an unsupported capability can be ignored. |
 
 ### Message size limits
@@ -228,7 +229,8 @@ actually connecting, persists, and acknowledges (ADR-0014). Software distributio
 Processes is in place (ADR-0015): the Server stores and offers packages, and each Supervisor
 downloads the artifact, verifies it (content hash always, Ed25519 signature when a key is
 configured), swaps it over its Managed Process's binary, health-gates it on the apply grace, and
-rolls back a binary that will not stay up. With the move to Baseline `v0.19.0` both ends also
+rolls back a binary that will not stay up, reporting `Downloading` with its progress while the
+artifact is still on the wire. With the move to Baseline `v0.19.0` both ends also
 enforce the protocol's new message size limits in both directions, on both transports and at the
 Supervisor Endpoint. Every remaining *planned* row — other/telemetry connection settings, the
 certificate-request flow, own telemetry, custom messages, and the Client's own self-update

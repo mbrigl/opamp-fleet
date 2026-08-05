@@ -98,6 +98,19 @@ impl Engine {
         std::mem::take(&mut self.pending_package_downloads)
     }
 
+    /// Records download progress for the Agent whose package is being fetched (ADR-0015), so the
+    /// next report carries `Downloading` with its details instead of a silent `Installing`.
+    pub fn package_downloading(
+        &mut self,
+        index: usize,
+        details: opamp::proto::PackageDownloadDetails,
+    ) {
+        if let Some(agent) = self.agents.get_mut(index) {
+            agent.state.package_downloading(details);
+            agent.owes_report = true;
+        }
+    }
+
     /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0015).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
@@ -111,6 +124,8 @@ impl Engine {
         let Some(agent) = self.agents.get_mut(index) else {
             return;
         };
+        // The bytes are in: the status moves from Downloading to Installing.
+        agent.state.package_downloaded();
         match &agent.commands {
             Some(commands) => {
                 if let Err(e) = commands.try_send(ProcessCommand::ApplyPackage {

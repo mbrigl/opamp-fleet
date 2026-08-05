@@ -767,10 +767,17 @@ pub struct PackageStatusView {
     pub name: String,
     /// The version the Agent has installed; empty if it has none.
     pub version: String,
-    /// `Installed`, `Installing`, `InstallPending`, or `InstallFailed`.
+    /// `Downloading`, `Installing`, `Installed`, `InstallPending`, or `InstallFailed`.
     pub status: String,
     /// The failure reason when `status` is `InstallFailed`.
     pub error: String,
+    /// How far the artifact download has got, as a percentage. Present only while `Downloading`,
+    /// and only when the download source stated a size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_percent: Option<f64>,
+    /// The download's current rate in bytes per second. Present only while `Downloading`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_second: Option<f64>,
 }
 
 impl PackageStatusView {
@@ -781,13 +788,21 @@ impl PackageStatusView {
             s if s == S::Installing as i32 => "Installing",
             s if s == S::InstallPending as i32 => "InstallPending",
             s if s == S::InstallFailed as i32 => "InstallFailed",
+            s if s == S::Downloading as i32 => "Downloading",
             _ => "Unknown",
         };
+        // The Baseline carries these only with `Downloading`, and a percentage of zero means the
+        // source never said how big the artifact is — not that nothing has arrived.
+        let details = status.download_details.filter(|_| name == "Downloading");
         PackageStatusView {
             name: status.name.clone(),
             version: status.agent_has_version.clone(),
             status: name.to_string(),
             error: status.error_message.clone(),
+            download_percent: details
+                .map(|d| d.download_percent)
+                .filter(|percent| *percent > 0.0),
+            download_bytes_per_second: details.map(|d| d.download_bytes_per_second),
         }
     }
 }
@@ -1009,5 +1024,53 @@ mod tests {
             with_undefined,
             ["ReportsStatus", "unknown bits 0x1000000000000000"]
         );
+    }
+
+    /// What an operator sees while a package is on the wire. A status the view does not know
+    /// reads as "Unknown", which is worse than useless during a rollout — so `Downloading` and
+    /// its progress are part of the view, and the progress belongs to that status alone.
+    #[test]
+    fn the_package_view_shows_a_download_in_progress() {
+        use opamp::proto::{PackageDownloadDetails, PackageStatus, PackageStatusEnum};
+
+        let downloading = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 42.5,
+                download_bytes_per_second: 1_048_576.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(downloading.status, "Downloading");
+        assert_eq!(downloading.download_percent, Some(42.5));
+        assert_eq!(downloading.download_bytes_per_second, Some(1_048_576.0));
+
+        // A percentage is only meaningful when the source stated a size; zero means it did not.
+        let sizeless = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 0.0,
+                download_bytes_per_second: 2048.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sizeless.download_percent, None);
+        assert_eq!(sizeless.download_bytes_per_second, Some(2048.0));
+
+        // Every other status carries no progress, whatever the Agent sent.
+        let installing = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Installing as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 99.0,
+                download_bytes_per_second: 1.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(installing.status, "Installing");
+        assert_eq!(installing.download_percent, None);
+        assert_eq!(installing.download_bytes_per_second, None);
     }
 }
