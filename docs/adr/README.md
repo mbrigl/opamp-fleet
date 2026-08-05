@@ -46,4 +46,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |
 | [0016](0016-configuration-content-role.md) | Carry the Baseline's `AgentConfigFile.role` through the Configuration model | 🟡 proposed |
 | [0017](0017-selector-targeted-packages.md) | Selector-targeted packages, chosen by the Server rather than named on each host | 🟡 proposed |
+| [0018](0018-packages-imported-from-a-url.md) | A package is an uploaded archive or a URL the Agents fetch — unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟡 proposed |
 
