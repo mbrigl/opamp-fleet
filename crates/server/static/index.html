@@ -185,12 +185,15 @@
       </section>
 
       <section id="packages-card" class="card config">
-        <h2>Packages — a software artifact offered to every Agent whose Supervisor names it; verified (content hash, and signature when a key is configured), then swapped and health-gated. Packages are fleet-wide — no Selector.</h2>
+        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
           <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
@@ -200,6 +203,7 @@
         </div>
         <div class="config-actions">
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
+          <button id="package-target" class="btn btn-ghost">Set selector</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
           <span id="package-error" class="err"></span>
@@ -295,6 +299,9 @@
         }
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
+        }
+        if (a.package_conflict) {
+          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
         }
         for (const p of a.packages || []) {
           const cls = p.status === "Installed" ? "green"
@@ -509,7 +516,7 @@
 
       function renderPackageList() {
         $("package-list").innerHTML = packages.map((p) =>
-          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}</span>`
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectPackage(chip.dataset.name));
@@ -521,6 +528,8 @@
         selectedPackage = name;
         $("package-name").value = pkg.name;
         $("package-version").value = pkg.version || "";
+        $("package-selector").value = selectorText(pkg.selector);
+        $("package-addon").checked = !!pkg.addon;
         $("package-error").textContent = "";
         renderPackageList();
       }
@@ -550,6 +559,26 @@
         $("package-error").textContent = "";
         selectedPackage = name;
         $("package-file").value = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Aiming an existing package is a request of its own — re-uploading a few hundred megabytes
+      // just to change whom it targets would be absurd.
+      $("package-target").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
+        let selector;
+        try { selector = parseSelector($("package-selector").value); } catch (e) { $("package-error").textContent = e.message; return; }
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/selector`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ selector }),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
         await refreshPackages();
         refreshAgents();
       });

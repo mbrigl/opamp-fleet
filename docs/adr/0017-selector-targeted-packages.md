@@ -58,10 +58,23 @@ Four parts:
    Selector on that host's `host.name` (or an operator attribute) expresses it — and, unlike a line
    in a file on that machine, is visible in the fleet view.
 
-3. **At most one top-level package may match an Agent.** The Baseline states there is *"normally only
-   one top-level package, which implements the primary functionality of the Agent"*. Two matching
-   top-level packages are an operator error the Server refuses to resolve by guessing: it rejects the
-   Selector that would create the overlap, naming the other package.
+3. **One top-level package per Agent, resolved by specificity.** The Baseline states there is
+   *"normally only one top-level package, which implements the primary functionality of the
+   Agent"*, and a Supervisor has one binary to replace. Where several top-level packages match an
+   Agent, the **most specific Selector wins** — the one naming the most attributes. That is what
+   makes the shape an operator actually reaches for work: a fleet-wide package with an empty
+   Selector, plus a narrower one aimed at the hosts a rollout starts on, which overrides it for
+   exactly those and leaves everyone else alone.
+
+   Only a *tie* — two equally specific Selectors both matching one Agent — has no defensible
+   answer. That Agent is offered nothing, and the fleet view says why on the Agent itself
+   (`package_conflict`), because a rollout that silently never starts is worse than one that
+   explains itself. Matching addons are offered alongside the chosen top-level package.
+
+   Refusing the ambiguity at the API instead — rejecting a Selector that could overlap another —
+   was tried and abandoned: every package starts with an empty Selector, which overlaps everything,
+   so a store holding two packages could never have a Selector set on either. It also forbids the
+   fleet-wide-plus-canary shape outright, which is the whole point.
 
 4. **The Selector is set through its own sub-resource**, `PUT /api/v1/packages/{name}/selector`, with
    the same JSON shape a Configuration uses. The artifact upload keeps its current contract
@@ -93,6 +106,11 @@ Four parts:
   the Selector, `PUT /api/v1/packages/{name}/file` for the bytes). Rejected for now: it is the
   tidier REST shape and mirrors Configurations better, but it breaks the published v1 contract for a
   gain that a sub-resource delivers additively. Worth revisiting if the package model grows further.
+- **Refuse an overlapping Selector at the API.** Rejected on contact with the code, which is the
+  honest reason: with every existing package carrying an empty Selector, the first `PUT` is always
+  refused, and there is no order in which two packages can be narrowed — the store cannot leave the
+  state it starts in. Resolving at offer time has no such dead end, and it turns the common case
+  (a default plus an override) from an error into the mechanism.
 - **Target by Instance UID instead of a Selector.** Rejected. Naming Agents individually pins a
   rollout to identities that are reassignable (`AgentIdentification`) and says nothing about *why*
   those hosts were chosen. A Selector over reported attributes survives re-identification and is
@@ -133,10 +151,13 @@ Four parts:
   updated before its Server has Selectors configured will accept an offer chosen by an empty
   Selector — i.e. the fleet-wide package — which is the old behaviour and therefore safe, but worth
   saying out loud in the release note.
-- Negative / trade-offs: an operator can create an overlap — two top-level packages whose Selectors
-  match the same Agent — which the Server has to refuse. A refusal at the API is the right place for
-  it, but it is a new class of error message, and it can appear when *widening* a Selector that was
-  fine before.
+- Negative / trade-offs: specificity is a precedence rule, and precedence rules have to be learned.
+  "The Selector naming more attributes wins" is simple, but an operator who expects "last write
+  wins" or "most recently uploaded wins" will be surprised once.
+- Negative / trade-offs: a tie leaves an Agent with no package at all until someone narrows a
+  Selector. It is reported on the Agent in the fleet view and in the Server's log, but it is a
+  state an operator can reach by widening a Selector that was fine before, and nothing warns at the
+  moment of the change — only afterwards, on the Agents it affects.
 - Negative / trade-offs: a Selector that stops matching an Agent does **not** uninstall anything —
   the Agent keeps running what it installed. That is deliberate (the protocol has no "revert to the
   previous artifact" and a silent downgrade would be worse), but "remove from the Selector" reading

@@ -87,9 +87,12 @@ state_dir = "client-state"
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
-# package = "otelcol"      # (ADR-0015) update this binary from the Server package of this name:
-#                          # the artifact is verified, swapped over `binary`, health-gated on
-#                          # apply_grace_secs, and rolled back if it will not stay up
+# accepts_packages = true  # (ADR-0015, ADR-0017) take binary updates from the Server: the
+#                          # artifact it selects for this Agent is verified, swapped over
+#                          # `binary`, health-gated on apply_grace_secs, and rolled back if it
+#                          # will not stay up. *Which* artifact is the Server's decision — give
+#                          # the package a Selector there (PUT /api/v1/packages/<name>/selector),
+#                          # so a rollout is aimed centrally instead of from this file
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:

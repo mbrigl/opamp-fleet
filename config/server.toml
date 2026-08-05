@@ -42,7 +42,10 @@ max_message_size_bytes = 67108864
 
 # Where software packages are persisted (ADR-0015): one artifact + metadata pair each. Upload a
 # package with PUT /api/v1/packages/{name}?version=<v> (artifact as the body, optional Ed25519
-# signature=<hex>); the Server offers it to Agents whose [[supervisor]] block names it. The
+# signature=<hex>), then aim it with PUT /api/v1/packages/{name}/selector (ADR-0017): the Server
+# offers it to the Agents its Selector matches, among those that accept packages. An empty
+# Selector targets all of them; a narrower one wins for the Agents it names, which is how a
+# rollout starts on part of the fleet. The
 # download endpoint sits on the unauthenticated REST plane — the content hash and signature are
 # what protect an installed binary, so sign packages and configure the key on the Client.
 packages_dir = "fleet-packages"

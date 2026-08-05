@@ -87,10 +87,13 @@ pub struct SupervisorBlock {
     pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
-    /// The package this Supervisor's Managed Process is updated from (ADR-0015): the name of a
-    /// Server-offered package whose artifact swaps this process's binary. Set enables
-    /// `AcceptsPackages`; unset means this Supervisor takes no package offers.
-    pub package: Option<String>,
+    /// Whether this Supervisor's Managed Process is updated from Server-offered packages
+    /// (ADR-0015, ADR-0017). `true` declares `AcceptsPackages` and takes whichever top-level
+    /// package the Server selects for this Agent; `false` (the default) takes no package offers.
+    ///
+    /// **Which** artifact arrives is the Server's decision, expressed as the package's Selector —
+    /// so a rollout is steered centrally rather than by editing this file on every host.
+    pub accepts_packages: bool,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
@@ -124,12 +127,17 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
-        let package = take_string(&mut table, "package")?;
-        if let Some(package) = &package {
-            crate::cli::parse_instance_name(package).map_err(|e| {
-                format!("supervisor {name:?}: invalid package name {package:?}: {e}")
-            })?;
+        // `package = "name"` chose the artifact on the host; ADR-0017 moved that decision to the
+        // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
+        if table.contains_key("package") {
+            return Err(format!(
+                "supervisor {name:?}: `package` is no longer a supervisor key — set \
+                 `accepts_packages = true` and give the package a Selector on the Server \
+                 (PUT /api/v1/packages/<name>/selector), which is what now decides which \
+                 artifact this Agent receives"
+            ));
         }
+        let accepts_packages = take_bool(&mut table, "accepts_packages")?.unwrap_or(false);
         Ok(SupervisorBlock {
             kind,
             name,
@@ -137,7 +145,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             attributes,
-            package,
+            accepts_packages,
             settings: table,
         })
     }
@@ -149,6 +157,17 @@ fn take_string(table: &mut toml::Table, key: &str) -> Result<Option<String>, Str
         Some(toml::Value::String(s)) => Ok(Some(s)),
         Some(other) => Err(format!(
             "`{key}` must be a string, not {}",
+            other.type_str()
+        )),
+    }
+}
+
+fn take_bool(table: &mut toml::Table, key: &str) -> Result<Option<bool>, String> {
+    match table.remove(key) {
+        None => Ok(None),
+        Some(toml::Value::Boolean(b)) => Ok(Some(b)),
+        Some(other) => Err(format!(
+            "`{key}` must be true or false, not {}",
             other.type_str()
         )),
     }
@@ -444,6 +463,52 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// ADR-0017 moved the choice of artifact to the Server, so the Supervisor only consents. The
+    /// key that used to name a package is refused rather than ignored: an operator who still has
+    /// it in a file believes it does something.
+    #[test]
+    fn a_supervisor_consents_to_packages_and_the_old_naming_key_is_refused() {
+        let consenting: ClientConfig = toml::from_str(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            accepts_packages = true
+            "#,
+        )
+        .expect("parse");
+        assert!(consenting.supervisors[0].accepts_packages);
+
+        // Absent means no package offers, as before.
+        let quiet: ClientConfig = toml::from_str(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            "#,
+        )
+        .expect("parse");
+        assert!(!quiet.supervisors[0].accepts_packages);
+
+        let stale = toml::from_str::<ClientConfig>(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            package = "otelcol"
+            "#,
+        )
+        .expect_err("the old key must fail loudly");
+        let message = stale.to_string();
+        assert!(
+            message.contains("accepts_packages") && message.contains("Selector"),
+            "the error says what to do instead: {message}"
+        );
     }
 
     #[test]

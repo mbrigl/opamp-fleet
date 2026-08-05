@@ -93,10 +93,13 @@ pub struct AgentState {
     /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
     connection_settings_status: Option<ConnectionSettingsStatus>,
     send_settings_status: bool,
-    /// The package this Agent's Managed Process is updated from (ADR-0015): the name of a
-    /// Server-offered package. `None` means the Agent takes no package offers (and declares
-    /// neither package capability).
-    package_name: Option<String>,
+    /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0015).
+    /// Which package that is, is the Server's choice (ADR-0017) — this side only consents.
+    accepts_packages: bool,
+    /// The name of the top-level package the Server last offered. Learned from the offer, not
+    /// configured: it keys the reported `PackageStatuses` map, which the Baseline requires to name
+    /// every package the Agent has or is processing.
+    offered_name: Option<String>,
     /// The package currently installed, persisted across restarts.
     installed_package: Option<InstalledPackage>,
     /// Progress of the artifact download in flight (ADR-0015), reported as `Downloading` with
@@ -117,6 +120,10 @@ pub struct AgentState {
     server_offered: Option<(String, Vec<u8>)>,
     /// The last install failure for this Agent's package, reported alongside the status.
     package_error: String,
+    /// A failure in processing the *offer itself* rather than one package — the Baseline's
+    /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
+    /// PackagesAvailable message and that error is not related to any particular single package".
+    offer_error: String,
     send_package_status: bool,
     /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
@@ -158,7 +165,8 @@ impl AgentState {
             send_components_full: false,
             connection_settings_status: None,
             send_settings_status: false,
-            package_name: None,
+            accepts_packages: false,
+            offered_name: None,
             installed_package: None,
             downloading: None,
             installing: None,
@@ -166,19 +174,34 @@ impl AgentState {
             echoed_all_packages_hash: Vec::new(),
             server_offered: None,
             package_error: String::new(),
+            offer_error: String::new(),
             send_package_status: false,
             configured_attributes: Vec::new(),
         })
     }
 
-    /// Opts this Agent into package delivery for the named package (ADR-0015): declares
-    /// `AcceptsPackages` and `ReportsPackageStatuses`, and restores what it last installed so a
-    /// restarted Client reports the version it runs and is not re-offered it.
-    pub fn accept_package(&mut self, package_name: String) {
-        self.package_name = Some(package_name);
+    /// Opts this Agent into package delivery (ADR-0015): declares `AcceptsPackages` and
+    /// `ReportsPackageStatuses`, and restores what it last installed so a restarted Client reports
+    /// the version it runs and is not re-offered it.
+    ///
+    /// It consents; it does not choose. Which artifact arrives is decided by the Selector on the
+    /// Server (ADR-0017), so a rollout is aimed centrally rather than from this host's file.
+    pub fn accept_packages(&mut self) {
+        self.accepts_packages = true;
         self.installed_package = self.storage.load_package();
         self.declare_capability(AgentCapabilities::AcceptsPackages);
         self.declare_capability(AgentCapabilities::ReportsPackageStatuses);
+    }
+
+    /// The package this Agent is processing or has: the one being installed, else the installed
+    /// one, else the one last offered. `None` until the Server offers anything — an Agent that has
+    /// no package reports none, which is what "all packages the Agent has" amounts to.
+    fn package_name(&self) -> Option<String> {
+        self.installing
+            .as_ref()
+            .map(|d| d.name.clone())
+            .or_else(|| self.installed_package.as_ref().map(|p| p.name.clone()))
+            .or_else(|| self.offered_name.clone())
     }
 
     /// Restores the outcome of a previously applied connection-settings offer (ADR-0014): the
@@ -334,7 +357,7 @@ impl AgentState {
         if self.send_full || self.send_settings_status {
             msg.connection_settings_status = self.connection_settings_status.clone();
         }
-        if self.package_name.is_some() && (self.send_full || self.send_package_status) {
+        if self.accepts_packages && (self.send_full || self.send_package_status) {
             msg.package_statuses = Some(self.package_statuses());
         }
         // Available components ride the Baseline's two-step shape: the hash in every full
@@ -361,8 +384,15 @@ impl AgentState {
     /// This Agent's package status as one `PackageStatuses`: its single package's state, plus the
     /// `server_provided_all_packages_hash` the Server compares to gate re-offering.
     fn package_statuses(&self) -> PackageStatuses {
-        let Some(name) = &self.package_name else {
-            return PackageStatuses::default();
+        // Every package the Agent has or is processing — which is at most one, and none until
+        // the Server has offered something. The aggregate still rides an empty map: it is what
+        // tells the Server this Agent is in sync with an offer of nothing.
+        let Some(name) = self.package_name() else {
+            return PackageStatuses {
+                packages: Default::default(),
+                server_provided_all_packages_hash: self.echoed_all_packages_hash.clone(),
+                error_message: self.offer_error.clone(),
+            };
         };
         // `agent_has_*` is what the Agent actually runs — the last successful install, if any.
         let (has_version, has_hash) = self
@@ -411,7 +441,7 @@ impl AgentState {
         PackageStatuses {
             packages: [(name.clone(), package)].into(),
             server_provided_all_packages_hash: self.echoed_all_packages_hash.clone(),
-            error_message: String::new(),
+            error_message: self.offer_error.clone(),
         }
     }
 
@@ -527,44 +557,64 @@ impl AgentState {
         handled
     }
 
-    /// Reacts to a `PackagesAvailable` offer for this Agent's one named package.
+    /// Reacts to a `PackagesAvailable` offer: the Server selected what this Agent may have
+    /// (ADR-0017), so this side takes the one **top-level** package out of the offer — the binary
+    /// of its Managed Process — and ignores addons, which a Supervisor has no way to apply.
     fn handle_package_offer(
         &mut self,
         offer: &opamp::proto::PackagesAvailable,
         handled: &mut Handled,
     ) {
-        let Some(name) = self.package_name.clone() else {
+        if !self.accepts_packages {
             return;
-        };
+        }
         self.offered_all_packages_hash = offer.all_packages_hash.clone();
-        let Some(available) = offer.packages.get(&name) else {
-            // Our package is not in this offer — nothing for us to install; echo the aggregate so
-            // the Server stops offering (its other packages are not our concern).
+        // The Baseline: "There is normally only one top-level package, which implements the
+        // primary functionality of the Agent." The Server refuses to create an overlap, so more
+        // than one here means a peer that does not — refused rather than picked from at random.
+        let mut top_level = offer
+            .packages
+            .iter()
+            .filter(|(_, available)| available.r#type != PackageType::Addon as i32);
+        let Some((name, available)) = top_level.next() else {
+            // Nothing top-level for us. An empty offer is simply "nothing for this Agent"; an
+            // offer of addons only is an operator error — a Supervisor replaces one binary and
+            // knows nothing about addons — so that one is reported rather than passed over.
+            if !offer.packages.is_empty() {
+                error!(
+                    packages = offer.packages.len(),
+                    "refusing an offer of addons only: this Client installs top-level packages only"
+                );
+                self.installing = None;
+                self.offer_error =
+                    "this Client installs top-level packages only; the offer carries addons only"
+                        .to_string();
+                handled.send_report = true;
+            }
             self.echoed_all_packages_hash = offer.all_packages_hash.clone();
             self.send_package_status = true;
             return;
         };
-        self.server_offered = Some((available.version.clone(), available.hash.clone()));
-        // The Baseline distinguishes a `TopLevel` package — the Managed Process's own binary —
-        // from an `Addon`. A Supervisor knows how to replace the former and nothing about the
-        // latter, and installing an Addon the only way this Client can would overwrite the very
-        // binary the addon was meant to extend. So it is refused, and refusing is a *report*: the
-        // aggregate hash is echoed with `InstallFailed`, which both tells the operator why and
-        // stops the Server offering the same bytes forever.
-        if available.r#type == PackageType::Addon as i32 {
+        if let Some((second, _)) = top_level.next() {
             error!(
-                package = %name,
-                "refusing an addon package: this Client installs top-level packages only"
+                first = %name, second = %second,
+                "refusing an offer with two top-level packages: an Agent has one binary to replace"
             );
             self.installing = None;
-            self.package_error =
-                "this Client installs top-level packages only; the offered package is an addon"
-                    .to_string();
+            self.offer_error = format!(
+                "the Server offered two top-level packages ({name:?} and {second:?}); \
+                 an Agent has one binary to replace"
+            );
             self.echoed_all_packages_hash = offer.all_packages_hash.clone();
             self.send_package_status = true;
             handled.send_report = true;
             return;
         }
+        let name = name.clone();
+        // A usable offer clears whatever the last unusable one complained about.
+        self.offer_error.clear();
+        self.offered_name = Some(name.clone());
+        self.server_offered = Some((available.version.clone(), available.hash.clone()));
         let installed_hash = self
             .installed_package
             .as_ref()
@@ -622,12 +672,17 @@ impl AgentState {
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
     /// refusal is a report, not a loop.
     pub fn package_applied(&mut self, hash: Vec<u8>, result: Result<String, String>) {
+        // Keep the name the outcome is about: `installing` is cleared here, and a failure leaves
+        // no installed record to fall back on, but the status still has to name its package.
+        if let Some(name) = self.installing.as_ref().map(|d| d.name.clone()) {
+            self.offered_name = Some(name);
+        }
         self.installing = None;
         self.downloading = None;
         match result {
             Ok(version) => {
                 let installed = InstalledPackage {
-                    name: self.package_name.clone().unwrap_or_default(),
+                    name: self.package_name().unwrap_or_default(),
                     version: version.clone(),
                     hash_hex: hex::encode(&hash),
                 };
@@ -1024,7 +1079,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
-        agent.accept_package("otelcol".to_string());
+        agent.accept_packages();
         let _ = agent.next_report();
 
         // The two package capabilities are declared once a package is accepted.
@@ -1144,15 +1199,15 @@ mod tests {
     }
 
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
-    /// package is *be* that binary — so an addon offer must be refused rather than installed over
-    /// the process it was meant to extend, and the refusal must be reported.
+    /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
+    /// than installed over the process they were meant to extend, and the refusal is reported.
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
-        agent.accept_package("otelcol".to_string());
+        agent.accept_packages();
         let _ = agent.next_report();
 
         let handled = agent.handle(&ServerToAgent {
@@ -1181,14 +1236,16 @@ mod tests {
         );
         assert!(handled.send_report, "the refusal is reported at once");
 
+        // The failure is about the offer, not about one package — which is exactly what the
+        // Baseline's `PackageStatuses.error_message` is for ("not related to any particular
+        // single package"), so it rides there and the packages map stays empty.
         let statuses = agent.next_report().package_statuses.expect("statuses");
-        let status = &statuses.packages["otelcol"];
-        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
         assert!(
-            status.error_message.contains("addon"),
+            statuses.error_message.contains("addon"),
             "the reason names what was refused: {}",
-            status.error_message
+            statuses.error_message
         );
+        assert!(statuses.packages.is_empty(), "nothing was installed");
         // A refusal is a report, not a loop: the aggregate is echoed so the offer ends.
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
@@ -1198,7 +1255,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
-        agent.accept_package("otelcol".to_string());
+        agent.accept_packages();
         agent.offered_all_packages_hash = b"agg-2".to_vec();
         agent.server_offered = Some(("9.9.9".to_string(), b"bad".to_vec()));
         agent.installing = Some(crate::packages::PackageDownload {

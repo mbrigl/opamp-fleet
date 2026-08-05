@@ -1,5 +1,6 @@
-//! Package delivery end to end (ADR-0015): the real Server armed with a package store, the real
-//! Client binary running a `command` Supervisor bound to that package. The Client downloads the
+//! Package delivery end to end (ADR-0015, ADR-0017): the real Server armed with a package store,
+//! the real Client binary running a `command` Supervisor that consents to package updates — which
+//! artifact it gets is the Server's choice, not this configuration's. The Client downloads the
 //! offered artifact, verifies its content hash and Ed25519 signature, swaps it over the managed
 //! binary, health-gates the restart, and reports `Installed` — visible in the fleet view.
 
@@ -112,7 +113,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"myagent\"\n",
-            "package = \"myagent\"\n",
+            "accepts_packages = true\n",
             "apply_grace_secs = 1\n",
             "command = {managed:?}\n",
             "args = [\"--touch\", {marker:?}]\n",

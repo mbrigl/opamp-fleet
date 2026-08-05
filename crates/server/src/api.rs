@@ -52,6 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
+        .routes(routes!(put_package_selector))
         .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
@@ -262,11 +263,27 @@ async fn delete_configuration(
     }
 }
 
-/// One stored package's name and version (never its artifact bytes).
+/// One stored package as the API shows it — never its artifact bytes.
 #[derive(Serialize, ToSchema)]
 struct PackageView {
     name: String,
     version: String,
+    /// `true` for an addon, `false` for a top-level package (a Managed Process's binary).
+    #[serde(default)]
+    addon: bool,
+    /// Whom this package is offered to (ADR-0017): equality pairs that must all match an
+    /// attribute the Agent reported. Empty targets the whole fleet.
+    #[serde(default)]
+    selector: std::collections::BTreeMap<String, String>,
+}
+
+/// The writable Selector of a package — the body of `PUT /api/v1/packages/{name}/selector`.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct PackageSelectorSpec {
+    /// Equality pairs an Agent's reported attributes must all match; empty targets every Agent.
+    #[serde(default)]
+    selector: std::collections::BTreeMap<String, String>,
 }
 
 /// The query parameters of a package upload: everything but the artifact, which is the body.
@@ -298,7 +315,12 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
             store
                 .list()
                 .into_iter()
-                .map(|(name, version)| PackageView { name, version })
+                .map(|p| PackageView {
+                    name: p.name,
+                    version: p.version,
+                    addon: p.addon,
+                    selector: p.selector,
+                })
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -383,9 +405,15 @@ async fn put_package(
     ) {
         Ok(()) => {
             info!(package = %name, bytes = written, "package stored from the API");
+            let selector = state
+                .packages()
+                .and_then(|store| store.selector_of_package(&name))
+                .unwrap_or_default();
             Json(PackageView {
                 name,
                 version: upload.version,
+                addon: upload.addon,
+                selector,
             })
             .into_response()
         }
@@ -415,6 +443,48 @@ async fn delete_package(State(state): State<Arc<AppState>>, Path(name): Path<Str
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
         Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Sets which Agents a package is offered to (ADR-0017). An empty Selector targets the whole
+/// fleet; every pair must equal an attribute the Agent reported, exactly as for a Configuration.
+///
+/// Where several top-level packages match one Agent, the most specific Selector wins — so a
+/// fleet-wide package plus a narrower one is how a rollout starts on part of the fleet. Two
+/// equally specific Selectors reaching the same Agent leave it with no offer, and the fleet view
+/// says so on that Agent (`package_conflict`).
+#[utoipa::path(
+    put,
+    path = "/api/v1/packages/{name}/selector",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    request_body = PackageSelectorSpec,
+    responses(
+        (status = 200, description = "The package, with its Selector", body = PackageView),
+        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The Selector could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_selector(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<PackageSelectorSpec>,
+) -> Response {
+    match state.set_package_selector(&name, spec.selector.clone()) {
+        Ok(version) => {
+            info!(package = %name, pairs = spec.selector.len(), "package selector set");
+            Json(PackageView {
+                name,
+                version,
+                addon: false,
+                selector: spec.selector,
+            })
+            .into_response()
+        }
+        Err(e) if e.contains("not configured") || e.starts_with("no package") => {
+            error(StatusCode::NOT_FOUND, e)
+        }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

@@ -542,22 +542,53 @@ impl AppState {
         }
     }
 
-    /// The package offer for one Agent, or `None` when it cannot accept packages or the aggregate
-    /// hash it last reported already matches what the store holds.
+    /// The package offer for one Agent, or `None` when it cannot accept packages, no package's
+    /// Selector matches it, or the aggregate hash it last reported already matches the set it
+    /// should have.
+    ///
+    /// Both the offer and the aggregate are computed over *this Agent's* matching packages
+    /// (ADR-0017): comparing against a fleet-wide aggregate would re-offer, on every exchange,
+    /// packages this Agent is never given.
     fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
         let offering = self.packages.as_ref()?;
         if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
             return None;
         }
+        let description = record.description.as_ref();
         let reported = record
             .package_statuses
             .as_ref()
             .map(|s| s.server_provided_all_packages_hash.as_slice())
             .unwrap_or_default();
-        if reported == offering.store.all_packages_hash().as_slice() {
+        if reported == offering.store.all_packages_hash_for(description).as_slice() {
             return None;
         }
-        offering.store.offer(&offering.download_base, None)
+        match offering
+            .store
+            .offer_for(description, &offering.download_base, None)
+        {
+            Ok(offer) => offer,
+            // Ambiguous targeting: two equally specific Selectors both reach this Agent. Offering
+            // neither is the only honest answer — but silence would leave an operator watching a
+            // rollout that never starts, so it is logged and shown in the fleet view.
+            Err(e) => {
+                warn!(error = %e, "refusing to offer a package: ambiguous targeting");
+                None
+            }
+        }
+    }
+
+    /// Why this Agent is offered no package, when the reason is the operator's targeting rather
+    /// than the absence of one (ADR-0017). `None` when nothing is wrong.
+    fn package_conflict(&self, record: &AgentRecord) -> Option<String> {
+        let offering = self.packages.as_ref()?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+            return None;
+        }
+        offering
+            .store
+            .offer_for(record.description.as_ref(), "", None)
+            .err()
     }
 
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
@@ -638,6 +669,31 @@ impl AppState {
             .staging_path(name)
     }
 
+    /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
+    /// change newly targets is offered it now rather than at its next poll. Returns the package's
+    /// version, for the response.
+    pub fn set_package_selector(
+        &self,
+        name: &str,
+        selector: BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_selector(name, selector)?;
+        let version = store
+            .list()
+            .into_iter()
+            .find(|p| p.name == name)
+            .map(|p| p.version)
+            .unwrap_or_default();
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package selector changed");
+        Ok(version)
+    }
+
     /// Deletes a package; `Ok(false)` when none of that name exists.
     pub fn delete_package(&self, name: &str) -> Result<bool, String> {
         let store = self
@@ -677,7 +733,8 @@ impl AppState {
             .map(|(uid, record)| {
                 let desired = self.configs.desired_for(record.description.as_ref());
                 let matched = self.configs.matching_names(record.description.as_ref());
-                AgentView::from_record(uid, record, desired.as_ref(), matched)
+                let package_conflict = self.package_conflict(record);
+                AgentView::from_record(uid, record, desired.as_ref(), matched, package_conflict)
             })
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
@@ -749,6 +806,10 @@ pub struct AgentView {
     pub available_components: Vec<String>,
     /// The Agent's package installations (ADR-0015), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
+    /// Why this Agent is offered no package although it accepts them — two equally specific
+    /// Selectors both reach it (ADR-0017). Absent when the targeting is unambiguous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_conflict: Option<String>,
     pub transport: String,
     pub connected: bool,
     pub healthy: bool,
@@ -874,6 +935,7 @@ impl AgentView {
         record: &AgentRecord,
         desired: Option<&DesiredConfig>,
         matched_configurations: Vec<String>,
+        package_conflict: Option<String>,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
             Some(d) => (
@@ -922,6 +984,7 @@ impl AgentView {
                     names
                 })
                 .unwrap_or_default(),
+            package_conflict,
             packages: record
                 .package_statuses
                 .as_ref()

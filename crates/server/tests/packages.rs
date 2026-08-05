@@ -224,3 +224,219 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).to_vec()
 }
+
+/// A helper mirroring how an operator aims a rollout: name the package, then set its Selector.
+async fn set_selector(
+    server: &TestServer,
+    name: &str,
+    pairs: &[(&str, &str)],
+) -> reqwest::Response {
+    let selector: std::collections::BTreeMap<&str, &str> = pairs.iter().copied().collect();
+    reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/{name}/selector",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "selector": selector }))
+        .send()
+        .await
+        .expect("put selector")
+}
+
+/// The point of ADR-0017: an artifact reaches the Agents its Selector matches and no others, so a
+/// binary rollout can be tried on part of the fleet first.
+#[tokio::test]
+async fn a_selector_aims_a_package_at_part_of_the_fleet() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
+    assert_eq!(
+        set_selector(&server, "otelcol", &[("os.type", "linux")])
+            .await
+            .status(),
+        200
+    );
+
+    // full_report describes an Agent with os.type = linux (see the test scaffolding).
+    let targeted = InstanceUid::default();
+    let mut report = full_report(&targeted, "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let reply = exchange(&server, &report).await;
+    let offer = reply
+        .packages_available
+        .expect("the matching Agent is offered it");
+    assert!(offer.packages.contains_key("otelcol"));
+    assert!(!offer.all_packages_hash.is_empty());
+
+    // An Agent that reports something else is offered nothing at all — not an empty offer, no
+    // offer: it keeps running what it runs (goal 9, applied to software).
+    let other = InstanceUid::default();
+    let mut elsewhere = full_report(&other, "windows-box", 1);
+    elsewhere.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    if let Some(description) = elsewhere.agent_description.as_mut() {
+        for attribute in &mut description.non_identifying_attributes {
+            if attribute.key == "os.type" {
+                attribute.value = Some(opamp::proto::AnyValue {
+                    value: Some(opamp::proto::any_value::Value::StringValue(
+                        "windows".to_string(),
+                    )),
+                });
+            }
+        }
+    }
+    let reply = exchange(&server, &elsewhere).await;
+    assert!(
+        reply.packages_available.is_none(),
+        "an Agent outside the Selector is offered nothing"
+    );
+}
+
+/// The aggregate hash gates re-offering, and it is per Agent: computed over the whole store it
+/// would never match what a targeted Agent was actually sent, and the Server would re-offer for ever.
+#[tokio::test]
+async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "2.0.0", b"for-linux").await;
+    upload(&server, "otelcol-win", "2.0.0", b"for-windows").await;
+    assert_eq!(
+        set_selector(&server, "otelcol", &[("os.type", "linux")])
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        set_selector(&server, "otelcol-win", &[("os.type", "windows")])
+            .await
+            .status(),
+        200
+    );
+
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64
+        | AgentCapabilities::ReportsPackageStatuses as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
+    assert_eq!(
+        offer.packages.len(),
+        1,
+        "only the package this Agent's Selector matches"
+    );
+
+    // Echoing exactly that aggregate settles it — the Server must not keep re-offering.
+    let mut installed = full_report(&uid, "collector", 2);
+    installed.capabilities |= AgentCapabilities::AcceptsPackages as u64
+        | AgentCapabilities::ReportsPackageStatuses as u64;
+    installed.package_statuses = Some(PackageStatuses {
+        packages: [(
+            "otelcol".to_string(),
+            PackageStatus {
+                name: "otelcol".to_string(),
+                agent_has_version: "2.0.0".to_string(),
+                status: PackageStatusEnum::Installed as i32,
+                ..Default::default()
+            },
+        )]
+        .into(),
+        server_provided_all_packages_hash: offer.all_packages_hash.clone(),
+        error_message: String::new(),
+    });
+    assert!(
+        exchange(&server, &installed)
+            .await
+            .packages_available
+            .is_none(),
+        "the Agent is in sync with what it was offered"
+    );
+}
+
+/// The canary shape an operator actually wants: a fleet-wide package, plus a narrower one for the
+/// hosts a rollout starts on. The more specific Selector wins for those hosts, and the fleet-wide
+/// one keeps serving everyone else.
+#[tokio::test]
+async fn a_narrower_selector_overrides_the_fleet_wide_package_for_the_agents_it_names() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "2.0.0", b"the-fleet-binary").await;
+    upload(&server, "otelcol-canary", "3.0.0", b"the-canary-binary").await;
+    // otelcol keeps the empty Selector: everyone. The canary names one attribute.
+    assert_eq!(
+        set_selector(
+            &server,
+            "otelcol-canary",
+            &[("service.name", "canary-host")]
+        )
+        .await
+        .status(),
+        200
+    );
+
+    async fn offered_to(server: &TestServer, name: &str) -> Vec<String> {
+        let uid = InstanceUid::default();
+        let mut report = full_report(&uid, name, 1);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        let offer = exchange(server, &report)
+            .await
+            .packages_available
+            .expect("an offer");
+        let mut names: Vec<String> = offer.packages.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    assert_eq!(
+        offered_to(&server, "canary-host").await,
+        ["otelcol-canary"],
+        "the named host gets the canary, and only it"
+    );
+    assert_eq!(
+        offered_to(&server, "ordinary-host").await,
+        ["otelcol"],
+        "everyone else keeps the fleet-wide package"
+    );
+}
+
+/// Two equally specific Selectors reaching one Agent is the one case with no defensible answer:
+/// the Server offers neither and says so in the fleet view, rather than picking at random.
+#[tokio::test]
+async fn equally_specific_selectors_offer_nothing_and_are_reported() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "2.0.0", b"one").await;
+    upload(&server, "otelcol-next", "3.0.0", b"two").await;
+    // Both name exactly one attribute, and both match the Agent below.
+    assert_eq!(
+        set_selector(&server, "otelcol", &[("os.type", "linux")])
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        set_selector(
+            &server,
+            "otelcol-next",
+            &[("os.description", "Testix 1.0 LTS")]
+        )
+        .await
+        .status(),
+        200
+    );
+
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let reply = exchange(&server, &report).await;
+    assert!(
+        reply.packages_available.is_none(),
+        "an ambiguous target is offered nothing"
+    );
+
+    let view = &server.state.snapshot()[0];
+    let conflict = view
+        .package_conflict
+        .as_ref()
+        .expect("the fleet view says why");
+    assert!(
+        conflict.contains("otelcol") && conflict.contains("otelcol-next"),
+        "the reason names both packages: {conflict}"
+    );
+}
