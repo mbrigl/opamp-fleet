@@ -1,6 +1,6 @@
 # ADR-0017: Selector-targeted packages, chosen by the Server rather than named on each host
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-05
 - **Deciders:** Markus Brigl
 
