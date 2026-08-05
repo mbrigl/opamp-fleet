@@ -8,7 +8,7 @@
 //! store, hash, offer, and serve.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use opamp::proto::{DownloadableFile, Headers, PackageAvailable, PackageType, PackagesAvailable};
@@ -17,8 +17,10 @@ use sha2::{Digest, Sha256};
 
 use crate::configs::validate_name;
 
-/// A stored package: metadata plus the artifact bytes (held in memory; also on disk). The name is
-/// a map key on the wire and a file name here, so it follows the ADR-0010 grammar.
+/// A stored package: its metadata. The artifact itself stays on disk (`<name>.bin`) and is
+/// streamed to whoever asks — a program weighs hundreds of megabytes, and a fleet server holding
+/// every one of them in memory, plus a copy per download, is the shape this deliberately avoids.
+/// The name is a map key on the wire and a file name here, so it follows the ADR-0010 grammar.
 #[derive(Clone)]
 pub struct Package {
     pub name: String,
@@ -29,8 +31,8 @@ pub struct Package {
     pub content_hash: Vec<u8>,
     /// Optional Ed25519 signature over the artifact, supplied by the operator.
     pub signature: Option<Vec<u8>>,
-    /// The artifact bytes.
-    pub artifact: Vec<u8>,
+    /// The artifact's size in bytes, for the fleet view and the logs.
+    pub size: u64,
 }
 
 impl Package {
@@ -111,11 +113,11 @@ impl PackageStore {
             validate_name(&meta.name)
                 .map_err(|e| format!("invalid package name in {}: {e}", path.display()))?;
             let artifact_path = dir.join(format!("{}.bin", meta.name));
-            let artifact = std::fs::read(&artifact_path)
-                .map_err(|e| format!("cannot read {}: {e}", artifact_path.display()))?;
             let content_hash = hex::decode(&meta.content_hash_hex)
                 .map_err(|e| format!("invalid content hash in {}: {e}", path.display()))?;
-            if Sha256::digest(&artifact).as_slice() != content_hash.as_slice() {
+            // Re-hash by streaming: the check must not depend on the artifact fitting in memory.
+            let (size, actual) = hash_file(&artifact_path)?;
+            if actual != content_hash {
                 return Err(format!(
                     "package {:?}: artifact does not match its recorded content hash",
                     meta.name
@@ -136,7 +138,7 @@ impl PackageStore {
                     addon: meta.addon,
                     content_hash,
                     signature,
-                    artifact,
+                    size,
                 },
             );
         }
@@ -156,13 +158,14 @@ impl PackageStore {
             .collect()
     }
 
-    /// One package's artifact bytes, for the download endpoint.
-    pub fn artifact(&self, name: &str) -> Option<Vec<u8>> {
+    /// Where a package's artifact lives, for the download endpoint to stream from. `None` when no
+    /// package of that name is stored.
+    pub fn artifact_path(&self, name: &str) -> Option<PathBuf> {
         self.packages
             .read()
             .expect("packages lock")
             .get(name)
-            .map(|p| p.artifact.clone())
+            .map(|p| self.dir.join(format!("{}.bin", p.name)))
     }
 
     /// `true` when the store holds no package — the Server then leaves `OffersPackages` undeclared.
@@ -170,8 +173,78 @@ impl PackageStore {
         self.packages.read().expect("packages lock").is_empty()
     }
 
-    /// Creates or replaces a package: validated, the content hash computed, persisted atomically
-    /// (temp files + rename), then visible to the control loop.
+    /// Where an upload is streamed to before it becomes a package. In the store's own directory,
+    /// so [`put_staged`](Self::put_staged) can move it into place with a rename.
+    ///
+    /// # Errors
+    /// Returns an error when the name is not a valid package name.
+    pub fn staging_path(&self, name: &str) -> Result<PathBuf, String> {
+        validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
+        Ok(self.dir.join(format!("{name}.upload")))
+    }
+
+    /// Turns a streamed upload into a package: hashed by streaming, moved into place with a
+    /// rename, then visible to the control loop. The artifact never passes through memory — an
+    /// agent binary is far too big to buffer twice just to store it once.
+    ///
+    /// The staged file is consumed on success and removed on failure, so a rejected upload leaves
+    /// nothing behind.
+    pub fn put_staged(
+        &self,
+        name: String,
+        version: String,
+        addon: bool,
+        signature: Option<Vec<u8>>,
+        staged: &Path,
+    ) -> Result<(), String> {
+        let result = self.store_staged(&name, &version, addon, signature, staged);
+        if result.is_err() {
+            let _ = std::fs::remove_file(staged);
+        }
+        result
+    }
+
+    fn store_staged(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        signature: Option<Vec<u8>>,
+        staged: &Path,
+    ) -> Result<(), String> {
+        validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
+        let (size, content_hash) = hash_file(staged)?;
+        if size == 0 {
+            return Err("the package artifact is empty; refusing to distribute it".to_string());
+        }
+        let meta = PackageMeta {
+            name: name.to_string(),
+            version: version.to_string(),
+            addon,
+            content_hash_hex: hex::encode(&content_hash),
+            signature_hex: signature.as_ref().map(hex::encode),
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        let artifact = self.dir.join(format!("{name}.bin"));
+        std::fs::rename(staged, &artifact)
+            .map_err(|e| format!("cannot persist {}: {e}", artifact.display()))?;
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        self.packages.write().expect("packages lock").insert(
+            name.to_string(),
+            Package {
+                name: name.to_string(),
+                version: version.to_string(),
+                addon,
+                content_hash,
+                signature,
+                size,
+            },
+        );
+        Ok(())
+    }
+
+    /// Creates or replaces a package from bytes already in hand — the shape the tests and any
+    /// small artifact use. A real upload takes [`put_staged`](Self::put_staged) instead.
     pub fn put(
         &self,
         name: String,
@@ -185,6 +258,7 @@ impl PackageStore {
             return Err("the package artifact is empty; refusing to distribute it".to_string());
         }
         let content_hash = Sha256::digest(&artifact).to_vec();
+        let size = artifact.len() as u64;
         let meta = PackageMeta {
             name: name.clone(),
             version: version.clone(),
@@ -203,7 +277,7 @@ impl PackageStore {
                 addon,
                 content_hash,
                 signature,
-                artifact,
+                size,
             },
         );
         Ok(())
@@ -266,6 +340,26 @@ impl PackageStore {
     }
 }
 
+/// Hashes a file by streaming it, returning `(size, sha256)`. Used where an artifact's integrity
+/// must be checked without the artifact having to fit in memory.
+fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((size, hasher.finalize().to_vec()))
+}
+
 /// The aggregate over all packages — name and content — in name order (the map iterates sorted).
 fn aggregate_hash<'a>(packages: impl Iterator<Item = &'a Package>) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -301,11 +395,18 @@ mod tests {
                 store.list(),
                 vec![("otelcol".to_string(), "1.2.3".to_string())]
             );
-            assert_eq!(store.artifact("otelcol"), Some(b"binary".to_vec()));
+            let path = store.artifact_path("otelcol").expect("an artifact path");
+            assert_eq!(std::fs::read(&path).expect("read"), b"binary");
         }
-        // A fresh store over the same directory restores the package and its verified artifact.
+        // A fresh store over the same directory restores the package and re-verifies its artifact
+        // against the recorded hash — by streaming it, so the check never depends on its size.
         let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
-        assert_eq!(reopened.artifact("otelcol"), Some(b"binary".to_vec()));
+        let path = reopened.artifact_path("otelcol").expect("an artifact path");
+        assert_eq!(std::fs::read(&path).expect("read"), b"binary");
+        assert!(
+            reopened.artifact_path("nothing-stored").is_none(),
+            "no path for a package that does not exist"
+        );
     }
 
     #[test]

@@ -14,6 +14,8 @@ use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
@@ -29,6 +31,9 @@ pub struct Endpoint {
     listener: TcpListener,
     name: String,
     events: EventSender,
+    /// The message size limit this endpoint enforces in both directions. It speaks the Server
+    /// side of the protocol, so the Baseline's limits bind it exactly as they bind the Server.
+    max_message_size: usize,
 }
 
 impl Endpoint {
@@ -36,7 +41,12 @@ impl Endpoint {
     ///
     /// # Errors
     /// Returns an error when the loopback port cannot be bound.
-    pub fn bind(name: String, port: u16, events: EventSender) -> Result<Self, String> {
+    pub fn bind(
+        name: String,
+        port: u16,
+        events: EventSender,
+        max_message_size: usize,
+    ) -> Result<Self, String> {
         let std_listener = std::net::TcpListener::bind(("127.0.0.1", port))
             .map_err(|e| format!("supervisor {name:?}: cannot bind 127.0.0.1:{port}: {e}"))?;
         std_listener
@@ -48,6 +58,7 @@ impl Endpoint {
             listener,
             name,
             events,
+            max_message_size,
         })
     }
 
@@ -83,21 +94,43 @@ impl Endpoint {
     async fn serve(&self, stream: TcpStream, shutdown: &mut Shutdown) {
         // The upgrade is accepted regardless of the request path: this listener serves exactly
         // one local process, so there is nothing to route by.
-        let mut socket = match tokio_tungstenite::accept_async(stream).await {
-            Ok(socket) => socket,
-            Err(e) => {
-                warn!(supervisor = %self.name, error = %e, "endpoint handshake failed");
-                return;
-            }
-        };
+        let limit = self.max_message_size;
+        // The receive limit, applied by the transport itself: a Managed Process that floods the
+        // endpoint must not be able to make the Client allocate without bound.
+        let ws_config = WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
+        let mut socket =
+            match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
+                Ok(socket) => socket,
+                Err(e) => {
+                    warn!(supervisor = %self.name, error = %e, "endpoint handshake failed");
+                    return;
+                }
+            };
         loop {
             tokio::select! {
                 incoming = socket.next() => {
-                    let Some(Ok(message)) = incoming else { return };
+                    let message = match incoming {
+                        Some(Ok(message)) => message,
+                        // Past the limit the message never becomes a frame; answer it with the
+                        // 1009 close the Baseline names, as the Server does.
+                        Some(Err(e)) => {
+                            warn!(supervisor = %self.name, error = %e, "endpoint receive error");
+                            let _ = socket.close(Some(too_big_close())).await;
+                            return;
+                        }
+                        None => return,
+                    };
                     match message {
                         Message::Binary(data) => {
-                            let report: AgentToServer = match frame::decode(&data) {
+                            let report: AgentToServer = match frame::decode(&data, limit) {
                                 Ok(report) => report,
+                                Err(e @ frame::FrameError::TooLarge(..)) => {
+                                    warn!(supervisor = %self.name, error = %e, "oversized endpoint message");
+                                    let _ = socket.close(Some(too_big_close())).await;
+                                    return;
+                                }
                                 Err(e) => {
                                     warn!(supervisor = %self.name, error = %e, "undecodable endpoint message");
                                     continue;
@@ -109,11 +142,14 @@ impl Endpoint {
                                 ..Default::default()
                             };
                             self.fold(report).await;
-                            if socket
-                                .send(Message::Binary(frame::encode(&reply).into()))
-                                .await
-                                .is_err()
-                            {
+                            let framed = match frame::encode_within(&reply, limit) {
+                                Ok(framed) => framed,
+                                Err(e) => {
+                                    warn!(supervisor = %self.name, error = %e, "discarding an oversized endpoint reply");
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Binary(framed.into())).await.is_err() {
                                 return;
                             }
                         }
@@ -162,12 +198,21 @@ pub fn start(
     port: u16,
     events: EventSender,
     shutdown: Shutdown,
+    max_message_size: usize,
 ) -> Result<SocketAddr, String> {
-    let endpoint = Endpoint::bind(name.clone(), port, events)?;
+    let endpoint = Endpoint::bind(name.clone(), port, events, max_message_size)?;
     let addr = endpoint.local_addr()?;
     info!(supervisor = %name, endpoint = %format!("ws://{addr}/v1/opamp"), "supervisor endpoint ready");
     tokio::spawn(endpoint.run(shutdown));
     Ok(addr)
+}
+
+/// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
+fn too_big_close() -> CloseFrame {
+    CloseFrame {
+        code: CloseCode::Size,
+        reason: "message exceeds the OpAMP message size limit".into(),
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +233,7 @@ mod tests {
             0,
             EventSender::new(0, event_tx),
             shutdown,
+            opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
         )
         .expect("endpoint starts");
 
@@ -210,7 +256,11 @@ mod tests {
             ..Default::default()
         };
         socket
-            .send(Message::Binary(frame::encode(&report).into()))
+            .send(Message::Binary(
+                frame::encode_within(&report, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE)
+                    .expect("within the limit")
+                    .into(),
+            ))
             .await
             .expect("send the report");
 
@@ -244,7 +294,8 @@ mod tests {
         let Message::Binary(data) = reply else {
             panic!("expected a binary reply");
         };
-        let decoded: ServerToAgent = frame::decode(&data).expect("decodable");
+        let decoded: ServerToAgent =
+            frame::decode(&data, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE).expect("decodable");
         assert_eq!(decoded.instance_uid, report.instance_uid);
         assert_eq!(decoded.capabilities, ENDPOINT_CAPABILITIES);
     }
@@ -258,6 +309,7 @@ mod tests {
             0,
             EventSender::new(0, event_tx),
             shutdown,
+            opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
         )
         .expect("endpoint starts");
         shutdown_tx.send(true).expect("signal shutdown");

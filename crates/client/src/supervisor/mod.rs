@@ -94,6 +94,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             block.endpoint_port,
             EventSender::new(index, event_tx.clone()),
             shutdown.clone(),
+            config.max_message_size_bytes,
         )?;
 
         let commands = plugin.start(SupervisorContext {

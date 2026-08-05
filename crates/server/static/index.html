@@ -299,9 +299,16 @@
         for (const p of a.packages || []) {
           const cls = p.status === "Installed" ? "green"
             : p.status === "InstallFailed" ? "red"
-            : "amber"; // Installing / InstallPending
-          const label = `pkg: ${esc(p.name)}${p.version ? " " + esc(p.version) : ""}`;
-          const title = p.status === "InstallFailed" && p.error ? esc(p.error) : esc(p.status);
+            : "amber"; // Downloading / Installing / InstallPending
+          let label = `pkg: ${esc(p.name)}${p.version ? " " + esc(p.version) : ""}`;
+          let title = p.status === "InstallFailed" && p.error ? esc(p.error) : esc(p.status);
+          // A download of a few hundred megabytes takes minutes: show it moving rather than
+          // leaving the operator to guess whether it is progressing or wedged.
+          if (p.status === "Downloading") {
+            label += p.download_percent != null ? ` ↓ ${p.download_percent.toFixed(0)}%` : " ↓";
+            const rate = p.download_bytes_per_second;
+            title = rate ? `Downloading — ${(rate / 1048576).toFixed(1)} MiB/s` : "Downloading";
+          }
           chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
         }
         return `<div class="chips">${chips.join("")}</div>`;

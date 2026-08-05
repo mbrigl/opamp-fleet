@@ -52,6 +52,11 @@ pub struct ClientConfig {
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
     pub package_key: Option<Vec<u8>>,
+    /// The largest OpAMP message the Client accepts or sends, on either transport and in either
+    /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
+    /// this default, and asks that it be configurable.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size_bytes: usize,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -258,6 +263,10 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
 
+fn default_max_message_size() -> usize {
+    opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
+}
+
 fn default_stop_timeout_secs() -> u64 {
     10
 }
@@ -280,6 +289,7 @@ impl Default for ClientConfig {
             authorization_override: None,
             packages: None,
             package_key: None,
+            max_message_size_bytes: default_max_message_size(),
             supervisors: Vec::new(),
         }
     }
@@ -316,6 +326,14 @@ impl ClientConfig {
                 )
             })?;
             config.package_key = Some(key);
+        }
+        // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
+        // limit is mandatory, so a value that cannot carry a message fails startup.
+        if config.max_message_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
         }
         Ok(config)
     }
@@ -407,6 +425,25 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
         assert_eq!(disabled.heartbeat_interval_secs, 0);
+    }
+
+    /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
+    /// configurable; zero is not "unlimited" but a limit that could carry nothing, so it fails.
+    #[test]
+    fn the_message_size_limit_defaults_to_the_recommended_value_and_is_configurable() {
+        assert_eq!(
+            ClientConfig::default().max_message_size_bytes,
+            64 * 1024 * 1024
+        );
+        let tightened: ClientConfig =
+            toml::from_str("max_message_size_bytes = 65536").expect("parse");
+        assert_eq!(tightened.max_message_size_bytes, 65536);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_message_size_bytes"), "{err}");
     }
 
     #[test]

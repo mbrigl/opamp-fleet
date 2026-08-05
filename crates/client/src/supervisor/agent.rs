@@ -11,9 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
     AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
-    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageStatus,
-    PackageStatusEnum, PackageStatuses, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
+    PackageDownloadDetails, PackageStatus, PackageStatusEnum, PackageStatuses, PackageType,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -98,6 +99,9 @@ pub struct AgentState {
     package_name: Option<String>,
     /// The package currently installed, persisted across restarts.
     installed_package: Option<InstalledPackage>,
+    /// Progress of the artifact download in flight (ADR-0015), reported as `Downloading` with
+    /// `PackageDownloadDetails`; `None` once the bytes are on disk. `[Development]` upstream.
+    downloading: Option<PackageDownloadDetails>,
     /// The package hash currently downloading/installing, so a repeated offer of the same hash is
     /// not re-entered while it is in flight.
     installing: Option<PackageDownload>,
@@ -156,6 +160,7 @@ impl AgentState {
             send_settings_status: false,
             package_name: None,
             installed_package: None,
+            downloading: None,
             installing: None,
             offered_all_packages_hash: Vec::new(),
             echoed_all_packages_hash: Vec::new(),
@@ -370,8 +375,13 @@ impl AgentState {
                 )
             })
             .unwrap_or_default();
-        let status = if self.installing.is_some() {
-            // A download/install is in flight.
+        let status = if self.downloading.is_some() {
+            // Still fetching the artifact. Reported apart from `Installing` because a download of
+            // a few hundred megabytes is the part that takes minutes — the Server would otherwise
+            // watch a silent `Installing` and have no way to tell progress from a hang.
+            PackageStatusEnum::Downloading
+        } else if self.installing.is_some() {
+            // Downloaded and verified; the Supervisor is applying it.
             PackageStatusEnum::Installing
         } else if !self.package_error.is_empty() {
             // The last attempt failed — a refusal is a report, not a silence.
@@ -395,7 +405,8 @@ impl AgentState {
             server_offered_hash: offered_hash,
             status: status as i32,
             error_message: self.package_error.clone(),
-            ..Default::default()
+            // "Should only be set if status is Downloading" — so it rides exactly that status.
+            download_details: self.downloading,
         };
         PackageStatuses {
             packages: [(name.clone(), package)].into(),
@@ -534,6 +545,26 @@ impl AgentState {
             return;
         };
         self.server_offered = Some((available.version.clone(), available.hash.clone()));
+        // The Baseline distinguishes a `TopLevel` package — the Managed Process's own binary —
+        // from an `Addon`. A Supervisor knows how to replace the former and nothing about the
+        // latter, and installing an Addon the only way this Client can would overwrite the very
+        // binary the addon was meant to extend. So it is refused, and refusing is a *report*: the
+        // aggregate hash is echoed with `InstallFailed`, which both tells the operator why and
+        // stops the Server offering the same bytes forever.
+        if available.r#type == PackageType::Addon as i32 {
+            error!(
+                package = %name,
+                "refusing an addon package: this Client installs top-level packages only"
+            );
+            self.installing = None;
+            self.package_error =
+                "this Client installs top-level packages only; the offered package is an addon"
+                    .to_string();
+            self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+            self.send_package_status = true;
+            handled.send_report = true;
+            return;
+        }
         let installed_hash = self
             .installed_package
             .as_ref()
@@ -571,12 +602,28 @@ impl AgentState {
         handled.package_download = Some(download);
     }
 
+    /// Records how far the artifact download has got (ADR-0015), so the next report carries
+    /// `Downloading` with the details. The Baseline only *permits* these interim reports; without
+    /// them a multi-hundred-megabyte download is indistinguishable from a stuck install.
+    pub fn package_downloading(&mut self, details: PackageDownloadDetails) {
+        self.downloading = Some(details);
+        self.send_package_status = true;
+    }
+
+    /// The artifact is downloaded and verified; what follows is the Supervisor applying it, which
+    /// the Baseline reports as `Installing` rather than `Downloading`.
+    pub fn package_downloaded(&mut self) {
+        self.downloading = None;
+        self.send_package_status = true;
+    }
+
     /// Closes a package's lifecycle the Supervisor applied (ADR-0015): `Ok(version)` records it
     /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
     /// refusal is a report, not a loop.
     pub fn package_applied(&mut self, hash: Vec<u8>, result: Result<String, String>) {
         self.installing = None;
+        self.downloading = None;
         match result {
             Ok(version) => {
                 let installed = InstalledPackage {
@@ -813,6 +860,7 @@ mod tests {
                 config_map: HashMap::from([(
                     String::new(),
                     AgentConfigFile {
+                        role: String::new(),
                         body: body.to_vec(),
                         content_type: String::new(),
                     },
@@ -1018,6 +1066,44 @@ mod tests {
             PackageStatusEnum::Installing as i32
         );
 
+        // While the artifact is on the wire the status is Downloading, carrying how far it has
+        // got — the Baseline's interim reporting, which is what keeps a minutes-long transfer
+        // distinguishable from a stuck install.
+        agent.package_downloading(PackageDownloadDetails {
+            download_percent: 42.5,
+            download_bytes_per_second: 1_048_576.0,
+        });
+        let status = agent
+            .next_report()
+            .package_statuses
+            .expect("statuses")
+            .packages["otelcol"]
+            .clone();
+        assert_eq!(status.status, PackageStatusEnum::Downloading as i32);
+        let details = status.download_details.expect("details while downloading");
+        assert!((details.download_percent - 42.5).abs() < f64::EPSILON);
+        assert!((details.download_bytes_per_second - 1_048_576.0).abs() < f64::EPSILON);
+        assert_eq!(
+            status.server_offered_hash, b"pkg-hash",
+            "the Baseline requires the offered hash while downloading"
+        );
+        assert!(
+            status.error_message.is_empty(),
+            "downloading is not an error"
+        );
+
+        // Bytes in, applying: back to Installing, and the details go with the status they belong
+        // to ("should only be set if status is Downloading").
+        agent.package_downloaded();
+        let status = agent
+            .next_report()
+            .package_statuses
+            .expect("statuses")
+            .packages["otelcol"]
+            .clone();
+        assert_eq!(status.status, PackageStatusEnum::Installing as i32);
+        assert!(status.download_details.is_none());
+
         // A repeat of the same offer while in flight is not re-entered.
         let again = agent.handle(&ServerToAgent {
             packages_available: Some(offer),
@@ -1055,6 +1141,56 @@ mod tests {
             ..Default::default()
         });
         assert!(settled.package_download.is_none(), "already installed");
+    }
+
+    /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
+    /// package is *be* that binary — so an addon offer must be refused rather than installed over
+    /// the process it was meant to extend, and the refusal must be reported.
+    #[test]
+    fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
+        use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        agent.accept_package("otelcol".to_string());
+        let _ = agent.next_report();
+
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        r#type: PackageType::Addon as i32,
+                        version: "2.0.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "/api/v1/packages/otelcol/file".to_string(),
+                            content_hash: b"chash".to_vec(),
+                            ..Default::default()
+                        }),
+                        hash: b"addon-hash".to_vec(),
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg-addon".to_vec(),
+            }),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_none(),
+            "an addon is never downloaded, let alone swapped over the binary"
+        );
+        assert!(handled.send_report, "the refusal is reported at once");
+
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        assert!(
+            status.error_message.contains("addon"),
+            "the reason names what was refused: {}",
+            status.error_message
+        );
+        // A refusal is a report, not a loop: the aggregate is echoed so the offer ends.
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
 
     #[test]

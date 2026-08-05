@@ -152,6 +152,74 @@ async fn no_offer_without_the_capability() {
     );
 }
 
+/// A package is a *program*: an `otelcol-contrib` binary weighs hundreds of megabytes, so the
+/// upload route must not be bounded by the framework's 2 MiB default, and the artifact must reach
+/// the Agent unchanged whatever its size.
+#[tokio::test]
+async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact() {
+    let (server, _scratch) = spawn_with_packages().await;
+
+    // Past axum's 2 MiB default body limit — the limit that used to make a real binary
+    // undeliverable — and not a round number, so a truncation would show.
+    let artifact: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    upload(&server, "otelcol", "1.2.3", &artifact).await;
+
+    let downloaded = reqwest::Client::new()
+        .get(format!(
+            "http://{}/api/v1/packages/otelcol/file",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("download");
+    assert_eq!(
+        downloaded
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(artifact.len().to_string().as_str()),
+        "the length is advertised, so the Agent can size the transfer"
+    );
+    let bytes = downloaded.bytes().await.expect("bytes");
+    assert_eq!(bytes.len(), artifact.len());
+    assert_eq!(bytes.as_ref(), artifact.as_slice(), "byte-identical");
+    assert_eq!(sha256(&artifact).len(), 32);
+}
+
+/// The upload limit is a configured bound, not an accident of the framework: past it the API
+/// refuses rather than buffering whatever arrives.
+#[tokio::test]
+async fn an_artifact_past_the_configured_limit_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(PackageOffering::new(store, String::new())))
+            .with_max_package_size(4096),
+    );
+    let app = server::app(state, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{addr}/api/v1/packages/otelcol?version=1.0.0"
+        ))
+        .body(vec![0u8; 8192])
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 413);
+}
+
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).to_vec()

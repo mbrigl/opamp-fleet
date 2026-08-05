@@ -27,6 +27,10 @@ use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 use crate::packages::PackageStore;
 
+/// The package upload limit in force when nothing configures one — roomy, because a real agent
+/// binary is (see `server.toml`, `max_package_size_bytes`).
+pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::OffersRemoteConfig as u64
@@ -162,6 +166,11 @@ pub struct AppState {
     /// The packages offered to the fleet (ADR-0015); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
+    /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
+    max_message_size: usize,
+    /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
+    /// message, so it is bounded separately and far more generously.
+    max_package_size: usize,
 }
 
 impl AppState {
@@ -183,7 +192,34 @@ impl AppState {
             next_conn: AtomicU64::new(1),
             connection_offer: None,
             packages: None,
+            max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
         })
+    }
+
+    /// Sets the message size limit both transports enforce (the Baseline recommends the default
+    /// [`opamp::frame::DEFAULT_MAX_MESSAGE_SIZE`] and asks that it be configurable).
+    #[must_use]
+    pub fn with_max_message_size(mut self, limit: usize) -> Self {
+        self.max_message_size = limit;
+        self
+    }
+
+    /// The message size limit in force, for the transports to enforce in both directions.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
+    /// Sets the largest package artifact the REST API accepts on upload (ADR-0015).
+    #[must_use]
+    pub fn with_max_package_size(mut self, limit: usize) -> Self {
+        self.max_package_size = limit;
+        self
+    }
+
+    /// The package upload limit in force, for the REST API's package route.
+    pub fn max_package_size(&self) -> usize {
+        self.max_package_size
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -572,25 +608,34 @@ impl AppState {
         })
     }
 
-    /// Creates or replaces a package (ADR-0015), persists it, and wakes every WebSocket loop so a
-    /// matching connected Agent is offered it now.
+    /// Creates or replaces a package (ADR-0015) from a streamed upload, persists it, and wakes
+    /// every WebSocket loop so a matching connected Agent is offered it now.
     pub fn put_package(
         &self,
         name: String,
         version: String,
         addon: bool,
         signature: Option<Vec<u8>>,
-        artifact: Vec<u8>,
+        staged: &std::path::Path,
     ) -> Result<(), String> {
         let store = self
             .packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.put(name.clone(), version, addon, signature, artifact)?;
+        store.put_staged(name.clone(), version, addon, signature, staged)?;
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package stored and offered");
         Ok(())
+    }
+
+    /// Where an upload for `name` is streamed before it becomes a package.
+    pub fn package_staging_path(&self, name: &str) -> Result<std::path::PathBuf, String> {
+        self.packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store()
+            .staging_path(name)
     }
 
     /// Deletes a package; `Ok(false)` when none of that name exists.
@@ -667,6 +712,11 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
                         AgentConfigFile {
                             body: body.clone().into_bytes(),
                             content_type: String::new(),
+                            // `role` arrived with Baseline v0.19.0 and is Agent-type-specific.
+                            // Carrying an operator-chosen value into it changes the REST API's
+                            // Configuration model, which is a public contract — proposed in
+                            // ADR-0012, deliberately left unset until that is decided.
+                            role: String::new(),
                         },
                     )
                 })
@@ -717,10 +767,17 @@ pub struct PackageStatusView {
     pub name: String,
     /// The version the Agent has installed; empty if it has none.
     pub version: String,
-    /// `Installed`, `Installing`, `InstallPending`, or `InstallFailed`.
+    /// `Downloading`, `Installing`, `Installed`, `InstallPending`, or `InstallFailed`.
     pub status: String,
     /// The failure reason when `status` is `InstallFailed`.
     pub error: String,
+    /// How far the artifact download has got, as a percentage. Present only while `Downloading`,
+    /// and only when the download source stated a size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_percent: Option<f64>,
+    /// The download's current rate in bytes per second. Present only while `Downloading`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_second: Option<f64>,
 }
 
 impl PackageStatusView {
@@ -731,13 +788,21 @@ impl PackageStatusView {
             s if s == S::Installing as i32 => "Installing",
             s if s == S::InstallPending as i32 => "InstallPending",
             s if s == S::InstallFailed as i32 => "InstallFailed",
+            s if s == S::Downloading as i32 => "Downloading",
             _ => "Unknown",
         };
+        // The Baseline carries these only with `Downloading`, and a percentage of zero means the
+        // source never said how big the artifact is — not that nothing has arrived.
+        let details = status.download_details.filter(|_| name == "Downloading");
         PackageStatusView {
             name: status.name.clone(),
             version: status.agent_has_version.clone(),
             status: name.to_string(),
             error: status.error_message.clone(),
+            download_percent: details
+                .map(|d| d.download_percent)
+                .filter(|percent| *percent > 0.0),
+            download_bytes_per_second: details.map(|d| d.download_bytes_per_second),
         }
     }
 }
@@ -959,5 +1024,53 @@ mod tests {
             with_undefined,
             ["ReportsStatus", "unknown bits 0x1000000000000000"]
         );
+    }
+
+    /// What an operator sees while a package is on the wire. A status the view does not know
+    /// reads as "Unknown", which is worse than useless during a rollout — so `Downloading` and
+    /// its progress are part of the view, and the progress belongs to that status alone.
+    #[test]
+    fn the_package_view_shows_a_download_in_progress() {
+        use opamp::proto::{PackageDownloadDetails, PackageStatus, PackageStatusEnum};
+
+        let downloading = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 42.5,
+                download_bytes_per_second: 1_048_576.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(downloading.status, "Downloading");
+        assert_eq!(downloading.download_percent, Some(42.5));
+        assert_eq!(downloading.download_bytes_per_second, Some(1_048_576.0));
+
+        // A percentage is only meaningful when the source stated a size; zero means it did not.
+        let sizeless = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 0.0,
+                download_bytes_per_second: 2048.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sizeless.download_percent, None);
+        assert_eq!(sizeless.download_bytes_per_second, Some(2048.0));
+
+        // Every other status carries no progress, whatever the Agent sent.
+        let installing = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Installing as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 99.0,
+                download_bytes_per_second: 1.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(installing.status, "Installing");
+        assert_eq!(installing.download_percent, None);
+        assert_eq!(installing.download_bytes_per_second, None);
     }
 }
