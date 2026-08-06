@@ -480,24 +480,31 @@ mod tests {
         assert!(!marker_path(dir.path()).exists());
     }
 
+    /// A binary that cannot run at all is the failure class no post-restart mechanism can catch,
+    /// because it never gets far enough to count an attempt. Refusing it is the whole reason the
+    /// probe happens before the pointer moves.
     #[test]
-    fn the_probe_refuses_a_binary_that_is_not_this_client() {
+    fn the_probe_refuses_a_binary_that_cannot_run() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // A program that runs happily and says nothing we asked for.
-        let binary = dir.path().join("impostor");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&binary, "#!/bin/sh\necho hello\n").expect("write");
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
-            let err = probe(&binary, "2.0.0").expect_err("an impostor must be refused");
-            assert!(err.contains("not an OpAMP Fleet Client"), "got {err}");
-        }
-
-        // And one that cannot run at all — the class no later mechanism can catch.
         let missing = dir.path().join("not-there");
         assert!(probe(&missing, "2.0.0").is_err());
+    }
+
+    /// A program that runs happily and answers something else: offered under the configured
+    /// package name, and still not this Client. Unix-only because the impostor is a shell script;
+    /// what it proves is platform-independent.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_refuses_a_binary_that_is_not_this_client() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("impostor");
+        std::fs::write(&binary, "#!/bin/sh\necho hello\n").expect("write");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let err = probe(&binary, "2.0.0").expect_err("an impostor must be refused");
+        assert!(err.contains("not an OpAMP Fleet Client"), "got {err}");
     }
 
     #[cfg(unix)]
