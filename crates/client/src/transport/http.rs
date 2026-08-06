@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::RunOutcome;
+use crate::transport::{ReportSink, RunOutcome};
 
 /// The media type the Baseline requires the Client to set.
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
@@ -118,6 +118,14 @@ pub async fn run(
             };
             crate::transport::process_package_downloads(engine, config, &mut sink).await;
             reports = engine.owed_reports();
+            if engine.restart_for_update() {
+                // Send the owed `Installing` and stop: the pointer already points at the new
+                // version, and this process exists only to get out of its way (ADR-0020).
+                if !reports.is_empty() {
+                    let _ = sink.send(reports).await;
+                }
+                return Ok(RunOutcome::RestartForUpdate);
+            }
             if reports.is_empty() {
                 break;
             }

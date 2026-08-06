@@ -35,10 +35,32 @@ pub struct Engine {
     /// Packages awaiting the transport's download and verification (ADR-0015), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
+    /// How the Client updates *itself* (ADR-0020): where its state lives, the archive key, and —
+    /// while this process is a freshly installed version — the marker it must commit. `None` when
+    /// `[self_update]` is absent, in which case the self-Agent accepts no packages anyway.
+    self_update: Option<SelfUpdateState>,
+    /// Set once the Server has answered at all. Reaching the Server is what a new version has to
+    /// do to prove itself: a binary that starts, connects, and is spoken to is running.
+    seen_server: bool,
+    /// Set once a self-update has moved the `current` pointer: the run must end for the service
+    /// manager to start the new version (ADR-0020).
+    restart_for_update: bool,
+}
+
+/// What the Engine needs to install a new version of the Client and to close out one that is on
+/// probation (ADR-0020).
+struct SelfUpdateState {
+    state_dir: std::path::PathBuf,
+    archive_key: Option<String>,
+    /// Present while this process is the new version and has not yet committed itself.
+    probation: Option<Box<crate::selfupdate::UpdateMarker>>,
 }
 
 impl Engine {
-    /// An Engine over Agents without Managed Processes (the self-Agent case, and tests).
+    /// An Engine over Agents without Managed Processes. Since ADR-0020 the Client always builds
+    /// its self-Agent *and* its Supervisors through [`with_processes`](Self::with_processes), so
+    /// this is the tests' constructor — the shape it stands for no longer occurs in production.
+    #[cfg(test)]
     #[must_use]
     pub fn new(agents: Vec<AgentState>) -> Self {
         let (_, events) = mpsc::channel(1);
@@ -67,7 +89,43 @@ impl Engine {
             events,
             pending_connection_offer: None,
             pending_package_downloads: Vec::new(),
+            self_update: None,
+            seen_server: false,
+            restart_for_update: false,
         }
+    }
+
+    /// Arms self-update (ADR-0020): where to write the marker, how to open an encrypted archive,
+    /// and the marker this process must commit if it is itself a freshly installed version.
+    pub fn arm_self_update(
+        &mut self,
+        state_dir: std::path::PathBuf,
+        archive_key: Option<String>,
+        probation: Option<crate::selfupdate::UpdateMarker>,
+    ) {
+        self.self_update = Some(SelfUpdateState {
+            state_dir,
+            archive_key,
+            probation: probation.map(Box::new),
+        });
+    }
+
+    /// Reports a self-update that finished in a previous process (ADR-0020): the install
+    /// necessarily completes across a restart, so the terminal status is owed by whichever
+    /// version came up — the new one saying `Installed`, or the old one saying why it is back.
+    pub fn report_self_update_outcome(&mut self, outcome: &crate::selfupdate::UpdateOutcome) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
+        let hash = hex::decode(&outcome.package_hash_hex).unwrap_or_default();
+        agent.state.package_applied(
+            hash,
+            match &outcome.error {
+                None => Ok(outcome.version.clone()),
+                Some(error) => Err(error.clone()),
+            },
+        );
+        agent.owes_report = true;
     }
 
     /// Restores previously applied connection settings on every Agent (ADR-0014), so a restarted
@@ -111,9 +169,11 @@ impl Engine {
         }
     }
 
-    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0015).
+    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0015),
+    /// or — for the Client's own Agent — installs it as a new version of the Client (ADR-0020).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
+    ///
     pub fn apply_package(
         &mut self,
         index: usize,
@@ -121,6 +181,10 @@ impl Engine {
         version: String,
         hash: Vec<u8>,
     ) {
+        if index == crate::supervisor::SELF_AGENT_INDEX {
+            self.apply_self_update(&staged, version, hash);
+            return;
+        }
         let Some(agent) = self.agents.get_mut(index) else {
             return;
         };
@@ -146,6 +210,57 @@ impl Engine {
                     hash,
                     Err("this agent has no process to install a package into".to_string()),
                 );
+                agent.owes_report = true;
+            }
+        }
+    }
+
+    /// Whether a self-update has moved the `current` pointer and the run must therefore end, so
+    /// the service manager restarts into the new version (ADR-0020).
+    #[must_use]
+    pub fn restart_for_update(&self) -> bool {
+        self.restart_for_update
+    }
+
+    /// Installs a verified artifact as a new version of *this Client* (ADR-0020).
+    ///
+    /// Unlike a Supervisor's install, the outcome cannot be reported from here on success: this
+    /// process is about to stop being the one that runs. Only the failure is terminal now — and it
+    /// is terminal with the previous version still current and still running.
+    fn apply_self_update(&mut self, staged: &std::path::Path, version: String, hash: Vec<u8>) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
+        agent.state.package_downloaded();
+        let Some(update) = &self.self_update else {
+            // Unreachable while the capability is only declared with `[self_update]`, but a
+            // refusal that says so beats an install that should not have been offered.
+            let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+            agent
+                .state
+                .package_applied(hash, Err("self-update is not enabled".to_string()));
+            agent.owes_report = true;
+            return;
+        };
+
+        match crate::selfupdate::install(
+            &update.state_dir,
+            staged,
+            &version,
+            &hash,
+            update.archive_key.as_deref(),
+        ) {
+            Ok(_) => {
+                // `Installing` is already the reported status and the caller flushes it before the
+                // run ends. What comes after the restart reports the outcome.
+                let _ = std::fs::remove_file(staged);
+                self.restart_for_update = true;
+            }
+            Err(e) => {
+                warn!(error = %e, "the Client's self-update failed; staying on this version");
+                let _ = std::fs::remove_file(staged);
+                let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+                agent.state.package_applied(hash, Err(e));
                 agent.owes_report = true;
             }
         }
@@ -229,6 +344,17 @@ impl Engine {
             warn!(agent = %uid, "dropping a reply for an unknown agent");
             return Handled::default();
         };
+        // The Server answered, so this version connected and is being spoken to — which is what a
+        // freshly installed one has to manage to stop being on probation (ADR-0020). Committing
+        // here rather than on a timer means the bar is "it works", not "it survived a clock".
+        if !self.seen_server {
+            self.seen_server = true;
+            if let Some(update) = &mut self.self_update {
+                if let Some(marker) = update.probation.take() {
+                    crate::selfupdate::commit(&update.state_dir, &marker);
+                }
+            }
+        }
         let agent = &mut self.agents[index];
         let mut handled = agent.state.handle(reply);
         if handled.send_report {

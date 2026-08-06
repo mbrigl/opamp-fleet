@@ -70,6 +70,9 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_name == name)
 }
 
+/// What this Client presents: its two Supervisors, plus itself (ADR-0020).
+const AGENTS: usize = 3;
+
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -110,15 +113,21 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let _client = spawn_client(&config_path);
 
     // Both Supervisors appear as their own connected Agents — over the one WebSocket
-    // connection this Client maintains (ADR-0003: routed by instance_uid alone).
-    let agents = wait_until("both agents connected", || {
+    // connection this Client maintains (ADR-0003: routed by instance_uid alone) — and so does the
+    // Client itself, which since ADR-0020 is an Agent whether or not it supervises anything.
+    let agents = wait_until("every agent connected", || {
         let snapshot = state.snapshot();
-        (snapshot.len() == 2 && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
+        (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
     })
     .await;
     assert!(view(&agents, "otelcol").is_some());
     assert!(view(&agents, "stub").is_some());
-    assert_ne!(agents[0].instance_uid, agents[1].instance_uid);
+    assert!(
+        view(&agents, "opamp-fleet-client").is_some(),
+        "the Client is its own Agent (ADR-0020)"
+    );
+    let uids: std::collections::HashSet<_> = agents.iter().map(|a| &a.instance_uid).collect();
+    assert_eq!(uids.len(), AGENTS, "each Agent has its own identity");
 
     // The Foreign Agent runs from the start; the Collector awaits its first configuration.
     let first_stub_pid = wait_until("the stub to run", || stub_pid(&stub_marker)).await;
@@ -137,10 +146,12 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         })
         .expect("distribute the fleet configuration");
 
-    // Both Agents acknowledge APPLIED and are in sync; the processes restarted on the files.
-    wait_until("both agents in sync", || {
+    // Every Agent acknowledges APPLIED and is in sync; the processes restarted on the files. The
+    // fleet-wide Configuration has an empty Selector, so it reaches the Client's own Agent too —
+    // which stores it and is done, having no process to restart.
+    wait_until("every agent in sync", || {
         let snapshot = state.snapshot();
-        (snapshot.len() == 2
+        (snapshot.len() == AGENTS
             && snapshot
                 .iter()
                 .all(|a| a.in_sync && a.remote_config_status == "APPLIED"))
@@ -175,17 +186,27 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     })
     .await;
 
-    // The probed process version arrived for both: the collector plugin probes `--version` by
-    // itself, the command plugin because the block sets `version_args`. The stub prints its
-    // SemVer inside free text ("stub_agent version 9.9.9 (test build)").
-    wait_until("both agents report the probed version", || {
+    // The probed process version arrived for both *supervised* Agents: the collector plugin
+    // probes `--version` by itself, the command plugin because the block sets `version_args`. The
+    // stub prints its SemVer inside free text ("stub_agent version 9.9.9 (test build)").
+    wait_until("both supervised agents report the probed version", || {
         let snapshot = state.snapshot();
-        snapshot
+        ["otelcol", "stub"]
             .iter()
-            .all(|a| a.service_version == "9.9.9")
+            .all(|name| view(&snapshot, name).is_some_and(|a| a.service_version == "9.9.9"))
             .then_some(())
     })
     .await;
+
+    // The Client's own Agent reports the Client's version instead — never a Managed Process's,
+    // because it has none (ADR-0020 makes it visible; ADR-0009 supplies the version).
+    let snapshot = state.snapshot();
+    let client_agent = view(&snapshot, "opamp-fleet-client").expect("the client's own agent");
+    assert_ne!(client_agent.service_version, "9.9.9");
+    assert!(
+        !client_agent.service_version.is_empty(),
+        "the Client reports its own baked version"
+    );
 
     // The operator-defined attributes arrived and Selectors act on them: a Configuration
     // targeting `role = edge` matches only the stub Supervisor (ADR-0012).

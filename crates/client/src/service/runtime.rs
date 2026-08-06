@@ -25,6 +25,17 @@ pub struct RunSpec {
     pub state_dir: Option<PathBuf>,
 }
 
+/// How a daemon run ended, which decides how the process leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The operator stopped it. A clean exit, and the service manager leaves it stopped.
+    Normal,
+    /// A self-update switched to a new version (ADR-0020). The process must exit *non-zero* so
+    /// the manager's restart-on-failure brings the new version up: none of the three managers
+    /// offers "restart on success", and issuing the restart from inside the unit deadlocks.
+    RestartForUpdate,
+}
+
 /// A multi-use shutdown handle: resolves once shutdown is requested, immediately when it already
 /// was — the transports await it at several points in their loops.
 #[derive(Debug, Clone)]
@@ -60,7 +71,7 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("cannot build the tokio runtime: {e}"))?;
-    runtime.block_on(async {
+    let exit = runtime.block_on(async {
         let (tx, shutdown) = shutdown_channel();
         tokio::spawn(async move {
             shutdown_signal().await;
@@ -69,7 +80,15 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
         #[cfg(unix)]
         tokio::spawn(ignore_sighup());
         run_until_shutdown(spec, shutdown).await
-    })
+    })?;
+    if exit == Exit::RestartForUpdate {
+        // Not an error, but it has to look like one: systemd's `Restart=on-failure` and launchd's
+        // `KeepAlive{SuccessfulExit:false}` are the only "bring it back" either offers, and a
+        // clean exit is precisely what tells them not to (ADR-0010, ADR-0020).
+        tracing::info!("exiting so the service manager starts the newly installed version");
+        std::process::exit(crate::selfupdate::EXIT_RESTART_FOR_UPDATE);
+    }
+    Ok(())
 }
 
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
@@ -77,11 +96,35 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
 ///
 /// # Errors
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.
-pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result<(), String> {
+pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result<Exit, String> {
     heal_torn_pointer();
     let mut config = load_effective_config(&spec)?;
 
+    // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
+    // a freshly installed version on probation, or the previous one brought back after a rollback.
+    let startup = crate::selfupdate::on_start(&config.state_dir)?;
+    let (probation, owed_outcome) = match startup {
+        crate::selfupdate::Startup::Ordinary => (None, None),
+        crate::selfupdate::Startup::OnProbation(marker) => (Some(*marker), None),
+        crate::selfupdate::Startup::Outcome(outcome) => (None, Some(*outcome)),
+        // `current` now names the previous version and this one is not it. Nothing is served
+        // from here; the manager restarts and the version it starts reports the failure.
+        crate::selfupdate::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
+    };
+
     let mut engine = supervisor::build_engine(&config, &shutdown)?;
+    if config.self_update.is_some() {
+        engine.arm_self_update(
+            config.state_dir.clone(),
+            config.packages.as_ref().and_then(|p| p.archive_key.clone()),
+            probation,
+        );
+    }
+    if let Some(outcome) = &owed_outcome {
+        // The install finished in another process; this one owes the Server its terminal status.
+        engine.report_self_update_outcome(outcome);
+        crate::selfupdate::clear_outcome(&config.state_dir);
+    }
     if let Some(stored) = connection::load(&config.state_dir) {
         // A restarted Client reports the persisted settings APPLIED, so the Server does not
         // re-offer what it already runs (ADR-0014).
@@ -101,7 +144,8 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             }
         };
         match outcome {
-            RunOutcome::Shutdown => return Ok(()),
+            RunOutcome::Shutdown => return Ok(Exit::Normal),
+            RunOutcome::RestartForUpdate => return Ok(Exit::RestartForUpdate),
             // Verified connection settings took effect (ADR-0014): re-resolve the effective
             // configuration — endpoint, credential, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
