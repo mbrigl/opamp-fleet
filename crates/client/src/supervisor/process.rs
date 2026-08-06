@@ -225,10 +225,26 @@ impl Runner {
         info!(supervisor = %self.name, version = %version, binary = %binary.display(), "package binary staged; restarting");
 
         let started = self.try_spawn().await;
-        if let Err(e) = &started {
-            warn!(supervisor = %self.name, error = %e, "the new binary would not start");
+        // "Nothing started" has two meanings, and only one of them is a failed install. A plugin
+        // with no process to run — a Collector that has not been configured yet — has not rejected
+        // the artifact: the binary is in place and will be started by the configuration when it
+        // arrives. `ApplyConfig` has always drawn this distinction; the package path must too, or
+        // installing onto a host that is not yet configured deletes what it just installed.
+        let nothing_to_run = started.is_err() && (self.build)().is_none();
+        match (&started, nothing_to_run) {
+            (Err(_), true) => {
+                info!(supervisor = %self.name, version = %version, "package installed; nothing to run until a configuration arrives");
+            }
+            (Err(e), false) => {
+                warn!(supervisor = %self.name, error = %e, "the new binary would not start");
+            }
+            _ => {}
         }
-        let outcome = self.gate(started.ok(), child, shutdown).await;
+        let outcome = if nothing_to_run {
+            GraceOutcome::Ok
+        } else {
+            self.gate(started.ok(), child, shutdown).await
+        };
         match (&outcome, has_backup) {
             // Roll the binary back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
@@ -359,9 +375,18 @@ impl Runner {
             }
             Err(e) => {
                 warn!(supervisor = %self.name, program = %spec.program.display(), error = %e, "cannot spawn");
+                // What the Server should read is the *situation*, not the syscall. A binary that
+                // is not there — a first install that failed and was undone, or a program never
+                // installed — is a Supervisor with no process, and saying so is more use to an
+                // operator than "spawn failed".
+                let status = if e.kind() == std::io::ErrorKind::NotFound {
+                    "no process installed"
+                } else {
+                    "spawn failed"
+                };
                 self.events
                     .send(ProcessEvent::Health(unhealthy(
-                        "spawn failed".to_string(),
+                        status.to_string(),
                         format!("cannot spawn {}: {e}", spec.program.display()),
                     )))
                     .await;
@@ -737,11 +762,44 @@ mod tests {
         let _ = harness.task.await;
     }
 
+    /// A Supervisor whose program is not on the machine keeps running and says so. The wording is
+    /// the point: what the Server should read is the situation — there is no process — not the
+    /// syscall that reported it. This is the state a failed *first* install leaves behind, once
+    /// the artifact it could not run has been removed again.
     #[tokio::test]
-    async fn a_spawn_failure_is_reported_not_fatal() {
+    async fn a_missing_program_is_reported_as_no_process_not_fatal() {
         let mut harness = start(|| {
             Some(ProcessSpec {
                 program: PathBuf::from("/nonexistent/definitely-not-here"),
+                args: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+            })
+        });
+        let health = next_health(&mut harness.events).await;
+        assert!(!health.healthy);
+        assert_eq!(health.status, "no process installed");
+        assert!(
+            health.last_error.contains("definitely-not-here"),
+            "the detail still names the path: {}",
+            health.last_error
+        );
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// A program that exists but cannot be executed is a different situation, and keeps the
+    /// wording that describes it.
+    #[tokio::test]
+    async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("not-executable");
+        std::fs::write(&program, b"data").expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let mut harness = start(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
                 args: Vec::new(),
                 env: Vec::new(),
                 working_dir: None,
@@ -1025,6 +1083,68 @@ mod tests {
             program,
             "the installed binary is the member, not the archive"
         );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// Bringing a host into the fleet the other way round: the Supervisor is configured, the
+    /// program is not installed yet, and the Server delivers it. A plugin with nothing to run —
+    /// a Collector awaiting its configuration — must not turn that into a failed install, which
+    /// would delete the binary that was just put in place.
+    #[tokio::test]
+    async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("otelcol");
+        assert!(
+            !binary.exists(),
+            "the program is not installed on this host"
+        );
+
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, b"#!/bin/sh\nexec sleep 600\n").expect("stage");
+
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            // No configuration yet, so the plugin has nothing to run.
+            build: Box::new(|| None),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await; // "awaiting configuration"
+
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "1.0.0".to_string(),
+                hash: b"first".to_vec(),
+            })
+            .await
+            .expect("send");
+
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"first".to_vec());
+        assert_eq!(
+            result,
+            Ok("1.0.0".to_string()),
+            "the artifact is installed; running it is the configuration's business"
+        );
+        assert!(binary.exists(), "the installed binary stays on disk");
 
         harness.shutdown_tx.send(true).expect("shutdown");
         let _ = harness.task.await;
