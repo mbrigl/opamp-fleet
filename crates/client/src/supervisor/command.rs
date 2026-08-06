@@ -61,6 +61,7 @@ impl Plugin for CommandPlugin {
             apply_grace: ctx.apply_grace,
             // A package (ADR-0015) swaps this command's binary.
             binary: Some(settings.command.clone()),
+            archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.

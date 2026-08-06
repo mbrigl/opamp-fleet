@@ -103,6 +103,9 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
     pub apply_grace: Duration,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018); `None` when none is
+    /// configured. Client-wide, like the package verification key.
+    pub archive_key: Option<String>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.

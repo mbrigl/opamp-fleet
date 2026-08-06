@@ -30,6 +30,11 @@ base64.workspace = true
 rustls.workspace = true
 ring.workspace = true
 rustls-pemfile.workspace = true
+# ADR-0018: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# encrypted `.7z` with the key from `[packages] archive_key`.
+flate2.workspace = true
+tar.workspace = true
+sevenz-rust2.workspace = true
 
 # ADR-0011: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
@@ -43,6 +48,9 @@ windows-service.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# Tests build the `.7z` fixtures they then open; the shipped Client only ever decompresses, so the
+# encoder rides in dev-dependencies alone (ADR-0018).
+sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.
 server = { path = "../server" }
 axum.workspace = true

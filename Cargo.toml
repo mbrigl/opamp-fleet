@@ -30,8 +30,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
-# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007).
+# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007) — and,
+# on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0018).
 flate2 = "1"
+# Opening a `.7z` package artifact, encrypted or not (ADR-0018). Pure Rust; default features are
+# off because they pull `bzip2`, which binds to C — `aes256` is the RustCrypto AES this needs, and
+# LZMA/LZMA2 decoding is in the base. Keeps the C-free build chain of ADR-0006 and ADR-0007.
+sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256"] }
+# Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust, no C toolchain, which
+# is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and never
+# writes a path the archive chose.
+tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0013).
 base64 = "0.22"
 # Constant-time credential comparison on the Server (ADR-0013).

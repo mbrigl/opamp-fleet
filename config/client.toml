@@ -46,6 +46,12 @@ state_dir = "client-state"
 # (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
 # [packages]
 # verification_key = "<hex-encoded Ed25519 public key>"
+# archive_key = "the key an encrypted .7z was packed with"   # (ADR-0018) opens an encrypted
+#                          # artifact. One secret for the fleet — a single archive serves every
+#                          # Agent — and never the [auth] credential, which the Server rotates on
+#                          # its own (ADR-0014): a rotation would leave every archive unopenable.
+#                          # The Server never learns this key; the artifact stays encrypted
+#                          # wherever it is stored and is opened only on the host that runs it.
 
 # Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
 # username and password together. The Authorization header rides every plain-HTTP request and
@@ -92,7 +98,10 @@ state_dir = "client-state"
 #                          # `binary`, health-gated on apply_grace_secs, and rolled back if it
 #                          # will not stay up. *Which* artifact is the Server's decision — give
 #                          # the package a Selector there (PUT /api/v1/packages/<name>/selector),
-#                          # so a rollout is aimed centrally instead of from this file
+#                          # so a rollout is aimed centrally instead of from this file.
+#                          # An artifact that is a .tar.gz is unpacked here (ADR-0018): the member
+#                          # whose file name matches `binary` is what gets installed, so an
+#                          # upstream release can be uploaded exactly as published
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:

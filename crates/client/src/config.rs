@@ -244,6 +244,13 @@ pub struct PackagesConfig {
     /// signature against it; when unset, an unsigned package is accepted on its content hash alone
     /// and a *signed* one is refused (there is nothing to check it with).
     pub verification_key: Option<String>,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018). Unset means artifacts are
+    /// expected unencrypted; an encrypted one then fails to install, naming this key.
+    ///
+    /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
+    /// credential from `[auth]`, which the Server rotates on its own (ADR-0014): a rotation would
+    /// leave every packed archive unopenable.
+    pub archive_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

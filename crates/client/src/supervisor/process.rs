@@ -38,6 +38,8 @@ pub struct Runner {
     /// The Managed Process's binary — what an `ApplyPackage` swap replaces (ADR-0015). `None` for
     /// a plugin with no single swappable binary, which then reports a package `InstallFailed`.
     pub binary: Option<PathBuf>,
+    /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
+    pub archive_key: Option<String>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -211,7 +213,7 @@ impl Runner {
                 ));
             }
         };
-        if let Err(e) = install_executable(&staged, &binary) {
+        if let Err(e) = install_executable(&staged, &binary, self.archive_key.as_deref()) {
             // Put the old binary back before reporting: the process must not be left with none.
             if has_backup {
                 let _ = std::fs::rename(&backup, &binary);
@@ -466,17 +468,43 @@ enum GraceOutcome {
 /// Writes `bytes` to `path` atomically (temp + rename) and marks it executable on Unix — the
 /// binary swap a package apply performs (ADR-0015). A rename is atomic within a directory, so a
 /// crash mid-write never leaves a half-written binary in place.
-/// Installs a downloaded artifact as `path`: copied in a stream (the download lives in the state
+/// Installs a downloaded artifact as `path`: written in a stream (the download lives in the state
 /// directory, which may be on another filesystem, so this cannot be a rename), made executable,
 /// then renamed into place — the rename being what makes the swap atomic.
-fn install_executable(artifact: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+///
+/// The artifact may be the program or an archive holding it (ADR-0018). An archive is opened here,
+/// where the binary's name is known, and the member of that name is what gets installed — nothing
+/// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
+/// its author published.
+fn install_executable(
+    artifact: &std::path::Path,
+    path: &std::path::Path,
+    archive_key: Option<&str>,
+) -> Result<(), String> {
     let temp = path.with_extension("staged");
-    let mut source = std::fs::File::open(artifact)
-        .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
     let mut target = std::fs::File::create(&temp)
         .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-    std::io::copy(&mut source, &mut target)
-        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    match crate::archive::detect(artifact)? {
+        crate::archive::Kind::Raw => {
+            let mut source = std::fs::File::open(artifact)
+                .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
+            std::io::copy(&mut source, &mut target)
+                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        }
+        kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
+            let member = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
+            let written = match kind {
+                crate::archive::Kind::SevenZ => {
+                    crate::archive::extract_7z(artifact, &member, &mut target, archive_key)?
+                }
+                _ => crate::archive::extract_tar_gz(artifact, &member, &mut target)?,
+            };
+            info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the package archive");
+        }
+    }
     drop(target);
     #[cfg(unix)]
     {
@@ -545,6 +573,7 @@ mod tests {
             stop_timeout: Duration::from_secs(5),
             apply_grace,
             binary: None,
+            archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(build),
@@ -816,6 +845,7 @@ mod tests {
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(200),
             binary: Some(binary.clone()),
+            archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -865,6 +895,93 @@ mod tests {
         let _ = harness.task.await;
     }
 
+    /// The case ADR-0018 exists for: what upstream publishes is a `.tar.gz`, not a bare binary.
+    /// The Supervisor takes the member named after its own binary and installs that.
+    #[tokio::test]
+    async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        std::fs::write(&binary, "#!/bin/sh\nexec sleep 600\n").expect("write");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        // A release-shaped archive: the program under a versioned directory, next to other files.
+        let program = b"#!/bin/sh\n# v2\nexec sleep 600\n";
+        let staged = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&staged).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (name, content) in [
+                ("agent-2.0.0/LICENSE", b"text".as_slice()),
+                ("agent-2.0.0/agent", program.as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, content)
+                    .expect("append");
+            }
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+
+        let run_binary = binary.clone();
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: run_binary.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                })
+            }),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await;
+
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged: staged.clone(),
+                version: "2.0.0".to_string(),
+                hash: b"tar-hash".to_vec(),
+            })
+            .await
+            .expect("send");
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"tar-hash".to_vec());
+        assert_eq!(
+            result,
+            Ok("2.0.0".to_string()),
+            "the unpacked program stays up"
+        );
+        assert_eq!(
+            std::fs::read(&binary).expect("read"),
+            program,
+            "the installed binary is the member, not the archive"
+        );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
     #[tokio::test]
     async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -882,6 +999,7 @@ mod tests {
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(500),
             binary: Some(binary.clone()),
+            archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
