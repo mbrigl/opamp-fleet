@@ -48,5 +48,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0017](0017-selector-targeted-packages.md) | Selector-targeted packages, chosen by the Server rather than named on each host | 🟢 accepted |
 | [0018](0018-packages-imported-from-a-url.md) | A package is an uploaded archive or a URL the Agents fetch — unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
 | [0019](0019-one-step-back.md) | One step back — the package store remembers the version it replaced | 🟢 accepted |
-| [0020](0020-client-self-update.md) | The Client updates itself — its own Agent, a staged version, and a restart it does not issue | 🟡 proposed |
+| [0020](0020-client-self-update.md) | The Client updates itself — its own Agent, a staged version, and a restart it does not issue | 🟢 accepted |
 

@@ -1,6 +1,6 @@
 # ADR-0020: The Client updates itself — its own Agent, a staged version, and a restart it does not issue
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-06
 - **Deciders:** Markus Brigl
 
