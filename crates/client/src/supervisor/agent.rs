@@ -96,6 +96,9 @@ pub struct AgentState {
     /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0015).
     /// Which package that is, is the Server's choice (ADR-0017) — this side only consents.
     accepts_packages: bool,
+    /// The only package name this Agent will install (ADR-0020); `None` takes whichever top-level
+    /// package the Server selects, which is what a Supervisor does (ADR-0017).
+    expected_package: Option<String>,
     /// The name of the top-level package the Server last offered. Learned from the offer, not
     /// configured: it keys the reported `PackageStatuses` map, which the Baseline requires to name
     /// every package the Agent has or is processing.
@@ -166,6 +169,7 @@ impl AgentState {
             connection_settings_status: None,
             send_settings_status: false,
             accepts_packages: false,
+            expected_package: None,
             offered_name: None,
             installed_package: None,
             downloading: None,
@@ -191,6 +195,17 @@ impl AgentState {
         self.installed_package = self.storage.load_package();
         self.declare_capability(AgentCapabilities::AcceptsPackages);
         self.declare_capability(AgentCapabilities::ReportsPackageStatuses);
+    }
+
+    /// Opts this Agent into package delivery for **one named package only** (ADR-0020) — what the
+    /// Client's own Agent does. A Supervisor takes whichever top-level package the Server selects
+    /// for it (ADR-0017), because the worst case there is a Managed Process that will not start
+    /// and is rolled back. The Client has no such safety net: a package with an empty Selector
+    /// reaches every consenting Agent, and one written over this binary takes the host out of
+    /// reach for good. So this side matches the name and refuses everything else.
+    pub fn accept_packages_named(&mut self, name: String) {
+        self.accept_packages();
+        self.expected_package = Some(name);
     }
 
     /// The package this Agent is processing or has: the one being installed, else the installed
@@ -611,6 +626,26 @@ impl AgentState {
             return;
         }
         let name = name.clone();
+        // The Client's own Agent takes one named package and nothing else (ADR-0020). A
+        // fleet-wide package with an empty Selector reaches every consenting Agent, so without
+        // this an artifact meant for a Collector would be written over this binary and the host
+        // would be gone. Refused and reported, never silently ignored.
+        if let Some(expected) = &self.expected_package {
+            if &name != expected {
+                error!(
+                    offered = %name, expected = %expected,
+                    "refusing a package this Agent was not configured to take"
+                );
+                self.installing = None;
+                self.offer_error = format!(
+                    "this Agent installs only the package {expected:?}; the Server offered {name:?}"
+                );
+                self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+                self.send_package_status = true;
+                handled.send_report = true;
+                return;
+            }
+        }
         // A usable offer clears whatever the last unusable one complained about.
         self.offer_error.clear();
         self.offered_name = Some(name.clone());
@@ -1069,6 +1104,73 @@ mod tests {
         );
         this.handle(&command_with_config);
         assert!(!this.take_pending_restart());
+    }
+
+    /// ADR-0020: the Client's own Agent takes one named package and refuses everything else. A
+    /// package with an empty Selector reaches every consenting Agent (ADR-0017), so without this
+    /// the first fleet-wide Collector artifact an operator uploads would be written over the
+    /// Client and take the host out of reach.
+    #[test]
+    fn the_self_agent_refuses_a_package_it_was_not_configured_to_take() {
+        use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+        let _ = agent.next_report();
+
+        let offer = |name: &str| PackagesAvailable {
+            packages: [(
+                name.to_string(),
+                PackageAvailable {
+                    version: "2.0.0".to_string(),
+                    file: Some(DownloadableFile {
+                        download_url: "/x".to_string(),
+                        content_hash: b"chash".to_vec(),
+                        ..Default::default()
+                    }),
+                    hash: b"pkg-hash".to_vec(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            all_packages_hash: b"agg-1".to_vec(),
+        };
+
+        // A Collector's package, offered fleet-wide: refused, and nothing is downloaded.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer("otelcol")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_none(),
+            "nothing is fetched for a package this Agent does not take"
+        );
+        assert!(handled.send_report, "the refusal is reported, not silent");
+        let statuses = agent
+            .next_report()
+            .package_statuses
+            .expect("a package status");
+        assert!(
+            statuses.error_message.contains("opamp-client"),
+            "the refusal names what this Agent would accept: {:?}",
+            statuses.error_message
+        );
+        assert_eq!(
+            statuses.server_provided_all_packages_hash, b"agg-1",
+            "the aggregate is echoed so the Server stops re-offering it"
+        );
+
+        // The configured one is taken.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer("opamp-client")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("the named package is taken");
+        assert_eq!(download.name, "opamp-client");
     }
 
     #[test]

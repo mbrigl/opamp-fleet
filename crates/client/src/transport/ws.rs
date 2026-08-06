@@ -34,6 +34,9 @@ enum Served {
     ConnectionLost,
     /// Verified connection settings took effect (ADR-0014); the runtime reconnects with them.
     Reconfigured,
+    /// A self-update switched to a new version (ADR-0020); the run ends and the process asks the
+    /// service manager for a restart.
+    RestartForUpdate,
 }
 
 pub async fn run(
@@ -97,6 +100,7 @@ pub async fn run(
                         return Ok(RunOutcome::Shutdown);
                     }
                     Served::Reconfigured => return Ok(RunOutcome::Reconfigured),
+                    Served::RestartForUpdate => return Ok(RunOutcome::RestartForUpdate),
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
             }
@@ -239,6 +243,10 @@ async fn serve(
                             && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
                         {
                             return Served::ConnectionLost;
+                        }
+                        // The `Installing` above is the last thing this version says (ADR-0020).
+                        if engine.restart_for_update() {
+                            return Served::RestartForUpdate;
                         }
                     }
                     Message::Close(_) => return Served::ConnectionLost,

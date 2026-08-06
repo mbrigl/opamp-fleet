@@ -46,6 +46,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Prove that this executable is an OpAMP Fleet Client and say which version (ADR-0020).
+    ///
+    /// Run as a child process on a freshly staged binary before the `current` pointer moves to
+    /// it. Two things are being asked at once: *does it run at all* on this host — the failure
+    /// class no post-restart mechanism can catch, because a binary that cannot exec never gets
+    /// far enough to notice anything — and *is it this program*, since a package offered under
+    /// the configured name is still only a name until something answers for it. Hidden, because
+    /// it is a machine-to-machine handshake and not an operator command.
+    #[command(hide = true)]
+    SelfCheck,
 }
 
 /// Arguments for `run`.

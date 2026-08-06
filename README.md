@@ -253,6 +253,21 @@ $ client service uninstall                                   # never deletes lay
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
   control on Windows); after a crash the manager restarts the service, after an explicit stop it
   stays down.
+- **Self-update** ([ADR-0020](docs/adr/0020-client-self-update.md)): the Client is always its own
+  Agent, so the Server can see which version each host runs. Letting the Server *replace* that
+  version is opt-in per Client and names the package it will take — anything else is refused,
+  because a package aimed at the whole fleet would otherwise be written over the Client itself:
+
+  ```toml
+  [self_update]
+  package = "opamp-client"   # only this package is ever installed over this binary
+  ```
+
+  A new version is staged beside the running one under `versions/`, run once to prove it is this
+  program at the version offered, and switched to by moving `current`. The Client then exits and
+  the service manager starts the new version; one that does not reach the Server within a few
+  restarts is rolled back to its predecessor, and either outcome is reported to the Server by
+  whichever version came up.
 
 Real service registration cannot run in CI. The manual smoke checklist per platform: install →
 start → status → stop → start → status → uninstall, then the same with a second `--instance`;

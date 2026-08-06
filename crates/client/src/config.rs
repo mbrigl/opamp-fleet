@@ -48,6 +48,9 @@ pub struct ClientConfig {
     /// Package verification (ADR-0015); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
+    /// Consent for the Server to replace this Client's own binary (ADR-0020); absent — the
+    /// default — means the Client's Agent accepts no packages at all.
+    pub self_update: Option<SelfUpdateConfig>,
     /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
@@ -253,6 +256,21 @@ pub struct PackagesConfig {
     pub archive_key: Option<String>,
 }
 
+/// The `[self_update]` block (ADR-0020): consent for the Server to replace *this Client's* binary.
+///
+/// Absent — the default — the Client's own Agent declares no package capability at all, and no
+/// offer can reach it. Present, it takes exactly the package named here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfUpdateConfig {
+    /// The name of the package that carries this Client. **Required**, and the whole of the
+    /// protection: a package with an empty Selector reaches every Agent that accepts packages
+    /// (ADR-0017), so without a name to match, the first fleet-wide Collector artifact an operator
+    /// uploads would be installed over the Client and take the host out of reach. An offer under
+    /// any other name is refused and reported, never applied.
+    pub package: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -314,6 +332,7 @@ impl Default for ClientConfig {
             auth: None,
             authorization_override: None,
             packages: None,
+            self_update: None,
             package_key: None,
             max_message_size_bytes: default_max_message_size(),
             supervisors: Vec::new(),
@@ -451,6 +470,30 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
         assert_eq!(disabled.heartbeat_interval_secs, 0);
+    }
+
+    /// ADR-0020: self-update is off unless the file says otherwise, and saying so means naming the
+    /// package. A section without a name does not parse — an operator who half-configured this
+    /// would otherwise have consented to receive whatever the fleet receives.
+    #[test]
+    fn self_update_is_off_by_default_and_must_name_its_package() {
+        assert!(ClientConfig::default().self_update.is_none());
+        let untouched: ClientConfig =
+            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+        assert!(untouched.self_update.is_none());
+
+        let armed: ClientConfig =
+            toml::from_str("[self_update]\npackage = \"opamp-client\"\n").expect("parse");
+        assert_eq!(armed.self_update.expect("armed").package, "opamp-client");
+
+        assert!(
+            toml::from_str::<ClientConfig>("[self_update]\n").is_err(),
+            "a section without a package name is not consent to anything"
+        );
+        assert!(
+            toml::from_str::<ClientConfig>("[self_update]\npackge = \"x\"\n").is_err(),
+            "a typo fails startup rather than silently disabling self-update"
+        );
     }
 
     /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be

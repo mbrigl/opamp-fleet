@@ -41,7 +41,8 @@ state_dir = "client-state"
 # Optional package verification (ADR-0015). With a key set, every Server-offered package MUST
 # carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
 # its content hash alone and a signed one is refused. A [[supervisor]] block opts into package
-# delivery by naming the package that updates its binary (its `package = "..."` key below).
+# delivery with `accepts_packages = true` below; *which* artifact it then receives is the Server's
+# decision, expressed as that package's Selector (ADR-0017), never a key in this file.
 # Generate a key and sign artifacts with the `opamp-package-sign` helper
 # (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
 # [packages]
@@ -112,6 +113,7 @@ state_dir = "client-state"
 # type = "collector"
 # name = "otelcol-plain"
 # binary = "/usr/local/bin/otelcol"
+# accepts_packages = true
 
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
 # Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
@@ -121,6 +123,7 @@ state_dir = "client-state"
 # type = "command"
 # name = "fluent-bit"
 # command = "/opt/fluent-bit/bin/fluent-bit"
+# accepts_packages = true
 # args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/fluent-bit-conf"]
 # working_dir = "/var/lib/fluent-bit"   # optional
 # [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)

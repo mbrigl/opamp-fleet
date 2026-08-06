@@ -24,6 +24,13 @@ use crate::storage::Storage;
 use agent::AgentState;
 use ports::{EventSender, Plugin, SupervisorContext};
 
+/// The Engine index of the Client's own Agent (ADR-0020). It is built first, so a Supervisor's
+/// index is its block's position plus this.
+pub const SELF_AGENT_INDEX: usize = 0;
+
+/// What a Supervisor's block position must be shifted by to reach its Engine index.
+const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
+
 /// The compiled-in plugin registry (ADR-0011). A new process kind is a new module and one line
 /// here — the supervision core stays untouched (goal 8).
 fn registry() -> Vec<Box<dyn Plugin>> {
@@ -47,19 +54,31 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         }
         state
     };
-    if config.supervisors.is_empty() {
-        let storage = Storage::new(config.state_dir.clone())
-            .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
-        let state = AgentState::new(config.name.clone(), storage)
-            .map_err(|e| format!("cannot restore the agent state: {e}"))?
-            .with_attributes(config.agent_attributes(None));
-        return Ok(Engine::new(vec![declare_heartbeat(state)]));
-    }
-
     let plugins = registry();
     let (event_tx, events) = mpsc::channel(64);
-    let mut agents = Vec::with_capacity(config.supervisors.len());
-    for (index, block) in config.supervisors.iter().enumerate() {
+    let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
+
+    // The Client is always its own Agent (ADR-0020), whether or not it supervises anything. It
+    // used to exist only when nothing else did, which left the Client invisible on exactly the
+    // hosts that manage something — and left the Server with nobody to offer the Client's own
+    // package to. It is index 0 so the Supervisors that follow keep a stable, obvious offset.
+    let storage = Storage::new(config.state_dir.clone())
+        .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
+    let mut self_state = declare_heartbeat(
+        AgentState::new(config.name.clone(), storage)
+            .map_err(|e| format!("cannot restore the agent state: {e}"))?
+            .with_attributes(config.agent_attributes(None)),
+    );
+    // Consenting to be updated is its own decision, made per Client, and it names the package it
+    // will take — anything else is refused rather than written over this binary (ADR-0020).
+    if let Some(self_update) = &config.self_update {
+        self_state.accept_packages_named(self_update.package.clone());
+    }
+    agents.push((self_state, None));
+
+    for (block_index, block) in config.supervisors.iter().enumerate() {
+        // The event channel is keyed by position in `agents`, and the self-Agent holds 0.
+        let index = block_index + SELF_AGENT_OFFSET;
         let plugin = plugins
             .iter()
             .find(|p| p.kind() == block.kind)

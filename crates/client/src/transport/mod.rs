@@ -66,7 +66,15 @@ pub async fn process_package_downloads<S: ReportSink>(
             }
         };
         match result {
-            Ok(staged) => engine.apply_package(index, staged, version, hash),
+            Ok(staged) => {
+                engine.apply_package(index, staged, version, hash);
+                if engine.restart_for_update() {
+                    // A self-update moved the `current` pointer (ADR-0020). Whatever else was
+                    // queued is moot: this process is about to be replaced, and the caller ends
+                    // the run once the owed `Installing` has gone out.
+                    break;
+                }
+            }
             Err(e) => {
                 tracing::warn!(package = %name, error = %e, "package download or verification failed");
                 engine.package_download_failed(index, hash, e);
@@ -84,6 +92,10 @@ pub enum RunOutcome {
     /// Verified connection settings took effect (ADR-0014): the runtime re-resolves the
     /// effective configuration and reconnects — possibly on the other transport.
     Reconfigured,
+    /// A self-update installed a new version of the Client and moved the `current` pointer
+    /// (ADR-0020). The run ends here and the process exits asking for a restart; what comes back
+    /// up is the new version, which reports the outcome.
+    RestartForUpdate,
 }
 
 /// Reconnect backoff: exponential from one second, capped at a minute.

@@ -8,6 +8,7 @@ mod config;
 mod connection;
 mod engine;
 mod packages;
+mod selfupdate;
 mod service;
 mod storage;
 mod supervisor;
@@ -51,6 +52,13 @@ fn main() {
             args,
         ),
         Some(Command::Service { action }) => service_command(&cli.config, cli.instance, &action),
+        // Answer for this executable so a self-update can prove it before pointing at it
+        // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
+        // configuration, no state directory, and no Server.
+        Some(Command::SelfCheck) => {
+            println!("{}{}", selfupdate::SELF_CHECK_TOKEN, version::version());
+            Ok(())
+        }
     };
     if let Err(e) = result {
         eprintln!("{e}");
