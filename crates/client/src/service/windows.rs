@@ -111,15 +111,39 @@ fn run_service() -> Result<(), String> {
 
     let result = tokio_runtime.block_on(runtime::run_until_shutdown(spec, shutdown));
 
+    // Report the *outcome*, not a blanket success. The SCM decides whether to run the recovery
+    // actions from the exit code in this final status: a `Stopped` carrying `Win32(0)` is a clean
+    // stop and is never retried, whatever went wrong. Reporting zero here is what made the
+    // `RestartPolicy::OnFailure` of ADR-0010 unreachable on Windows even once failure actions
+    // exist, and it is what a future self-update (which ends its run deliberately) depends on.
+    if let Err(e) = &result {
+        error!(error = %e, "the daemon exited with an error; reporting it to the SCM");
+    }
+    let exit_code = if result.is_ok() {
+        ServiceExitCode::Win32(0)
+    } else {
+        ServiceExitCode::ServiceSpecific(SERVICE_SPECIFIC_FAILURE)
+    };
     status_handle
-        .set_service_status(status(ScmState::Stopped, ServiceControlAccept::empty()))
+        .set_service_status(ServiceStatus {
+            exit_code,
+            ..status(ScmState::Stopped, ServiceControlAccept::empty())
+        })
         .map_err(|e| format!("cannot report Stopped: {e}"))?;
     result
 }
 
+/// The service-specific exit code reported when the daemon body returns an error. Any non-zero
+/// value marks the stop as a failure; a service-specific one keeps it from being read as a Win32
+/// error code that means something else.
+const SERVICE_SPECIFIC_FAILURE: u32 = 1;
+
 /// Build a `ServiceStatus` for the given state and accepted controls. The wait hint bounds how
 /// long the SCM grants for a pending transition; the shutdown path finishes well inside it
 /// (system shutdown grants ~5 s total — `WaitToKillServiceTimeout`).
+///
+/// The exit code is success; the one place a failure is reported overrides it explicitly, because
+/// every *other* status here is a transition rather than an outcome.
 fn status(current_state: ScmState, controls_accepted: ServiceControlAccept) -> ServiceStatus {
     ServiceStatus {
         service_type: SERVICE_TYPE,

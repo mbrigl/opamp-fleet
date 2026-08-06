@@ -32,6 +32,34 @@ that are available on the Server **for this Agent**"* — the offer is per-Agent
 `all_packages_hash` gates re-offering per Agent as well. The Server already composes a per-Agent
 remote configuration this way; a single global package offer has no reason to exist.
 
+### Undoing a rollout
+
+A rollout can be aimed, watched, and — when the new binary will not stay up — undone by the Agent
+itself: the Supervisor restores the binary it replaced and reports `InstallFailed` (ADR-0015). The
+other kind of undo is the one an operator asks for an hour later: *the new version starts fine and
+behaves badly, put the fleet back.*
+
+A store that keeps **one** package per name answers that only by producing the old artifact again —
+a new upload or a new source replaces what was there, and nothing remembers what it was. So an
+operator either re-uploads the file they hope they still have, or re-points the source at the
+previous release. Neither is hard, and for a **referenced** package (ADR-0017) it is genuinely
+cheap: the previous URL and its checksum are both on the release page, so a rollback is two fields.
+There is also a shape that works without any change: keep `otelcol-0.156` and `otelcol-0.157` as
+separate packages and move the Selector between them.
+
+So this is not a capability gap. It is three smaller things:
+
+- **It is not one action.** "Put it back" requires the operator to know what "back" was, at the
+  moment they are least calm.
+- **It is not recorded.** Nothing on the Server says what this package was before, so nobody can
+  answer "what changed here?" without external notes.
+- **It is asymmetric.** A referenced package rolls back from public information; an uploaded one
+  rolls back only if someone kept the file.
+
+The protocol has no objection: a `PackageAvailable` is *"an offer from the Server to the Agent to
+install a new package or initiate an **upgrade or downgrade** of a package that the Agent already
+has"*. A rollback is not a special mechanism — it is the ordinary offer, naming the older artifact.
+
 ## Decision
 
 We will give a **Package a Selector**, exactly as a Configuration has one, and make the **Server**
@@ -79,6 +107,36 @@ from a file on each host.
    the body); a package without a Selector behaves exactly as one with an empty Selector, so no
    stored package and no generated client breaks.
 
+### One step back
+
+We will have the package store remember **exactly one** previous version per package, and add
+`POST /api/v1/packages/{name}/rollback`, which makes it the current one again.
+
+5. **One step, not a catalogue.** Replacing a package's artifact — by upload or by
+   source — moves the descriptor it replaces into `previous`. A rollback swaps `current` and
+   `previous`, so the thing rolled back *from* becomes the next `previous` and pressing the button
+   twice returns to where it started. That is what one button should mean.
+
+6. **What is remembered costs what it costs.** For a referenced package it is a URL, a
+   checksum, a version and any headers — nothing measurable. For an uploaded one the previous
+   artifact file is kept alongside the current one, so a package occupies at most twice its size.
+   Bounded, and the bound is the reason for keeping one rather than many: an agent binary is
+   hundreds of megabytes, and a Server that accumulates every version an operator ever pushed
+   becomes an artifact registry by accident. A fleet that wants a catalogue should point at one —
+   which is exactly what a referenced package does.
+
+7. **A rollback changes only what is offered, never whom.** The Selector belongs to the
+   package and is untouched: which Agents a package reaches is a separate decision from which bytes
+   they get, and mixing the two would make an undo do more than it says.
+
+8. **The fleet view shows what "back" is.** A rollback button that does not say what it
+   will install is a dare, so the package list carries the previous version and, for a referenced
+   package, its source. An operator sees `0.157.0 ← 0.156.0` before choosing.
+
+9. **A package with no previous version cannot be rolled back**, and the API says so
+   (`409`) rather than silently doing nothing. That is the state of every package at its first
+   upload.
+
 ## Alternatives considered
 
 - **Leave targeting to `client.toml`.** Rejected. It works — the platform case is solved by naming
@@ -116,6 +174,27 @@ from a file on each host.
   those hosts were chosen. A Selector over reported attributes survives re-identification and is
   self-documenting — and it is already the project's vocabulary.
 
+- **Re-upload or re-point instead of rolling back.** The honest baseline, and it is why the one-step
+  rollback is small. It costs an operator two fields for a referenced package, and for an uploaded
+  one it costs whatever it costs to still have the file. Rejected because the moment it matters is
+  an incident, and an incident is exactly when "find the old artifact" is worst — but it is a close
+  call, and without the rollback nothing is broken.
+- **Keep every version, with a retention policy.** The complete answer, and a much larger one: it
+  needs a version key on every package, a listing per package, garbage collection, and disk
+  accounting nobody asked for. It also turns the Server into a small artifact registry, which the
+  specification does not ask it to be. Rejected in favour of the one step that answers the actual
+  question; a fleet with a registry already has referenced packages.
+- **Model rollback as a Selector move between per-version packages.** Works without code, and is
+  genuinely good practice: `otelcol-0.156` and `otelcol-0.157` side by side, the Selector deciding.
+  Rejected as *the* answer because it makes every rollout a two-package dance and leaves the fleet's
+  state spread across package names — but it stays a perfectly reasonable way to work, and this
+  decision does not take it away.
+- **Roll back automatically when health degrades after an install.** Tempting, and far more than an
+  undo button: it needs a definition of "degrades" that is not "the process exited" (that case is
+  already handled by the apply grace), a window over which to judge it, and a way to stop a flapping
+  fleet from oscillating between two versions. Rejected as a different decision with its own risks,
+  not as a bad idea.
+
 ## Sources / Prior art
 
 - [OpAMP specification § Packages (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
@@ -124,6 +203,11 @@ from a file on each host.
   functionality of the Agent"*: the per-Agent offer (a name mapped to one offered version and hash
   *for this Agent*), which is both the constraint resolution satisfies and the licence for holding
   what is not offered.
+
+- [OpAMP specification § PackageAvailable (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
+  — *"an offer from the Server to the Agent to install a new package or initiate an upgrade or
+  downgrade of a package that the Agent already has"*: a downgrade is the ordinary offer, so nothing
+  on the wire changes for a rollback.
 
 - [`opamp-go`](https://github.com/open-telemetry/opamp-go) — checked as the behavioural oracle: its
   example Server only logs `PackagesAvailable`/`ServerProvidedAllPackagesHash` and never offers a
@@ -135,6 +219,12 @@ from a file on each host.
   so an operator learns one targeting mechanism, not two.
 - [ADR-0015](0015-package-delivery-for-managed-processes.md) — the delivery, verification, and
   health-gating this leaves untouched; only *who is offered what* is decided here.
+
+- [ADR-0015](0015-package-delivery-for-managed-processes.md) — the Agent-side rollback the one-step
+  rollback is deliberately *not*: that one restores a binary that would not start, within seconds,
+  without an operator. This one is a decision a human makes later, about a binary that runs.
+- [ADR-0017](0017-package-artifacts.md) — referenced packages, which make the previous
+  version free to remember and, for many fleets, already make rolling back a two-field edit.
 
 ## Consequences
 
@@ -167,7 +257,22 @@ from a file on each host.
   previous artifact" and a silent downgrade would be worse), but "remove from the Selector" reading
   as "leave it as it is" will surprise someone.
 
-- Follow-ups: a deliberate rollback — pinning a fleet back to a previous artifact — is a re-upload,
-  because the store keeps one version per package name. Version history in the package store is a
-  separate decision. So is a bulk restart across a selected set of Agents, which the fleet view's
-  unused checkboxes already suggest.
+- Follow-ups: a bulk restart across a selected set of Agents, which the fleet view's unused
+  checkboxes already suggest.
+
+- Positive: undoing a rollout is one action that names what it will do, instead of a search for an
+  artifact during an incident.
+- Positive: the Server can answer "what was here before?", which is the smallest useful form of a
+  rollout record.
+- Negative / trade-offs: an uploaded package occupies up to twice its size on the Server. For a
+  fleet with several large packages that is real disk, and there is no setting to opt out — keeping
+  the previous version is the whole feature.
+- Negative / trade-offs: "one step" is a promise that will be tested. The first time someone rolls
+  back twice expecting to reach a version from last week, they will find themselves back where they
+  started. The fleet view showing exactly one previous version is what has to make that obvious.
+- Negative / trade-offs: a rollback is a new offer like any other, so it travels at the speed of the
+  control loop — Agents pick it up on their next exchange, and one that is offline stays on the new
+  version until it returns. Nothing here makes an undo faster than a rollout.
+- Follow-ups: a rollout record worth the name — who changed a package, when, and to what — which is
+  a broader question than packages and would touch Configurations too. And automatic rollback on
+  post-install health, which needs its own definition of failure.

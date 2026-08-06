@@ -40,7 +40,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟢 accepted |
 | [0010](0010-client-os-service.md) | The Client as a multi-instance native OS service, installed and run through its own CLI | 🟢 accepted |
 | [0011](0011-supervisor-mode-core-and-plugins.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins that own their process kind, n Agents over one connection | 🟢 accepted |
-| [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟡 proposed |
+| [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
 | [0013](0013-agent-admission-on-the-opamp-endpoint.md) | Agent admission on the OpAMP endpoint — optional proofs, each enforced once configured, proving fleet membership | 🟢 accepted |
 | [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
 | [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |

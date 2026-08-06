@@ -11,6 +11,7 @@ pub mod manager;
 pub mod runtime;
 #[cfg(windows)]
 pub mod windows;
+mod windows_restart;
 
 /// Whether an action targets the machine's service manager or the current user's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

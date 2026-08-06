@@ -133,6 +133,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             name: "fleet".to_string(),
             selector: Default::default(),
             body: "receivers: {}\n".to_string(),
+            role: String::new(),
         })
         .expect("distribute the fleet configuration");
 
@@ -217,6 +218,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             name: "edge-extra".to_string(),
             selector: [("role".to_string(), "edge".to_string())].into(),
             body: "processors: {}\n".to_string(),
+            role: String::new(),
         })
         .expect("distribute the targeted configuration");
     wait_until("the stub to apply both entries", || {

@@ -1,6 +1,6 @@
 # ADR-0012: Selector-targeted Configurations and the OpenAPI-described REST API
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 
@@ -186,8 +186,7 @@ stored Configuration without it and every generated client keeps working unchang
 
 ### The content role
 
-- **Leave `role` unset, as the Baseline bump did.** Rejected as an end state, though it is where the
-  code stands until this ADR is decided.
+- **Leave `role` unset, as the Baseline bump did.** Rejected as an end state.
   It leaves goal 7's heterogeneous fleet unable to receive a certificate or a config fragment, and
   leaves a field of the protocol permanently unexpressed, which goals 12 and 13 push against.
 - **A separate `supplementary` boolean on the Configuration resource.** Rejected. It reads more
