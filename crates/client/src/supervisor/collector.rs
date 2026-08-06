@@ -56,6 +56,7 @@ impl Plugin for CollectorPlugin {
             apply_grace: ctx.apply_grace,
             // A package (ADR-0015) swaps this Collector binary.
             binary: Some(settings.binary.clone()),
+            archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || {

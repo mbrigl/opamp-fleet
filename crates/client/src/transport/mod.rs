@@ -179,7 +179,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let mut state = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
-        state.accept_package("otelcol".to_string());
+        state.accept_packages();
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
         let config = ClientConfig {

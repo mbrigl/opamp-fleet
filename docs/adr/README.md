@@ -44,4 +44,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0013](0013-agent-admission-on-the-opamp-endpoint.md) | Agent admission on the OpAMP endpoint — optional proofs, each enforced once configured, proving fleet membership | 🟢 accepted |
 | [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
 | [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |
+| [0016](0016-what-a-package-is-and-how-it-is-aimed.md) | What a package is, and how the Server — not the host — aims it at Agents | 🟢 accepted |
+| [0017](0017-package-artifacts.md) | A package's artifacts — an uploaded archive or a URL the Agents fetch, unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
 

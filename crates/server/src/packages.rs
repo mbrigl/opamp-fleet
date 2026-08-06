@@ -11,11 +11,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use opamp::proto::{DownloadableFile, Headers, PackageAvailable, PackageType, PackagesAvailable};
+use opamp::proto::{
+    AgentDescription, DownloadableFile, Header, Headers, PackageAvailable, PackageType,
+    PackagesAvailable,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::configs::validate_name;
+use crate::configs::{matches, validate_name};
 
 /// A stored package: its metadata. The artifact itself stays on disk (`<name>.bin`) and is
 /// streamed to whoever asks — a program weighs hundreds of megabytes, and a fleet server holding
@@ -33,6 +36,24 @@ pub struct Package {
     pub signature: Option<Vec<u8>>,
     /// The artifact's size in bytes, for the fleet view and the logs.
     pub size: u64,
+    /// The Selector (ADR-0012 semantics, ADR-0016): equality pairs that must all match an
+    /// attribute the Agent reported. **Empty matches every Agent** — which is what every package
+    /// stored before Selectors existed has, so it keeps behaving as it did.
+    pub selector: BTreeMap<String, String>,
+    /// Where the artifact lives when it is **not** here (ADR-0017). `None` is an uploaded package,
+    /// whose bytes this Server holds and serves; `Some` is a reference, offered to Agents as the
+    /// address it names — the Server never downloads it and has nothing to serve.
+    pub source: Option<Source>,
+}
+
+/// An artifact that lives somewhere else (ADR-0017): the address Agents fetch it from, and what
+/// they must send to be allowed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub url: String,
+    /// Sent with the download — a token for a private source. It reaches every Agent the package
+    /// targets, which is the exposure the operator accepts by using one.
+    pub headers: BTreeMap<String, String>,
 }
 
 impl Package {
@@ -48,10 +69,39 @@ impl Package {
         hasher.finalize().to_vec()
     }
 
-    /// This package as a wire `PackageAvailable`; `download_base` is the URL prefix the artifact is
-    /// served under, so the Agent's `download_url` is `{base}/{name}/file`. Empty `download_base`
-    /// yields a path the Agent resolves against its own OpAMP endpoint.
+    /// This package as a wire `PackageAvailable`.
+    ///
+    /// An uploaded package is offered from this Server: `download_base` prefixes the artifact
+    /// endpoint, and an empty prefix yields a path the Agent resolves against its own OpAMP
+    /// endpoint. A **referenced** package is offered as the address it names, with whatever headers
+    /// the operator gave — the Baseline's Download Server "may be on the same host as the OpAMP
+    /// Server or a different host", and this is that other host (ADR-0017).
     fn to_available(&self, download_base: &str, headers: Option<Headers>) -> PackageAvailable {
+        let file = match &self.source {
+            Some(source) => DownloadableFile {
+                download_url: source.url.clone(),
+                content_hash: self.content_hash.clone(),
+                signature: self.signature.clone().unwrap_or_default(),
+                // The Server's own credential has no business at someone else's address; what
+                // travels is what the operator said that source needs.
+                headers: (!source.headers.is_empty()).then(|| Headers {
+                    headers: source
+                        .headers
+                        .iter()
+                        .map(|(key, value)| Header {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                }),
+            },
+            None => DownloadableFile {
+                download_url: format!("{download_base}/api/v1/packages/{}/file", self.name),
+                content_hash: self.content_hash.clone(),
+                signature: self.signature.clone().unwrap_or_default(),
+                headers,
+            },
+        };
         PackageAvailable {
             r#type: if self.addon {
                 PackageType::Addon as i32
@@ -59,15 +109,20 @@ impl Package {
                 PackageType::TopLevel as i32
             },
             version: self.version.clone(),
-            file: Some(DownloadableFile {
-                download_url: format!("{download_base}/api/v1/packages/{}/file", self.name),
-                content_hash: self.content_hash.clone(),
-                signature: self.signature.clone().unwrap_or_default(),
-                headers,
-            }),
+            file: Some(file),
             hash: self.package_hash(),
         }
     }
+}
+
+/// One package as the REST API lists it (ADR-0016): what it is and whom it targets.
+pub struct PackageSummary {
+    pub name: String,
+    pub version: String,
+    pub addon: bool,
+    pub selector: BTreeMap<String, String>,
+    /// The address an Agent fetches this from when the Server does not hold it (ADR-0017).
+    pub source_url: Option<String>,
 }
 
 /// Metadata as persisted next to the artifact (`<name>.json`); the artifact is `<name>.bin`.
@@ -80,6 +135,16 @@ struct PackageMeta {
     content_hash_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_hex: Option<String>,
+    /// The Selector (ADR-0016). Absent in a file written before Selectors existed, which reads as
+    /// empty — the whole fleet, exactly what that package did.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    selector: BTreeMap<String, String>,
+    /// The source of a referenced package (ADR-0017); absent for an uploaded one, which is what
+    /// every package written before this existed is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_headers: BTreeMap<String, String>,
 }
 
 /// The persistent package store: one `<name>.json` + `<name>.bin` pair per package under
@@ -112,17 +177,29 @@ impl PackageStore {
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
             validate_name(&meta.name)
                 .map_err(|e| format!("invalid package name in {}: {e}", path.display()))?;
-            let artifact_path = dir.join(format!("{}.bin", meta.name));
             let content_hash = hex::decode(&meta.content_hash_hex)
                 .map_err(|e| format!("invalid content hash in {}: {e}", path.display()))?;
-            // Re-hash by streaming: the check must not depend on the artifact fitting in memory.
-            let (size, actual) = hash_file(&artifact_path)?;
-            if actual != content_hash {
-                return Err(format!(
-                    "package {:?}: artifact does not match its recorded content hash",
-                    meta.name
-                ));
-            }
+            let source = meta.source_url.clone().map(|url| Source {
+                url,
+                headers: meta.source_headers.clone(),
+            });
+            // An uploaded artifact is re-hashed by streaming, so a corrupt one never ships and the
+            // check never depends on its size. A referenced one has nothing here to check: its
+            // hash is the operator's word, verified by every Agent that downloads it (ADR-0017).
+            let size = match &source {
+                Some(_) => 0,
+                None => {
+                    let artifact_path = dir.join(format!("{}.bin", meta.name));
+                    let (size, actual) = hash_file(&artifact_path)?;
+                    if actual != content_hash {
+                        return Err(format!(
+                            "package {:?}: artifact does not match its recorded content hash",
+                            meta.name
+                        ));
+                    }
+                    size
+                }
+            };
             let signature = match &meta.signature_hex {
                 Some(hex) => Some(
                     hex::decode(hex)
@@ -139,6 +216,8 @@ impl PackageStore {
                     content_hash,
                     signature,
                     size,
+                    selector: meta.selector,
+                    source,
                 },
             );
         }
@@ -148,13 +227,20 @@ impl PackageStore {
         })
     }
 
-    /// Package names and versions, in name order (the REST list view — never the artifact bytes).
-    pub fn list(&self) -> Vec<(String, String)> {
+    /// Every package's name, version, addon flag, and Selector, in name order — the REST list
+    /// view; never the artifact bytes.
+    pub fn list(&self) -> Vec<PackageSummary> {
         self.packages
             .read()
             .expect("packages lock")
             .values()
-            .map(|p| (p.name.clone(), p.version.clone()))
+            .map(|p| PackageSummary {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                addon: p.addon,
+                selector: p.selector.clone(),
+                source_url: p.source.as_ref().map(|s| s.url.clone()),
+            })
             .collect()
     }
 
@@ -165,6 +251,8 @@ impl PackageStore {
             .read()
             .expect("packages lock")
             .get(name)
+            // A referenced package is not served from here; the Agents were given its address.
+            .filter(|p| p.source.is_none())
             .map(|p| self.dir.join(format!("{}.bin", p.name)))
     }
 
@@ -217,12 +305,19 @@ impl PackageStore {
         if size == 0 {
             return Err("the package artifact is empty; refusing to distribute it".to_string());
         }
+        // A new artifact for an existing package keeps that package's Selector: replacing the
+        // bytes must never silently widen a targeted rollout to the whole fleet.
+        let selector = self.selector_of(name);
         let meta = PackageMeta {
             name: name.to_string(),
             version: version.to_string(),
             addon,
             content_hash_hex: hex::encode(&content_hash),
             signature_hex: signature.as_ref().map(hex::encode),
+            selector: selector.clone(),
+            // Bytes arrived: this package is held here now, whatever it referred to before.
+            source_url: None,
+            source_headers: BTreeMap::new(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         let artifact = self.dir.join(format!("{name}.bin"));
@@ -238,9 +333,98 @@ impl PackageStore {
                 content_hash,
                 signature,
                 size,
+                selector,
+                source: None,
             },
         );
         Ok(())
+    }
+
+    /// A stored package's Selector for the REST views; `None` when no such package exists.
+    pub fn selector_of_package(&self, name: &str) -> Option<BTreeMap<String, String>> {
+        self.packages
+            .read()
+            .expect("packages lock")
+            .get(name)
+            .map(|p| p.selector.clone())
+    }
+
+    /// Points a package at an artifact that lives somewhere else (ADR-0017): no bytes are stored
+    /// or fetched, and Agents are given `url` — with `headers`, when the source needs them — plus
+    /// the `content_hash` the operator supplied, which is the only thing that will check what they
+    /// receive.
+    ///
+    /// Creates the package when it does not exist, and replaces an uploaded one's bytes with the
+    /// reference. An existing Selector is kept: re-pointing a targeted package must not widen it.
+    ///
+    /// # Errors
+    /// Returns an error when the name is invalid, the hash is not a SHA-256, or the metadata cannot
+    /// be persisted.
+    pub fn set_source(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        content_hash: Vec<u8>,
+        signature: Option<Vec<u8>>,
+        source: Source,
+    ) -> Result<(), String> {
+        validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
+        if content_hash.len() != 32 {
+            return Err(
+                "the content hash must be a SHA-256: 64 hex characters, as published in a                  release's checksums file"
+                    .to_string(),
+            );
+        }
+        if !source.url.starts_with("http://") && !source.url.starts_with("https://") {
+            return Err(format!(
+                "the source url {:?} must start with http:// or https://",
+                source.url
+            ));
+        }
+        let selector = self.selector_of(name);
+        let meta = PackageMeta {
+            name: name.to_string(),
+            version: version.to_string(),
+            addon,
+            content_hash_hex: hex::encode(&content_hash),
+            signature_hex: signature.as_ref().map(hex::encode),
+            selector: selector.clone(),
+            source_url: Some(source.url.clone()),
+            source_headers: source.headers.clone(),
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        // Bytes this Server was holding are no longer what the fleet gets; keeping them would
+        // serve an artifact nobody is offered.
+        let artifact = self.dir.join(format!("{name}.bin"));
+        if artifact.exists() {
+            let _ = std::fs::remove_file(&artifact);
+        }
+        self.packages.write().expect("packages lock").insert(
+            name.to_string(),
+            Package {
+                name: name.to_string(),
+                version: version.to_string(),
+                addon,
+                content_hash,
+                signature,
+                size: 0,
+                selector,
+                source: Some(source),
+            },
+        );
+        Ok(())
+    }
+
+    /// The Selector a stored package already carries, or empty when it is new.
+    fn selector_of(&self, name: &str) -> BTreeMap<String, String> {
+        self.packages
+            .read()
+            .expect("packages lock")
+            .get(name)
+            .map(|p| p.selector.clone())
+            .unwrap_or_default()
     }
 
     /// Creates or replaces a package from bytes already in hand — the shape the tests and any
@@ -259,12 +443,17 @@ impl PackageStore {
         }
         let content_hash = Sha256::digest(&artifact).to_vec();
         let size = artifact.len() as u64;
+        let selector = self.selector_of(&name);
         let meta = PackageMeta {
             name: name.clone(),
             version: version.clone(),
             addon,
             content_hash_hex: hex::encode(&content_hash),
             signature_hex: signature.as_ref().map(hex::encode),
+            selector: selector.clone(),
+            // Bytes arrived: this package is held here now, whatever it referred to before.
+            source_url: None,
+            source_headers: BTreeMap::new(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.bin"), &artifact)?;
@@ -278,6 +467,8 @@ impl PackageStore {
                 content_hash,
                 signature,
                 size,
+                selector,
+                source: None,
             },
         );
         Ok(())
@@ -299,22 +490,30 @@ impl PackageStore {
         Ok(true)
     }
 
-    /// The whole offer: every package as a `PackageAvailable`, plus `all_packages_hash` — the
-    /// Baseline's "aggregate of all packages names and content". `None` when the store is empty.
+    /// One Agent's offer: the packages whose Selector matches it, plus the `all_packages_hash` —
+    /// the Baseline's "aggregate of all packages names and content" — over *that* set (ADR-0016).
+    /// `Ok(None)` when nothing matches, which is what an Agent outside every Selector must see;
+    /// `Err` when the targeting is ambiguous and the Server refuses to guess.
+    ///
+    /// The Baseline calls this "the packages that are available on the Server **for this Agent**",
+    /// so both the map and its aggregate are per-Agent; the aggregate is what gates re-offering,
+    /// and computing it over the whole store would re-offer an Agent packages it never gets.
     /// `download_base` prefixes each `download_url`; `headers` (the `[auth]` credential) ride the
     /// download so it is authenticated like every other request.
-    pub fn offer(
+    pub fn offer_for(
         &self,
+        description: Option<&AgentDescription>,
         download_base: &str,
         headers: Option<Headers>,
-    ) -> Option<PackagesAvailable> {
+    ) -> Result<Option<PackagesAvailable>, String> {
         let packages = self.packages.read().expect("packages lock");
-        if packages.is_empty() {
-            return None;
+        let matching = resolve(&packages, description)?;
+        if matching.is_empty() {
+            return Ok(None);
         }
-        Some(PackagesAvailable {
-            packages: packages
-                .values()
+        Ok(Some(PackagesAvailable {
+            packages: matching
+                .iter()
                 .map(|p| {
                     (
                         p.name.clone(),
@@ -322,13 +521,54 @@ impl PackageStore {
                     )
                 })
                 .collect(),
-            all_packages_hash: aggregate_hash(packages.values()),
-        })
+            all_packages_hash: aggregate_hash(matching.iter().copied()),
+        }))
     }
 
-    /// The aggregate hash alone, to gate re-offering without building the whole message.
-    pub fn all_packages_hash(&self) -> Vec<u8> {
-        aggregate_hash(self.packages.read().expect("packages lock").values())
+    /// The aggregate hash for one Agent, to gate re-offering without building the whole message.
+    /// Empty when nothing matches or the targeting is ambiguous — in both cases the Agent is
+    /// offered nothing, and has nothing to be in sync with.
+    pub fn all_packages_hash_for(&self, description: Option<&AgentDescription>) -> Vec<u8> {
+        let packages = self.packages.read().expect("packages lock");
+        match resolve(&packages, description) {
+            Ok(matching) if !matching.is_empty() => aggregate_hash(matching.into_iter()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Sets a package's Selector (ADR-0016). Which Agents that newly reaches — or stops reaching —
+    /// follows from state on their next exchange; nothing is pushed from here.
+    pub fn set_selector(
+        &self,
+        name: &str,
+        selector: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let mut packages = self.packages.write().expect("packages lock");
+        if !packages.contains_key(name) {
+            return Err(format!("no package {name:?}"));
+        }
+        let mut package = packages
+            .remove(name)
+            .expect("the package was just looked up");
+        package.selector = selector;
+        let meta = PackageMeta {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            addon: package.addon,
+            content_hash_hex: hex::encode(&package.content_hash),
+            signature_hex: package.signature.as_ref().map(hex::encode),
+            selector: package.selector.clone(),
+            source_url: package.source.as_ref().map(|s| s.url.clone()),
+            source_headers: package
+                .source
+                .as_ref()
+                .map(|s| s.headers.clone())
+                .unwrap_or_default(),
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        let written = self.write_atomic(&format!("{name}.json"), &json);
+        packages.insert(name.to_string(), package);
+        written
     }
 
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
@@ -358,6 +598,45 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
         size += read as u64;
     }
     Ok((size, hasher.finalize().to_vec()))
+}
+
+/// Which packages one Agent is offered (ADR-0016): every matching addon, and **one** top-level
+/// package — the Baseline knows "normally only one top-level package", and a Supervisor has one
+/// binary to replace.
+///
+/// When several top-level packages match, the **most specific Selector wins**: the one naming the
+/// most attributes. That is what makes the pattern an operator actually wants work — a fleet-wide
+/// package with an empty Selector, and a narrower one aimed at the hosts a rollout starts on, which
+/// overrides it for exactly those. A tie between two equally specific Selectors is the one case
+/// with no defensible answer, so it is refused and reported rather than guessed.
+fn resolve<'a>(
+    packages: &'a BTreeMap<String, Package>,
+    description: Option<&AgentDescription>,
+) -> Result<Vec<&'a Package>, String> {
+    let (top_level, addons): (Vec<&Package>, Vec<&Package>) = packages
+        .values()
+        .filter(|p| matches(&p.selector, description))
+        .partition(|p| !p.addon);
+
+    let mut chosen: Option<&Package> = None;
+    for package in &top_level {
+        match chosen {
+            None => chosen = Some(package),
+            Some(current) if package.selector.len() > current.selector.len() => {
+                chosen = Some(package)
+            }
+            Some(current) if package.selector.len() == current.selector.len() => {
+                return Err(format!(
+                    "packages {:?} and {:?} are equally specific for this Agent; \
+                     narrow one of their Selectors — an Agent has one binary to replace",
+                    current.name, package.name
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    Ok(chosen.into_iter().chain(addons).collect())
 }
 
 /// The aggregate over all packages — name and content — in name order (the map iterates sorted).
@@ -391,9 +670,13 @@ mod tests {
                 )
                 .expect("put");
             assert!(!store.is_empty());
-            assert_eq!(
-                store.list(),
-                vec![("otelcol".to_string(), "1.2.3".to_string())]
+            let listed = store.list();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].name, "otelcol");
+            assert_eq!(listed[0].version, "1.2.3");
+            assert!(
+                listed[0].selector.is_empty(),
+                "a new package targets everyone"
             );
             let path = store.artifact_path("otelcol").expect("an artifact path");
             assert_eq!(std::fs::read(&path).expect("read"), b"binary");
@@ -422,7 +705,7 @@ mod tests {
                 b"one".to_vec(),
             )
             .expect("put a");
-        let before = store.all_packages_hash();
+        let before = store.all_packages_hash_for(None);
         store
             .put(
                 "b".to_string(),
@@ -432,7 +715,7 @@ mod tests {
                 b"two".to_vec(),
             )
             .expect("put b");
-        let after = store.all_packages_hash();
+        let after = store.all_packages_hash_for(None);
         assert_ne!(before, after, "a new package changes the aggregate");
 
         // Re-putting the same content yields the same aggregate — the hash is content-defined.
@@ -445,7 +728,7 @@ mod tests {
                 b"one".to_vec(),
             )
             .expect("re-put a");
-        assert_eq!(store.all_packages_hash(), after);
+        assert_eq!(store.all_packages_hash_for(None), after);
     }
 
     #[test]
@@ -453,7 +736,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         assert!(
-            store.offer("", None).is_none(),
+            store
+                .offer_for(None, "", None)
+                .expect("no ambiguity")
+                .is_none(),
             "an empty store offers nothing"
         );
         store
@@ -466,9 +752,10 @@ mod tests {
             )
             .expect("put");
         let offer = store
-            .offer("https://fleet.example:4320", None)
+            .offer_for(None, "https://fleet.example:4320", None)
+            .expect("no ambiguity")
             .expect("offer");
-        assert_eq!(offer.all_packages_hash, store.all_packages_hash());
+        assert_eq!(offer.all_packages_hash, store.all_packages_hash_for(None));
         let available = &offer.packages["otelcol"];
         assert_eq!(available.version, "1.2.3");
         assert_eq!(

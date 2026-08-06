@@ -185,12 +185,19 @@
       </section>
 
       <section id="packages-card" class="card config">
-        <h2>Packages — a software artifact offered to every Agent whose Supervisor names it; verified (content hash, and signature when a key is configured), then swapped and health-gated. Packages are fleet-wide — no Selector.</h2>
+        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
           <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
+          <input id="package-sha256" placeholder="sha256 of the artifact (from the release's checksums file)" autocomplete="off" />
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
@@ -200,6 +207,8 @@
         </div>
         <div class="config-actions">
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
+          <button id="package-source" class="btn btn-ghost">Use source url</button>
+          <button id="package-target" class="btn btn-ghost">Set selector</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
           <span id="package-error" class="err"></span>
@@ -209,6 +218,12 @@
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+      </div>
+
+      <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
+        <span id="selection-count" class="sub"></span>
+        <button id="restart-selected" class="btn btn-ghost">⟳ Restart selected</button>
+        <span id="selection-result" class="sub"></span>
       </div>
 
       <div class="card table-wrap">
@@ -245,6 +260,9 @@
       // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
       const expandedComponents = new Set();
+      // Which Agents the operator has ticked. Kept by instance_uid rather than by row, so a
+      // selection survives the two-second refresh instead of being wiped mid-decision.
+      const selectedAgents = new Set();
 
       const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       function ago(ms) {
@@ -296,6 +314,9 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        if (a.package_conflict) {
+          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
+        }
         for (const p of a.packages || []) {
           const cls = p.status === "Installed" ? "green"
             : p.status === "InstallFailed" ? "red"
@@ -341,7 +362,7 @@
         $("agents").innerHTML = rows.map((a) => {
           const row = `
           <tr>
-            <td class="chk"><input type="checkbox" /></td>
+            <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
@@ -405,8 +426,53 @@
         if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
         render();
       });
+      // Reflects the current selection in the bar above the table.
+      function renderSelection() {
+        $("selection-bar").style.display = selectedAgents.size ? "flex" : "none";
+        $("selection-count").textContent = `${selectedAgents.size} agent(s) selected`;
+      }
+
+      document.addEventListener("change", (e) => {
+        const box = e.target.closest(".row-select");
+        if (!box) return;
+        if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        $("selection-result").textContent = "";
+        renderSelection();
+      });
+
+      // A restart per selected Agent — the same route the per-row button uses, since the UI is a
+      // client of the API and nothing more. Refusals are counted and named rather than swallowed:
+      // an Agent that does not declare AcceptsRestartCommand is answered 409 by the Server.
+      $("restart-selected").addEventListener("click", async () => {
+        const uids = [...selectedAgents];
+        if (!uids.length) return;
+        $("selection-result").textContent = "restarting…";
+        let accepted = 0;
+        const refused = [];
+        for (const uid of uids) {
+          try {
+            const res = await fetch(`/api/v1/agents/${encodeURIComponent(uid)}/restart`, { method: "POST" });
+            if (res.ok) { accepted += 1; continue; }
+            const reason = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refused.push(`${uid.slice(0, 8)}…: ${reason}`);
+          } catch (e) {
+            refused.push(`${uid.slice(0, 8)}…: ${e.message}`);
+          }
+        }
+        $("selection-result").textContent = refused.length
+          ? `${accepted} restarted · ${refused.length} refused — ${refused.join("; ")}`
+          : `${accepted} restarted`;
+        refreshAgents();
+      });
+
+      // Select-all applies to what is on screen — which, with a filter active, is the point.
       $("select-all").addEventListener("change", (e) => {
-        document.querySelectorAll('#agents input[type="checkbox"]').forEach((c) => (c.checked = e.target.checked));
+        document.querySelectorAll("#agents .row-select").forEach((box) => {
+          box.checked = e.target.checked;
+          if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        });
+        $("selection-result").textContent = "";
+        renderSelection();
       });
 
       // Configurations editor (ADR-0012): name + selector + body, PUT/DELETE per Configuration.
@@ -509,7 +575,7 @@
 
       function renderPackageList() {
         $("package-list").innerHTML = packages.map((p) =>
-          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}</span>`
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectPackage(chip.dataset.name));
@@ -521,6 +587,9 @@
         selectedPackage = name;
         $("package-name").value = pkg.name;
         $("package-version").value = pkg.version || "";
+        $("package-selector").value = selectorText(pkg.selector);
+        $("package-url").value = pkg.source_url || "";
+        $("package-addon").checked = !!pkg.addon;
         $("package-error").textContent = "";
         renderPackageList();
       }
@@ -550,6 +619,52 @@
         $("package-error").textContent = "";
         selectedPackage = name;
         $("package-file").value = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Aiming an existing package is a request of its own — re-uploading a few hundred megabytes
+      // just to change whom it targets would be absurd.
+      $("package-target").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
+        let selector;
+        try { selector = parseSelector($("package-selector").value); } catch (e) { $("package-error").textContent = e.message; return; }
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/selector`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ selector }),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Point a package at an artifact hosted elsewhere (ADR-0017): nothing is uploaded, and the
+      // checksum is what every agent verifies — this server never sees the bytes.
+      $("package-source").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        const version = $("package-version").value.trim();
+        const url = $("package-url").value.trim();
+        const sha256 = $("package-sha256").value.trim();
+        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!url || !sha256) { $("package-error").textContent = "a source needs a url and the artifact's sha256"; return; }
+        const body = { url, sha256, version, addon: $("package-addon").checked };
+        const signature = $("package-signature").value.trim();
+        if (signature) body.signature = signature;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/source`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = name;
         await refreshPackages();
         refreshAgents();
       });

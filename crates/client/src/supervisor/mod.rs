@@ -82,9 +82,10 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
                 .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
                 .with_attributes(config.agent_attributes(Some(block))),
         );
-        // A Supervisor bound to a named package accepts package delivery (ADR-0015).
-        if let Some(package) = &block.package {
-            state.accept_package(package.clone());
+        // A Supervisor that consents takes whichever top-level package the Server selects for it
+        // (ADR-0015, ADR-0016).
+        if block.accepts_packages {
+            state.accept_packages();
         }
 
         // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
@@ -102,6 +103,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             config_dir,
             stop_timeout: Duration::from_secs(block.stop_timeout_secs),
             apply_grace: Duration::from_secs(block.apply_grace_secs),
+            archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
             settings: block.settings.clone(),
             events: EventSender::new(index, event_tx.clone()),
             shutdown: shutdown.clone(),

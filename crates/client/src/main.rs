@@ -2,6 +2,7 @@
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `client.toml`, restores the
 //! Agent's identity, and runs the transport the endpoint selects (ADR-0007) until stopped.
 
+mod archive;
 mod cli;
 mod config;
 mod connection;
