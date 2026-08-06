@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use opamp::proto::{
-    AgentDescription, DownloadableFile, Headers, PackageAvailable, PackageType, PackagesAvailable,
+    AgentDescription, DownloadableFile, Header, Headers, PackageAvailable, PackageType,
+    PackagesAvailable,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,6 +40,20 @@ pub struct Package {
     /// attribute the Agent reported. **Empty matches every Agent** — which is what every package
     /// stored before Selectors existed has, so it keeps behaving as it did.
     pub selector: BTreeMap<String, String>,
+    /// Where the artifact lives when it is **not** here (ADR-0018). `None` is an uploaded package,
+    /// whose bytes this Server holds and serves; `Some` is a reference, offered to Agents as the
+    /// address it names — the Server never downloads it and has nothing to serve.
+    pub source: Option<Source>,
+}
+
+/// An artifact that lives somewhere else (ADR-0018): the address Agents fetch it from, and what
+/// they must send to be allowed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub url: String,
+    /// Sent with the download — a token for a private source. It reaches every Agent the package
+    /// targets, which is the exposure the operator accepts by using one.
+    pub headers: BTreeMap<String, String>,
 }
 
 impl Package {
@@ -54,10 +69,39 @@ impl Package {
         hasher.finalize().to_vec()
     }
 
-    /// This package as a wire `PackageAvailable`; `download_base` is the URL prefix the artifact is
-    /// served under, so the Agent's `download_url` is `{base}/{name}/file`. Empty `download_base`
-    /// yields a path the Agent resolves against its own OpAMP endpoint.
+    /// This package as a wire `PackageAvailable`.
+    ///
+    /// An uploaded package is offered from this Server: `download_base` prefixes the artifact
+    /// endpoint, and an empty prefix yields a path the Agent resolves against its own OpAMP
+    /// endpoint. A **referenced** package is offered as the address it names, with whatever headers
+    /// the operator gave — the Baseline's Download Server "may be on the same host as the OpAMP
+    /// Server or a different host", and this is that other host (ADR-0018).
     fn to_available(&self, download_base: &str, headers: Option<Headers>) -> PackageAvailable {
+        let file = match &self.source {
+            Some(source) => DownloadableFile {
+                download_url: source.url.clone(),
+                content_hash: self.content_hash.clone(),
+                signature: self.signature.clone().unwrap_or_default(),
+                // The Server's own credential has no business at someone else's address; what
+                // travels is what the operator said that source needs.
+                headers: (!source.headers.is_empty()).then(|| Headers {
+                    headers: source
+                        .headers
+                        .iter()
+                        .map(|(key, value)| Header {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                }),
+            },
+            None => DownloadableFile {
+                download_url: format!("{download_base}/api/v1/packages/{}/file", self.name),
+                content_hash: self.content_hash.clone(),
+                signature: self.signature.clone().unwrap_or_default(),
+                headers,
+            },
+        };
         PackageAvailable {
             r#type: if self.addon {
                 PackageType::Addon as i32
@@ -65,12 +109,7 @@ impl Package {
                 PackageType::TopLevel as i32
             },
             version: self.version.clone(),
-            file: Some(DownloadableFile {
-                download_url: format!("{download_base}/api/v1/packages/{}/file", self.name),
-                content_hash: self.content_hash.clone(),
-                signature: self.signature.clone().unwrap_or_default(),
-                headers,
-            }),
+            file: Some(file),
             hash: self.package_hash(),
         }
     }
@@ -82,6 +121,8 @@ pub struct PackageSummary {
     pub version: String,
     pub addon: bool,
     pub selector: BTreeMap<String, String>,
+    /// The address an Agent fetches this from when the Server does not hold it (ADR-0018).
+    pub source_url: Option<String>,
 }
 
 /// Metadata as persisted next to the artifact (`<name>.json`); the artifact is `<name>.bin`.
@@ -98,6 +139,12 @@ struct PackageMeta {
     /// empty — the whole fleet, exactly what that package did.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selector: BTreeMap<String, String>,
+    /// The source of a referenced package (ADR-0018); absent for an uploaded one, which is what
+    /// every package written before this existed is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_headers: BTreeMap<String, String>,
 }
 
 /// The persistent package store: one `<name>.json` + `<name>.bin` pair per package under
@@ -130,17 +177,29 @@ impl PackageStore {
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
             validate_name(&meta.name)
                 .map_err(|e| format!("invalid package name in {}: {e}", path.display()))?;
-            let artifact_path = dir.join(format!("{}.bin", meta.name));
             let content_hash = hex::decode(&meta.content_hash_hex)
                 .map_err(|e| format!("invalid content hash in {}: {e}", path.display()))?;
-            // Re-hash by streaming: the check must not depend on the artifact fitting in memory.
-            let (size, actual) = hash_file(&artifact_path)?;
-            if actual != content_hash {
-                return Err(format!(
-                    "package {:?}: artifact does not match its recorded content hash",
-                    meta.name
-                ));
-            }
+            let source = meta.source_url.clone().map(|url| Source {
+                url,
+                headers: meta.source_headers.clone(),
+            });
+            // An uploaded artifact is re-hashed by streaming, so a corrupt one never ships and the
+            // check never depends on its size. A referenced one has nothing here to check: its
+            // hash is the operator's word, verified by every Agent that downloads it (ADR-0018).
+            let size = match &source {
+                Some(_) => 0,
+                None => {
+                    let artifact_path = dir.join(format!("{}.bin", meta.name));
+                    let (size, actual) = hash_file(&artifact_path)?;
+                    if actual != content_hash {
+                        return Err(format!(
+                            "package {:?}: artifact does not match its recorded content hash",
+                            meta.name
+                        ));
+                    }
+                    size
+                }
+            };
             let signature = match &meta.signature_hex {
                 Some(hex) => Some(
                     hex::decode(hex)
@@ -158,6 +217,7 @@ impl PackageStore {
                     signature,
                     size,
                     selector: meta.selector,
+                    source,
                 },
             );
         }
@@ -179,6 +239,7 @@ impl PackageStore {
                 version: p.version.clone(),
                 addon: p.addon,
                 selector: p.selector.clone(),
+                source_url: p.source.as_ref().map(|s| s.url.clone()),
             })
             .collect()
     }
@@ -190,6 +251,8 @@ impl PackageStore {
             .read()
             .expect("packages lock")
             .get(name)
+            // A referenced package is not served from here; the Agents were given its address.
+            .filter(|p| p.source.is_none())
             .map(|p| self.dir.join(format!("{}.bin", p.name)))
     }
 
@@ -252,6 +315,9 @@ impl PackageStore {
             content_hash_hex: hex::encode(&content_hash),
             signature_hex: signature.as_ref().map(hex::encode),
             selector: selector.clone(),
+            // Bytes arrived: this package is held here now, whatever it referred to before.
+            source_url: None,
+            source_headers: BTreeMap::new(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         let artifact = self.dir.join(format!("{name}.bin"));
@@ -268,6 +334,7 @@ impl PackageStore {
                 signature,
                 size,
                 selector,
+                source: None,
             },
         );
         Ok(())
@@ -280,6 +347,74 @@ impl PackageStore {
             .expect("packages lock")
             .get(name)
             .map(|p| p.selector.clone())
+    }
+
+    /// Points a package at an artifact that lives somewhere else (ADR-0018): no bytes are stored
+    /// or fetched, and Agents are given `url` — with `headers`, when the source needs them — plus
+    /// the `content_hash` the operator supplied, which is the only thing that will check what they
+    /// receive.
+    ///
+    /// Creates the package when it does not exist, and replaces an uploaded one's bytes with the
+    /// reference. An existing Selector is kept: re-pointing a targeted package must not widen it.
+    ///
+    /// # Errors
+    /// Returns an error when the name is invalid, the hash is not a SHA-256, or the metadata cannot
+    /// be persisted.
+    pub fn set_source(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        content_hash: Vec<u8>,
+        signature: Option<Vec<u8>>,
+        source: Source,
+    ) -> Result<(), String> {
+        validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
+        if content_hash.len() != 32 {
+            return Err(
+                "the content hash must be a SHA-256: 64 hex characters, as published in a                  release's checksums file"
+                    .to_string(),
+            );
+        }
+        if !source.url.starts_with("http://") && !source.url.starts_with("https://") {
+            return Err(format!(
+                "the source url {:?} must start with http:// or https://",
+                source.url
+            ));
+        }
+        let selector = self.selector_of(name);
+        let meta = PackageMeta {
+            name: name.to_string(),
+            version: version.to_string(),
+            addon,
+            content_hash_hex: hex::encode(&content_hash),
+            signature_hex: signature.as_ref().map(hex::encode),
+            selector: selector.clone(),
+            source_url: Some(source.url.clone()),
+            source_headers: source.headers.clone(),
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        // Bytes this Server was holding are no longer what the fleet gets; keeping them would
+        // serve an artifact nobody is offered.
+        let artifact = self.dir.join(format!("{name}.bin"));
+        if artifact.exists() {
+            let _ = std::fs::remove_file(&artifact);
+        }
+        self.packages.write().expect("packages lock").insert(
+            name.to_string(),
+            Package {
+                name: name.to_string(),
+                version: version.to_string(),
+                addon,
+                content_hash,
+                signature,
+                size: 0,
+                selector,
+                source: Some(source),
+            },
+        );
+        Ok(())
     }
 
     /// The Selector a stored package already carries, or empty when it is new.
@@ -316,6 +451,9 @@ impl PackageStore {
             content_hash_hex: hex::encode(&content_hash),
             signature_hex: signature.as_ref().map(hex::encode),
             selector: selector.clone(),
+            // Bytes arrived: this package is held here now, whatever it referred to before.
+            source_url: None,
+            source_headers: BTreeMap::new(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.bin"), &artifact)?;
@@ -330,6 +468,7 @@ impl PackageStore {
                 signature,
                 size,
                 selector,
+                source: None,
             },
         );
         Ok(())
@@ -419,6 +558,12 @@ impl PackageStore {
             content_hash_hex: hex::encode(&package.content_hash),
             signature_hex: package.signature.as_ref().map(hex::encode),
             selector: package.selector.clone(),
+            source_url: package.source.as_ref().map(|s| s.url.clone()),
+            source_headers: package
+                .source
+                .as_ref()
+                .map(|s| s.headers.clone())
+                .unwrap_or_default(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         let written = self.write_atomic(&format!("{name}.json"), &json);

@@ -195,6 +195,10 @@
         <div class="config-fields">
           <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
         </div>
+        <div class="config-fields">
+          <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
+          <input id="package-sha256" placeholder="sha256 of the artifact (from the release's checksums file)" autocomplete="off" />
+        </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
             <input type="checkbox" id="package-addon" /> addon (default: top-level, a Managed Process's binary)
@@ -203,6 +207,7 @@
         </div>
         <div class="config-actions">
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
+          <button id="package-source" class="btn btn-ghost">Use source url</button>
           <button id="package-target" class="btn btn-ghost">Set selector</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
@@ -214,6 +219,7 @@
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
       </div>
+
 
       <div class="card table-wrap">
         <table>
@@ -516,7 +522,7 @@
 
       function renderPackageList() {
         $("package-list").innerHTML = packages.map((p) =>
-          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}</span>`
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectPackage(chip.dataset.name));
@@ -529,6 +535,7 @@
         $("package-name").value = pkg.name;
         $("package-version").value = pkg.version || "";
         $("package-selector").value = selectorText(pkg.selector);
+        $("package-url").value = pkg.source_url || "";
         $("package-addon").checked = !!pkg.addon;
         $("package-error").textContent = "";
         renderPackageList();
@@ -579,6 +586,32 @@
           return;
         }
         $("package-error").textContent = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Point a package at an artifact hosted elsewhere (ADR-0018): nothing is uploaded, and the
+      // checksum is what every agent verifies — this server never sees the bytes.
+      $("package-source").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        const version = $("package-version").value.trim();
+        const url = $("package-url").value.trim();
+        const sha256 = $("package-sha256").value.trim();
+        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!url || !sha256) { $("package-error").textContent = "a source needs a url and the artifact's sha256"; return; }
+        const body = { url, sha256, version, addon: $("package-addon").checked };
+        const signature = $("package-signature").value.trim();
+        if (signature) body.signature = signature;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/source`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = name;
         await refreshPackages();
         refreshAgents();
       });

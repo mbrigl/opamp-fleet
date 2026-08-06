@@ -669,6 +669,28 @@ impl AppState {
             .staging_path(name)
     }
 
+    /// Points a package at an artifact hosted elsewhere (ADR-0018) and wakes every WebSocket loop,
+    /// so a targeted Agent is offered the new address now rather than at its next poll.
+    pub fn set_package_source(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        content_hash: Vec<u8>,
+        signature: Option<Vec<u8>>,
+        source: crate::packages::Source,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_source(name, version, addon, content_hash, signature, source)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package now referenced from its source");
+        Ok(())
+    }
+
     /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
     /// change newly targets is offered it now rather than at its next poll. Returns the package's
     /// version, for the response.

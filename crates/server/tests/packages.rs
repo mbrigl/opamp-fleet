@@ -440,3 +440,132 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
         "the reason names both packages: {conflict}"
     );
 }
+
+/// ADR-0018: a package may live somewhere else. The Server stores the reference, offers that
+/// address verbatim with the operator's checksum and headers, and has nothing of its own to serve.
+#[tokio::test]
+async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
+    let (server, _scratch) = spawn_with_packages().await;
+
+    // A source the probe can reach: a tiny server standing in for a release page.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let source_addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut scratch = [0u8; 1024];
+            let _ = stream.read(&mut scratch).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        }
+    });
+
+    let url = format!("http://{source_addr}/releases/otelcol.tar.gz");
+    let digest = sha256(b"the-artifact-we-never-see");
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/otelcol/source",
+            server.addr
+        ))
+        .json(&serde_json::json!({
+            "url": url,
+            "sha256": hex::encode(&digest),
+            "version": "0.157.0",
+            "headers": { "Authorization": "Bearer release-token" }
+        }))
+        .send()
+        .await
+        .expect("put source");
+    assert_eq!(response.status(), 200);
+
+    // The offer names the source, carries the operator's hash, and passes the headers on.
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
+    let file = offer.packages["otelcol"]
+        .file
+        .as_ref()
+        .expect("a downloadable file");
+    assert_eq!(file.download_url, url, "the Agent is sent to the source");
+    assert_eq!(
+        file.content_hash, digest,
+        "the operator's checksum, unaltered"
+    );
+    let headers = file.headers.as_ref().expect("headers ride along");
+    assert_eq!(headers.headers[0].key, "Authorization");
+
+    // And this Server has nothing to hand out: it never downloaded the artifact.
+    let local = reqwest::Client::new()
+        .get(format!(
+            "http://{}/api/v1/packages/otelcol/file",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        local.status(),
+        404,
+        "a referenced artifact is not served from here"
+    );
+}
+
+/// The probe is a typo catch, and only a definitive refusal counts as one: a source this Server
+/// cannot reach at all says nothing about whether the Agents can.
+#[tokio::test]
+async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not() {
+    let (server, _scratch) = spawn_with_packages().await;
+
+    // A source that answers 404 — the shape of a mistyped release path.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let refusing = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut scratch = [0u8; 1024];
+            let _ = stream.read(&mut scratch).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+        }
+    });
+
+    let put_source = |url: String| async move {
+        reqwest::Client::new()
+            .put(format!(
+                "http://{}/api/v1/packages/otelcol/source",
+                server.addr
+            ))
+            .json(&serde_json::json!({
+                "url": url,
+                "sha256": hex::encode(sha256(b"x")),
+                "version": "1.0.0"
+            }))
+            .send()
+            .await
+            .expect("put source")
+    };
+
+    let refused = put_source(format!("http://{refusing}/typo.tar.gz")).await;
+    assert_eq!(refused.status(), 400);
+    let body = refused.text().await.expect("body");
+    assert!(
+        body.contains("404"),
+        "the refusal quotes what the source said: {body}"
+    );
+
+    // Port 1 answers nothing at all: stored anyway, because the fleet may reach what we cannot.
+    let unreachable = put_source("http://127.0.0.1:1/otelcol.tar.gz".to_string()).await;
+    assert_eq!(unreachable.status(), 200);
+}

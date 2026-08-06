@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_package_selector))
+        .routes(routes!(put_package_source))
         .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
@@ -275,6 +276,10 @@ struct PackageView {
     /// attribute the Agent reported. Empty targets the whole fleet.
     #[serde(default)]
     selector: std::collections::BTreeMap<String, String>,
+    /// Where Agents fetch the artifact when this Server does not hold it (ADR-0018). Absent for an
+    /// uploaded package, which is served from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
 }
 
 /// The writable Selector of a package — the body of `PUT /api/v1/packages/{name}/selector`.
@@ -320,6 +325,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
                     version: p.version,
                     addon: p.addon,
                     selector: p.selector,
+                    source_url: p.source_url,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -414,6 +420,8 @@ async fn put_package(
                 version: upload.version,
                 addon: upload.addon,
                 selector,
+                // An upload holds the bytes here, so there is no source to name.
+                source_url: None,
             })
             .into_response()
         }
@@ -444,6 +452,157 @@ async fn delete_package(State(state): State<Arc<AppState>>, Path(name): Path<Str
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
         Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The body of `PUT /api/v1/packages/{name}/source` (ADR-0018).
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct PackageSourceSpec {
+    /// Where the artifact lives — `http://` or `https://`. Agents fetch it from here; this Server
+    /// never downloads it.
+    url: String,
+    /// The artifact's SHA-256, hex, as published in the release's checksums file. Required: for a
+    /// referenced package nothing here ever sees the bytes, so this is what protects every Agent.
+    sha256: String,
+    /// The version Agents report having installed.
+    version: String,
+    /// `true` marks an addon; the default is a top-level package.
+    #[serde(default)]
+    addon: bool,
+    /// Hex Ed25519 signature over the artifact, checked by the Agent against its configured key.
+    #[serde(default)]
+    signature: Option<String>,
+    /// Headers the Agents send with the download — a token for a private source. Every targeted
+    /// Agent receives them.
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Points a package at an artifact hosted elsewhere (ADR-0018), instead of uploading it. The
+/// Server stores the reference and offers it verbatim; it never downloads the artifact, so the
+/// `sha256` — and the signature, when one is configured — is what protects every Agent.
+///
+/// The URL is probed once, to catch a typo while the operator is still looking at the screen. A
+/// definitive refusal from the source (a 4xx) fails the request; a source this Server simply
+/// cannot reach does not, because the Server is not in the download path and its reachability says
+/// nothing about the Agents'.
+#[utoipa::path(
+    put,
+    path = "/api/v1/packages/{name}/source",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name (ADR-0010 grammar)")),
+    request_body = PackageSourceSpec,
+    responses(
+        (status = 200, description = "The package, now referenced", body = PackageView),
+        (status = 400, description = "Invalid name, url, hash or signature — or the source refused the probe", body = ErrorBody),
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The reference could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_source(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<PackageSourceSpec>,
+) -> Response {
+    if let Err(e) = configs::validate_name(&name) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid name {name:?}: {e}"),
+        );
+    }
+    let content_hash = match hex::decode(spec.sha256.trim()) {
+        Ok(bytes) => bytes,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid sha256: {e}")),
+    };
+    let signature = match spec.signature.as_deref() {
+        Some(hex) => match hex::decode(hex) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid signature hex: {e}"),
+                )
+            }
+        },
+        None => None,
+    };
+    if let Err(e) = probe(&spec.url, &spec.headers).await {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    let source = crate::packages::Source {
+        url: spec.url.clone(),
+        headers: spec.headers.clone(),
+    };
+    match state.set_package_source(
+        &name,
+        &spec.version,
+        spec.addon,
+        content_hash,
+        signature,
+        source,
+    ) {
+        Ok(()) => {
+            info!(package = %name, url = %spec.url, "package source stored from the API");
+            let selector = state
+                .packages()
+                .and_then(|store| store.selector_of_package(&name))
+                .unwrap_or_default();
+            Json(PackageView {
+                name,
+                version: spec.version,
+                addon: spec.addon,
+                selector,
+                source_url: Some(spec.url),
+            })
+            .into_response()
+        }
+        Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
+        Err(e) if e.starts_with("invalid") || e.contains("must ") => {
+            error(StatusCode::BAD_REQUEST, e)
+        }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Asks the source whether it has the artifact. A refusal is reported; being unable to ask is not,
+/// because this Server never downloads it and the Agents may well reach what it cannot.
+async fn probe(
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!(error = %e, "cannot build the probe client; storing the source unprobed");
+            return Ok(());
+        }
+    };
+    let mut request = client.head(url);
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_client_error() => Err(format!(
+            "the source answered {} — check the url{}",
+            response.status(),
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                || response.status() == reqwest::StatusCode::FORBIDDEN
+            {
+                " and whether it needs headers"
+            } else {
+                ""
+            }
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Not an error: a fleet may reach an address its Server cannot.
+            warn!(url = %url, error = %e, "cannot reach the source from here; storing it anyway");
+            Ok(())
+        }
     }
 }
 
@@ -479,6 +638,7 @@ async fn put_package_selector(
                 version,
                 addon: false,
                 selector: spec.selector,
+                source_url: None,
             })
             .into_response()
         }

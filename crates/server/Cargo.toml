@@ -29,8 +29,10 @@ constant_time_eq.workspace = true
 rustls.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
+# ADR-0018: probing the URL of a referenced package — one HEAD, to catch a typo. The Server never
+# downloads an artifact, so this is the whole of its outbound HTTP.
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true
-reqwest.workspace = true
 tempfile = "3"
