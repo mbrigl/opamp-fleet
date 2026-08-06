@@ -71,8 +71,29 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
+        Ok(store) => {
+            if !store.is_empty() {
+                info!("offering software packages to the fleet (ADR-0015)");
+            }
+            Some(server::fleet::PackageOffering::new(
+                store,
+                config.advertised_url.clone().unwrap_or_default(),
+            ))
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let state = match AppState::new(config.config_dir.clone()) {
-        Ok(state) => Arc::new(state.with_connection_offer(connection_offer)),
+        Ok(state) => Arc::new(
+            state
+                .with_connection_offer(connection_offer)
+                .with_packages(packages)
+                .with_max_message_size(config.max_message_size_bytes)
+                .with_max_package_size(config.max_package_size_bytes),
+        ),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);

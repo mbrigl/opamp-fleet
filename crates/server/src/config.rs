@@ -29,6 +29,25 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     /// Optional connection settings offered to the fleet (ADR-0014); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
+    /// Where software packages are persisted — artifact + metadata each (ADR-0015). An empty or
+    /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
+    #[serde(default = "default_packages_dir")]
+    pub packages_dir: PathBuf,
+    /// The absolute base URL the Server advertises for package downloads (ADR-0015), e.g.
+    /// `https://fleet.example:4320`. When unset, the Server offers a path-only `download_url`
+    /// that the Client resolves against its own OpAMP endpoint — right for the common
+    /// single-listener deployment; set it when downloads must go through a different host.
+    pub advertised_url: Option<String>,
+    /// The largest OpAMP message the Server accepts or sends, on either transport and in either
+    /// direction. The Baseline requires the limit, recommends this default, and asks that it be
+    /// configurable — a fleet of small status reports can be served with far less.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size_bytes: usize,
+    /// The largest package artifact the REST API accepts on upload (ADR-0015). Nothing to do with
+    /// the OpAMP message limit above: a package is a *program*, routinely hundreds of megabytes,
+    /// and it travels over the REST plane, never in an OpAMP message.
+    #[serde(default = "default_max_package_size")]
+    pub max_package_size_bytes: usize,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -170,6 +189,19 @@ fn default_config_dir() -> PathBuf {
     PathBuf::from("fleet-configs")
 }
 
+fn default_packages_dir() -> PathBuf {
+    PathBuf::from("fleet-packages")
+}
+
+fn default_max_message_size() -> usize {
+    opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
+}
+
+/// Roomy enough for the real thing: an `otelcol-contrib` binary is a few hundred megabytes.
+fn default_max_package_size() -> usize {
+    crate::fleet::DEFAULT_MAX_PACKAGE_SIZE
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -178,6 +210,10 @@ impl Default for ServerConfig {
             tls: None,
             auth: None,
             connection_offer: None,
+            packages_dir: default_packages_dir(),
+            advertised_url: None,
+            max_message_size_bytes: default_max_message_size(),
+            max_package_size_bytes: default_max_package_size(),
         }
     }
 }
@@ -201,6 +237,20 @@ impl ServerConfig {
             offer
                 .check(config.auth.as_ref())
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
+        // limit is mandatory, so a value that cannot carry a message fails startup.
+        if config.max_message_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        if config.max_package_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_package_size_bytes must be greater than zero",
+                path.display()
+            ));
         }
         Ok(config)
     }
@@ -231,6 +281,23 @@ mod tests {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen.port(), 4320);
         assert!(cfg.tls.is_none());
+    }
+
+    /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
+    /// configurable; zero is not "unlimited" but a limit that could carry nothing, so it fails.
+    #[test]
+    fn the_message_size_limit_defaults_to_the_recommended_value_and_is_configurable() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.max_message_size_bytes, 64 * 1024 * 1024);
+        let tightened: ServerConfig =
+            toml::from_str("max_message_size_bytes = 65536").expect("parse");
+        assert_eq!(tightened.max_message_size_bytes, 65536);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_message_size_bytes"), "{err}");
     }
 
     #[test]

@@ -45,6 +45,18 @@ pub struct ClientConfig {
     /// settings at startup — never from the file, and it wins over `[auth]`.
     #[serde(skip)]
     pub authorization_override: Option<String>,
+    /// Package verification (ADR-0015); absent means unsigned packages are accepted on their
+    /// content hash alone.
+    pub packages: Option<PackagesConfig>,
+    /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
+    /// signature is checked against. Set from the file at load; not itself a file key.
+    #[serde(skip)]
+    pub package_key: Option<Vec<u8>>,
+    /// The largest OpAMP message the Client accepts or sends, on either transport and in either
+    /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
+    /// this default, and asks that it be configurable.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size_bytes: usize,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -75,6 +87,13 @@ pub struct SupervisorBlock {
     pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
+    /// Whether this Supervisor's Managed Process is updated from Server-offered packages
+    /// (ADR-0015, ADR-0017). `true` declares `AcceptsPackages` and takes whichever top-level
+    /// package the Server selects for this Agent; `false` (the default) takes no package offers.
+    ///
+    /// **Which** artifact arrives is the Server's decision, expressed as the package's Selector —
+    /// so a rollout is steered centrally rather than by editing this file on every host.
+    pub accepts_packages: bool,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
@@ -108,6 +127,17 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        // `package = "name"` chose the artifact on the host; ADR-0017 moved that decision to the
+        // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
+        if table.contains_key("package") {
+            return Err(format!(
+                "supervisor {name:?}: `package` is no longer a supervisor key — set \
+                 `accepts_packages = true` and give the package a Selector on the Server \
+                 (PUT /api/v1/packages/<name>/selector), which is what now decides which \
+                 artifact this Agent receives"
+            ));
+        }
+        let accepts_packages = take_bool(&mut table, "accepts_packages")?.unwrap_or(false);
         Ok(SupervisorBlock {
             kind,
             name,
@@ -115,6 +145,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             attributes,
+            accepts_packages,
             settings: table,
         })
     }
@@ -126,6 +157,17 @@ fn take_string(table: &mut toml::Table, key: &str) -> Result<Option<String>, Str
         Some(toml::Value::String(s)) => Ok(Some(s)),
         Some(other) => Err(format!(
             "`{key}` must be a string, not {}",
+            other.type_str()
+        )),
+    }
+}
+
+fn take_bool(table: &mut toml::Table, key: &str) -> Result<Option<bool>, String> {
+    match table.remove(key) {
+        None => Ok(None),
+        Some(toml::Value::Boolean(b)) => Ok(Some(b)),
+        Some(other) => Err(format!(
+            "`{key}` must be true or false, not {}",
             other.type_str()
         )),
     }
@@ -194,6 +236,23 @@ impl AuthConfig {
     }
 }
 
+/// The `[packages]` block (ADR-0015): how downloaded package artifacts are verified.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesConfig {
+    /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
+    /// signature against it; when unset, an unsigned package is accepted on its content hash alone
+    /// and a *signed* one is refused (there is nothing to check it with).
+    pub verification_key: Option<String>,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018). Unset means artifacts are
+    /// expected unencrypted; an encrypted one then fails to install, naming this key.
+    ///
+    /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
+    /// credential from `[auth]`, which the Server rotates on its own (ADR-0014): a rotation would
+    /// leave every packed archive unopenable.
+    pub archive_key: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -230,6 +289,10 @@ fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
 
+fn default_max_message_size() -> usize {
+    opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
+}
+
 fn default_stop_timeout_secs() -> u64 {
     10
 }
@@ -250,6 +313,9 @@ impl Default for ClientConfig {
             tls: None,
             auth: None,
             authorization_override: None,
+            packages: None,
+            package_key: None,
+            max_message_size_bytes: default_max_message_size(),
             supervisors: Vec::new(),
         }
     }
@@ -264,7 +330,7 @@ impl ClientConfig {
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let config: ClientConfig =
+        let mut config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
         config.check_supervisor_names()?;
         if let Some(auth) = &config.auth {
@@ -272,7 +338,35 @@ impl ClientConfig {
             auth.authorization()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        // Decode the package verification key once — a malformed key must fail startup, not the
+        // first package offer.
+        if let Some(key_hex) = config
+            .packages
+            .as_ref()
+            .and_then(|p| p.verification_key.as_ref())
+        {
+            let key = hex::decode(key_hex).map_err(|e| {
+                format!(
+                    "{}: [packages].verification_key is not valid hex: {e}",
+                    path.display()
+                )
+            })?;
+            config.package_key = Some(key);
+        }
+        // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
+        // limit is mandatory, so a value that cannot carry a message fails startup.
+        if config.max_message_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
         Ok(config)
+    }
+
+    /// The Ed25519 public key package signatures are verified against (ADR-0015), or `None`.
+    pub fn package_key(&self) -> Option<&[u8]> {
+        self.package_key.as_deref()
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -357,6 +451,71 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
         assert_eq!(disabled.heartbeat_interval_secs, 0);
+    }
+
+    /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
+    /// configurable; zero is not "unlimited" but a limit that could carry nothing, so it fails.
+    #[test]
+    fn the_message_size_limit_defaults_to_the_recommended_value_and_is_configurable() {
+        assert_eq!(
+            ClientConfig::default().max_message_size_bytes,
+            64 * 1024 * 1024
+        );
+        let tightened: ClientConfig =
+            toml::from_str("max_message_size_bytes = 65536").expect("parse");
+        assert_eq!(tightened.max_message_size_bytes, 65536);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// ADR-0017 moved the choice of artifact to the Server, so the Supervisor only consents. The
+    /// key that used to name a package is refused rather than ignored: an operator who still has
+    /// it in a file believes it does something.
+    #[test]
+    fn a_supervisor_consents_to_packages_and_the_old_naming_key_is_refused() {
+        let consenting: ClientConfig = toml::from_str(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            accepts_packages = true
+            "#,
+        )
+        .expect("parse");
+        assert!(consenting.supervisors[0].accepts_packages);
+
+        // Absent means no package offers, as before.
+        let quiet: ClientConfig = toml::from_str(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            "#,
+        )
+        .expect("parse");
+        assert!(!quiet.supervisors[0].accepts_packages);
+
+        let stale = toml::from_str::<ClientConfig>(
+            r#"
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "/usr/local/bin/agent"
+            package = "otelcol"
+            "#,
+        )
+        .expect_err("the old key must fail loudly");
+        let message = stale.to_string();
+        assert!(
+            message.contains("accepts_packages") && message.contains("Selector"),
+            "the error says what to do instead: {message}"
+        );
     }
 
     #[test]

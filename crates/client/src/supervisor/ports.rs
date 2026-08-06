@@ -25,6 +25,17 @@ pub enum ProcessCommand {
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
     ApplyConfig { config: AgentRemoteConfig },
+    /// A package was downloaded and verified (content hash and signature; ADR-0015): swap its
+    /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
+    /// does — a binary that will not stay up is rolled back to the previous one. Answered with
+    /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
+    /// not its bytes, since a program is too big to carry through the core; `hash` is the package
+    /// hash the status refers to; `version` is what the Agent then reports it has.
+    ApplyPackage {
+        staged: PathBuf,
+        version: String,
+        hash: Vec<u8>,
+    },
     /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
     /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —
     /// the health events of the stop/spawn cycle are the visible outcome.
@@ -51,6 +62,12 @@ pub enum ProcessEvent {
     ConfigApplied {
         hash: Vec<u8>,
         result: Result<(), String>,
+    },
+    /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0015).
+    PackageApplied {
+        hash: Vec<u8>,
+        result: Result<String, String>,
     },
 }
 
@@ -86,6 +103,9 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
     pub apply_grace: Duration,
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0018); `None` when none is
+    /// configured. Client-wide, like the package verification key.
+    pub archive_key: Option<String>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.

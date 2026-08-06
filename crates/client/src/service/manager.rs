@@ -20,6 +20,18 @@ use service_manager::{
 use super::{ServiceControl, ServiceLevel, ServiceState};
 use crate::cli::InstanceName;
 
+/// Restart after a failure, never after a clean stop (ADR-0010) — with a delay so a Client that
+/// fails at startup does not spin, and no retry limit so a host recovers however long it takes.
+const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
+    delay_secs: Some(RESTART_DELAY_SECS),
+    max_retries: None,
+    reset_after_secs: None,
+};
+
+/// Read by [`windows_restart`](super::windows_restart) so both platforms wait the same before a
+/// restart.
+pub(super) const RESTART_DELAY_SECS: u32 = 5;
+
 /// The per-instance service label (reverse-DNS, per platform conventions): the systemd unit
 /// `io.opamp-fleet.client.<instance>.service`, the launchd label and plist name, the Windows
 /// service name.
@@ -74,12 +86,21 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
     ]
 }
 
-/// Register the instance as a service running `spec.program`.
+/// Register the instance as a service running `spec.program`, **including** the failure recovery
+/// that makes ADR-0010's restart-on-failure real on every platform. On Windows that is a second
+/// step against the SCM, because `service-manager` silently drops the policy there; on systemd and
+/// launchd the manager has already written it.
 ///
 /// # Errors
 /// Returns an error if the manager rejects the install (commonly: not running as
-/// root/Administrator for a system-level service).
+/// root/Administrator for a system-level service), or if the recovery actions cannot be set.
 pub fn install(spec: &InstallSpec) -> Result<(), String> {
+    install_service(spec)?;
+    // What `service-manager` does not do on Windows, done here (see `windows_restart`).
+    super::windows_restart::configure(&label(&spec.instance)?.to_qualified_name())
+}
+
+fn install_service(spec: &InstallSpec) -> Result<(), String> {
     manager(spec.level)?
         .install(ServiceInstallCtx {
             label: label(&spec.instance)?,
@@ -94,11 +115,11 @@ pub fn install(spec: &InstallSpec) -> Result<(), String> {
             autostart: true,
             // Restart only on a crash, never after an explicit stop — what lets a future updater
             // stop the service, switch `current`, and start it without the manager racing it.
-            restart_policy: RestartPolicy::OnFailure {
-                delay_secs: Some(5),
-                max_retries: None,
-                reset_after_secs: None,
-            },
+            //
+            // Honoured natively on systemd (`Restart=on-failure`) and launchd
+            // (`KeepAlive{SuccessfulExit:false}`). The Windows backend of `service-manager`
+            // *discards* this and only logs a warning, which is why `windows_restart` exists.
+            restart_policy: RESTART_POLICY,
         })
         .map_err(|e| {
             format!("cannot install the service (system scope needs root/Administrator): {e}")
@@ -237,6 +258,25 @@ mod tests {
         assert!(args.contains(&OsString::from("/etc/opamp/client.toml")));
         assert!(args.contains(&OsString::from("prod")));
         assert!(args.contains(&OsString::from("/opt/fleet/state")));
+    }
+
+    /// The Windows recovery actions are configured separately from the policy handed to
+    /// `service-manager` (see `windows_restart`), so the two could drift into disagreeing about
+    /// how long a failed Client waits before it comes back. They read one constant; this is what
+    /// says so.
+    #[test]
+    fn both_platforms_restart_after_the_same_delay() {
+        match RESTART_POLICY {
+            RestartPolicy::OnFailure {
+                delay_secs,
+                max_retries,
+                ..
+            } => {
+                assert_eq!(delay_secs, Some(RESTART_DELAY_SECS));
+                assert_eq!(max_retries, None, "a host recovers however long it takes");
+            }
+            other => panic!("the Client restarts only on failure (ADR-0010), got {other:?}"),
+        }
     }
 
     #[cfg(target_os = "linux")]

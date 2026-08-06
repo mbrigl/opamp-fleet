@@ -159,9 +159,12 @@
       <div class="page-head">
         <div>
           <h1>Agents</h1>
-          <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s)</p>
+          <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s) · <a class="name" href="/api/v1/docs" target="_blank" rel="noopener">API docs</a></p>
         </div>
-        <button id="toggle-config" class="btn btn-primary">Configurations</button>
+        <div style="display: flex; gap: 10px;">
+          <button id="toggle-packages" class="btn btn-ghost">Packages</button>
+          <button id="toggle-config" class="btn btn-primary">Configurations</button>
+        </div>
       </div>
 
       <section id="config-card" class="card config">
@@ -170,6 +173,7 @@
         <div class="config-fields">
           <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent)" autocomplete="off" />
+          <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
         <textarea id="config" placeholder="The configuration body to distribute…"></textarea>
@@ -181,9 +185,47 @@
         </div>
       </section>
 
+      <section id="packages-card" class="card config">
+        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
+        <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
+        <div class="config-fields">
+          <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
+          <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
+          <input id="package-sha256" placeholder="sha256 of the artifact (from the release's checksums file)" autocomplete="off" />
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+            <input type="checkbox" id="package-addon" /> addon (default: top-level, a Managed Process's binary)
+          </label>
+          <input id="package-file" type="file" style="color: var(--muted); font-size: 13px;" />
+        </div>
+        <div class="config-actions">
+          <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
+          <button id="package-source" class="btn btn-ghost">Use source url</button>
+          <button id="package-target" class="btn btn-ghost">Set selector</button>
+          <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
+          <button id="package-delete" class="btn btn-ghost">Delete</button>
+          <button id="package-close" class="btn btn-ghost">Close</button>
+          <span id="package-error" class="err"></span>
+        </div>
+      </section>
+
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+      </div>
+
+      <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
+        <span id="selection-count" class="sub"></span>
+        <button id="restart-selected" class="btn btn-ghost">⟳ Restart selected</button>
+        <span id="selection-result" class="sub"></span>
       </div>
 
       <div class="card table-wrap">
@@ -220,6 +262,9 @@
       // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
       const expandedComponents = new Set();
+      // Which Agents the operator has ticked. Kept by instance_uid rather than by row, so a
+      // selection survives the two-second refresh instead of being wiped mid-decision.
+      const selectedAgents = new Set();
 
       const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       function ago(ms) {
@@ -271,6 +316,24 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        if (a.package_conflict) {
+          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
+        }
+        for (const p of a.packages || []) {
+          const cls = p.status === "Installed" ? "green"
+            : p.status === "InstallFailed" ? "red"
+            : "amber"; // Downloading / Installing / InstallPending
+          let label = `pkg: ${esc(p.name)}${p.version ? " " + esc(p.version) : ""}`;
+          let title = p.status === "InstallFailed" && p.error ? esc(p.error) : esc(p.status);
+          // A download of a few hundred megabytes takes minutes: show it moving rather than
+          // leaving the operator to guess whether it is progressing or wedged.
+          if (p.status === "Downloading") {
+            label += p.download_percent != null ? ` ↓ ${p.download_percent.toFixed(0)}%` : " ↓";
+            const rate = p.download_bytes_per_second;
+            title = rate ? `Downloading — ${(rate / 1048576).toFixed(1)} MiB/s` : "Downloading";
+          }
+          chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
+        }
         return `<div class="chips">${chips.join("")}</div>`;
       }
       function matchedConfigs(a) {
@@ -283,8 +346,9 @@
         if (!filterText) return true;
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
+        const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
         const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
-          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || [])
+          .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
       }
@@ -300,7 +364,7 @@
         $("agents").innerHTML = rows.map((a) => {
           const row = `
           <tr>
-            <td class="chk"><input type="checkbox" /></td>
+            <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
@@ -364,8 +428,53 @@
         if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
         render();
       });
+      // Reflects the current selection in the bar above the table.
+      function renderSelection() {
+        $("selection-bar").style.display = selectedAgents.size ? "flex" : "none";
+        $("selection-count").textContent = `${selectedAgents.size} agent(s) selected`;
+      }
+
+      document.addEventListener("change", (e) => {
+        const box = e.target.closest(".row-select");
+        if (!box) return;
+        if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        $("selection-result").textContent = "";
+        renderSelection();
+      });
+
+      // A restart per selected Agent — the same route the per-row button uses, since the UI is a
+      // client of the API and nothing more. Refusals are counted and named rather than swallowed:
+      // an Agent that does not declare AcceptsRestartCommand is answered 409 by the Server.
+      $("restart-selected").addEventListener("click", async () => {
+        const uids = [...selectedAgents];
+        if (!uids.length) return;
+        $("selection-result").textContent = "restarting…";
+        let accepted = 0;
+        const refused = [];
+        for (const uid of uids) {
+          try {
+            const res = await fetch(`/api/v1/agents/${encodeURIComponent(uid)}/restart`, { method: "POST" });
+            if (res.ok) { accepted += 1; continue; }
+            const reason = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refused.push(`${uid.slice(0, 8)}…: ${reason}`);
+          } catch (e) {
+            refused.push(`${uid.slice(0, 8)}…: ${e.message}`);
+          }
+        }
+        $("selection-result").textContent = refused.length
+          ? `${accepted} restarted · ${refused.length} refused — ${refused.join("; ")}`
+          : `${accepted} restarted`;
+        refreshAgents();
+      });
+
+      // Select-all applies to what is on screen — which, with a filter active, is the point.
       $("select-all").addEventListener("change", (e) => {
-        document.querySelectorAll('#agents input[type="checkbox"]').forEach((c) => (c.checked = e.target.checked));
+        document.querySelectorAll("#agents .row-select").forEach((box) => {
+          box.checked = e.target.checked;
+          if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        });
+        $("selection-result").textContent = "";
+        renderSelection();
       });
 
       // Configurations editor (ADR-0012): name + selector + body, PUT/DELETE per Configuration.
@@ -384,7 +493,7 @@
       }
       function renderConfigList() {
         $("config-list").innerHTML = configurations.map((c) =>
-          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}</span>`
+          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${c.role ? "role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : "top-level configuration"}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#config-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectConfig(chip.dataset.name));
@@ -397,6 +506,7 @@
         configDirty = false;
         $("config-name").value = config.name;
         $("config-selector").value = selectorText(config.selector);
+        $("config-role").value = config.role || "";
         $("config").value = config.body;
         $("config-error").textContent = "";
         renderConfigList();
@@ -407,12 +517,15 @@
       $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); });
       $("save").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
+        const role = $("config-role").value.trim();
         let selector;
         try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ selector, body: $("config").value }),
+          // An empty role is left out entirely rather than sent as "": absent is what the
+          // resource means by top-level configuration.
+          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}) }),
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
@@ -434,7 +547,7 @@
         }
         $("config-error").textContent = "";
         selectedName = null;
-        $("config-name").value = ""; $("config-selector").value = ""; $("config").value = "";
+        $("config-name").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
         await refreshConfigs();
         refreshAgents();
       });
@@ -461,6 +574,154 @@
         });
       }
 
+      // Packages editor (ADR-0015): name + version + addon + optional signature + artifact file,
+      // PUT/DELETE per package. Packages are fleet-wide — no Selector, unlike Configurations.
+      let packages = [];
+      let selectedPackage = null;
+
+      function renderPackageList() {
+        $("package-list").innerHTML = packages.map((p) =>
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}" title="${p.previous_version ? "rolls back to " + esc(p.previous_version) + (p.previous_source_url ? " from " + esc(p.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${p.previous_version ? " ← " + esc(p.previous_version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
+        ).join("") || `<span class="chip">none yet</span>`;
+        document.querySelectorAll("#package-list .clickable").forEach((chip) => {
+          chip.addEventListener("click", () => selectPackage(chip.dataset.name));
+        });
+      }
+      function selectPackage(name) {
+        const pkg = packages.find((p) => p.name === name);
+        if (!pkg) return;
+        selectedPackage = name;
+        $("package-name").value = pkg.name;
+        $("package-version").value = pkg.version || "";
+        $("package-selector").value = selectorText(pkg.selector);
+        $("package-url").value = pkg.source_url || "";
+        $("package-addon").checked = !!pkg.addon;
+        $("package-error").textContent = "";
+        // A rollback button that does not say what it will install is a dare (ADR-0019): it names
+        // the version, and stays disabled while there is nothing to go back to.
+        const rollback = $("package-rollback");
+        rollback.disabled = !pkg.previous_version;
+        rollback.textContent = pkg.previous_version ? `↩ Roll back to ${pkg.previous_version}` : "↩ Roll back";
+        rollback.title = pkg.previous_version
+          ? `Offer ${pkg.previous_version} again${pkg.previous_source_url ? ` from ${pkg.previous_source_url}` : ""}. The selector is untouched; agents pick it up on their next exchange.`
+          : "This package has never replaced another, so there is nothing to go back to.";
+        renderPackageList();
+      }
+      $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
+      $("package-close").addEventListener("click", () => $("packages-card").classList.remove("open"));
+      $("package-upload").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        const version = $("package-version").value.trim();
+        const file = $("package-file").files[0];
+        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!file) { $("package-error").textContent = "choose an artifact file to upload"; return; }
+        const params = new URLSearchParams({ version, addon: $("package-addon").checked ? "true" : "false" });
+        const signature = $("package-signature").value.trim();
+        if (signature) params.set("signature", signature);
+        let res;
+        try {
+          res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}?${params}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: await file.arrayBuffer(),
+          });
+        } catch (e) { $("package-error").textContent = e.message; return; }
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = name;
+        $("package-file").value = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Aiming an existing package is a request of its own — re-uploading a few hundred megabytes
+      // just to change whom it targets would be absurd.
+      $("package-target").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
+        let selector;
+        try { selector = parseSelector($("package-selector").value); } catch (e) { $("package-error").textContent = e.message; return; }
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/selector`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ selector }),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Point a package at an artifact hosted elsewhere (ADR-0018): nothing is uploaded, and the
+      // checksum is what every agent verifies — this server never sees the bytes.
+      $("package-source").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        const version = $("package-version").value.trim();
+        const url = $("package-url").value.trim();
+        const sha256 = $("package-sha256").value.trim();
+        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!url || !sha256) { $("package-error").textContent = "a source needs a url and the artifact's sha256"; return; }
+        const body = { url, sha256, version, addon: $("package-addon").checked };
+        const signature = $("package-signature").value.trim();
+        if (signature) body.signature = signature;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/source`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = name;
+        await refreshPackages();
+        refreshAgents();
+      });
+      // One step back (ADR-0019): the version this package replaced becomes the current one again,
+      // and the one rolled back from becomes the next step back — so this twice returns to where
+      // it started.
+      $("package-rollback").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/rollback`, { method: "POST" });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        await refreshPackages();
+        selectPackage(name);
+        refreshAgents();
+      });
+      $("package-delete").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        selectedPackage = null;
+        $("package-name").value = ""; $("package-version").value = ""; $("package-signature").value = "";
+        $("package-addon").checked = false; $("package-file").value = "";
+        $("package-rollback").disabled = true; $("package-rollback").textContent = "↩ Roll back";
+        await refreshPackages();
+        refreshAgents();
+      });
+      async function refreshPackages() {
+        try {
+          const res = await fetch("/api/v1/packages");
+          packages = res.ok ? await res.json() : [];
+        } catch { return; }
+        renderPackageList();
+      }
+
       async function refreshAgents() {
         try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
         render();
@@ -471,14 +732,16 @@
         renderConfigList();
         if (selectedName && !configDirty) {
           const selected = configurations.find((c) => c.name === selectedName);
-          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); }
+          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
         }
       }
 
       refreshConfigs();
+      refreshPackages();
       refreshAgents();
       setInterval(refreshAgents, 2000);
       setInterval(refreshConfigs, 5000);
+      setInterval(refreshPackages, 5000);
     </script>
   </body>
 </html>

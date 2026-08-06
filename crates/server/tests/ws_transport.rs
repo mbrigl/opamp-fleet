@@ -10,7 +10,7 @@ use opamp::frame;
 use opamp::proto::{AgentDisconnect, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent};
 use opamp::uid::InstanceUid;
 use server::fleet::SERVER_CAPABILITIES;
-use support::{compressed_report, distribute, full_report, spawn};
+use support::{compressed_report, distribute, distribute_with_role, full_report, spawn};
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -23,9 +23,16 @@ async fn connect(addr: std::net::SocketAddr) -> Socket {
     socket
 }
 
+/// The limit is not what these tests are about; they use the recommended default.
+const LIMIT: usize = frame::DEFAULT_MAX_MESSAGE_SIZE;
+
 async fn send(socket: &mut Socket, msg: &opamp::proto::AgentToServer) {
     socket
-        .send(Message::Binary(frame::encode(msg).into()))
+        .send(Message::Binary(
+            frame::encode_within(msg, LIMIT)
+                .expect("within the limit")
+                .into(),
+        ))
         .await
         .expect("send");
 }
@@ -38,7 +45,7 @@ async fn recv(socket: &mut Socket) -> ServerToAgent {
             .expect("an open connection")
             .expect("a frame");
         match message {
-            Message::Binary(data) => return frame::decode(&data).expect("decode"),
+            Message::Binary(data) => return frame::decode(&data, LIMIT).expect("decode"),
             // Control frames are not OpAMP messages.
             _ => continue,
         }
@@ -92,6 +99,36 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     distribute(server.addr, "fleet", &[], "exporters: {}\n").await;
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
+}
+
+/// ADR-0016: the operator's role reaches the Agent in `AgentConfigFile.role`, verbatim, and a
+/// Configuration without one leaves the field unset.
+#[tokio::test]
+async fn a_configuration_role_reaches_the_agent_verbatim() {
+    let server = spawn().await;
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "collector", 1)).await;
+    recv(&mut socket).await;
+
+    distribute(server.addr, "base", &[], "receivers: {}\n").await;
+    recv(&mut socket).await;
+    distribute_with_role(server.addr, "ruleset", &[], "rules: []\n", "supplementary").await;
+
+    let map = recv(&mut socket)
+        .await
+        .remote_config
+        .expect("an offer")
+        .config
+        .expect("a config map");
+    assert_eq!(
+        map.config_map["ruleset"].role, "supplementary",
+        "the role travels unchanged"
+    );
+    assert_eq!(
+        map.config_map["base"].role, "",
+        "a Configuration without a role leaves the field unset"
+    );
 }
 
 #[tokio::test]
@@ -309,4 +346,41 @@ async fn two_agents_share_one_connection() {
     let agents = server.state.snapshot();
     assert_eq!(agents.len(), 2);
     assert!(agents.iter().all(|a| a.connected));
+}
+
+/// The Baseline (message size limits): a WebSocket message past the receive limit is malformed,
+/// and the Server closes the connection with status code 1009 rather than acting on it.
+#[tokio::test]
+async fn an_oversized_frame_closes_the_connection_with_1009() {
+    let server = support::spawn_with_limit(1024).await;
+    let mut socket = connect(server.addr).await;
+
+    socket
+        .send(Message::Binary(vec![0u8; 4096].into()))
+        .await
+        .expect("send an oversized frame");
+
+    // The close frame is what the peer sees; anything before it would mean the Server processed
+    // a message it must have refused.
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("an answer within five seconds")
+            .expect("an open connection");
+        match message {
+            Ok(Message::Close(Some(close))) => {
+                assert_eq!(
+                    u16::from(close.code),
+                    1009,
+                    "the Baseline names 1009 (Message Too Big)"
+                );
+                return;
+            }
+            Ok(Message::Binary(_)) => panic!("the Server answered an oversized frame"),
+            // tungstenite surfaces the close as an error on the next read once it has been
+            // handled; either way the connection must be gone, not serving.
+            Ok(_) => continue,
+            Err(e) => panic!("the connection failed without a 1009 close: {e}"),
+        }
+    }
 }

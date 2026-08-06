@@ -13,6 +13,8 @@
 #   3. Section-reference integrity: every section reference (the section sign followed by a
 #      number, e.g. in "AGENTS.md, section 6") matches a numbered '## N.' heading in AGENTS.md —
 #      the only numbered document in this repository; extend the check if another one appears.
+#      A citation into an external specification (e.g. "RFC 9110 §11") reuses the section sign
+#      for a document that is not in this repository, so it is accepted unverified.
 #   4. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) names an ADR
 #      file that exists in docs/adr/ — anticipated follow-ups are described by topic, never by
 #      a number that does not exist yet (docs/adr/README.md, process rule 7).
@@ -221,11 +223,14 @@ check_section_refs() {
       continue
     fi
     while IFS=: read -r lineno match; do
+      # A citation into an external spec (e.g. 'RFC 9110 §11') reuses the section sign for a
+      # document outside this repository — accept it unverified, like an external link.
+      [[ "$match" == RFC\ * ]] && continue
       n="${match#§}"
       if ! _contains "$n" "${valid_sections[@]}"; then
         add_error "$rel:$lineno: reference '$match' matches no numbered section in AGENTS.md"
       fi
-    done < <(grep -noE '§[0-9]+' "$f")
+    done < <(grep -noE '(RFC [0-9]+ )?§[0-9]+' "$f")
   done < <(find "$ROOT" -type f \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -not -path '*/.git/*' | sort)
 }
 

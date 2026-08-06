@@ -8,6 +8,12 @@ listen = "0.0.0.0:4320"
 # Where Configurations (ADR-0012) are persisted across Server restarts — one JSON file each.
 config_dir = "fleet-configs"
 
+# The largest OpAMP message accepted or sent, on either transport and in either direction. The
+# protocol requires the limit and recommends this default; a fleet of small status reports runs
+# comfortably on far less. An oversized request is answered 413, an oversized WebSocket message
+# closes the connection with 1009.
+max_message_size_bytes = 67108864
+
 # Optional TLS (ADR-0007): with a certificate and key the listener serves HTTPS/WSS instead.
 # [tls]
 # cert_file = "cert.pem"
@@ -33,3 +39,26 @@ config_dir = "fleet-configs"
 # bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
+
+# Where software packages are persisted (ADR-0015): one artifact + metadata pair each. Upload a
+# package with PUT /api/v1/packages/{name}?version=<v> (artifact as the body, optional Ed25519
+# signature=<hex>) — or, instead of uploading, point it at an artifact hosted elsewhere with
+# PUT /api/v1/packages/{name}/source (ADR-0018: url + sha256 + version, optional headers for a
+# private source); the Server stores only that reference and never downloads it. Then aim the
+# package with PUT /api/v1/packages/{name}/selector (ADR-0017): the Server
+# offers it to the Agents its Selector matches, among those that accept packages. An empty
+# Selector targets all of them; a narrower one wins for the Agents it names, which is how a
+# rollout starts on part of the fleet. The
+# download endpoint sits on the unauthenticated REST plane — the content hash and signature are
+# what protect an installed binary, so sign packages and configure the key on the Client.
+packages_dir = "fleet-packages"
+
+# The largest package artifact the REST API accepts on upload. A package is a program, not a
+# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
+# max_message_size_bytes above and applies to the package upload route alone.
+max_package_size_bytes = 1073741824
+
+# The absolute base URL advertised for downloads. Leave unset for the common single-listener
+# case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when
+# downloads must go through a different host.
+# advertised_url = "https://fleet.example:4320"

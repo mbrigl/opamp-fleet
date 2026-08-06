@@ -35,6 +35,11 @@ pub struct Runner {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0011's health-gated acknowledgement); zero acknowledges on start.
     pub apply_grace: Duration,
+    /// The Managed Process's binary — what an `ApplyPackage` swap replaces (ADR-0015). `None` for
+    /// a plugin with no single swappable binary, which then reports a package `InstallFailed`.
+    pub binary: Option<PathBuf>,
+    /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
+    pub archive_key: Option<String>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -111,6 +116,35 @@ impl Runner {
                             }
                         }
                     }
+                    Some(ProcessCommand::ApplyPackage { staged, version, hash }) => {
+                        // Swap the binary, restart, and health-gate on the apply grace — a binary
+                        // that will not stay up is rolled back to the bytes it replaced (ADR-0015).
+                        stop(&mut child, self.stop_timeout, &self.name).await;
+                        backoff.reset();
+                        let result = self.swap_and_gate(staged, &version, &mut child, &mut shutdown).await;
+                        if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
+                            child = self.spawn_if_due().await;
+                        }
+                        match result {
+                            GraceOutcome::Ok => {
+                                self.events
+                                    .send(ProcessEvent::PackageApplied { hash, result: Ok(version) })
+                                    .await;
+                            }
+                            GraceOutcome::Failed(error) => {
+                                self.events
+                                    .send(ProcessEvent::PackageApplied { hash, result: Err(error) })
+                                    .await;
+                                // Stay supervised, exactly as a failed ApplyConfig does.
+                                let delay = backoff.advance();
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => child = self.spawn_if_due().await,
+                                    _ = shutdown.requested() => break,
+                                }
+                            }
+                            GraceOutcome::ShuttingDown => break,
+                        }
+                    }
                     Some(ProcessCommand::Restart) => {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
@@ -143,8 +177,172 @@ impl Runner {
         stop(&mut child, self.stop_timeout, &self.name).await;
     }
 
+    /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
+    /// rolling the binary back on failure (ADR-0015). The process is already stopped. On success
+    /// `child` holds the running process; on failure the previous binary is restored (and the
+    /// caller respawns it).
+    ///
+    /// Everything here moves *files*: the old binary is renamed aside rather than read into
+    /// memory, and the artifact is copied in a stream. A program can weigh hundreds of megabytes,
+    /// and holding two copies of one in RAM to update it is not a trade this makes.
+    async fn swap_and_gate(
+        &self,
+        staged: PathBuf,
+        version: &str,
+        child: &mut Option<Child>,
+        shutdown: &mut Shutdown,
+    ) -> GraceOutcome {
+        let Some(binary) = self.binary.clone() else {
+            let _ = std::fs::remove_file(&staged);
+            return GraceOutcome::Failed(
+                "this supervisor manages no single binary to replace".to_string(),
+            );
+        };
+        // Move the binary we are replacing aside — same directory, so the rename is atomic and
+        // costs nothing — and it is what a failed package is rolled back from.
+        let backup = binary.with_extension("rollback");
+        let has_backup = match std::fs::rename(&binary, &backup) {
+            Ok(()) => true,
+            // No existing binary (first install) — nothing to roll back to.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                let _ = std::fs::remove_file(&staged);
+                return GraceOutcome::Failed(format!(
+                    "cannot set the current binary {} aside: {e}",
+                    binary.display()
+                ));
+            }
+        };
+        if let Err(e) = install_executable(&staged, &binary, self.archive_key.as_deref()) {
+            // Put the old binary back before reporting: the process must not be left with none.
+            if has_backup {
+                let _ = std::fs::rename(&backup, &binary);
+            }
+            let _ = std::fs::remove_file(&staged);
+            return GraceOutcome::Failed(e);
+        }
+        let _ = std::fs::remove_file(&staged);
+        info!(supervisor = %self.name, version = %version, binary = %binary.display(), "package binary staged; restarting");
+
+        let started = self.try_spawn().await;
+        // "Nothing started" has two meanings, and only one of them is a failed install. A plugin
+        // with no process to run — a Collector that has not been configured yet — has not rejected
+        // the artifact: the binary is in place and will be started by the configuration when it
+        // arrives. `ApplyConfig` has always drawn this distinction; the package path must too, or
+        // installing onto a host that is not yet configured deletes what it just installed.
+        let nothing_to_run = started.is_err() && (self.build)().is_none();
+        match (&started, nothing_to_run) {
+            (Err(_), true) => {
+                info!(supervisor = %self.name, version = %version, "package installed; nothing to run until a configuration arrives");
+            }
+            (Err(e), false) => {
+                warn!(supervisor = %self.name, error = %e, "the new binary would not start");
+            }
+            _ => {}
+        }
+        let outcome = if nothing_to_run {
+            GraceOutcome::Ok
+        } else {
+            self.gate(started.ok(), child, shutdown).await
+        };
+        match (&outcome, has_backup) {
+            // Roll the binary back to what ran before, so the next respawn is the old, known one.
+            (GraceOutcome::Failed(_), true) => {
+                if let Err(e) = std::fs::rename(&backup, &binary) {
+                    warn!(supervisor = %self.name, error = %e, "cannot roll the binary back");
+                } else {
+                    warn!(supervisor = %self.name, "rolled the binary back after a failed package");
+                }
+            }
+            (GraceOutcome::Failed(_), false) => {
+                let _ = std::fs::remove_file(&binary);
+            }
+            // Applied: the previous binary is no longer needed.
+            (_, true) => {
+                let _ = std::fs::remove_file(&backup);
+            }
+            (_, false) => {}
+        }
+        outcome
+    }
+
+    /// The apply-grace health gate shared by a package swap: a freshly started process must
+    /// survive `apply_grace` to count as applied; exiting within it fails. `child` is left holding
+    /// the running process on success.
+    async fn gate(
+        &self,
+        started: Option<Child>,
+        child: &mut Option<Child>,
+        shutdown: &mut Shutdown,
+    ) -> GraceOutcome {
+        match started {
+            None => GraceOutcome::Failed("the process did not start".to_string()),
+            Some(mut proc) if !self.apply_grace.is_zero() => {
+                tokio::select! {
+                    status = proc.wait() => {
+                        let describe = status
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|e| format!("wait failed: {e}"));
+                        warn!(supervisor = %self.name, status = %describe, "process exited during the apply grace");
+                        self.events
+                            .send(ProcessEvent::Health(unhealthy(
+                                format!("exited during the apply grace ({describe})"),
+                                describe.clone(),
+                            )))
+                            .await;
+                        GraceOutcome::Failed(format!("the process exited during the apply grace ({describe})"))
+                    }
+                    _ = tokio::time::sleep(self.apply_grace) => {
+                        *child = Some(proc);
+                        GraceOutcome::Ok
+                    }
+                    _ = shutdown.requested() => {
+                        *child = Some(proc);
+                        GraceOutcome::ShuttingDown
+                    }
+                }
+            }
+            Some(proc) => {
+                *child = Some(proc);
+                GraceOutcome::Ok
+            }
+        }
+    }
+
     /// Spawns when the plugin says something should run, reporting health either way.
     async fn spawn_if_due(&self) -> Option<Child> {
+        self.try_spawn().await.ok()
+    }
+
+    /// Spawns the Managed Process, keeping the reason when it fails.
+    ///
+    /// Right after a package swap the reason matters: exec of a freshly written binary can fail
+    /// with `ETXTBSY` — "Text file busy" — when another thread of this Client forked for its own
+    /// spawn while this one still held the new file open for writing. The forked child inherits
+    /// that descriptor until it execs, and the kernel refuses to exec a file anyone holds open for
+    /// writing. It is transient and says nothing about the artifact, so the swap retries briefly
+    /// rather than rolling back a binary that is perfectly good.
+    async fn try_spawn(&self) -> Result<Child, String> {
+        const BUSY_RETRIES: u32 = 10;
+        const BUSY_DELAY: Duration = Duration::from_millis(50);
+
+        let mut attempt = 0;
+        loop {
+            match self.spawn_once().await {
+                Err(e) if is_text_file_busy(&e) && attempt < BUSY_RETRIES => {
+                    attempt += 1;
+                    warn!(
+                        supervisor = %self.name, attempt,
+                        "the new binary is momentarily busy (another spawn holds it); retrying"
+                    );
+                    tokio::time::sleep(BUSY_DELAY).await;
+                }
+                other => return other.map_err(|e| e.to_string()),
+            }
+        }
+    }
+
+    async fn spawn_once(&self) -> Result<Child, std::io::Error> {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
@@ -152,7 +350,7 @@ impl Runner {
                     String::new(),
                 )))
                 .await;
-            return None;
+            return Err(std::io::Error::other("nothing to run"));
         };
         let mut command = Command::new(&spec.program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
@@ -173,19 +371,41 @@ impl Runner {
                         ..Default::default()
                     }))
                     .await;
-                Some(child)
+                Ok(child)
             }
             Err(e) => {
                 warn!(supervisor = %self.name, program = %spec.program.display(), error = %e, "cannot spawn");
+                // What the Server should read is the *situation*, not the syscall. A binary that
+                // is not there — a first install that failed and was undone, or a program never
+                // installed — is a Supervisor with no process, and saying so is more use to an
+                // operator than "spawn failed".
+                let status = if e.kind() == std::io::ErrorKind::NotFound {
+                    "no process installed"
+                } else {
+                    "spawn failed"
+                };
                 self.events
                     .send(ProcessEvent::Health(unhealthy(
-                        "spawn failed".to_string(),
+                        status.to_string(),
                         format!("cannot spawn {}: {e}", spec.program.display()),
                     )))
                     .await;
-                None
+                Err(e)
             }
         }
+    }
+}
+
+/// `ETXTBSY`: the file cannot be executed because someone holds it open for writing.
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -308,6 +528,66 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
+/// The result of health-gating a freshly (re)started process.
+enum GraceOutcome {
+    /// The process survived the grace (or the grace is zero) — applied.
+    Ok,
+    /// The process exited within the grace, or would not start — with the reason.
+    Failed(String),
+    /// A shutdown was requested mid-grace; the caller stops without an acknowledgement.
+    ShuttingDown,
+}
+
+/// Writes `bytes` to `path` atomically (temp + rename) and marks it executable on Unix — the
+/// binary swap a package apply performs (ADR-0015). A rename is atomic within a directory, so a
+/// crash mid-write never leaves a half-written binary in place.
+/// Installs a downloaded artifact as `path`: written in a stream (the download lives in the state
+/// directory, which may be on another filesystem, so this cannot be a rename), made executable,
+/// then renamed into place — the rename being what makes the swap atomic.
+///
+/// The artifact may be the program or an archive holding it (ADR-0018). An archive is opened here,
+/// where the binary's name is known, and the member of that name is what gets installed — nothing
+/// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
+/// its author published.
+fn install_executable(
+    artifact: &std::path::Path,
+    path: &std::path::Path,
+    archive_key: Option<&str>,
+) -> Result<(), String> {
+    let temp = path.with_extension("staged");
+    let mut target = std::fs::File::create(&temp)
+        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    match crate::archive::detect(artifact)? {
+        crate::archive::Kind::Raw => {
+            let mut source = std::fs::File::open(artifact)
+                .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
+            std::io::copy(&mut source, &mut target)
+                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        }
+        kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
+            let member = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
+            let written = match kind {
+                crate::archive::Kind::SevenZ => {
+                    crate::archive::extract_7z(artifact, &member, &mut target, archive_key)?
+                }
+                _ => crate::archive::extract_tar_gz(artifact, &member, &mut target)?,
+            };
+            info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the package archive");
+        }
+    }
+    drop(target);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("cannot make {} executable: {e}", temp.display()))?;
+    }
+    std::fs::rename(&temp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+}
+
 fn unhealthy(status: String, last_error: String) -> ComponentHealth {
     ComponentHealth {
         healthy: false,
@@ -331,6 +611,7 @@ mod tests {
     use crate::service::runtime::shutdown_channel;
     use crate::supervisor::ports::EventSender;
     use opamp::proto::AgentRemoteConfig;
+    use std::os::unix::fs::PermissionsExt;
 
     fn sh(script: &str) -> ProcessSpec {
         ProcessSpec {
@@ -364,6 +645,8 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace,
+            binary: None,
+            archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(build),
@@ -479,11 +762,44 @@ mod tests {
         let _ = harness.task.await;
     }
 
+    /// A Supervisor whose program is not on the machine keeps running and says so. The wording is
+    /// the point: what the Server should read is the situation — there is no process — not the
+    /// syscall that reported it. This is the state a failed *first* install leaves behind, once
+    /// the artifact it could not run has been removed again.
     #[tokio::test]
-    async fn a_spawn_failure_is_reported_not_fatal() {
+    async fn a_missing_program_is_reported_as_no_process_not_fatal() {
         let mut harness = start(|| {
             Some(ProcessSpec {
                 program: PathBuf::from("/nonexistent/definitely-not-here"),
+                args: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+            })
+        });
+        let health = next_health(&mut harness.events).await;
+        assert!(!health.healthy);
+        assert_eq!(health.status, "no process installed");
+        assert!(
+            health.last_error.contains("definitely-not-here"),
+            "the detail still names the path: {}",
+            health.last_error
+        );
+        harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// A program that exists but cannot be executed is a different situation, and keeps the
+    /// wording that describes it.
+    #[tokio::test]
+    async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("not-executable");
+        std::fs::write(&program, b"data").expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let mut harness = start(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
                 args: Vec::new(),
                 env: Vec::new(),
                 working_dir: None,
@@ -601,6 +917,296 @@ mod tests {
             "a restart must not emit a ConfigApplied"
         );
         harness.shutdown_tx.send(true).expect("signal shutdown");
+        let _ = harness.task.await;
+    }
+
+    async fn next_package_ack(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+    ) -> (Vec<u8>, Result<String, String>) {
+        loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("an event in time")
+                .expect("an open channel");
+            if let ProcessEvent::PackageApplied { hash, result } = event {
+                return (hash, result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        // The "old" binary: a script that sleeps (stays up).
+        std::fs::write(&binary, "#!/bin/sh\nexec sleep 600\n").expect("write");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let run_binary = binary.clone();
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: run_binary.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                })
+            }),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await; // initial spawn
+
+        // A new binary that also stays up — it must survive the grace and be acknowledged. It
+        // arrives as a downloaded *file*, the way the transport stages one.
+        let new_bytes = b"#!/bin/sh\nexec sleep 600\n".to_vec();
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, &new_bytes).expect("stage");
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged: staged.clone(),
+                version: "2.0.0".to_string(),
+                hash: b"pkg-hash".to_vec(),
+            })
+            .await
+            .expect("send");
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"pkg-hash".to_vec());
+        assert_eq!(result, Ok("2.0.0".to_string()));
+        // The binary on disk is the swapped one, and the staged download is cleaned up.
+        assert_eq!(std::fs::read(&binary).expect("read"), new_bytes);
+        assert!(!staged.exists(), "the staged artifact is not left behind");
+        assert!(
+            !binary.with_extension("rollback").exists(),
+            "a succeeded install keeps no backup"
+        );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// The case ADR-0018 exists for: what upstream publishes is a `.tar.gz`, not a bare binary.
+    /// The Supervisor takes the member named after its own binary and installs that.
+    #[tokio::test]
+    async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        std::fs::write(&binary, "#!/bin/sh\nexec sleep 600\n").expect("write");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        // A release-shaped archive: the program under a versioned directory, next to other files.
+        let program = b"#!/bin/sh\n# v2\nexec sleep 600\n";
+        let staged = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&staged).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (name, content) in [
+                ("agent-2.0.0/LICENSE", b"text".as_slice()),
+                ("agent-2.0.0/agent", program.as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, content)
+                    .expect("append");
+            }
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+
+        let run_binary = binary.clone();
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: run_binary.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                })
+            }),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await;
+
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged: staged.clone(),
+                version: "2.0.0".to_string(),
+                hash: b"tar-hash".to_vec(),
+            })
+            .await
+            .expect("send");
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"tar-hash".to_vec());
+        assert_eq!(
+            result,
+            Ok("2.0.0".to_string()),
+            "the unpacked program stays up"
+        );
+        assert_eq!(
+            std::fs::read(&binary).expect("read"),
+            program,
+            "the installed binary is the member, not the archive"
+        );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// Bringing a host into the fleet the other way round: the Supervisor is configured, the
+    /// program is not installed yet, and the Server delivers it. A plugin with nothing to run —
+    /// a Collector awaiting its configuration — must not turn that into a failed install, which
+    /// would delete the binary that was just put in place.
+    #[tokio::test]
+    async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("otelcol");
+        assert!(
+            !binary.exists(),
+            "the program is not installed on this host"
+        );
+
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, b"#!/bin/sh\nexec sleep 600\n").expect("stage");
+
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            // No configuration yet, so the plugin has nothing to run.
+            build: Box::new(|| None),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await; // "awaiting configuration"
+
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "1.0.0".to_string(),
+                hash: b"first".to_vec(),
+            })
+            .await
+            .expect("send");
+
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"first".to_vec());
+        assert_eq!(
+            result,
+            Ok("1.0.0".to_string()),
+            "the artifact is installed; running it is the configuration's business"
+        );
+        assert!(binary.exists(), "the installed binary stays on disk");
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    #[tokio::test]
+    async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        let good = b"#!/bin/sh\nexec sleep 600\n".to_vec();
+        std::fs::write(&binary, &good).expect("write");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let run_binary = binary.clone();
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(500),
+            binary: Some(binary.clone()),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: run_binary.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                })
+            }),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut harness = Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task,
+        };
+        let _ = next_health(&mut harness.events).await;
+
+        // A binary that exits at once: it fails the grace and must be rolled back.
+        let staged = dir.path().join("downloaded.staged");
+        std::fs::write(&staged, b"#!/bin/sh\nexit 1\n").expect("stage");
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "9.9.9".to_string(),
+                hash: b"bad-hash".to_vec(),
+            })
+            .await
+            .expect("send");
+        let (hash, result) = next_package_ack(&mut harness.events).await;
+        assert_eq!(hash, b"bad-hash".to_vec());
+        assert!(result.is_err(), "a binary that exits fails the install");
+        // The binary on disk is the original one again.
+        assert_eq!(std::fs::read(&binary).expect("read"), good, "rolled back");
+
+        harness.shutdown_tx.send(true).expect("shutdown");
         let _ = harness.task.await;
     }
 

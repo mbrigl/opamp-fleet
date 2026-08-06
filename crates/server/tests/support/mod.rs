@@ -13,8 +13,9 @@ use server::fleet::AppState;
 pub struct TestServer {
     pub addr: SocketAddr,
     pub state: Arc<AppState>,
-    // Held so the Configuration store's directory outlives the test.
-    _dir: tempfile::TempDir,
+    // Held so the store directories outlive the test. Public so a test binary that wires its own
+    // AppState (e.g. package delivery) can hand over the temp dir it kept alive.
+    pub _dir: tempfile::TempDir,
 }
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
@@ -28,6 +29,13 @@ pub async fn spawn_with_auth(auth: Option<server::transport::OpampAuth>) -> Test
     spawn_with(auth, None).await
 }
 
+/// The same real router with a tightened message size limit, for the tests that drive the
+/// Baseline's size rules without moving megabytes around.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_limit(limit: usize) -> TestServer {
+    spawn_full(None, None, limit).await
+}
+
 /// The full shape: optional credential check (ADR-0013) and optional connection-settings offer
 /// (ADR-0014).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
@@ -35,11 +43,20 @@ pub async fn spawn_with(
     auth: Option<server::transport::OpampAuth>,
     offer: Option<server::fleet::ConnectionOffer>,
 ) -> TestServer {
+    spawn_full(auth, offer, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE).await
+}
+
+async fn spawn_full(
+    auth: Option<server::transport::OpampAuth>,
+    offer: Option<server::fleet::ConnectionOffer>,
+    limit: usize,
+) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store")
-            .with_connection_offer(offer),
+            .with_connection_offer(offer)
+            .with_max_message_size(limit),
     );
     let app = server::app(state.clone(), auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -107,10 +124,26 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 /// Stores a Configuration through the REST API v1, the way an operator (or portal) does.
 #[allow(dead_code)]
 pub async fn distribute(addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
+    distribute_with_role(addr, name, selector, body, "").await;
+}
+
+/// [`distribute`] with the Baseline's `AgentConfigFile.role` set (ADR-0016); an empty role is the
+/// ordinary top-level configuration and stays out of the request.
+pub async fn distribute_with_role(
+    addr: SocketAddr,
+    name: &str,
+    selector: &[(&str, &str)],
+    body: &str,
+    role: &str,
+) {
     let selector: std::collections::BTreeMap<&str, &str> = selector.iter().copied().collect();
+    let mut spec = serde_json::json!({ "selector": selector, "body": body });
+    if !role.is_empty() {
+        spec["role"] = role.into();
+    }
     let response = reqwest::Client::new()
         .put(format!("http://{addr}/api/v1/configurations/{name}"))
-        .json(&serde_json::json!({ "selector": selector, "body": body }))
+        .json(&spec)
         .send()
         .await
         .expect("put the configuration");

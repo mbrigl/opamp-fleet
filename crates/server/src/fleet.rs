@@ -11,8 +11,9 @@ use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
     ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
-    OpAmpConnectionSettings, RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities,
-    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    OpAmpConnectionSettings, PackageStatuses, PackagesAvailable, RemoteConfigStatus,
+    RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -24,6 +25,11 @@ use utoipa::ToSchema;
 
 use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
+use crate::packages::PackageStore;
+
+/// The package upload limit in force when nothing configures one — roomy, because a real agent
+/// binary is (see `server.toml`, `max_package_size_bytes`).
+pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
@@ -70,6 +76,9 @@ pub struct AgentRecord {
     /// The outcome of the last connection-settings offer this Agent reported (ADR-0014); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
+    /// The package statuses this Agent last reported (ADR-0015); the
+    /// `server_provided_all_packages_hash` inside is what gates re-offering packages.
+    pub package_statuses: Option<PackageStatuses>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
@@ -121,6 +130,28 @@ impl ConnectionOffer {
     }
 }
 
+/// The package store plus the base URL each `download_url` is built from (ADR-0015).
+pub struct PackageOffering {
+    store: PackageStore,
+    download_base: String,
+}
+
+impl PackageOffering {
+    /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
+    /// against its own endpoint. The download sits on the unauthenticated REST plane (ADR-0013);
+    /// the artifact's content hash and signature are what protect it, so no credential rides it.
+    pub fn new(store: PackageStore, download_base: String) -> Self {
+        PackageOffering {
+            store,
+            download_base,
+        }
+    }
+
+    pub fn store(&self) -> &PackageStore {
+        &self.store
+    }
+}
+
 /// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
@@ -132,6 +163,14 @@ pub struct AppState {
     /// The connection settings offered to the fleet (ADR-0014); `None` offers nothing and leaves
     /// `OffersConnectionSettings` undeclared.
     connection_offer: Option<ConnectionOffer>,
+    /// The packages offered to the fleet (ADR-0015); `None` offers nothing and leaves
+    /// `OffersPackages` undeclared.
+    packages: Option<PackageOffering>,
+    /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
+    max_message_size: usize,
+    /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
+    /// message, so it is bounded separately and far more generously.
+    max_package_size: usize,
 }
 
 impl AppState {
@@ -152,7 +191,35 @@ impl AppState {
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
+            packages: None,
+            max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
         })
+    }
+
+    /// Sets the message size limit both transports enforce (the Baseline recommends the default
+    /// [`opamp::frame::DEFAULT_MAX_MESSAGE_SIZE`] and asks that it be configurable).
+    #[must_use]
+    pub fn with_max_message_size(mut self, limit: usize) -> Self {
+        self.max_message_size = limit;
+        self
+    }
+
+    /// The message size limit in force, for the transports to enforce in both directions.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
+    /// Sets the largest package artifact the REST API accepts on upload (ADR-0015).
+    #[must_use]
+    pub fn with_max_package_size(mut self, limit: usize) -> Self {
+        self.max_package_size = limit;
+        self
+    }
+
+    /// The package upload limit in force, for the REST API's package route.
+    pub fn max_package_size(&self) -> usize {
+        self.max_package_size
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -163,14 +230,33 @@ impl AppState {
         self
     }
 
+    /// Arms package delivery (ADR-0015); with a non-empty store the Server declares
+    /// `OffersPackages` and `AcceptsPackagesStatus`.
+    #[must_use]
+    pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
+        self.packages = packages;
+        self
+    }
+
+    /// Read access to the package store, for the REST API's package routes.
+    pub fn packages(&self) -> Option<&PackageStore> {
+        self.packages.as_ref().map(PackageOffering::store)
+    }
+
     /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
-    /// only while an offer is actually configured — an undeclared capability is never exercised,
-    /// a declared one never hollow.
+    /// while a connection offer is configured and `OffersPackages` / `AcceptsPackagesStatus`
+    /// while a non-empty package store is armed — an undeclared capability is never exercised, a
+    /// declared one never hollow.
     fn capabilities(&self) -> u64 {
-        match self.connection_offer {
-            Some(_) => SERVER_CAPABILITIES | ServerCapabilities::OffersConnectionSettings as u64,
-            None => SERVER_CAPABILITIES,
+        let mut caps = SERVER_CAPABILITIES;
+        if self.connection_offer.is_some() {
+            caps |= ServerCapabilities::OffersConnectionSettings as u64;
         }
+        if self.packages.as_ref().is_some_and(|p| !p.store.is_empty()) {
+            caps |= ServerCapabilities::OffersPackages as u64
+                | ServerCapabilities::AcceptsPackagesStatus as u64;
+        }
+        caps
     }
 
     /// A fresh identity for one WebSocket connection.
@@ -313,6 +399,7 @@ impl AppState {
                 restart_pending: false,
                 available_components: None,
                 connection_settings_status: None,
+                package_statuses: None,
                 owner: conn,
             }
         });
@@ -351,6 +438,14 @@ impl AppState {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
             }
             record.connection_settings_status = Some(status);
+        }
+        if let Some(statuses) = msg.package_statuses {
+            for status in statuses.packages.values() {
+                if status.status == opamp::proto::PackageStatusEnum::InstallFailed as i32 {
+                    warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
+                }
+            }
+            record.package_statuses = Some(statuses);
         }
         if let Some(incoming) = msg.available_components {
             // A routine hash-only update must not degrade an already-fetched full map of the
@@ -423,6 +518,14 @@ impl AppState {
             self.settings_offer(record)
         };
 
+        // The package offer (ADR-0015), gated by capability and the reported
+        // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
+        let packages_available = if disconnected {
+            None
+        } else {
+            self.packages_offer(record)
+        };
+
         Processed {
             reply: ServerToAgent {
                 instance_uid: uid.as_bytes().to_vec(),
@@ -430,12 +533,62 @@ impl AppState {
                 flags: reply_flags,
                 remote_config,
                 connection_settings,
+                packages_available,
                 agent_identification: identification,
                 ..Default::default()
             },
             uid: Some(uid),
             disconnected,
         }
+    }
+
+    /// The package offer for one Agent, or `None` when it cannot accept packages, no package's
+    /// Selector matches it, or the aggregate hash it last reported already matches the set it
+    /// should have.
+    ///
+    /// Both the offer and the aggregate are computed over *this Agent's* matching packages
+    /// (ADR-0017): comparing against a fleet-wide aggregate would re-offer, on every exchange,
+    /// packages this Agent is never given.
+    fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
+        let offering = self.packages.as_ref()?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+            return None;
+        }
+        let description = record.description.as_ref();
+        let reported = record
+            .package_statuses
+            .as_ref()
+            .map(|s| s.server_provided_all_packages_hash.as_slice())
+            .unwrap_or_default();
+        if reported == offering.store.all_packages_hash_for(description).as_slice() {
+            return None;
+        }
+        match offering
+            .store
+            .offer_for(description, &offering.download_base, None)
+        {
+            Ok(offer) => offer,
+            // Ambiguous targeting: two equally specific Selectors both reach this Agent. Offering
+            // neither is the only honest answer — but silence would leave an operator watching a
+            // rollout that never starts, so it is logged and shown in the fleet view.
+            Err(e) => {
+                warn!(error = %e, "refusing to offer a package: ambiguous targeting");
+                None
+            }
+        }
+    }
+
+    /// Why this Agent is offered no package, when the reason is the operator's targeting rather
+    /// than the absence of one (ADR-0017). `None` when nothing is wrong.
+    fn package_conflict(&self, record: &AgentRecord) -> Option<String> {
+        let offering = self.packages.as_ref()?;
+        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+            return None;
+        }
+        offering
+            .store
+            .offer_for(record.description.as_ref(), "", None)
+            .err()
     }
 
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
@@ -465,20 +618,117 @@ impl AppState {
         })
     }
 
-    /// The unsolicited offer a WebSocket loop pushes when a Configuration changes; `None` when
-    /// the Agent already runs its composed set (or nothing matches it, or it cannot accept one),
+    /// The unsolicited offer a WebSocket loop pushes when a Configuration or package changes;
+    /// `None` when the Agent already runs both (or nothing matches it, or it cannot accept one),
     /// so nothing redundant crosses the wire.
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
         let desired = self.configs.desired_for(record.description.as_ref());
-        let remote_config = offer(record, desired.as_ref())?;
+        let remote_config = offer(record, desired.as_ref());
+        let packages_available = self.packages_offer(record);
+        if remote_config.is_none() && packages_available.is_none() {
+            return None;
+        }
         Some(ServerToAgent {
             instance_uid: uid.as_bytes().to_vec(),
             capabilities: self.capabilities(),
-            remote_config: Some(remote_config),
+            remote_config,
+            packages_available,
             ..Default::default()
         })
+    }
+
+    /// Creates or replaces a package (ADR-0015) from a streamed upload, persists it, and wakes
+    /// every WebSocket loop so a matching connected Agent is offered it now.
+    pub fn put_package(
+        &self,
+        name: String,
+        version: String,
+        addon: bool,
+        signature: Option<Vec<u8>>,
+        staged: &std::path::Path,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.put_staged(name.clone(), version, addon, signature, staged)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package stored and offered");
+        Ok(())
+    }
+
+    /// Where an upload for `name` is streamed before it becomes a package.
+    pub fn package_staging_path(&self, name: &str) -> Result<std::path::PathBuf, String> {
+        self.packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store()
+            .staging_path(name)
+    }
+
+    /// Points a package at an artifact hosted elsewhere (ADR-0018) and wakes every WebSocket loop,
+    /// so a targeted Agent is offered the new address now rather than at its next poll.
+    pub fn set_package_source(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        content_hash: Vec<u8>,
+        signature: Option<Vec<u8>>,
+        source: crate::packages::Source,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_source(name, version, addon, content_hash, signature, source)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package now referenced from its source");
+        Ok(())
+    }
+
+    /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
+    /// change newly targets is offered it now rather than at its next poll. Returns the package's
+    /// version, for the response.
+    pub fn set_package_selector(
+        &self,
+        name: &str,
+        selector: BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_selector(name, selector)?;
+        let version = store
+            .list()
+            .into_iter()
+            .find(|p| p.name == name)
+            .map(|p| p.version)
+            .unwrap_or_default();
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package selector changed");
+        Ok(version)
+    }
+
+    /// Deletes a package; `Ok(false)` when none of that name exists.
+    pub fn delete_package(&self, name: &str) -> Result<bool, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        let deleted = store.delete(name)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(package = %name, "package deleted");
+        }
+        Ok(deleted)
     }
 
     /// Marks the Agents a closing WebSocket connection carried as no longer connected — but only
@@ -505,7 +755,8 @@ impl AppState {
             .map(|(uid, record)| {
                 let desired = self.configs.desired_for(record.description.as_ref());
                 let matched = self.configs.matching_names(record.description.as_ref());
-                AgentView::from_record(uid, record, desired.as_ref(), matched)
+                let package_conflict = self.package_conflict(record);
+                AgentView::from_record(uid, record, desired.as_ref(), matched, package_conflict)
             })
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
@@ -534,12 +785,16 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
             config_map: desired
                 .entries
                 .iter()
-                .map(|(name, body)| {
+                .map(|entry| {
                     (
-                        name.clone(),
+                        entry.name.clone(),
                         AgentConfigFile {
-                            body: body.clone().into_bytes(),
+                            body: entry.body.clone().into_bytes(),
                             content_type: String::new(),
+                            // The operator's role, verbatim (ADR-0016). Empty — the default —
+                            // leaves the field unset, which is top-level configuration and what
+                            // every Configuration predating that decision carries.
+                            role: entry.role.clone(),
                         },
                     )
                 })
@@ -570,6 +825,12 @@ pub struct AgentView {
     pub capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     pub available_components: Vec<String>,
+    /// The Agent's package installations (ADR-0015), in name order; empty until reported.
+    pub packages: Vec<PackageStatusView>,
+    /// Why this Agent is offered no package although it accepts them — two equally specific
+    /// Selectors both reach it (ADR-0017). Absent when the targeting is unambiguous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_conflict: Option<String>,
     pub transport: String,
     pub connected: bool,
     pub healthy: bool,
@@ -580,6 +841,52 @@ pub struct AgentView {
     pub in_sync: bool,
     pub sequence_num: u64,
     pub last_seen_ms: u64,
+}
+
+/// One package's installation state as the REST API and UI see it (ADR-0015).
+#[derive(Serialize, ToSchema)]
+pub struct PackageStatusView {
+    pub name: String,
+    /// The version the Agent has installed; empty if it has none.
+    pub version: String,
+    /// `Downloading`, `Installing`, `Installed`, `InstallPending`, or `InstallFailed`.
+    pub status: String,
+    /// The failure reason when `status` is `InstallFailed`.
+    pub error: String,
+    /// How far the artifact download has got, as a percentage. Present only while `Downloading`,
+    /// and only when the download source stated a size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_percent: Option<f64>,
+    /// The download's current rate in bytes per second. Present only while `Downloading`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_second: Option<f64>,
+}
+
+impl PackageStatusView {
+    fn from_status(status: &opamp::proto::PackageStatus) -> Self {
+        use opamp::proto::PackageStatusEnum as S;
+        let name = match status.status {
+            s if s == S::Installed as i32 => "Installed",
+            s if s == S::Installing as i32 => "Installing",
+            s if s == S::InstallPending as i32 => "InstallPending",
+            s if s == S::InstallFailed as i32 => "InstallFailed",
+            s if s == S::Downloading as i32 => "Downloading",
+            _ => "Unknown",
+        };
+        // The Baseline carries these only with `Downloading`, and a percentage of zero means the
+        // source never said how big the artifact is — not that nothing has arrived.
+        let details = status.download_details.filter(|_| name == "Downloading");
+        PackageStatusView {
+            name: status.name.clone(),
+            version: status.agent_has_version.clone(),
+            status: name.to_string(),
+            error: status.error_message.clone(),
+            download_percent: details
+                .map(|d| d.download_percent)
+                .filter(|percent| *percent > 0.0),
+            download_bytes_per_second: details.map(|d| d.download_bytes_per_second),
+        }
+    }
 }
 
 /// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
@@ -649,6 +956,7 @@ impl AgentView {
         record: &AgentRecord,
         desired: Option<&DesiredConfig>,
         matched_configurations: Vec<String>,
+        package_conflict: Option<String>,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
             Some(d) => (
@@ -695,6 +1003,20 @@ impl AgentView {
                     let mut names: Vec<String> = ac.components.keys().cloned().collect();
                     names.sort_unstable();
                     names
+                })
+                .unwrap_or_default(),
+            package_conflict,
+            packages: record
+                .package_statuses
+                .as_ref()
+                .map(|s| {
+                    let mut views: Vec<PackageStatusView> = s
+                        .packages
+                        .values()
+                        .map(PackageStatusView::from_status)
+                        .collect();
+                    views.sort_by(|a, b| a.name.cmp(&b.name));
+                    views
                 })
                 .unwrap_or_default(),
             transport: record.transport.as_str().to_string(),
@@ -786,5 +1108,53 @@ mod tests {
             with_undefined,
             ["ReportsStatus", "unknown bits 0x1000000000000000"]
         );
+    }
+
+    /// What an operator sees while a package is on the wire. A status the view does not know
+    /// reads as "Unknown", which is worse than useless during a rollout — so `Downloading` and
+    /// its progress are part of the view, and the progress belongs to that status alone.
+    #[test]
+    fn the_package_view_shows_a_download_in_progress() {
+        use opamp::proto::{PackageDownloadDetails, PackageStatus, PackageStatusEnum};
+
+        let downloading = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 42.5,
+                download_bytes_per_second: 1_048_576.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(downloading.status, "Downloading");
+        assert_eq!(downloading.download_percent, Some(42.5));
+        assert_eq!(downloading.download_bytes_per_second, Some(1_048_576.0));
+
+        // A percentage is only meaningful when the source stated a size; zero means it did not.
+        let sizeless = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Downloading as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 0.0,
+                download_bytes_per_second: 2048.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sizeless.download_percent, None);
+        assert_eq!(sizeless.download_bytes_per_second, Some(2048.0));
+
+        // Every other status carries no progress, whatever the Agent sent.
+        let installing = PackageStatusView::from_status(&PackageStatus {
+            name: "otelcol".to_string(),
+            status: PackageStatusEnum::Installing as i32,
+            download_details: Some(PackageDownloadDetails {
+                download_percent: 99.0,
+                download_bytes_per_second: 1.0,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(installing.status, "Installing");
+        assert_eq!(installing.download_percent, None);
+        assert_eq!(installing.download_bytes_per_second, None);
     }
 }

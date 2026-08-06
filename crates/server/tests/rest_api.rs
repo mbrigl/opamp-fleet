@@ -79,6 +79,64 @@ async fn configurations_crud_round_trips() {
     assert_eq!(gone.status(), 404);
 }
 
+/// ADR-0016: `role` is optional on the way in and absent on the way out when unset, so every
+/// stored Configuration and every generated client keeps working unchanged.
+#[tokio::test]
+async fn a_configuration_carries_an_optional_role() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // Omitted: accepted, and absent from the response.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/base"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        stored.get("role").is_none(),
+        "an unset role stays out of the JSON: {stored}"
+    );
+
+    // Set: stored verbatim and returned.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/ruleset"))
+        .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "supplementary");
+
+    let got: serde_json::Value = client
+        .get(url(server.addr, "/api/v1/configurations/ruleset"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got["role"], "supplementary");
+
+    // A value this project has no word for is carried, not rejected — the vocabulary is
+    // Agent-type-specific and the Server never guesses at one.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/other"))
+        .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "some-agents-own-word");
+}
+
 #[tokio::test]
 async fn invalid_configurations_are_rejected_loudly() {
     let server = spawn().await;
@@ -135,6 +193,51 @@ async fn the_openapi_document_describes_the_contract() {
 }
 
 #[tokio::test]
+async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // The docs page renders the OpenAPI document and pulls its renderer from this same origin.
+    let page = client
+        .get(url(server.addr, "/api/v1/docs"))
+        .send()
+        .await
+        .expect("get docs");
+    assert_eq!(page.status(), 200);
+    assert!(page
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html")));
+    let html = page.text().await.expect("html");
+    assert!(
+        html.contains("spec-url=\"/api/v1/openapi.json\""),
+        "points at the document"
+    );
+    assert!(
+        html.contains("/api/v1/docs/redoc.js"),
+        "loads the vendored renderer"
+    );
+
+    // The vendored bundle is served as JavaScript — no CDN, so the docs work offline.
+    let js = client
+        .get(url(server.addr, "/api/v1/docs/redoc.js"))
+        .send()
+        .await
+        .expect("get renderer");
+    assert_eq!(js.status(), 200);
+    assert!(js
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("javascript")));
+    assert!(
+        js.text().await.expect("js").len() > 100_000,
+        "the real bundle, not a stub"
+    );
+}
+
+#[tokio::test]
 async fn configurations_survive_a_server_restart() {
     // The store is the persistence: a new AppState over the same directory restores everything.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -146,6 +249,7 @@ async fn configurations_survive_a_server_restart() {
                 name: "keeper".to_string(),
                 selector: std::collections::BTreeMap::new(),
                 body: "receivers: {}\n".to_string(),
+                role: String::new(),
             })
             .expect("put");
     }

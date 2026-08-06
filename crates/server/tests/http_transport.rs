@@ -12,7 +12,7 @@ use opamp::proto::{
 use opamp::uid::InstanceUid;
 use prost::Message;
 use server::fleet::SERVER_CAPABILITIES;
-use support::{compressed_report, distribute, full_report, spawn};
+use support::{compressed_report, distribute, full_report, spawn, spawn_with_limit};
 
 const PROTOBUF: &str = "application/x-protobuf";
 
@@ -320,6 +320,48 @@ async fn gzip_request_bodies_are_accepted() {
     let reply =
         ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode");
     assert_eq!(reply.instance_uid, uid.as_bytes());
+}
+
+/// The Baseline (message size limits): the Server MUST enforce a receive limit on the plain-HTTP
+/// transport and MUST answer an oversized request with `413 Content Too Large`.
+#[tokio::test]
+async fn an_oversized_request_body_is_refused_with_413() {
+    let server = spawn_with_limit(1024).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/opamp", server.addr))
+        .header("content-type", PROTOBUF)
+        .body(vec![0u8; 2048])
+        .send()
+        .await
+        .expect("post");
+
+    assert_eq!(response.status(), 413);
+}
+
+/// The same limit, applied *after* decompression: a small gzip body that inflates past the limit
+/// buys no more memory than an oversized plain one, and is answered the same way.
+#[tokio::test]
+async fn a_gzip_body_that_inflates_past_the_limit_is_refused_with_413() {
+    let server = spawn_with_limit(1024).await;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    // Compresses to a few dozen bytes — well inside the request-body limit — but inflates far
+    // past it, which is precisely the case the Baseline calls out.
+    encoder.write_all(&vec![0u8; 64 * 1024]).expect("gzip");
+    let body = encoder.finish().expect("gzip finish");
+    assert!(body.len() < 1024, "the compressed body is under the limit");
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/opamp", server.addr))
+        .header("content-type", PROTOBUF)
+        .header("content-encoding", "gzip")
+        .body(body)
+        .send()
+        .await
+        .expect("post");
+
+    assert_eq!(response.status(), 413);
 }
 
 #[tokio::test]
