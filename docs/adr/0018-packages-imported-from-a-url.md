@@ -1,6 +1,6 @@
 # ADR-0018: A package is an uploaded archive or a URL the Agents fetch — unpacked by the Agent, `.tar.gz` or encrypted `.7z`
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-05
 - **Deciders:** Markus Brigl
 
