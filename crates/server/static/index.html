@@ -220,6 +220,11 @@
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
       </div>
 
+      <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
+        <span id="selection-count" class="sub"></span>
+        <button id="restart-selected" class="btn btn-ghost">⟳ Restart selected</button>
+        <span id="selection-result" class="sub"></span>
+      </div>
 
       <div class="card table-wrap">
         <table>
@@ -255,6 +260,9 @@
       // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
       const expandedComponents = new Set();
+      // Which Agents the operator has ticked. Kept by instance_uid rather than by row, so a
+      // selection survives the two-second refresh instead of being wiped mid-decision.
+      const selectedAgents = new Set();
 
       const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
       function ago(ms) {
@@ -354,7 +362,7 @@
         $("agents").innerHTML = rows.map((a) => {
           const row = `
           <tr>
-            <td class="chk"><input type="checkbox" /></td>
+            <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
@@ -418,8 +426,53 @@
         if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
         render();
       });
+      // Reflects the current selection in the bar above the table.
+      function renderSelection() {
+        $("selection-bar").style.display = selectedAgents.size ? "flex" : "none";
+        $("selection-count").textContent = `${selectedAgents.size} agent(s) selected`;
+      }
+
+      document.addEventListener("change", (e) => {
+        const box = e.target.closest(".row-select");
+        if (!box) return;
+        if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        $("selection-result").textContent = "";
+        renderSelection();
+      });
+
+      // A restart per selected Agent — the same route the per-row button uses, since the UI is a
+      // client of the API and nothing more. Refusals are counted and named rather than swallowed:
+      // an Agent that does not declare AcceptsRestartCommand is answered 409 by the Server.
+      $("restart-selected").addEventListener("click", async () => {
+        const uids = [...selectedAgents];
+        if (!uids.length) return;
+        $("selection-result").textContent = "restarting…";
+        let accepted = 0;
+        const refused = [];
+        for (const uid of uids) {
+          try {
+            const res = await fetch(`/api/v1/agents/${encodeURIComponent(uid)}/restart`, { method: "POST" });
+            if (res.ok) { accepted += 1; continue; }
+            const reason = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refused.push(`${uid.slice(0, 8)}…: ${reason}`);
+          } catch (e) {
+            refused.push(`${uid.slice(0, 8)}…: ${e.message}`);
+          }
+        }
+        $("selection-result").textContent = refused.length
+          ? `${accepted} restarted · ${refused.length} refused — ${refused.join("; ")}`
+          : `${accepted} restarted`;
+        refreshAgents();
+      });
+
+      // Select-all applies to what is on screen — which, with a filter active, is the point.
       $("select-all").addEventListener("change", (e) => {
-        document.querySelectorAll('#agents input[type="checkbox"]').forEach((c) => (c.checked = e.target.checked));
+        document.querySelectorAll("#agents .row-select").forEach((box) => {
+          box.checked = e.target.checked;
+          if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        });
+        $("selection-result").textContent = "";
+        renderSelection();
       });
 
       // Configurations editor (ADR-0012): name + selector + body, PUT/DELETE per Configuration.
