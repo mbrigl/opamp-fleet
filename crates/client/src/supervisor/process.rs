@@ -224,8 +224,11 @@ impl Runner {
         let _ = std::fs::remove_file(&staged);
         info!(supervisor = %self.name, version = %version, binary = %binary.display(), "package binary staged; restarting");
 
-        let started = self.spawn_if_due().await;
-        let outcome = self.gate(started, child, shutdown).await;
+        let started = self.try_spawn().await;
+        if let Err(e) = &started {
+            warn!(supervisor = %self.name, error = %e, "the new binary would not start");
+        }
+        let outcome = self.gate(started.ok(), child, shutdown).await;
         match (&outcome, has_backup) {
             // Roll the binary back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
@@ -292,6 +295,38 @@ impl Runner {
 
     /// Spawns when the plugin says something should run, reporting health either way.
     async fn spawn_if_due(&self) -> Option<Child> {
+        self.try_spawn().await.ok()
+    }
+
+    /// Spawns the Managed Process, keeping the reason when it fails.
+    ///
+    /// Right after a package swap the reason matters: exec of a freshly written binary can fail
+    /// with `ETXTBSY` — "Text file busy" — when another thread of this Client forked for its own
+    /// spawn while this one still held the new file open for writing. The forked child inherits
+    /// that descriptor until it execs, and the kernel refuses to exec a file anyone holds open for
+    /// writing. It is transient and says nothing about the artifact, so the swap retries briefly
+    /// rather than rolling back a binary that is perfectly good.
+    async fn try_spawn(&self) -> Result<Child, String> {
+        const BUSY_RETRIES: u32 = 10;
+        const BUSY_DELAY: Duration = Duration::from_millis(50);
+
+        let mut attempt = 0;
+        loop {
+            match self.spawn_once().await {
+                Err(e) if is_text_file_busy(&e) && attempt < BUSY_RETRIES => {
+                    attempt += 1;
+                    warn!(
+                        supervisor = %self.name, attempt,
+                        "the new binary is momentarily busy (another spawn holds it); retrying"
+                    );
+                    tokio::time::sleep(BUSY_DELAY).await;
+                }
+                other => return other.map_err(|e| e.to_string()),
+            }
+        }
+    }
+
+    async fn spawn_once(&self) -> Result<Child, std::io::Error> {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
@@ -299,7 +334,7 @@ impl Runner {
                     String::new(),
                 )))
                 .await;
-            return None;
+            return Err(std::io::Error::other("nothing to run"));
         };
         let mut command = Command::new(&spec.program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
@@ -320,7 +355,7 @@ impl Runner {
                         ..Default::default()
                     }))
                     .await;
-                Some(child)
+                Ok(child)
             }
             Err(e) => {
                 warn!(supervisor = %self.name, program = %spec.program.display(), error = %e, "cannot spawn");
@@ -330,9 +365,22 @@ impl Runner {
                         format!("cannot spawn {}: {e}", spec.program.display()),
                     )))
                     .await;
-                None
+                Err(e)
             }
         }
+    }
+}
+
+/// `ETXTBSY`: the file cannot be executed because someone holds it open for writing.
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
