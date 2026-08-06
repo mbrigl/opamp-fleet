@@ -103,11 +103,14 @@ has fallen behind. It cannot tell you what that costs — that is what step 1 th
   **optional**: a conforming implementation may omit it, and *"Interoperability of Partial
   Implementations"* obliges each side to **stop using** a capability once it learns the peer lacks
   it — so an undeclared capability must never be assumed, in either direction.
-- **Status** — where this project stands: **implemented**, **planned**, or **not planned** (with a
-  reason, listed under [Deviations](#deviations)).
+- **Status** — where this project stands: **implemented**, **partial**, **planned**, or **not
+  planned** (with a reason, listed under [Deviations](#deviations)).
 
 Status values are deliberately coarse. A capability counts as *implemented* only when the code
-declares the bit **and** honours the behaviour behind it end to end.
+declares the bit **and** honours the behaviour behind it end to end. Where the bit is declared but
+part of the behaviour behind it is not honoured, the status is *partial* and the note says which
+part — a declared capability the peer may rely on is the one place where "mostly" has to be
+written down rather than rounded up.
 
 ## Agent capabilities
 
@@ -124,7 +127,7 @@ The Client declares these on behalf of each Agent it represents. Bit values are 
 | `ReportsOwnTraces` | `0x0020` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnMetrics` | `0x0040` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
 | `ReportsOwnLogs` | `0x0080` | Beta | optional | planned | Client's own telemetry to a Server-nominated destination. |
-| `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | implemented | Server-driven credential rotation (goal 17, ADR-0014). An offer is verified by actually connecting (the Baseline's MUST), persisted in the Client's state dir (overriding `client.toml`), then the connection switches — across transports if the offered endpoint demands it. An offered `heartbeat_interval_seconds` becomes the heartbeat (WebSocket) or polling interval (plain HTTP). |
+| `AcceptsOpAMPConnectionSettings` | `0x0100` | Beta | optional | partial | Server-driven credential rotation (goal 17, ADR-0014). An offer is verified by actually connecting (the Baseline's MUST), persisted in the Client's state dir (overriding `client.toml`), then the connection switches — across transports if the offered endpoint demands it. An offered `heartbeat_interval_seconds` becomes the heartbeat (WebSocket) or polling interval (plain HTTP). **Three fields of the offered `OpAMPConnectionSettings` are ignored**: `certificate`, `tls`, and `proxy` are dropped when an offer is folded over what is in force, and the offer is still acknowledged `APPLIED` — so a Server that offers a client certificate is told the settings were applied while nothing about them was. Scoped out by ADR-0014 for want of a client-side PKI; see [Mutual TLS](#mutual-tls-and-the-ignored-offer-fields) for what closing it needs. |
 | `AcceptsOtherConnectionSettings` | `0x0200` | Beta | optional | planned | Settings for non-OpAMP destinations. |
 | `AcceptsRestartCommand` | `0x0400` | Beta | optional | implemented | Declared by Supervisor-backed Agents only — the self-Agent has no process to restart. Queued via `POST /api/v1/agents/{uid}/restart`, delivered as the Baseline's command-only message on both transports (pushed over WebSocket, on the next poll over plain HTTP). |
 | `ReportsHealth` | `0x0800` | stable | optional | implemented | Core of the control loop (goal 2). `ComponentHealth.attributes`, new in `v0.19.0` (`[Development]`), is carried through from what a Managed Process reports; this project adds none of its own. |
@@ -144,7 +147,7 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 | `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `OffersPackages` | `0x0008` | Beta | optional | implemented | Declared only while a non-empty package store is armed (`packages_dir`, ADR-0015). Artifacts and metadata persist and are managed through the REST API — uploaded under `max_package_size_bytes` and served straight from disk, so neither the store nor a download holds a program in memory. The offer is composed **per Agent** from the packages whose Selector matches it, as the Baseline's "available on the Server for this Agent" describes (ADR-0017), and its `all_packages_hash` is computed over that same set — so the re-offer gate stays correct for a targeted rollout. A package is either uploaded here, in which case its `download_url` points at this listener, or **referenced** (ADR-0018): the Server stores the address and the operator's SHA-256, offers them verbatim with any headers the source needs, and never downloads the artifact — the Baseline's Download Server *"may be on the same host as the OpAMP Server or a different host"*. |
 | `AcceptsPackagesStatus` | `0x0010` | Beta | optional | implemented | The Server records each Agent's reported `PackageStatuses` and gates re-offering on the `server_provided_all_packages_hash` (ADR-0015). |
-| `OffersConnectionSettings` | `0x0020` | Beta | optional | implemented | Declared only while `server.toml` carries a `[connection_offer]` — credential, heartbeat interval, and/or endpoint, compiled into one hash-gated `OpAMPConnectionSettings` offered to Agents declaring `AcceptsOpAMPConnectionSettings` whose reported hash differs (ADR-0014). A credential that `[auth]` would reject fails startup. |
+| `OffersConnectionSettings` | `0x0020` | Beta | optional | partial | Declared only while `server.toml` carries a `[connection_offer]` — credential, heartbeat interval, and/or endpoint, compiled into one hash-gated `OpAMPConnectionSettings` offered to Agents declaring `AcceptsOpAMPConnectionSettings` whose reported hash differs (ADR-0014). A credential that `[auth]` would reject fails startup. The offer never carries `certificate`, `tls`, or `proxy` — there is no configuration surface to put them in, which is the Server half of the same gap the Agent row names. |
 | `AcceptsConnectionSettingsRequest` | `0x0040` | Development | optional | planned | Agent-initiated certificate signing request flow. |
 
 ## Protocol behaviour beyond capabilities
@@ -172,6 +175,8 @@ separately because conformance depends on them just as much.
 | Duplicate WebSocket connections | Handling defined by the spec | implemented | The Client holds one connection by construction and sends `agent_disconnect` before a graceful reconnect. The Server tracks per-connection ownership: only the owning connection marks its Agents disconnected, so a stale socket never takes down an Agent another connection carries. |
 | Undefined capability bits | MUST be zero | implemented | Both ends declare only defined bits (`opamp` generated enums). |
 | Authentication | HTTP auth methods MAY be used; `401` MUST be returned on failure | implemented | `[Beta]`. The Server's optional `[auth]` section guards `/v1/opamp` (ADR-0013): Basic and Bearer accepted, checked on every plain-HTTP POST and before the WebSocket upgrade completes, `401` with a `WWW-Authenticate` challenge otherwise. The Client sends the header on both transports. Without `[auth]` the endpoint stays open. Underpins goal 17. |
+| Transport security | TLS on both transports | implemented | rustls on both ends (ADR-0007); `wss://` and `https://`, with an optional CA file on the Client that replaces the built-in roots for a private CA. Server-authenticated only — see the next row. |
+| Mutual TLS | Client certificates as peer proof | planned | The Client presents no certificate (`with_no_client_auth`) and the Server verifies none. Deferred by ADR-0007 (out of scope) and ADR-0013 (which chose header credentials over a day-one PKI); it is the outstanding half of goal 17 and the reason three offer fields are ignored — see [Mutual TLS](#mutual-tls-and-the-ignored-offer-fields). |
 | Capability negotiation | Each side MUST stop using capabilities the peer lacks | implemented | The Server offers configuration only to Agents declaring `AcceptsRemoteConfig`; the Client stops reporting effective config to a Server without `AcceptsEffectiveConfig`. |
 | Retrying, throttling, bad request | Defined error and backoff behaviour | implemented | The Server answers malformed input with `BAD_REQUEST` error responses; the Client honours `UNAVAILABLE` retry hints and reconnects with capped exponential backoff. The Server does not yet emit throttling itself. |
 | Interim status reporting | The Client MAY report progress while it downloads and installs | implemented | While an artifact downloads the Client reports `Downloading` with `PackageDownloadDetails` every 5 s, and reports the terminal status once done — the Baseline's "status reports allow the Server to stay informed" for processing that takes a long time. |
@@ -194,6 +199,37 @@ The limit defaults to **64 MiB**, the value upstream recommends, and is configur
 through `max_message_size_bytes` (ADR-0008). Zero is rejected at startup: the Baseline knows no
 "unlimited", so a limit that could carry nothing is a configuration error, not a way to switch the
 rule off. The Supervisor Endpoint enforces the same limit as the Server it stands in for.
+
+### Mutual TLS and the ignored offer fields
+
+Goal 17 asks for three things: TLS on both ends, mutual TLS, and a Server that accepts only
+authenticated Agent identities. Two of them hold — rustls on both transports (ADR-0007) and the
+optional `[auth]` credential on the OpAMP endpoint (ADR-0013). **Mutual TLS does not**, and this is
+where that is written down, because it is the one open item with nowhere else to live: it is not a
+capability bit, so no row in the matrices above carried it, and until now it existed only as a
+sentence in three ADRs saying the next one would deal with it.
+
+What is missing is one mechanism with two ends of consequence:
+
+- **The channel.** The Client builds its rustls configuration `with_no_client_auth`
+  (`crates/client/src/tls.rs`) and the Server's `[tls]` section takes a certificate and a key but no
+  client CA, so neither end can prove or demand a peer identity. A fleet that wants one today uses
+  the `[auth]` credential, which proves *membership* rather than *which Agent*.
+- **The offer.** `OpAMPConnectionSettings` carries `certificate`, `tls`, and `proxy` alongside the
+  endpoint and headers this project does honour. The Client's `merge` rebuilds the settings from the
+  fields it knows and closes with `..Default::default()`, so those three are dropped — and the offer
+  is still acknowledged `APPLIED`. A Server offering a client certificate is told it was applied.
+  That acknowledgement is the sharp edge: an ignored field that reports success is worse than one
+  that reports nothing, because the Server has no way to find out.
+
+ADR-0014 scoped the three fields out deliberately — there is no client-side PKI for them to feed —
+and recorded that they would stay `planned` in the matrix. They had no row to stay in; the
+`partial` status on both connection-settings rows is that correction.
+
+Closing this is a decision, not an omission to tidy up, and it does not stand alone: client
+certificates without a rotation story are half a feature, and the Baseline's rotation story for them
+is the CSR flow (`AcceptsConnectionSettingsRequest`, itself `planned` above). Whoever takes it on
+takes on both, and writes an ADR first.
 
 ## Deviations
 
@@ -232,6 +268,9 @@ configured), swaps it over its Managed Process's binary, health-gates it on the 
 rolls back a binary that will not stay up, reporting `Downloading` with its progress while the
 artifact is still on the wire. With the move to Baseline `v0.19.0` both ends also
 enforce the protocol's new message size limits in both directions, on both transports and at the
-Supervisor Endpoint. Every remaining *planned* row — other/telemetry connection settings, the
-certificate-request flow, own telemetry, custom messages, and the Client's own self-update
-(goal 11) — is future work; the rows above double as that work list.
+Supervisor Endpoint. Every remaining *planned* row — mutual TLS, other/telemetry connection
+settings, the certificate-request flow, own telemetry, custom messages, and the Client's own
+self-update (goal 11) — is future work; the rows above double as that work list. Two rows read
+*partial* rather than *implemented*: both connection-settings capabilities honour the endpoint,
+credential, and heartbeat an offer carries but ignore its `certificate`, `tls`, and `proxy` fields
+(see [Mutual TLS](#mutual-tls-and-the-ignored-offer-fields)).
