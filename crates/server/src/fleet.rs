@@ -785,17 +785,16 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
             config_map: desired
                 .entries
                 .iter()
-                .map(|(name, body)| {
+                .map(|entry| {
                     (
-                        name.clone(),
+                        entry.name.clone(),
                         AgentConfigFile {
-                            body: body.clone().into_bytes(),
+                            body: entry.body.clone().into_bytes(),
                             content_type: String::new(),
-                            // `role` arrived with Baseline v0.19.0 and is Agent-type-specific.
-                            // Carrying an operator-chosen value into it changes the REST API's
-                            // Configuration model, which is a public contract — proposed in
-                            // ADR-0016, deliberately left unset until that is decided.
-                            role: String::new(),
+                            // The operator's role, verbatim (ADR-0016). Empty — the default —
+                            // leaves the field unset, which is top-level configuration and what
+                            // every Configuration predating that decision carries.
+                            role: entry.role.clone(),
                         },
                     )
                 })

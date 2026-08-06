@@ -230,10 +230,13 @@ async fn put_configuration(
         name,
         selector: spec.selector,
         body,
+        // Carried verbatim (ADR-0016): the values are Agent-type-specific, so the Server never
+        // validates one against a vocabulary of its own. Empty is top-level configuration.
+        role: spec.role,
     };
     match state.put_configuration(config.clone()) {
         Ok(()) => {
-            info!(configuration = %config.name, bytes = config.body.len(), "configuration stored from the API");
+            info!(configuration = %config.name, role = %config.role, bytes = config.body.len(), "configuration stored from the API");
             Json(config).into_response()
         }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),

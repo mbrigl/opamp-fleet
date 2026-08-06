@@ -79,6 +79,64 @@ async fn configurations_crud_round_trips() {
     assert_eq!(gone.status(), 404);
 }
 
+/// ADR-0016: `role` is optional on the way in and absent on the way out when unset, so every
+/// stored Configuration and every generated client keeps working unchanged.
+#[tokio::test]
+async fn a_configuration_carries_an_optional_role() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // Omitted: accepted, and absent from the response.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/base"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        stored.get("role").is_none(),
+        "an unset role stays out of the JSON: {stored}"
+    );
+
+    // Set: stored verbatim and returned.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/ruleset"))
+        .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "supplementary");
+
+    let got: serde_json::Value = client
+        .get(url(server.addr, "/api/v1/configurations/ruleset"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got["role"], "supplementary");
+
+    // A value this project has no word for is carried, not rejected — the vocabulary is
+    // Agent-type-specific and the Server never guesses at one.
+    let stored: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/other"))
+        .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
+        .send()
+        .await
+        .expect("put")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stored["role"], "some-agents-own-word");
+}
+
 #[tokio::test]
 async fn invalid_configurations_are_rejected_loudly() {
     let server = spawn().await;
@@ -191,6 +249,7 @@ async fn configurations_survive_a_server_restart() {
                 name: "keeper".to_string(),
                 selector: std::collections::BTreeMap::new(),
                 body: "receivers: {}\n".to_string(),
+                role: String::new(),
             })
             .expect("put");
     }

@@ -1,6 +1,6 @@
 # ADR-0016: Carry the Baseline's `AgentConfigFile.role` through the Configuration model
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-04
 - **Deciders:** Markus Brigl
 

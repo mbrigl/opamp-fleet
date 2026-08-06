@@ -10,7 +10,7 @@ use opamp::frame;
 use opamp::proto::{AgentDisconnect, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent};
 use opamp::uid::InstanceUid;
 use server::fleet::SERVER_CAPABILITIES;
-use support::{compressed_report, distribute, full_report, spawn};
+use support::{compressed_report, distribute, distribute_with_role, full_report, spawn};
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -99,6 +99,36 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     distribute(server.addr, "fleet", &[], "exporters: {}\n").await;
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
+}
+
+/// ADR-0016: the operator's role reaches the Agent in `AgentConfigFile.role`, verbatim, and a
+/// Configuration without one leaves the field unset.
+#[tokio::test]
+async fn a_configuration_role_reaches_the_agent_verbatim() {
+    let server = spawn().await;
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "collector", 1)).await;
+    recv(&mut socket).await;
+
+    distribute(server.addr, "base", &[], "receivers: {}\n").await;
+    recv(&mut socket).await;
+    distribute_with_role(server.addr, "ruleset", &[], "rules: []\n", "supplementary").await;
+
+    let map = recv(&mut socket)
+        .await
+        .remote_config
+        .expect("an offer")
+        .config
+        .expect("a config map");
+    assert_eq!(
+        map.config_map["ruleset"].role, "supplementary",
+        "the role travels unchanged"
+    );
+    assert_eq!(
+        map.config_map["base"].role, "",
+        "a Configuration without a role leaves the field unset"
+    );
 }
 
 #[tokio::test]

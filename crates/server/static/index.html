@@ -173,6 +173,7 @@
         <div class="config-fields">
           <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent)" autocomplete="off" />
+          <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
         <textarea id="config" placeholder="The configuration body to distribute…"></textarea>
@@ -491,7 +492,7 @@
       }
       function renderConfigList() {
         $("config-list").innerHTML = configurations.map((c) =>
-          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}</span>`
+          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${c.role ? "role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : "top-level configuration"}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#config-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectConfig(chip.dataset.name));
@@ -504,6 +505,7 @@
         configDirty = false;
         $("config-name").value = config.name;
         $("config-selector").value = selectorText(config.selector);
+        $("config-role").value = config.role || "";
         $("config").value = config.body;
         $("config-error").textContent = "";
         renderConfigList();
@@ -514,12 +516,15 @@
       $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); });
       $("save").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
+        const role = $("config-role").value.trim();
         let selector;
         try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ selector, body: $("config").value }),
+          // An empty role is left out entirely rather than sent as "": absent is what the
+          // resource means by top-level configuration.
+          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}) }),
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
@@ -541,7 +546,7 @@
         }
         $("config-error").textContent = "";
         selectedName = null;
-        $("config-name").value = ""; $("config-selector").value = ""; $("config").value = "";
+        $("config-name").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
         await refreshConfigs();
         refreshAgents();
       });
@@ -701,7 +706,7 @@
         renderConfigList();
         if (selectedName && !configDirty) {
           const selected = configurations.find((c) => c.name === selectedName);
-          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); }
+          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
         }
       }
 

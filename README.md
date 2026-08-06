@@ -214,6 +214,12 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
        http://127.0.0.1:4320/api/v1/configurations/linux-base  # distribute to a subset
 $ curl -X DELETE http://127.0.0.1:4320/api/v1/configurations/linux-base
+
+# Content the agent reads by path rather than is configured with (ADR-0016): written next to the
+# configuration under its own name, never passed to the process as configuration.
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"body": "rules: []", "role": "supplementary"}' \
+       http://127.0.0.1:4320/api/v1/configurations/ruleset
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or

@@ -124,10 +124,26 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 /// Stores a Configuration through the REST API v1, the way an operator (or portal) does.
 #[allow(dead_code)]
 pub async fn distribute(addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
+    distribute_with_role(addr, name, selector, body, "").await;
+}
+
+/// [`distribute`] with the Baseline's `AgentConfigFile.role` set (ADR-0016); an empty role is the
+/// ordinary top-level configuration and stays out of the request.
+pub async fn distribute_with_role(
+    addr: SocketAddr,
+    name: &str,
+    selector: &[(&str, &str)],
+    body: &str,
+    role: &str,
+) {
     let selector: std::collections::BTreeMap<&str, &str> = selector.iter().copied().collect();
+    let mut spec = serde_json::json!({ "selector": selector, "body": body });
+    if !role.is_empty() {
+        spec["role"] = role.into();
+    }
     let response = reqwest::Client::new()
         .put(format!("http://{addr}/api/v1/configurations/{name}"))
-        .json(&serde_json::json!({ "selector": selector, "body": body }))
+        .json(&spec)
         .send()
         .await
         .expect("put the configuration");

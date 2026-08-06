@@ -24,7 +24,19 @@ pub struct Configuration {
     pub selector: BTreeMap<String, String>,
     /// The configuration text handed to the Managed Process.
     pub body: String,
+    /// The Baseline's `AgentConfigFile.role` (ADR-0016), travelling unchanged to the Agent.
+    /// Empty — the default, and absent from the JSON — means top-level configuration, handled as
+    /// it always was. `supplementary` means content the Managed Process reads *by path* rather
+    /// than being configured with: a fragment, a certificate, a rule file. Any other value is
+    /// carried verbatim and treated like `supplementary`; the protocol leaves the vocabulary to
+    /// the Agent type, so nothing here guesses at one it does not know.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
 }
+
+/// The role value this project understands (ADR-0016). Every other non-empty value is passed on
+/// unchanged and handled the same way — written, not configured with.
+pub const ROLE_SUPPLEMENTARY: &str = "supplementary";
 
 /// The writable part of a [`Configuration`] — the `PUT` request body; the name comes from the URL.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -33,6 +45,18 @@ pub struct ConfigurationSpec {
     #[serde(default)]
     pub selector: BTreeMap<String, String>,
     pub body: String,
+    /// See [`Configuration::role`]. Absent means top-level configuration.
+    #[serde(default)]
+    pub role: String,
+}
+
+/// One composed entry of an Agent's Remote configuration: what becomes one `AgentConfigMap` entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigEntry {
+    pub name: String,
+    pub body: String,
+    /// The Baseline's `AgentConfigFile.role` (ADR-0016); empty is top-level configuration.
+    pub role: String,
 }
 
 /// One Agent's composed Remote configuration: every matching Configuration as a named entry, in
@@ -40,23 +64,37 @@ pub struct ConfigurationSpec {
 /// Agent matching nothing gets no offer at all.
 #[derive(Clone)]
 pub struct DesiredConfig {
-    /// `(name, body)` pairs, sorted by name — deterministic like the entry order the Managed
-    /// Process sees (the Collector receives them as one `--config` per entry, ADR-0011).
-    pub entries: Vec<(String, String)>,
-    /// SHA-256 over the length-prefixed `(name, body)` pairs in name order.
+    /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
+    /// (the Collector receives them as one `--config` per entry, ADR-0011).
+    pub entries: Vec<ConfigEntry>,
+    /// SHA-256 over the length-prefixed `(name, body, role)` triples in name order.
     pub hash: Vec<u8>,
 }
 
 impl DesiredConfig {
-    fn new(mut entries: Vec<(String, String)>) -> Self {
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+    fn new(mut entries: Vec<ConfigEntry>) -> Self {
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
         let mut hasher = Sha256::new();
-        for (name, body) in &entries {
+        for entry in &entries {
             // Length-prefixed framing keeps the hash unambiguous across entry boundaries.
-            hasher.update((name.len() as u64).to_le_bytes());
-            hasher.update(name.as_bytes());
-            hasher.update((body.len() as u64).to_le_bytes());
-            hasher.update(body.as_bytes());
+            hasher.update((entry.name.len() as u64).to_le_bytes());
+            hasher.update(entry.name.as_bytes());
+            hasher.update((entry.body.len() as u64).to_le_bytes());
+            hasher.update(entry.body.as_bytes());
+            // A role changes what the Agent must *do* with an entry, so it belongs in the hash
+            // that gates every push (goal 3) — an ungated role change would never be delivered.
+            // An empty role is hashed as nothing at all rather than as an empty field: it means
+            // "no role", it goes on the wire unset, and every Configuration that predates
+            // ADR-0016 has one. Hashing it would move every existing hash on upgrade and restart
+            // every Managed Process in the fleet to deliver a configuration identical to the one
+            // it already runs — the precise opposite of what goal 3 asks. The framing stays
+            // unambiguous: a role is length-prefixed like the other fields, and an omitted one
+            // cannot be mistaken for a following entry, whose own two length-prefixed fields are
+            // always longer than the single field a role would have been.
+            if !entry.role.is_empty() {
+                hasher.update((entry.role.len() as u64).to_le_bytes());
+                hasher.update(entry.role.as_bytes());
+            }
         }
         DesiredConfig {
             entries,
@@ -199,13 +237,17 @@ impl ConfigStore {
     /// This Agent's composed Remote configuration, or `None` when nothing matches — in which
     /// case no offer is made and the Agent keeps running what it already runs (goal 9).
     pub fn desired_for(&self, description: Option<&AgentDescription>) -> Option<DesiredConfig> {
-        let entries: Vec<(String, String)> = self
+        let entries: Vec<ConfigEntry> = self
             .configs
             .read()
             .expect("configs lock")
             .values()
             .filter(|c| matches(&c.selector, description))
-            .map(|c| (c.name.clone(), c.body.clone()))
+            .map(|c| ConfigEntry {
+                name: c.name.clone(),
+                body: c.body.clone(),
+                role: c.role.clone(),
+            })
             .collect();
         if entries.is_empty() {
             return None;
@@ -268,7 +310,13 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             body: body.to_string(),
+            role: String::new(),
         }
+    }
+
+    fn with_role(mut config: Configuration, role: &str) -> Configuration {
+        config.role = role.to_string();
+        config
     }
 
     #[test]
@@ -361,13 +409,106 @@ mod tests {
         store.put(config("aa-base", &[], "a")).expect("put");
 
         let desired = store.desired_for(None).expect("desired");
-        let names: Vec<&str> = desired.entries.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = desired.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["aa-base", "zz-extra"]);
         assert_eq!(desired.hash, store.desired_for(None).expect("again").hash);
 
         // The hash covers names and bodies: renaming or editing either changes it.
         store.put(config("aa-base", &[], "a2")).expect("edit");
         assert_ne!(store.desired_for(None).expect("edited").hash, desired.hash);
+    }
+
+    #[test]
+    fn a_role_travels_into_the_composed_entry_and_into_the_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(config("base", &[], "receivers: {}\n"))
+            .expect("put");
+        let without = store.desired_for(None).expect("desired").hash;
+
+        store
+            .put(with_role(
+                config("ruleset", &[], "rules: []\n"),
+                ROLE_SUPPLEMENTARY,
+            ))
+            .expect("put");
+        let desired = store.desired_for(None).expect("desired");
+        assert_eq!(
+            desired.entries,
+            vec![
+                ConfigEntry {
+                    name: "base".to_string(),
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                },
+                ConfigEntry {
+                    name: "ruleset".to_string(),
+                    body: "rules: []\n".to_string(),
+                    role: ROLE_SUPPLEMENTARY.to_string(),
+                },
+            ]
+        );
+
+        // Changing only the role changes the hash, so the edit actually reaches the fleet.
+        let rolled_back = store.put(with_role(config("ruleset", &[], "rules: []\n"), ""));
+        rolled_back.expect("put");
+        assert_ne!(store.desired_for(None).expect("desired").hash, desired.hash);
+        assert_ne!(store.desired_for(None).expect("desired").hash, without);
+    }
+
+    /// A Configuration written before ADR-0016 has no role, and its hash must not move when the
+    /// Server is upgraded — a moved hash restarts every Managed Process in the fleet to deliver a
+    /// configuration identical to the one it already runs.
+    #[test]
+    fn an_empty_role_leaves_the_hash_where_it_was() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(config("base", &[], "receivers: {}\n"))
+            .expect("put");
+
+        // The hash this Server computed before `role` existed, pinned by construction: name and
+        // body, length-prefixed, and nothing else.
+        let mut expected = Sha256::new();
+        expected.update((4u64).to_le_bytes());
+        expected.update(b"base");
+        expected.update((14u64).to_le_bytes());
+        expected.update(b"receivers: {}\n");
+
+        assert_eq!(
+            store.desired_for(None).expect("desired").hash,
+            expected.finalize().to_vec()
+        );
+    }
+
+    #[test]
+    fn a_role_survives_a_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(with_role(config("certs", &[], "PEM\n"), ROLE_SUPPLEMENTARY))
+            .expect("put");
+        let reopened = ConfigStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert_eq!(
+            reopened.get("certs").expect("certs").role,
+            ROLE_SUPPLEMENTARY
+        );
+    }
+
+    /// The JSON contract of ADR-0016: absent on the way in, absent on the way out.
+    #[test]
+    fn role_is_absent_from_the_json_when_unset() {
+        let json = serde_json::to_string(&config("base", &[], "b")).expect("serialize");
+        assert!(!json.contains("role"), "{json}");
+
+        let restored: Configuration =
+            serde_json::from_str(r#"{"name":"base","body":"b"}"#).expect("deserialize");
+        assert_eq!(restored.role, "");
+
+        let json = serde_json::to_string(&with_role(config("certs", &[], "b"), "supplementary"))
+            .expect("serialize");
+        assert!(json.contains(r#""role":"supplementary""#), "{json}");
     }
 
     #[test]

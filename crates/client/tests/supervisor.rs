@@ -100,6 +100,56 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
     let _ = client.wait();
 }
 
+/// ADR-0016: supplementary content is on disk next to the configuration — that is what makes a
+/// `${file:...}` reference resolve — but it is never handed to the Collector as `--config`.
+#[test]
+fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+
+    let config_dir = dir.path().join("state/supervisors/otelcol/config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("collector.yaml"), "receivers: {}\n").expect("seed config");
+    std::fs::write(config_dir.join("ruleset"), "rules: []\n").expect("seed supplementary");
+    std::fs::write(config_dir.join(".supplementary"), "ruleset\n").expect("seed bookkeeping");
+
+    let toml = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = {binary:?}\nargs = [\"--touch\", {marker:?}]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        binary = env!("CARGO_BIN_EXE_stub_agent"),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("client.toml");
+    std::fs::write(&config_path, toml).expect("write client.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for(
+        "the stub collector's marker",
+        Duration::from_secs(20),
+        || marker.exists(),
+    );
+    let content = std::fs::read_to_string(&marker).expect("read the marker");
+    assert!(
+        content.contains("collector.yaml"),
+        "the configuration is passed: {content}"
+    );
+    assert!(
+        !content.contains("ruleset"),
+        "supplementary content is not passed as configuration: {content}"
+    );
+    assert!(
+        !content.contains(".supplementary"),
+        "the bookkeeping is not passed either: {content}"
+    );
+    assert!(
+        config_dir.join("ruleset").exists(),
+        "supplementary content stays on disk to be read by path"
+    );
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
 #[cfg(unix)]
 #[test]
 fn sigterm_stops_the_managed_process_and_the_client_cleanly() {

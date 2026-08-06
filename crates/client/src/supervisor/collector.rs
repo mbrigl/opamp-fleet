@@ -12,7 +12,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
@@ -60,7 +59,10 @@ impl Plugin for CollectorPlugin {
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || {
-                let entries = config_entries(&config_dir);
+                // Only the entries that *are* configuration: supplementary content (ADR-0016)
+                // sits in the same directory for the Collector to read by path, and handing it
+                // over as `--config` is exactly what the role exists to prevent.
+                let entries = crate::storage::config_entries(&config_dir);
                 if entries.is_empty() {
                     // No configuration yet — the Collector does not run on nothing.
                     return None;
@@ -84,32 +86,6 @@ impl Plugin for CollectorPlugin {
     }
 }
 
-/// The written config-map entry files, in deterministic (sorted) order — the Collector's own
-/// merge semantics are order-dependent.
-fn config_entries(config_dir: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(config_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|entry| {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    warn!(dir = %config_dir.display(), error = %e, "unreadable config entry");
-                    return None;
-                }
-            };
-            entry
-                .file_type()
-                .ok()
-                .filter(std::fs::FileType::is_file)
-                .map(|_| entry.path())
-        })
-        .collect();
-    files.sort();
-    files
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,19 +100,5 @@ mod tests {
 
         let typo: toml::Table = toml::from_str("binry = \"/x\"").expect("table");
         assert!(typo.try_into::<CollectorSettings>().is_err());
-    }
-
-    #[test]
-    fn config_entries_are_files_only_and_sorted() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(config_entries(dir.path()).is_empty());
-        std::fs::write(dir.path().join("b.yaml"), "b").expect("write");
-        std::fs::write(dir.path().join("a.yaml"), "a").expect("write");
-        std::fs::create_dir(dir.path().join("subdir")).expect("mkdir");
-        let names: Vec<String> = config_entries(dir.path())
-            .into_iter()
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect();
-        assert_eq!(names, vec!["a.yaml", "b.yaml"]);
     }
 }
