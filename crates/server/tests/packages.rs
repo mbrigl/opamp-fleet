@@ -68,6 +68,78 @@ async fn upload(server: &TestServer, name: &str, version: &str, artifact: &[u8])
     assert_eq!(response.status(), 200, "upload should succeed");
 }
 
+/// ADR-0019 through the API: the rollback is one action that says what it will do, it refuses
+/// rather than silently doing nothing when there is nothing to go back to, and the restored
+/// artifact is what the fleet is then offered.
+#[tokio::test]
+async fn a_package_rolls_back_to_the_version_it_replaced() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let client = reqwest::Client::new();
+    let rollback = || {
+        client
+            .post(format!(
+                "http://{}/api/v1/packages/otelcol/rollback",
+                server.addr
+            ))
+            .send()
+    };
+
+    upload(&server, "otelcol", "0.156.0", b"old-binary").await;
+    assert_eq!(
+        rollback().await.expect("rollback").status(),
+        409,
+        "a package at its first upload has nothing to go back to"
+    );
+
+    upload(&server, "otelcol", "0.157.0", b"new-binary").await;
+    let listed: serde_json::Value = client
+        .get(format!("http://{}/api/v1/packages", server.addr))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed[0]["version"], "0.157.0");
+    assert_eq!(
+        listed[0]["previous_version"], "0.156.0",
+        "the list says what a rollback would put back"
+    );
+
+    let response = rollback().await.expect("rollback");
+    assert_eq!(response.status(), 200);
+    let rolled: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(rolled["version"], "0.156.0");
+    assert_eq!(rolled["previous_version"], "0.157.0");
+
+    // The restored artifact is what is served — so it is what the fleet installs.
+    let served = client
+        .get(format!(
+            "http://{}/api/v1/packages/otelcol/file",
+            server.addr
+        ))
+        .send()
+        .await
+        .expect("download")
+        .bytes()
+        .await
+        .expect("bytes");
+    assert_eq!(served.as_ref(), b"old-binary");
+
+    assert_eq!(
+        client
+            .post(format!(
+                "http://{}/api/v1/packages/nothing-here/rollback",
+                server.addr
+            ))
+            .send()
+            .await
+            .expect("rollback")
+            .status(),
+        404
+    );
+}
+
 #[tokio::test]
 async fn an_uploaded_package_is_offered_downloaded_and_gated() {
     let (server, _scratch) = spawn_with_packages().await;

@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_package_selector))
+        .routes(routes!(rollback_package))
         .routes(routes!(put_package_source))
         .routes(routes!(download_package))
         .split_for_parts();
@@ -283,6 +284,27 @@ struct PackageView {
     /// uploaded package, which is served from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_url: Option<String>,
+    /// The version `POST /api/v1/packages/{name}/rollback` would put back (ADR-0019). Absent when
+    /// this package has never replaced another — in which case a rollback answers `409`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_version: Option<String>,
+    /// Where that previous version is fetched from, when it is a referenced one (ADR-0018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_source_url: Option<String>,
+}
+
+impl From<crate::packages::PackageSummary> for PackageView {
+    fn from(summary: crate::packages::PackageSummary) -> Self {
+        PackageView {
+            name: summary.name,
+            version: summary.version,
+            addon: summary.addon,
+            selector: summary.selector,
+            source_url: summary.source_url,
+            previous_version: summary.previous_version,
+            previous_source_url: summary.previous_source_url,
+        }
+    }
 }
 
 /// The writable Selector of a package — the body of `PUT /api/v1/packages/{name}/selector`.
@@ -307,6 +329,16 @@ struct PackageUpload {
     signature: Option<String>,
 }
 
+/// A stored package as the API answers with it, read back from the store rather than assembled
+/// from whatever the handler happened to be given — so every response describes the package as it
+/// now is, including the version a rollback would restore.
+fn package_response(state: &AppState, name: &str) -> Response {
+    match state.packages().and_then(|store| store.summary(name)) {
+        Some(summary) => Json(PackageView::from(summary)).into_response(),
+        None => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
+    }
+}
+
 /// All stored packages, in name order (never the artifact bytes).
 #[utoipa::path(
     get,
@@ -323,13 +355,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
             store
                 .list()
                 .into_iter()
-                .map(|p| PackageView {
-                    name: p.name,
-                    version: p.version,
-                    addon: p.addon,
-                    selector: p.selector,
-                    source_url: p.source_url,
-                })
+                .map(PackageView::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -414,24 +440,56 @@ async fn put_package(
     ) {
         Ok(()) => {
             info!(package = %name, bytes = written, "package stored from the API");
-            let selector = state
-                .packages()
-                .and_then(|store| store.selector_of_package(&name))
-                .unwrap_or_default();
-            Json(PackageView {
-                name,
-                version: upload.version,
-                addon: upload.addon,
-                selector,
-                // An upload holds the bytes here, so there is no source to name.
-                source_url: None,
-            })
-            .into_response()
+            package_response(&state, &name)
         }
         Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
         Err(e) if e.starts_with("invalid") || e.contains("empty") => {
             error(StatusCode::BAD_REQUEST, e)
         }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Puts a package back to the version it replaced (ADR-0019) — the undo for a rollout that
+/// installed cleanly and then behaved badly, which the Agent-side rollback (ADR-0015) does not
+/// cover because that one only catches a binary that will not start.
+///
+/// Exactly one step is remembered, so the version rolled back *from* becomes the next one to go
+/// back to and pressing this twice returns to where it started. The Selector is untouched: which
+/// Agents a package reaches is a separate decision from which bytes they get. Distribution follows
+/// from state, like every package change — matching Agents are offered the restored version on
+/// their next exchange, and one that is offline stays on the new version until it returns.
+#[utoipa::path(
+    post,
+    path = "/api/v1/packages/{name}/rollback",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    responses(
+        (status = 200, description = "The package, now back at its previous version", body = PackageView),
+        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The package has no previous version to go back to", body = ErrorBody),
+        (status = 500, description = "The rollback could not be persisted", body = ErrorBody)
+    )
+)]
+async fn rollback_package(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(store) = state.packages() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "package delivery is not configured on this Server",
+        );
+    };
+    match store.rollback(&name) {
+        Ok(()) => {
+            info!(package = %name, "package rolled back to its previous version");
+            package_response(&state, &name)
+        }
+        // A package at its first upload has nothing to go back to; the API says so rather than
+        // silently doing nothing.
+        Err(e) if e.contains("no previous version") => error(StatusCode::CONFLICT, e),
+        Err(e) if e.starts_with("no package") => error(StatusCode::NOT_FOUND, e),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
@@ -547,18 +605,7 @@ async fn put_package_source(
     ) {
         Ok(()) => {
             info!(package = %name, url = %spec.url, "package source stored from the API");
-            let selector = state
-                .packages()
-                .and_then(|store| store.selector_of_package(&name))
-                .unwrap_or_default();
-            Json(PackageView {
-                name,
-                version: spec.version,
-                addon: spec.addon,
-                selector,
-                source_url: Some(spec.url),
-            })
-            .into_response()
+            package_response(&state, &name)
         }
         Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
         Err(e) if e.starts_with("invalid") || e.contains("must ") => {
@@ -634,16 +681,9 @@ async fn put_package_selector(
     Json(spec): Json<PackageSelectorSpec>,
 ) -> Response {
     match state.set_package_selector(&name, spec.selector.clone()) {
-        Ok(version) => {
+        Ok(_) => {
             info!(package = %name, pairs = spec.selector.len(), "package selector set");
-            Json(PackageView {
-                name,
-                version,
-                addon: false,
-                selector: spec.selector,
-                source_url: None,
-            })
-            .into_response()
+            package_response(&state, &name)
         }
         Err(e) if e.contains("not configured") || e.starts_with("no package") => {
             error(StatusCode::NOT_FOUND, e)

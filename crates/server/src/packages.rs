@@ -44,6 +44,26 @@ pub struct Package {
     /// whose bytes this Server holds and serves; `Some` is a reference, offered to Agents as the
     /// address it names — the Server never downloads it and has nothing to serve.
     pub source: Option<Source>,
+    /// What this package was before it was last replaced (ADR-0019), or `None` for one that has
+    /// never been replaced — the state of every package at its first upload. Exactly one step is
+    /// remembered: a rollback swaps it with the current version, so pressing the button twice
+    /// returns to where it started.
+    pub previous: Option<Version>,
+}
+
+/// One version of a package: everything needed to offer it, which is everything except the name
+/// and the Selector — those belong to the package, not to the bytes it currently carries. Used to
+/// remember the version a package replaced (ADR-0019).
+#[derive(Clone)]
+pub struct Version {
+    pub version: String,
+    /// `false` is the Baseline's `TopLevel`, `true` an `Addon`.
+    pub addon: bool,
+    pub content_hash: Vec<u8>,
+    pub signature: Option<Vec<u8>>,
+    /// Zero for a referenced version, whose bytes this Server never holds.
+    pub size: u64,
+    pub source: Option<Source>,
 }
 
 /// An artifact that lives somewhere else (ADR-0018): the address Agents fetch it from, and what
@@ -57,6 +77,38 @@ pub struct Source {
 }
 
 impl Package {
+    /// This package as persisted. The one place the on-disk shape is written, so a field added to
+    /// a package cannot be forgotten in one of the several ways a package is stored.
+    fn meta(&self) -> PackageMeta {
+        PackageMeta {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            addon: self.addon,
+            content_hash_hex: hex::encode(&self.content_hash),
+            signature_hex: self.signature.as_ref().map(hex::encode),
+            selector: self.selector.clone(),
+            source_url: self.source.as_ref().map(|s| s.url.clone()),
+            source_headers: self
+                .source
+                .as_ref()
+                .map(|s| s.headers.clone())
+                .unwrap_or_default(),
+            previous: self.previous.as_ref().map(VersionMeta::of),
+        }
+    }
+
+    /// What this package currently is, as the descriptor another version can remember it by.
+    fn current(&self) -> Version {
+        Version {
+            version: self.version.clone(),
+            addon: self.addon,
+            content_hash: self.content_hash.clone(),
+            signature: self.signature.clone(),
+            size: self.size,
+            source: self.source.clone(),
+        }
+    }
+
     /// The per-package hash the Agent compares to decide whether to download: over the fields that
     /// identify the offer (type, version) and the content. Framed length-prefixed so no boundary
     /// is ambiguous.
@@ -123,9 +175,32 @@ pub struct PackageSummary {
     pub selector: BTreeMap<String, String>,
     /// The address an Agent fetches this from when the Server does not hold it (ADR-0018).
     pub source_url: Option<String>,
+    /// The version a rollback would put back (ADR-0019), and — for a referenced one — where it
+    /// comes from. Absent when there is nothing to go back to, which is what makes the rollback
+    /// unavailable rather than a surprise: an operator sees `0.157.0 ← 0.156.0` before choosing.
+    pub previous_version: Option<String>,
+    pub previous_source_url: Option<String>,
 }
 
-/// Metadata as persisted next to the artifact (`<name>.json`); the artifact is `<name>.bin`.
+impl PackageSummary {
+    fn of(package: &Package) -> Self {
+        PackageSummary {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            addon: package.addon,
+            selector: package.selector.clone(),
+            source_url: package.source.as_ref().map(|s| s.url.clone()),
+            previous_version: package.previous.as_ref().map(|v| v.version.clone()),
+            previous_source_url: package
+                .previous
+                .as_ref()
+                .and_then(|v| v.source.as_ref().map(|s| s.url.clone())),
+        }
+    }
+}
+
+/// Metadata as persisted next to the artifact (`<name>.json`); the artifact is `<name>.bin` and
+/// the version it replaced, when that one was uploaded too, `<name>.previous.bin`.
 #[derive(Serialize, Deserialize)]
 struct PackageMeta {
     name: String,
@@ -145,6 +220,66 @@ struct PackageMeta {
     source_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     source_headers: BTreeMap<String, String>,
+    /// The version this package replaced (ADR-0019). Absent for one that never replaced anything,
+    /// and in every file written before that decision — which reads as "nothing to go back to",
+    /// exactly the truth for a package whose predecessor was never kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous: Option<VersionMeta>,
+}
+
+/// One remembered version, as persisted.
+#[derive(Serialize, Deserialize)]
+struct VersionMeta {
+    version: String,
+    #[serde(default)]
+    addon: bool,
+    content_hash_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_headers: BTreeMap<String, String>,
+}
+
+impl VersionMeta {
+    fn of(version: &Version) -> Self {
+        VersionMeta {
+            version: version.version.clone(),
+            addon: version.addon,
+            content_hash_hex: hex::encode(&version.content_hash),
+            signature_hex: version.signature.as_ref().map(hex::encode),
+            source_url: version.source.as_ref().map(|s| s.url.clone()),
+            source_headers: version
+                .source
+                .as_ref()
+                .map(|s| s.headers.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The stored form back into a [`Version`]. `size` is recovered by the caller, which is the
+    /// only party that can measure the artifact on disk.
+    fn into_version(self, size: u64) -> Result<Version, String> {
+        Ok(Version {
+            content_hash: hex::decode(&self.content_hash_hex)
+                .map_err(|e| format!("invalid content hash for the previous version: {e}"))?,
+            signature: match &self.signature_hex {
+                Some(hex) => Some(
+                    hex::decode(hex)
+                        .map_err(|e| format!("invalid signature for the previous version: {e}"))?,
+                ),
+                None => None,
+            },
+            source: self.source_url.map(|url| Source {
+                url,
+                headers: self.source_headers,
+            }),
+            version: self.version,
+            addon: self.addon,
+            size,
+        })
+    }
 }
 
 /// The persistent package store: one `<name>.json` + `<name>.bin` pair per package under
@@ -207,6 +342,41 @@ impl PackageStore {
                 ),
                 None => None,
             };
+            // The remembered version (ADR-0019) is restored the same way, and its artifact — when
+            // it has one here — is re-hashed just like the current one: a rollback ships it, so a
+            // corrupt one must not survive startup any more than a corrupt current artifact does.
+            let previous = match meta.previous {
+                Some(previous) => {
+                    let size = match previous.source_url {
+                        Some(_) => 0,
+                        None => {
+                            let kept = dir.join(format!("{}.previous.bin", meta.name));
+                            let (size, actual) = hash_file(&kept)?;
+                            let expected =
+                                hex::decode(&previous.content_hash_hex).map_err(|e| {
+                                    format!(
+                                        "invalid previous content hash in {}: {e}",
+                                        path.display()
+                                    )
+                                })?;
+                            if actual != expected {
+                                return Err(format!(
+                                    "package {:?}: the kept previous artifact does not match its \
+                                     recorded content hash",
+                                    meta.name
+                                ));
+                            }
+                            size
+                        }
+                    };
+                    Some(
+                        previous
+                            .into_version(size)
+                            .map_err(|e| format!("{}: {e}", path.display()))?,
+                    )
+                }
+                None => None,
+            };
             packages.insert(
                 meta.name.clone(),
                 Package {
@@ -218,6 +388,7 @@ impl PackageStore {
                     size,
                     selector: meta.selector,
                     source,
+                    previous,
                 },
             );
         }
@@ -234,13 +405,7 @@ impl PackageStore {
             .read()
             .expect("packages lock")
             .values()
-            .map(|p| PackageSummary {
-                name: p.name.clone(),
-                version: p.version.clone(),
-                addon: p.addon,
-                selector: p.selector.clone(),
-                source_url: p.source.as_ref().map(|s| s.url.clone()),
-            })
+            .map(PackageSummary::of)
             .collect()
     }
 
@@ -305,48 +470,151 @@ impl PackageStore {
         if size == 0 {
             return Err("the package artifact is empty; refusing to distribute it".to_string());
         }
-        // A new artifact for an existing package keeps that package's Selector: replacing the
-        // bytes must never silently widen a targeted rollout to the whole fleet.
-        let selector = self.selector_of(name);
-        let meta = PackageMeta {
+        self.replace(
+            name,
+            version,
+            addon,
+            content_hash,
+            signature,
+            size,
+            None,
+            || {
+                let artifact = self.dir.join(format!("{name}.bin"));
+                std::fs::rename(staged, &artifact)
+                    .map_err(|e| format!("cannot persist {}: {e}", artifact.display()))
+            },
+        )
+    }
+
+    /// The one path by which a package's bytes are replaced — an upload, a staged upload, or a
+    /// source (ADR-0018). It is what keeps the two invariants that hold across all three:
+    ///
+    /// - **The Selector survives.** Replacing the bytes must never silently widen a targeted
+    ///   rollout to the whole fleet (ADR-0017).
+    /// - **The version it replaced is remembered** (ADR-0019), including its artifact when that one
+    ///   was uploaded — so an operator can go one step back without producing the old file again.
+    ///
+    /// `install` puts the new artifact in place, once the one it displaces has been set aside.
+    #[allow(clippy::too_many_arguments)]
+    fn replace(
+        &self,
+        name: &str,
+        version: &str,
+        addon: bool,
+        content_hash: Vec<u8>,
+        signature: Option<Vec<u8>>,
+        size: u64,
+        source: Option<Source>,
+        install: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let existing = self
+            .packages
+            .read()
+            .expect("packages lock")
+            .get(name)
+            .cloned();
+        let selector = existing
+            .as_ref()
+            .map(|p| p.selector.clone())
+            .unwrap_or_default();
+        let previous = existing.as_ref().map(Package::current);
+
+        // Set the displaced artifact aside before the new one lands on it. A referenced version
+        // has no artifact here, and the file it would displace is simply gone.
+        let artifact = self.dir.join(format!("{name}.bin"));
+        if artifact.exists() {
+            let kept = self.dir.join(format!("{name}.previous.bin"));
+            std::fs::rename(&artifact, &kept)
+                .map_err(|e| format!("cannot keep the previous artifact: {e}"))?;
+        }
+        install()?;
+
+        let package = Package {
             name: name.to_string(),
             version: version.to_string(),
             addon,
-            content_hash_hex: hex::encode(&content_hash),
-            signature_hex: signature.as_ref().map(hex::encode),
-            selector: selector.clone(),
-            // Bytes arrived: this package is held here now, whatever it referred to before.
-            source_url: None,
-            source_headers: BTreeMap::new(),
+            content_hash,
+            signature,
+            size,
+            selector,
+            source,
+            previous,
         };
-        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
-        let artifact = self.dir.join(format!("{name}.bin"));
-        std::fs::rename(staged, &artifact)
-            .map_err(|e| format!("cannot persist {}: {e}", artifact.display()))?;
+        let json = serde_json::to_vec_pretty(&package.meta()).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.json"), &json)?;
-        self.packages.write().expect("packages lock").insert(
-            name.to_string(),
-            Package {
-                name: name.to_string(),
-                version: version.to_string(),
-                addon,
-                content_hash,
-                signature,
-                size,
-                selector,
-                source: None,
-            },
-        );
+        self.packages
+            .write()
+            .expect("packages lock")
+            .insert(name.to_string(), package);
         Ok(())
     }
 
-    /// A stored package's Selector for the REST views; `None` when no such package exists.
-    pub fn selector_of_package(&self, name: &str) -> Option<BTreeMap<String, String>> {
+    /// Puts a package back to the version it replaced (ADR-0019), which becomes the next version to
+    /// go back to — so pressing this twice returns to where it started. The Selector is untouched:
+    /// which Agents a package reaches is a separate decision from which bytes they get.
+    ///
+    /// Distribution follows from state, as every package change does: matching Agents are offered
+    /// the restored version on their next exchange.
+    ///
+    /// # Errors
+    /// Returns an error when no package of that name exists, or when it has no previous version —
+    /// the state of every package at its first upload.
+    pub fn rollback(&self, name: &str) -> Result<(), String> {
+        let mut packages = self.packages.write().expect("packages lock");
+        let package = packages
+            .get(name)
+            .ok_or_else(|| format!("no package {name:?}"))?;
+        let restore = package
+            .previous
+            .clone()
+            .ok_or_else(|| format!("package {name:?} has no previous version to go back to"))?;
+        let displaced = package.current();
+
+        // Swap the artifacts the two versions own. Either side may own none — a referenced version
+        // keeps its bytes elsewhere — so the swap is over whichever files actually exist.
+        let artifact = self.dir.join(format!("{name}.bin"));
+        let kept = self.dir.join(format!("{name}.previous.bin"));
+        let swapping = self.dir.join(format!("{name}.swap.tmp"));
+        match (displaced.source.is_none(), restore.source.is_none()) {
+            (true, true) => {
+                std::fs::rename(&artifact, &swapping)
+                    .and_then(|()| std::fs::rename(&kept, &artifact))
+                    .and_then(|()| std::fs::rename(&swapping, &kept))
+                    .map_err(|e| format!("cannot swap the artifacts of {name:?}: {e}"))?;
+            }
+            (true, false) => std::fs::rename(&artifact, &kept)
+                .map_err(|e| format!("cannot keep the artifact of {name:?}: {e}"))?,
+            (false, true) => std::fs::rename(&kept, &artifact)
+                .map_err(|e| format!("cannot restore the artifact of {name:?}: {e}"))?,
+            (false, false) => {}
+        }
+
+        let package = Package {
+            name: name.to_string(),
+            selector: package.selector.clone(),
+            version: restore.version,
+            addon: restore.addon,
+            content_hash: restore.content_hash,
+            signature: restore.signature,
+            size: restore.size,
+            source: restore.source,
+            previous: Some(displaced),
+        };
+        let json = serde_json::to_vec_pretty(&package.meta()).expect("package metadata serializes");
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        packages.insert(name.to_string(), package);
+        Ok(())
+    }
+
+    /// One stored package as the REST API presents it; `None` when no such package exists. The
+    /// single source every handler that answers with a package reads, so no response can describe
+    /// one from what its caller happened to know.
+    pub fn summary(&self, name: &str) -> Option<PackageSummary> {
         self.packages
             .read()
             .expect("packages lock")
             .get(name)
-            .map(|p| p.selector.clone())
+            .map(PackageSummary::of)
     }
 
     /// Points a package at an artifact that lives somewhere else (ADR-0018): no bytes are stored
@@ -382,49 +650,19 @@ impl PackageStore {
                 source.url
             ));
         }
-        let selector = self.selector_of(name);
-        let meta = PackageMeta {
-            name: name.to_string(),
-            version: version.to_string(),
+        // Bytes this Server was holding are no longer what the fleet gets — but they are what a
+        // rollback goes back to, so `replace` keeps them as the previous version rather than
+        // deleting them (ADR-0019).
+        self.replace(
+            name,
+            version,
             addon,
-            content_hash_hex: hex::encode(&content_hash),
-            signature_hex: signature.as_ref().map(hex::encode),
-            selector: selector.clone(),
-            source_url: Some(source.url.clone()),
-            source_headers: source.headers.clone(),
-        };
-        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
-        self.write_atomic(&format!("{name}.json"), &json)?;
-        // Bytes this Server was holding are no longer what the fleet gets; keeping them would
-        // serve an artifact nobody is offered.
-        let artifact = self.dir.join(format!("{name}.bin"));
-        if artifact.exists() {
-            let _ = std::fs::remove_file(&artifact);
-        }
-        self.packages.write().expect("packages lock").insert(
-            name.to_string(),
-            Package {
-                name: name.to_string(),
-                version: version.to_string(),
-                addon,
-                content_hash,
-                signature,
-                size: 0,
-                selector,
-                source: Some(source),
-            },
-        );
-        Ok(())
-    }
-
-    /// The Selector a stored package already carries, or empty when it is new.
-    fn selector_of(&self, name: &str) -> BTreeMap<String, String> {
-        self.packages
-            .read()
-            .expect("packages lock")
-            .get(name)
-            .map(|p| p.selector.clone())
-            .unwrap_or_default()
+            content_hash,
+            signature,
+            0,
+            Some(source),
+            || Ok(()),
+        )
     }
 
     /// Creates or replaces a package from bytes already in hand — the shape the tests and any
@@ -443,35 +681,17 @@ impl PackageStore {
         }
         let content_hash = Sha256::digest(&artifact).to_vec();
         let size = artifact.len() as u64;
-        let selector = self.selector_of(&name);
-        let meta = PackageMeta {
-            name: name.clone(),
-            version: version.clone(),
+        // Bytes arrived: this package is held here now, whatever it referred to before.
+        self.replace(
+            &name,
+            &version,
             addon,
-            content_hash_hex: hex::encode(&content_hash),
-            signature_hex: signature.as_ref().map(hex::encode),
-            selector: selector.clone(),
-            // Bytes arrived: this package is held here now, whatever it referred to before.
-            source_url: None,
-            source_headers: BTreeMap::new(),
-        };
-        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
-        self.write_atomic(&format!("{name}.bin"), &artifact)?;
-        self.write_atomic(&format!("{name}.json"), &json)?;
-        self.packages.write().expect("packages lock").insert(
-            name.clone(),
-            Package {
-                name,
-                version,
-                addon,
-                content_hash,
-                signature,
-                size,
-                selector,
-                source: None,
-            },
-        );
-        Ok(())
+            content_hash,
+            signature,
+            size,
+            None,
+            || self.write_atomic(&format!("{name}.bin"), &artifact),
+        )
     }
 
     /// Deletes a package; `Ok(false)` when none of that name exists.
@@ -480,7 +700,7 @@ impl PackageStore {
         if packages.remove(name).is_none() {
             return Ok(false);
         }
-        for suffix in ["json", "bin"] {
+        for suffix in ["json", "bin", "previous.bin"] {
             let path = self.dir.join(format!("{name}.{suffix}"));
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -551,21 +771,7 @@ impl PackageStore {
             .remove(name)
             .expect("the package was just looked up");
         package.selector = selector;
-        let meta = PackageMeta {
-            name: package.name.clone(),
-            version: package.version.clone(),
-            addon: package.addon,
-            content_hash_hex: hex::encode(&package.content_hash),
-            signature_hex: package.signature.as_ref().map(hex::encode),
-            selector: package.selector.clone(),
-            source_url: package.source.as_ref().map(|s| s.url.clone()),
-            source_headers: package
-                .source
-                .as_ref()
-                .map(|s| s.headers.clone())
-                .unwrap_or_default(),
-        };
-        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        let json = serde_json::to_vec_pretty(&package.meta()).expect("package metadata serializes");
         let written = self.write_atomic(&format!("{name}.json"), &json);
         packages.insert(name.to_string(), package);
         written
@@ -762,6 +968,266 @@ mod tests {
             available.file.as_ref().unwrap().download_url,
             "https://fleet.example:4320/api/v1/packages/otelcol/file"
         );
+    }
+
+    /// The shape ADR-0019 promises: one step back, and pressing it twice returns to where it
+    /// started.
+    #[test]
+    fn a_rollback_swaps_the_current_and_previous_versions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let put = |version: &str, bytes: &[u8]| {
+            store.put(
+                "otelcol".to_string(),
+                version.to_string(),
+                false,
+                None,
+                bytes.to_vec(),
+            )
+        };
+        put("0.156.0", b"old").expect("put");
+        assert!(
+            store
+                .summary("otelcol")
+                .expect("stored")
+                .previous_version
+                .is_none(),
+            "a package at its first upload has nothing to go back to"
+        );
+        assert!(
+            store.rollback("otelcol").is_err(),
+            "and rolling it back is refused"
+        );
+
+        put("0.157.0", b"new").expect("replace");
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(summary.version, "0.157.0");
+        assert_eq!(summary.previous_version.as_deref(), Some("0.156.0"));
+
+        store.rollback("otelcol").expect("rollback");
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(summary.version, "0.156.0");
+        assert_eq!(
+            summary.previous_version.as_deref(),
+            Some("0.157.0"),
+            "what we rolled back from is what we go back to next"
+        );
+        let path = store.artifact_path("otelcol").expect("an artifact path");
+        assert_eq!(std::fs::read(&path).expect("read"), b"old");
+
+        // Twice returns to where it started.
+        store.rollback("otelcol").expect("rollback again");
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(summary.version, "0.157.0");
+        let path = store.artifact_path("otelcol").expect("an artifact path");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+    }
+
+    /// Only one step is kept: a third version displaces the first, which is then gone for good.
+    #[test]
+    fn only_one_step_is_remembered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        for version in ["1", "2", "3"] {
+            store
+                .put(
+                    "otelcol".to_string(),
+                    version.to_string(),
+                    false,
+                    None,
+                    format!("bytes-{version}").into_bytes(),
+                )
+                .expect("put");
+        }
+        assert_eq!(
+            store
+                .summary("otelcol")
+                .expect("stored")
+                .previous_version
+                .as_deref(),
+            Some("2")
+        );
+        store.rollback("otelcol").expect("rollback");
+        assert_eq!(store.summary("otelcol").expect("stored").version, "2");
+        store.rollback("otelcol").expect("rollback");
+        assert_eq!(
+            store.summary("otelcol").expect("stored").version,
+            "3",
+            "the first version is not reachable; one step means one step"
+        );
+    }
+
+    /// The Selector belongs to the package, not to the bytes (ADR-0019 point 3).
+    #[test]
+    fn a_rollback_leaves_the_selector_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(
+                "otelcol".to_string(),
+                "1".to_string(),
+                false,
+                None,
+                b"a".to_vec(),
+            )
+            .expect("put");
+        store
+            .set_selector(
+                "otelcol",
+                [("os.type".to_string(), "linux".to_string())].into(),
+            )
+            .expect("target it");
+        store
+            .put(
+                "otelcol".to_string(),
+                "2".to_string(),
+                false,
+                None,
+                b"b".to_vec(),
+            )
+            .expect("replace");
+        store.rollback("otelcol").expect("rollback");
+
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(summary.version, "1");
+        assert_eq!(
+            summary.selector,
+            [("os.type".to_string(), "linux".to_string())].into(),
+            "an undo does only what it says"
+        );
+    }
+
+    /// A referenced version costs a URL and a checksum to remember, and rolls back to and from an
+    /// uploaded one without either side needing bytes the other has (ADR-0018 + ADR-0019).
+    #[test]
+    fn a_rollback_works_across_uploaded_and_referenced_versions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(
+                "otelcol".to_string(),
+                "1".to_string(),
+                false,
+                None,
+                b"here".to_vec(),
+            )
+            .expect("put");
+        store
+            .set_source(
+                "otelcol",
+                "2",
+                false,
+                vec![7u8; 32],
+                None,
+                Source {
+                    url: "https://cdn.example/otelcol-2.tar.gz".to_string(),
+                    headers: BTreeMap::new(),
+                },
+            )
+            .expect("point at a source");
+
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(
+            summary.source_url.as_deref(),
+            Some("https://cdn.example/otelcol-2.tar.gz")
+        );
+        assert_eq!(summary.previous_version.as_deref(), Some("1"));
+        assert!(
+            store.artifact_path("otelcol").is_none(),
+            "a referenced package is not served from here"
+        );
+
+        // Back to the uploaded one: its bytes were kept, so nothing has to be produced again.
+        store.rollback("otelcol").expect("rollback");
+        let summary = store.summary("otelcol").expect("stored");
+        assert_eq!(summary.version, "1");
+        assert!(summary.source_url.is_none());
+        assert_eq!(
+            summary.previous_source_url.as_deref(),
+            Some("https://cdn.example/otelcol-2.tar.gz"),
+            "the reference is what a further rollback goes back to"
+        );
+        let path = store.artifact_path("otelcol").expect("an artifact path");
+        assert_eq!(std::fs::read(&path).expect("read"), b"here");
+    }
+
+    #[test]
+    fn a_remembered_version_survives_a_reopen_and_is_re_verified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+            store
+                .put(
+                    "otelcol".to_string(),
+                    "1".to_string(),
+                    false,
+                    None,
+                    b"old".to_vec(),
+                )
+                .expect("put");
+            store
+                .put(
+                    "otelcol".to_string(),
+                    "2".to_string(),
+                    false,
+                    None,
+                    b"new".to_vec(),
+                )
+                .expect("replace");
+        }
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert_eq!(
+            reopened
+                .summary("otelcol")
+                .expect("stored")
+                .previous_version
+                .as_deref(),
+            Some("1")
+        );
+        reopened.rollback("otelcol").expect("rollback");
+        let path = reopened.artifact_path("otelcol").expect("an artifact path");
+        assert_eq!(std::fs::read(&path).expect("read"), b"old");
+
+        // A kept artifact is shipped by a rollback, so a corrupt one must fail startup exactly as
+        // a corrupt current one does.
+        std::fs::write(dir.path().join("otelcol.previous.bin"), b"tampered").expect("tamper");
+        let err = match PackageStore::open(dir.path().to_path_buf()) {
+            Ok(_) => panic!("a tampered kept artifact must fail to open"),
+            Err(e) => e,
+        };
+        assert!(err.contains("does not match"), "got {err:?}");
+    }
+
+    #[test]
+    fn deleting_a_package_takes_its_remembered_version_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        store
+            .put(
+                "otelcol".to_string(),
+                "1".to_string(),
+                false,
+                None,
+                b"old".to_vec(),
+            )
+            .expect("put");
+        store
+            .put(
+                "otelcol".to_string(),
+                "2".to_string(),
+                false,
+                None,
+                b"new".to_vec(),
+            )
+            .expect("replace");
+        assert!(store.delete("otelcol").expect("delete"));
+        assert!(
+            !dir.path().join("otelcol.previous.bin").exists(),
+            "nothing of a deleted package is left on disk"
+        );
+        assert!(PackageStore::open(dir.path().to_path_buf())
+            .expect("reopen")
+            .is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # ADR-0019: One step back — the package store remembers the version it replaced
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-06
 - **Deciders:** Markus Brigl
 

@@ -210,6 +210,7 @@
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
           <button id="package-source" class="btn btn-ghost">Use source url</button>
           <button id="package-target" class="btn btn-ghost">Set selector</button>
+          <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
           <span id="package-error" class="err"></span>
@@ -580,7 +581,7 @@
 
       function renderPackageList() {
         $("package-list").innerHTML = packages.map((p) =>
-          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
+          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}" title="${p.previous_version ? "rolls back to " + esc(p.previous_version) + (p.previous_source_url ? " from " + esc(p.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${p.previous_version ? " ← " + esc(p.previous_version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectPackage(chip.dataset.name));
@@ -596,6 +597,14 @@
         $("package-url").value = pkg.source_url || "";
         $("package-addon").checked = !!pkg.addon;
         $("package-error").textContent = "";
+        // A rollback button that does not say what it will install is a dare (ADR-0019): it names
+        // the version, and stays disabled while there is nothing to go back to.
+        const rollback = $("package-rollback");
+        rollback.disabled = !pkg.previous_version;
+        rollback.textContent = pkg.previous_version ? `↩ Roll back to ${pkg.previous_version}` : "↩ Roll back";
+        rollback.title = pkg.previous_version
+          ? `Offer ${pkg.previous_version} again${pkg.previous_source_url ? ` from ${pkg.previous_source_url}` : ""}. The selector is untouched; agents pick it up on their next exchange.`
+          : "This package has never replaced another, so there is nothing to go back to.";
         renderPackageList();
       }
       $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
@@ -673,6 +682,22 @@
         await refreshPackages();
         refreshAgents();
       });
+      // One step back (ADR-0019): the version this package replaced becomes the current one again,
+      // and the one rolled back from becomes the next step back — so this twice returns to where
+      // it started.
+      $("package-rollback").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) return;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/rollback`, { method: "POST" });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        await refreshPackages();
+        selectPackage(name);
+        refreshAgents();
+      });
       $("package-delete").addEventListener("click", async () => {
         const name = $("package-name").value.trim();
         if (!name) return;
@@ -685,6 +710,7 @@
         selectedPackage = null;
         $("package-name").value = ""; $("package-version").value = ""; $("package-signature").value = "";
         $("package-addon").checked = false; $("package-file").value = "";
+        $("package-rollback").disabled = true; $("package-rollback").textContent = "↩ Roll back";
         await refreshPackages();
         refreshAgents();
       });

@@ -220,6 +220,9 @@ $ curl -X DELETE http://127.0.0.1:4320/api/v1/configurations/linux-base
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
+
+# One step back (ADR-0019): re-offer the version this package replaced. 409 when there is none.
+$ curl -X POST http://127.0.0.1:4320/api/v1/packages/otelcol/rollback
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
