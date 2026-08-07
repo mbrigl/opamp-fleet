@@ -1,6 +1,6 @@
 # ADR-0022: A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-07
 - **Deciders:** Markus Brigl
 

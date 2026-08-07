@@ -50,5 +50,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0019](0019-one-step-back.md) | One step back — the package store remembers the version it replaced | 🟢 accepted |
 | [0020](0020-client-self-update.md) | The Client updates itself — its own Agent, a staged version, and a restart it does not issue | 🟢 accepted |
 | [0021](0021-supervisor-directory-and-path-implied-package-consent.md) | One directory per Supervisor — a bare program name means the Client owns it and updates it, an absolute path means it does not | 🟢 accepted |
-| [0022](0022-supervisor-path-placeholders-in-process-arguments.md) | A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync | 🟡 proposed |
+| [0022](0022-supervisor-path-placeholders-in-process-arguments.md) | A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync | 🟢 accepted |
 
