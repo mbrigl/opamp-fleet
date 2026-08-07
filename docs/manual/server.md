@@ -213,14 +213,22 @@ has replaced nothing answers `409`:
 $ curl -X POST http://127.0.0.1:4320/api/v1/packages/otelcol/rollback
 ```
 
-**Signing** (ADR-0015). The download route sits on the unauthenticated REST plane deliberately: the
-content hash and the signature are what protect an installed binary, not who was allowed to fetch
-it. Generate a key and sign artifacts with the helper that ships with the Client:
+**Building and signing** (ADR-0015, ADR-0018). The helper that ships with the Client writes the
+artifact, hashes it, and signs it:
 
 ```console
-$ cargo run -p client --bin opamp-package-sign -- keygen --out fleet-signing.pk8
-$ sig=$(cargo run -p client --bin opamp-package-sign -- sign --key fleet-signing.pk8 otelcol.tar.gz)
+$ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
+$ opamp-package-sign keygen --out fleet-signing.pk8                # prints the public key
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
 ```
+
+`pack` writes `.tar.gz` or an AES-256-encrypted `.7z` — the only two containers a Client can open —
+and names the member the way the receiving Supervisor will look for it. There is no ZIP support and
+no way to add one: an artifact that is neither gzip nor 7z is taken to *be* the program.
+[The rollout walkthrough](rollout.md) puts the whole sequence together.
+
+The download route sits on the unauthenticated REST plane deliberately: the content hash and the
+signature are what protect an installed binary, not who was allowed to fetch it.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
 Once a Client has a key configured, an unsigned package is refused; without one, a *signed* package

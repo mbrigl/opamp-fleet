@@ -385,6 +385,9 @@ host:
    5 s, so a transfer of hundreds of megabytes stays distinguishable from a stuck install), then
    `Installing`, then `Installed` or `InstallFailed`.
 
+[The rollout walkthrough](rollout.md) runs this end to end, from packing the artifact to watching it
+land.
+
 Two limits worth knowing before you plan a rollout: a Managed Process that is **more than one file**
 — an executable plus the shared objects it loads — cannot be delivered as a package, because exactly
 one archive member is installed; name it by an absolute path and update it however it was installed.

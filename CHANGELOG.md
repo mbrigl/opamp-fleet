@@ -70,6 +70,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   syntax keeps working; the flip side is that a misspelled placeholder is handed over rather than
   refused. The program itself (`binary`, `command`) is never substituted.
 
+- **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
+  SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
+  `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
+  ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)). Until now the project could open the
+  two container formats but gave an operator no supported way to produce one, and an encrypted
+  `.7z` in particular had no answer at all.
+
+  ```console
+  $ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail
+  $ opamp-package-sign pack --format 7z --archive-key "$KEY" --out promtail-3.0.0.7z ./promtail
+  ```
+
+  The member inside the archive is named after the packed file, which is what a Supervisor looks
+  for; `--program-name` covers an upstream build whose file name differs. A `.tar.gz` is
+  reproducible — modification time, owner, and group are zeroed — so repacking the same program
+  does not produce a new hash and therefore no rollout. **There is no `zip`, and adding one is not
+  a matter of a flag:** an artifact that is neither gzip nor 7z is taken to *be* the program, so a
+  `.zip` would be installed over the binary unopened.
+
+- **A user manual** at [`docs/manual/`](docs/manual/README.md) — Server and Client documented
+  option by option, plus an end-to-end [rollout walkthrough](docs/manual/rollout.md) that installs
+  and configures a Foreign Agent entirely from the Server.
+
 ### Changed
 
 - A Supervisor's package downloads are staged in its own directory

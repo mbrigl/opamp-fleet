@@ -185,3 +185,34 @@ state_dir = "client-state"
 # role = "edge"
 # [supervisor.env]                      # optional environment for the process
 # FLB_LOG_LEVEL = "info"
+
+# 4. A single-file Foreign Agent the SERVER delivers. Same plugin as 3, one difference that
+# changes who owns the program: the bare file name puts it in <supervisor_dir>/<name>/program/,
+# a directory this Client creates and owns, so this Agent declares AcceptsPackages and the
+# Server's artifact is installed over it (ADR-0021). Fluent Bit above cannot do this — it is an
+# executable plus the shared objects it loads, and exactly one archive member is ever installed
+# (ADR-0018); a single static binary can.
+#
+# Nothing has to be put on the host first. Until a package arrives the Supervisor reports
+# "no process installed" and keeps running, so the first version and every later one take the
+# same path — build the artifact, upload it, aim it:
+#
+#   opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
+#   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+#   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
+#        "http://<server>:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig"
+#   curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "prod"}}' \
+#        http://<server>:4320/api/v1/packages/promtail/selector
+#
+# The archive must hold the member "promtail" — the program's own file name, which is what this
+# block configures and what the Supervisor looks for. `pack` names it after the file it packs;
+# use --program-name when an upstream release names it otherwise. Only .tar.gz and .7z are
+# opened: anything else is taken to *be* the program, so a .zip would be written over the binary
+# unopened. An encrypted .7z (`pack --format 7z --archive-key ...`) needs [packages] archive_key
+# above, and the Server never learns that key.
+# [[supervisor]]
+# type = "command"
+# name = "promtail"
+# command = "promtail"                  # bare: this Supervisor's own program/, takes packages
+# args = ["-config.file=${config_dir}/promtail-conf"]
+# version_args = ["--version"]          # what it reports as service.version
