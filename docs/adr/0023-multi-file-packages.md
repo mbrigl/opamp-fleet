@@ -1,4 +1,4 @@
-# ADR-0023: A package may be a directory tree, unpacked whole into a version of its own
+# ADR-0023: A package may be a directory tree, unpacked whole beside the one it replaces
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-08-07
