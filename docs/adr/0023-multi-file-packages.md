@@ -50,32 +50,42 @@ the running one**, with a pointer moved to switch — the layout
 [ADR-0020](0020-client-self-update.md) already trusts for replacing a running program.
 
 1. **A `[[supervisor]]` block gains one optional key, `program_path`** — a relative path *inside*
-   the package, e.g. `bin/fluent-bit`. Absent, the layout is what it is today: the program is the
-   single file the archive holds. Present, the archive is unpacked whole and this is what gets
-   spawned.
+   the package, e.g. `bin/fluent-bit`. Absent, the layout is what it is today: one member, one file.
+   Present, **every member of the archive is extracted**, each keeping its own relative path, and
+   `program_path` says which of them is the program.
 
    `binary`/`command` keeps its ADR-0021 meaning untouched: a bare file name still means "this
    Supervisor's own directory, and therefore it takes packages", an absolute path still means the
    machine's. Consent stays readable in exactly the place it is read today; `program_path` says
-   *where inside* the delivered tree, never *whether*.
+   *where inside* the delivered tree, never *whether*. Tree mode is triggered by that key rather
+   than by what the archive happens to hold, so what a host will run is readable in the
+   configuration before any artifact exists.
 
-2. **The tree is unpacked to `<supervisor_dir>/<name>/program/<version>/`**, and
-   `<supervisor_dir>/<name>/program/current` points at it. The Managed Process is spawned from
-   `current/<program_path>`. A failed install leaves the previous version directory untouched, so a
-   rollback is the pointer moving back — never a second unpack, and never a moment with no program
-   on disk.
+2. **`program_path` matches a member by its trailing path components, not from the archive root.**
+   A release tarball almost always wraps everything in one version-named directory —
+   `fluent-bit-3.1.0/bin/fluent-bit` — and a `program_path` that had to name it would be wrong at
+   the next release, silently, which is the failure ADR-0022 exists to make unspellable. So
+   `program_path = "bin/fluent-bit"` matches any member whose path *ends* with those components,
+   exactly as today's single-member rule matches a file name "wherever the archive keeps it". More
+   than one match is refused, naming the candidates, and answered by writing more of the path.
 
-3. **The archive's paths are sanitized, and every member is bounded.** A member is refused, and the
+3. **The tree is unpacked to `<supervisor_dir>/<name>/program/<version>/`**, keeping whatever
+   directory structure the archive has, and `<supervisor_dir>/<name>/program/current` points at it.
+   The Managed Process is spawned from the matched member inside `current`. A failed install leaves
+   the previous version directory untouched, so a rollback is the pointer moving back — never a
+   second unpack, and never a moment with no program on disk.
+
+4. **The archive's paths are sanitized, and every member is bounded.** A member is refused, and the
    whole install with it, when its path is absolute, contains a `..` component, or is a symlink or
    hard link. Extraction is additionally bounded by a total byte count and a member count, not only
    the per-member limit that exists today. Refusing the install is the only correct answer: a
    partially unpacked agent is worse than none.
 
-4. **File modes come from the archive on Unix, plus `program_path` is always made executable.** A
+5. **File modes come from the archive on Unix, plus `program_path` is always made executable.** A
    tree carries its own modes and a `tar` preserves them; the one thing that must not depend on how
    the archive was built is whether the program can be executed at all.
 
-5. **Nothing changes for a single-file package.** No `program_path`, no tree, no version directory —
+6. **Nothing changes for a single-file package.** No `program_path`, no tree, no version directory —
    the existing path stays exactly as it is, including its rollback. This decision adds a second
    shape; it does not migrate the first.
 
@@ -88,6 +98,21 @@ the running one**, with a pointer moved to switch — the layout
   which is precisely the state that will not start. ADR-0017 also targets *one* top-level package
   per Agent by Selector; addons would need a second targeting model to answer "which addons, at
   which version, for this Agent".
+- **A `strip_components` key**, as `tar` has, to drop the release tarball's leading directory.
+  Stable across versions — it describes how a publisher builds archives, not which version — and one
+  more number an operator has to get right by inspecting an artifact first. Suffix matching needs
+  nothing written down and fails loudly when it is ambiguous, which is the better trade for a value
+  nobody can verify until a rollout runs.
+- **Strip a leading directory automatically** when every member shares one. It reads as the obvious
+  convenience and is wrong on an archive whose top level is *meaningful* — one holding only `lib/`
+  would be flattened into the root, and the failure would be a program that starts and cannot find
+  its libraries. Behaviour that changes with the archive's contents is exactly what should not sit
+  under a rollout.
+- **Find the program by searching the unpacked tree**, with no `program_path` at all — the natural
+  extension of today's match-by-file-name. It removes a key and it removes the answer to "what will
+  this host run" from the configuration file: before the first package there is nothing to search,
+  so the spawn path would exist only after an install, discovered rather than written. ADR-0021 put
+  that value in the file on purpose.
 - **A self-extracting single file** — a script carrying an embedded payload, installed as the
   program by today's mechanism, unpacking itself on first run. It needs no change here at all, which
   is its whole appeal. It also re-extracts on every update, hides what is installed from everything
@@ -137,7 +162,9 @@ the running one**, with a pointer moved to switch — the layout
   artifact, aim its Selector — and the rollback, health gate, and version reporting that already
   exist come with it.
 - Positive: the artifact stays the one upstream published, which is what ADR-0018 exists to protect.
-  A `.deb` still is not openable, but the `.tar.gz` many projects publish alongside it now is.
+  A `.deb` still is not openable, but the `.tar.gz` many projects publish alongside it now is —
+  wrapper directory and all, since `program_path` is written against the part of the path that does
+  not change between releases.
 - Negative / trade-offs: **the archive gains a say in where bytes land.** Today's "no traversal to
   defend against" property is genuinely lost, and traded for a sanitizer that has to be right —
   absolute paths, `..`, symlinks, and hard links all become refusals that must be tested rather than
