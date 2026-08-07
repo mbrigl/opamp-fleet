@@ -26,6 +26,126 @@ pub struct ProcessSpec {
     pub working_dir: Option<PathBuf>,
 }
 
+/// What a package replaces on disk.
+///
+/// The two shapes share their whole lifecycle — set the old one aside, install the new one, prove
+/// it starts, put the old one back if it does not — and differ only in what "it" is. Keeping that
+/// difference here rather than inside [`Runner::swap_and_gate`] is what lets the health gate and
+/// the rollback stay one piece of code for both (ADR-0015, ADR-0023).
+#[derive(Debug, Clone)]
+pub enum InstallTarget {
+    /// One file: the artifact is the program, or holds it as its single named member.
+    Binary(PathBuf),
+    /// A whole directory tree, unpacked beside the running one and swapped by renaming
+    /// directories — the same move the single-file case makes, one level up.
+    Tree {
+        /// This Supervisor's `program/` directory, which holds the live tree and the rolled-back
+        /// one under fixed names.
+        root: PathBuf,
+        /// Where the program sits inside the tree, as written in the configuration.
+        program_path: PathBuf,
+    },
+}
+
+impl InstallTarget {
+    /// What the Managed Process is spawned from.
+    fn live(&self) -> PathBuf {
+        match self {
+            InstallTarget::Binary(path) => path.clone(),
+            InstallTarget::Tree { root, .. } => root.join(crate::config::TREE_DIR),
+        }
+    }
+
+    /// Where the thing being replaced is kept until the new one has proved itself.
+    fn backup(&self) -> PathBuf {
+        match self {
+            InstallTarget::Binary(path) => path.with_extension("rollback"),
+            InstallTarget::Tree { root, .. } => {
+                root.join(format!("{}.rollback", crate::config::TREE_DIR))
+            }
+        }
+    }
+
+    /// Creates the directories this target needs before anything is installed into it — at
+    /// startup, so a Supervisor whose program has not arrived yet still owns its place.
+    ///
+    /// For a tree that is the `program/` root and **nothing below it**: the live tree is put there
+    /// by renaming a staging directory over the name, and a rename cannot replace a directory that
+    /// something else has already created and filled. Creating the program's parent — which is what
+    /// the single-file case wants — would make every first install of a tree fail.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be created.
+    pub fn prepare(&self) -> Result<(), String> {
+        let dir = match self {
+            InstallTarget::Binary(path) => path.parent().map(std::path::Path::to_path_buf),
+            InstallTarget::Tree { root, .. } => Some(root.clone()),
+        };
+        match dir {
+            Some(dir) => std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot prepare {}: {e}", dir.display())),
+            None => Ok(()),
+        }
+    }
+
+    /// Moves what runs today aside, so a failed install has something to go back to. `false` means
+    /// there was nothing there — a first install, which is the ordinary way an agent arrives.
+    fn set_aside(&self) -> Result<bool, String> {
+        let (live, backup) = (self.live(), self.backup());
+        // A rename never lands on an occupied name: Windows refuses it outright, and a directory
+        // rename would nest rather than replace.
+        self.remove(&backup);
+        match std::fs::rename(&live, &backup) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("cannot set {} aside: {e}", live.display())),
+        }
+    }
+
+    /// Installs the verified artifact as what runs next. The live path is free by the time this is
+    /// called — [`set_aside`](Self::set_aside) has just moved it.
+    fn install(&self, staged: &std::path::Path, archive_key: Option<&str>) -> Result<(), String> {
+        match self {
+            InstallTarget::Binary(path) => install_executable(staged, path, archive_key),
+            InstallTarget::Tree { root, program_path } => {
+                install_tree(staged, root, program_path, archive_key)
+            }
+        }
+    }
+
+    /// Puts back what ran before.
+    fn restore(&self) -> Result<(), String> {
+        let (live, backup) = (self.live(), self.backup());
+        self.remove(&live);
+        std::fs::rename(&backup, &live)
+            .map_err(|e| format!("cannot restore {}: {e}", live.display()))
+    }
+
+    /// Throws away what was just installed — a failed *first* install, with nothing behind it.
+    fn discard(&self) {
+        self.remove(&self.live());
+    }
+
+    /// Drops the backup once the new version has proved it stays up.
+    fn drop_backup(&self) {
+        self.remove(&self.backup());
+    }
+
+    /// Removes a file or a whole tree, whichever this target deals in. Best-effort throughout:
+    /// every caller is already committing to an outcome and has nothing better to do with a
+    /// failure than report the one it is already reporting.
+    fn remove(&self, path: &std::path::Path) {
+        match self {
+            InstallTarget::Binary(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+            InstallTarget::Tree { .. } => {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
@@ -35,9 +155,9 @@ pub struct Runner {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0011's health-gated acknowledgement); zero acknowledges on start.
     pub apply_grace: Duration,
-    /// The Managed Process's binary — what an `ApplyPackage` swap replaces (ADR-0015). `None` for
-    /// a plugin with no single swappable binary, which then reports a package `InstallFailed`.
-    pub binary: Option<PathBuf>,
+    /// What an `ApplyPackage` swap replaces (ADR-0015) — one file, or a whole tree (ADR-0023).
+    /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
+    pub install: Option<InstallTarget>,
     /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
     pub archive_key: Option<String>,
     pub events: EventSender,
@@ -194,37 +314,31 @@ impl Runner {
         child: &mut Option<Child>,
         shutdown: &mut Shutdown,
     ) -> GraceOutcome {
-        let Some(binary) = self.binary.clone() else {
+        let Some(target) = self.install.clone() else {
             let _ = std::fs::remove_file(&staged);
             return GraceOutcome::Failed(
-                "this supervisor manages no single binary to replace".to_string(),
+                "this supervisor manages nothing a package can replace".to_string(),
             );
         };
-        // Move the binary we are replacing aside — same directory, so the rename is atomic and
-        // costs nothing — and it is what a failed package is rolled back from.
-        let backup = binary.with_extension("rollback");
-        let has_backup = match std::fs::rename(&binary, &backup) {
-            Ok(()) => true,
-            // No existing binary (first install) — nothing to roll back to.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        // Move what runs today aside — a rename, so it is atomic and costs nothing — and it is
+        // what a failed package is rolled back from.
+        let has_backup = match target.set_aside() {
+            Ok(has_backup) => has_backup,
             Err(e) => {
                 let _ = std::fs::remove_file(&staged);
-                return GraceOutcome::Failed(format!(
-                    "cannot set the current binary {} aside: {e}",
-                    binary.display()
-                ));
+                return GraceOutcome::Failed(e);
             }
         };
-        if let Err(e) = install_executable(&staged, &binary, self.archive_key.as_deref()) {
-            // Put the old binary back before reporting: the process must not be left with none.
+        if let Err(e) = target.install(&staged, self.archive_key.as_deref()) {
+            // Put the old one back before reporting: the process must not be left with none.
             if has_backup {
-                let _ = std::fs::rename(&backup, &binary);
+                let _ = target.restore();
             }
             let _ = std::fs::remove_file(&staged);
             return GraceOutcome::Failed(e);
         }
         let _ = std::fs::remove_file(&staged);
-        info!(supervisor = %self.name, version = %version, binary = %binary.display(), "package binary staged; restarting");
+        info!(supervisor = %self.name, version = %version, program = %target.live().display(), "package staged; restarting");
 
         let started = self.try_spawn().await;
         // "Nothing started" has two meanings, and only one of them is a failed install. A plugin
@@ -248,21 +362,17 @@ impl Runner {
             self.gate(started.ok(), child, shutdown).await
         };
         match (&outcome, has_backup) {
-            // Roll the binary back to what ran before, so the next respawn is the old, known one.
+            // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
-                if let Err(e) = std::fs::rename(&backup, &binary) {
-                    warn!(supervisor = %self.name, error = %e, "cannot roll the binary back");
+                if let Err(e) = target.restore() {
+                    warn!(supervisor = %self.name, error = %e, "cannot roll the program back");
                 } else {
-                    warn!(supervisor = %self.name, "rolled the binary back after a failed package");
+                    warn!(supervisor = %self.name, "rolled the program back after a failed package");
                 }
             }
-            (GraceOutcome::Failed(_), false) => {
-                let _ = std::fs::remove_file(&binary);
-            }
-            // Applied: the previous binary is no longer needed.
-            (_, true) => {
-                let _ = std::fs::remove_file(&backup);
-            }
+            (GraceOutcome::Failed(_), false) => target.discard(),
+            // Applied: what ran before is no longer needed.
+            (_, true) => target.drop_backup(),
             (_, false) => {}
         }
         outcome
@@ -602,6 +712,90 @@ fn install_executable(
     std::fs::rename(&temp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
+/// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0023).
+///
+/// The tree is built in a staging directory first and moved into place by one rename, so the live
+/// name is either the old tree or the new one and never a half-written mixture. The live name is
+/// already free — the caller set the previous tree aside — and that previous tree is what a failed
+/// install is restored from, untouched throughout: nothing here ever writes into it.
+///
+/// `program_path` decides two things at once: which member of the archive is the program, and
+/// which directory prefix is dropped so the unpacked tree starts where the configuration says it
+/// does. A raw artifact — no archive at all — is written to that path directly, so an agent
+/// configured for a tree does not fail merely because someone uploaded a bare binary.
+fn install_tree(
+    artifact: &std::path::Path,
+    root: &std::path::Path,
+    program_path: &std::path::Path,
+    archive_key: Option<&str>,
+) -> Result<(), String> {
+    let staging = root.join(".staging");
+    // A previous attempt that died between unpacking and the rename would leave this behind.
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+
+    let unpack = |staging: &std::path::Path| -> Result<(), String> {
+        match crate::archive::detect(artifact)? {
+            crate::archive::Kind::Raw => {
+                let program = staging.join(program_path);
+                if let Some(parent) = program.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+                }
+                std::fs::copy(artifact, &program)
+                    .map_err(|e| format!("cannot write {}: {e}", program.display()))?;
+                info!(artifact = %artifact.display(), program = %program_path.display(), "the package is a bare program; placed it where the tree expects it");
+                Ok(())
+            }
+            crate::archive::Kind::TarGz => {
+                let summary = crate::archive::extract_tree_tar_gz(artifact, program_path, staging)?;
+                info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
+                Ok(())
+            }
+            crate::archive::Kind::SevenZ => {
+                let summary =
+                    crate::archive::extract_tree_7z(artifact, program_path, staging, archive_key)?;
+                info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
+                Ok(())
+            }
+        }
+    };
+
+    // Whatever went wrong, the staging directory does not survive it: the next install must start
+    // from an empty one, and a failed unpack has no value to anyone.
+    if let Err(e) = unpack(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+
+    let program = staging.join(program_path);
+    if !program.is_file() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "the unpacked package holds no file at {}",
+            program_path.display()
+        ));
+    }
+    // The tree carries its own modes where the archive had them, but whether the *program* can be
+    // executed is not something to inherit from how someone built an archive.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("cannot make {} executable: {e}", program.display()))?;
+    }
+
+    let live = root.join(crate::config::TREE_DIR);
+    std::fs::rename(&staging, &live).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging);
+        format!(
+            "cannot move the unpacked package to {}: {e}",
+            live.display()
+        )
+    })
+}
+
 fn unhealthy(status: String, last_error: String) -> ComponentHealth {
     ComponentHealth {
         healthy: false,
@@ -659,7 +853,7 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace,
-            binary: None,
+            install: None,
             archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
@@ -964,7 +1158,7 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(200),
-            binary: Some(binary.clone()),
+            install: Some(InstallTarget::Binary(binary.clone())),
             archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
@@ -1054,7 +1248,7 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(200),
-            binary: Some(binary.clone()),
+            install: Some(InstallTarget::Binary(binary.clone())),
             archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
@@ -1102,6 +1296,237 @@ mod tests {
         let _ = harness.task.await;
     }
 
+    /// Builds a release-shaped `.tar.gz`: the program and a library it "loads", under one
+    /// version-named wrapper directory (ADR-0023).
+    fn tree_release(path: &std::path::Path, wrapper: &str, program: &[u8], library: &[u8]) {
+        let file = std::fs::File::create(path).expect("create");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, content) in [
+            (format!("{wrapper}/bin/agent"), program),
+            (format!("{wrapper}/lib/libagent.so"), library),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, content)
+                .expect("append");
+        }
+        builder.into_inner().expect("tar").finish().expect("gzip");
+    }
+
+    /// A Runner installing into a tree, spawning whatever sits at `program/tree/bin/agent`.
+    fn tree_harness(root: &std::path::Path) -> Harness {
+        let program = root.join("tree/bin/agent");
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let runner = Runner {
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(200),
+            install: Some(InstallTarget::Tree {
+                root: root.to_path_buf(),
+                program_path: std::path::PathBuf::from("bin/agent"),
+            }),
+            archive_key: None,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                })
+            }),
+        };
+        Harness {
+            commands,
+            events,
+            shutdown_tx,
+            task: tokio::spawn(runner.run(shutdown)),
+        }
+    }
+
+    async fn apply_tree(
+        harness: &mut Harness,
+        staged: &std::path::Path,
+        version: &str,
+    ) -> Result<String, String> {
+        harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged: staged.to_path_buf(),
+                version: version.to_string(),
+                hash: version.as_bytes().to_vec(),
+            })
+            .await
+            .expect("send");
+        next_package_ack(&mut harness.events).await.1
+    }
+
+    /// The case ADR-0023 exists for: an agent that is a program *plus* what it loads, arriving
+    /// with nothing on the host first — and then being replaced the same way.
+    #[tokio::test]
+    async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("program");
+        std::fs::create_dir_all(&root).expect("create the program directory");
+
+        let first = dir.path().join("agent-1.0.0.tar.gz");
+        tree_release(
+            &first,
+            "agent-1.0.0",
+            b"#!/bin/sh\nexec sleep 600\n",
+            b"v1-library",
+        );
+        let mut harness = tree_harness(&root);
+        let _ = next_health(&mut harness.events).await; // nothing installed yet
+
+        assert_eq!(
+            apply_tree(&mut harness, &first, "1.0.0").await,
+            Ok("1.0.0".to_string()),
+            "a first install needs nothing on the host"
+        );
+        assert_eq!(
+            std::fs::read(root.join("tree/lib/libagent.so")).expect("the library"),
+            b"v1-library",
+            "what the program loads came with it"
+        );
+        assert!(
+            !root.join("tree.rollback").exists(),
+            "a first install leaves no rollback: there was nothing to keep"
+        );
+        assert!(!root.join(".staging").exists(), "staging does not survive");
+
+        let second = dir.path().join("agent-2.0.0.tar.gz");
+        tree_release(
+            &second,
+            "agent-2.0.0-linux-amd64",
+            b"#!/bin/sh\nexec sleep 600\n",
+            b"v2-library",
+        );
+        assert_eq!(
+            apply_tree(&mut harness, &second, "2.0.0").await,
+            Ok("2.0.0".to_string())
+        );
+        assert_eq!(
+            std::fs::read(root.join("tree/lib/libagent.so")).expect("the library"),
+            b"v2-library",
+            "the wrapper directory was renamed between releases and nothing had to follow it"
+        );
+        assert!(
+            !root.join("tree.rollback").exists(),
+            "a succeeded install keeps no previous tree"
+        );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// The health gate, one level up: a tree whose program will not stay up puts the *whole*
+    /// previous tree back — libraries included, since half of each would run nothing.
+    #[tokio::test]
+    async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("program");
+        std::fs::create_dir_all(&root).expect("create the program directory");
+
+        let good = dir.path().join("agent-1.0.0.tar.gz");
+        tree_release(
+            &good,
+            "agent-1.0.0",
+            b"#!/bin/sh\nexec sleep 600\n",
+            b"v1-library",
+        );
+        let mut harness = tree_harness(&root);
+        let _ = next_health(&mut harness.events).await;
+        assert_eq!(
+            apply_tree(&mut harness, &good, "1.0.0").await,
+            Ok("1.0.0".to_string())
+        );
+
+        // A version that exits immediately — rejected by the apply grace.
+        let bad = dir.path().join("agent-2.0.0.tar.gz");
+        tree_release(&bad, "agent-2.0.0", b"#!/bin/sh\nexit 1\n", b"v2-library");
+        assert!(
+            apply_tree(&mut harness, &bad, "2.0.0").await.is_err(),
+            "a program that exits in the grace has rejected itself"
+        );
+
+        assert_eq!(
+            std::fs::read(root.join("tree/bin/agent")).expect("the program"),
+            b"#!/bin/sh\nexec sleep 600\n",
+            "the program that ran before is back"
+        );
+        assert_eq!(
+            std::fs::read(root.join("tree/lib/libagent.so")).expect("the library"),
+            b"v1-library",
+            "and so is everything beside it — a rollback of half a tree is not a rollback"
+        );
+        assert!(
+            !root.join("tree.rollback").exists(),
+            "nothing is left behind"
+        );
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
+    /// The archive names a member the configuration does not — refused, with the old tree left
+    /// exactly where it was.
+    #[tokio::test]
+    async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("program");
+        std::fs::create_dir_all(&root).expect("create the program directory");
+
+        let good = dir.path().join("agent-1.0.0.tar.gz");
+        tree_release(
+            &good,
+            "agent-1.0.0",
+            b"#!/bin/sh\nexec sleep 600\n",
+            b"v1-library",
+        );
+        let mut harness = tree_harness(&root);
+        let _ = next_health(&mut harness.events).await;
+        assert_eq!(
+            apply_tree(&mut harness, &good, "1.0.0").await,
+            Ok("1.0.0".to_string())
+        );
+
+        // Same shape, wrong program name: `bin/agent` is not in it.
+        let wrong = dir.path().join("other.tar.gz");
+        {
+            let file = std::fs::File::create(&wrong).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(4);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "other-1.0.0/bin/other", &b"nope"[..])
+                .expect("append");
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+        let outcome = apply_tree(&mut harness, &wrong, "2.0.0").await;
+        assert!(outcome.is_err(), "{outcome:?}");
+
+        assert_eq!(
+            std::fs::read(root.join("tree/lib/libagent.so")).expect("the library"),
+            b"v1-library",
+            "the tree that was running is untouched"
+        );
+        assert!(!root.join(".staging").exists(), "staging does not survive");
+
+        harness.shutdown_tx.send(true).expect("shutdown");
+        let _ = harness.task.await;
+    }
+
     /// Bringing a host into the fleet the other way round: the Supervisor is configured, the
     /// program is not installed yet, and the Server delivers it. A plugin with nothing to run —
     /// a Collector awaiting its configuration — must not turn that into a failed install, which
@@ -1125,7 +1550,7 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(200),
-            binary: Some(binary.clone()),
+            install: Some(InstallTarget::Binary(binary.clone())),
             archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
@@ -1180,7 +1605,7 @@ mod tests {
             name: "test".to_string(),
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(500),
-            binary: Some(binary.clone()),
+            install: Some(InstallTarget::Binary(binary.clone())),
             archive_key: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,

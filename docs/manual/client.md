@@ -12,6 +12,7 @@ Server sends them, reports back what they are doing, and can replace their binar
 - [Configuration reference](#configuration-reference)
 - [Supervisors: putting a process under management](#supervisors-putting-a-process-under-management)
 - [Which programs take updates](#which-programs-take-updates)
+- [Agents that are more than one file](#agents-that-are-more-than-one-file)
 - [Path placeholders](#path-placeholders)
 - [Where things live on disk](#where-things-live-on-disk)
 - [Package updates](#package-updates)
@@ -208,6 +209,7 @@ plugin, not a change to the core.
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
 | `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
+| `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
 | `[supervisor.attributes]` | none | Attributes for this Agent alone, overriding the Client's `[attributes]` per key. |
 
 Two keys were **removed** and now fail at startup with a message saying what to do instead:
@@ -358,6 +360,7 @@ Each Supervisor owns everything under its own directory (ADR-0021):
 <supervisor_dir>/<name>/remote-config.pb  # the last configuration it received
 <supervisor_dir>/<name>/config/           # one entry file per matching Configuration
 <supervisor_dir>/<name>/program/          # the program, when it is named by a bare file name
+<supervisor_dir>/<name>/program/tree/     # …or the whole unpacked package (ADR-0023)
 <supervisor_dir>/<name>/packages/         # staging its package downloads go through
 ```
 
@@ -388,12 +391,54 @@ host:
 [The rollout walkthrough](rollout.md) runs this end to end, from packing the artifact to watching it
 land.
 
-Two limits worth knowing before you plan a rollout: a Managed Process that is **more than one file**
-— an executable plus the shared objects it loads — cannot be delivered as a package, because exactly
-one archive member is installed; name it by an absolute path and update it however it was installed.
-And only a **top-level** package is installed: an addon is something a Supervisor has no way to
-apply, so it is refused with `InstallFailed` rather than written over the binary it was meant to
-extend.
+One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
+addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
+than written over the binary it was meant to extend.
+
+## Agents that are more than one file
+
+An executable plus the shared objects it loads — Fluent Bit is the usual example — is delivered by
+naming where the program sits inside the package (ADR-0023):
+
+```toml
+[[supervisor]]
+type = "command"
+name = "fluent-bit"
+command = "fluent-bit"            # bare: consent, exactly as everywhere else
+program_path = "bin/fluent-bit"   # where the program sits inside the package
+args = ["-c", "${config_dir}/fluent-bit-conf"]
+```
+
+With `program_path` set, the whole archive is unpacked into
+`<supervisor_dir>/<name>/program/tree/`, keeping its own structure, and the program is
+`program/tree/bin/fluent-bit`. Without it, nothing changes: one member, one file, as before.
+
+**The path is matched from its end.** An upstream release wraps everything in a version-named
+directory — `fluent-bit-3.1.0/bin/fluent-bit` — and that prefix is dropped, so `bin/fluent-bit`
+keeps being right at the next release instead of naming a version. If it matches several members
+the install is refused and they are listed; write more of the path to say which.
+
+**The tree that was running is kept whole** as `program/tree.rollback` until the new one has
+survived `apply_grace_secs`, and put back whole if it has not — a rollback of half a tree would run
+nothing.
+
+What an archive may contain is checked before anything is written, and one bad member refuses the
+whole archive:
+
+| Refused | Why |
+|---|---|
+| a member with `..` in its path, or an absolute path | It names somewhere outside the directory being unpacked into. |
+| a symbolic or hard link | What it points at is not where it sits, which is the one thing a path check cannot judge. |
+| more than 10 000 members, or more than 2 GiB unpacked | An archive that expands without end. |
+
+Members outside the program's own directory — a `LICENSE` beside the wrapper — are not written, and
+the count is logged rather than passed over in silence.
+
+Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
+tree**; a `.7z` is opened too, but 7z stores Windows attributes, so only the program is made
+executable and a helper binary beside it would not be. And **`program_path` and an absolute
+`binary`/`command` are refused together** — the machine's program is not something this Client
+unpacks into.
 
 ## Updating the Client itself
 

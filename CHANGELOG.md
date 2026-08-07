@@ -93,6 +93,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   option by option, plus an end-to-end [rollout walkthrough](docs/manual/rollout.md) that installs
   and configures a Foreign Agent entirely from the Server.
 
+- **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
+  ([ADR-0023](docs/adr/0023-multi-file-packages.md)). An executable plus the shared objects it
+  loads — Fluent Bit is the case — could not be a package before, because exactly one archive
+  member was installed. Naming where the program sits inside the package unpacks the whole archive
+  instead:
+
+  ```toml
+  [[supervisor]]
+  type = "command"
+  name = "fluent-bit"
+  command = "fluent-bit"            # unchanged: the bare name is still the consent
+  program_path = "bin/fluent-bit"   # where the program sits inside the package
+  ```
+
+  The tree lands in `<supervisor_dir>/<name>/program/tree/`, and the one it replaced is kept as
+  `program/tree.rollback` until the new one has survived `apply_grace_secs` — put back **whole** if
+  it has not. The path is matched from its end, so the version-named directory a release wraps
+  everything in needs no mention and the value stays right at the next release.
+
+  **Without `program_path` nothing changes**: one member, one file, same layout, same rollback.
+
+  Unpacking a tree means the archive names paths, so every member is checked before anything is
+  written and one bad member refuses the whole archive: a `..` or absolute path, a symbolic or hard
+  link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
+  is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
+
 ### Changed
 
 - A Supervisor's package downloads are staged in its own directory

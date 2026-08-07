@@ -106,6 +106,10 @@ pub struct SupervisorContext {
     /// rather than reading its own `binary`/`command` key, so the path rule — and the package
     /// consent derived from it — lives in one place instead of once per plugin.
     pub program: PathBuf,
+    /// What an offered package replaces (ADR-0015, ADR-0023) — resolved beside `program` and for
+    /// the same reason: a plugin that decided this for itself could disagree with the Agent's
+    /// declared consent.
+    pub install: crate::supervisor::process::InstallTarget,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -193,6 +197,9 @@ mod tests {
             config_dir: supervisor_dir.join("config"),
             supervisor_dir,
             program: PathBuf::from("/opt/fluent-bit/bin/fluent-bit"),
+            install: crate::supervisor::process::InstallTarget::Binary(PathBuf::from(
+                "/opt/fluent-bit/bin/fluent-bit",
+            )),
             stop_timeout: Duration::from_secs(1),
             apply_grace: Duration::from_secs(0),
             archive_key: None,

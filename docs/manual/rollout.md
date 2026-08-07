@@ -26,10 +26,12 @@ The example is `promtail` — one static binary, which is the requirement (see
 Three properties of package delivery decide whether this path is open to a given agent (ADR-0018).
 Reading them first is cheaper than discovering them at rollout time.
 
-- **Exactly one file is installed.** An agent that is an executable *plus* the shared objects it
-  loads cannot be delivered as a package. Fluent Bit is the example in
-  [`config/client.toml`](../../config/client.toml) that deliberately uses an absolute path for this
-  reason. A statically linked single binary — Promtail, Vector, a Go or Rust agent — is fine.
+- **One file by default, a whole tree when you say so.** A statically linked single binary —
+  Promtail, Vector, a Go or Rust agent — needs nothing extra. An agent that is an executable *plus*
+  the shared objects it loads, such as Fluent Bit, needs `program_path` in its block, which unpacks
+  the whole archive instead of one member (ADR-0023); see
+  [Agents that are more than one file](client.md#agents-that-are-more-than-one-file). Everything
+  below applies to both.
 - **Only `.tar.gz` and `.7z` are opened.** The Client decides what an artifact is by its **leading
   bytes**, not its name, and anything that is neither gzip nor 7z is taken to *be* the program. A
   `.zip` is therefore not an unsupported format that gets rejected — it is installed over the
@@ -231,6 +233,9 @@ own automatic rollback in step 7, which reacts to a binary that will not stay up
 |---|---|
 | The Agent never shows `AcceptsPackages` | Its program is named by an absolute path, so it is the machine's and is never written to. The startup log states, per Supervisor, what it resolved and what it decided. |
 | `InstallFailed`, "holds no member named …" | The archive's member name does not match the configured program. The error lists what the archive *does* hold; repack with `--program-name`. |
+| `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
+| `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
+| `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
 | The agent stops starting right after a successful install | The artifact was probably a `.zip` (or some other container): not being gzip or 7z, it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
 | A signed package is refused | No `verification_key` on that Client — a Client without one refuses *signed* packages, not only unsigned ones. |

@@ -69,11 +69,21 @@ the running one**, with a pointer moved to switch — the layout
    exactly as today's single-member rule matches a file name "wherever the archive keeps it". More
    than one match is refused, naming the candidates, and answered by writing more of the path.
 
-3. **The tree is unpacked to `<supervisor_dir>/<name>/program/<version>/`**, keeping whatever
-   directory structure the archive has, and `<supervisor_dir>/<name>/program/current` points at it.
-   The Managed Process is spawned from the matched member inside `current`. A failed install leaves
-   the previous version directory untouched, so a rollback is the pointer moving back — never a
-   second unpack, and never a moment with no program on disk.
+3. **The tree is unpacked to `<supervisor_dir>/<name>/program/tree/`**, keeping whatever directory
+   structure the archive has below the stripped prefix, and the tree it replaced is kept beside it
+   as `program/tree.rollback`. The Managed Process is spawned from `program/tree/<program_path>` —
+   a path that follows from the configuration alone, so it is known at startup, before any package
+   has ever arrived. The new tree is built in `program/.staging` and moved into place by a single
+   rename, so the live name is either the old tree or the new one and never a mixture; a failed
+   install renames the previous one back.
+
+   Two fixed names rather than a version-named directory and a `current` pointer, which is what
+   this ADR first proposed: a directory rename is atomic on every platform this Client runs on,
+   while a pointer is a symlink on Unix and a junction on Windows — machinery ADR-0010 runs once,
+   as an Administrator, at install time, and which would here run on every package. It is also the
+   move the single-file swap already makes (`<binary>.rollback`), so there is one mechanism to
+   understand rather than two. What is lost is the version being legible on disk; the Agent reports
+   it, which is where an operator reads it anyway.
 
 4. **The archive's paths are sanitized, and every member is bounded.** A member is refused, and the
    whole install with it, when its path is absolute, contains a `..` component, or is a symlink or
@@ -84,6 +94,11 @@ the running one**, with a pointer moved to switch — the layout
 5. **File modes come from the archive on Unix, plus `program_path` is always made executable.** A
    tree carries its own modes and a `tar` preserves them; the one thing that must not depend on how
    the archive was built is whether the program can be executed at all.
+
+   A `.7z` is the exception: it stores Windows attributes, and a Unix mode survives in them only by
+   a convention this Client will not bet an agent's executability on. A tree packed as `.7z` gets
+   its program made executable and nothing else, so an agent that ships helper executables beside
+   its program is a reason to use `.tar.gz` — the format upstream releases use anyway.
 
 6. **Nothing changes for a single-file package.** No `program_path`, no tree, no version directory —
    the existing path stays exactly as it is, including its rollback. This decision adds a second
@@ -173,7 +188,7 @@ the running one**, with a pointer moved to switch — the layout
   few hundred megabytes of plugins doubles, on hosts where `supervisor_dir` was already the reason
   ADR-0021 made the location movable.
 - Negative / trade-offs: a second layout to explain. `program/<file>` and
-  `program/<version>/<program_path>` coexist, and which one a Supervisor has depends on whether one
+  `program/tree/<program_path>` coexist, and which one a Supervisor has depends on whether one
   optional key is set.
 - Negative / trade-offs: mode and ownership semantics now come partly from the archive, so an
   artifact built with sloppy modes produces an agent that does not start — a failure whose cause is

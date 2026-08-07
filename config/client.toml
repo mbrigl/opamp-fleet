@@ -161,9 +161,9 @@ state_dir = "client-state"
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
 # Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
 # (named after the Configuration on the Server, here "fluent-bit-conf") and the Supervisor
-# restarts the process on a change so it re-reads it. A Foreign Agent that is more than one file
-# — an executable plus the shared objects it loads — cannot be delivered as a package yet; name
-# it by an absolute path and update it however it was installed.
+# restarts the process on a change so it re-reads it. Named by an absolute path here, so it is
+# the machine's program: installed and updated by whatever put it there. Block 5 below is the
+# same agent delivered by the Server instead.
 #
 # args, working_dir and env values may use two placeholders naming this Supervisor's own
 # directories (ADR-0022), so nothing has to be kept in sync with state_dir or supervisor_dir:
@@ -216,3 +216,26 @@ state_dir = "client-state"
 # command = "promtail"                  # bare: this Supervisor's own program/, takes packages
 # args = ["-config.file=${config_dir}/promtail-conf"]
 # version_args = ["--version"]          # what it reports as service.version
+
+# 5. An agent that is MORE THAN ONE FILE, delivered by the Server (ADR-0023). Fluent Bit is an
+# executable plus the shared objects it loads, so the single member of block 4 is not enough:
+# `program_path` says where the program sits *inside* the package, and the whole archive is then
+# unpacked into <supervisor_dir>/<name>/program/tree/, keeping its own structure.
+#
+# The path is matched from its end, so the version-named directory an upstream release wraps
+# everything in — fluent-bit-3.1.0/bin/fluent-bit — needs no mention here and the value keeps
+# being right at the next release. Write more of the path only if it matches several members.
+#
+#   opamp-package-sign sha256 fluent-bit-3.1.0.tar.gz   # or pack a tree yourself
+#   curl -X PUT --data-binary @fluent-bit-3.1.0.tar.gz \
+#        "http://<server>:4320/api/v1/packages/fluent-bit?version=3.1.0"
+#
+# The tree that was running is kept as program/tree.rollback until the new one has survived
+# apply_grace_secs, and put back whole if it has not. A .tar.gz carries its own file modes and is
+# the right format here; a .7z is opened too, but only the program is made executable.
+# [[supervisor]]
+# type = "command"
+# name = "fluent-bit-managed"
+# command = "fluent-bit"                # bare: consent, exactly as everywhere else (ADR-0021)
+# program_path = "bin/fluent-bit"       # where the program sits inside the package
+# args = ["-c", "${config_dir}/fluent-bit-conf"]

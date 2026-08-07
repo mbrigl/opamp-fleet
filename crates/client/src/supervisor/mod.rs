@@ -117,9 +117,19 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         let program = crate::config::resolve_program(
             key,
             std::path::Path::new(raw),
+            block.program_path.as_deref(),
             &supervisor_dir,
             &block.name,
         )?;
+        // What a package replaces: one file, or — when the block says where the program sits
+        // inside the package — the whole tree under this Supervisor's `program/` (ADR-0023).
+        let install = match block.program_path.as_ref() {
+            Some(program_path) => crate::supervisor::process::InstallTarget::Tree {
+                root: supervisor_dir.join(crate::config::PROGRAM_DIR),
+                program_path: program_path.clone(),
+            },
+            None => crate::supervisor::process::InstallTarget::Binary(program.path.clone()),
+        };
 
         let mut state = declare_heartbeat(
             AgentState::supervised(block.name.clone(), storage)
@@ -131,13 +141,9 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         // Logged either way — the consent is now derived rather than written, and an operator who
         // changes a path should not have to infer what it did to the fleet.
         if program.owned {
-            let dir = program
-                .path
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_default();
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("cannot prepare {}: {e}", dir.display()))?;
+            // What the target itself needs — for a tree that is its root and nothing below it,
+            // since the live tree arrives by renaming a directory over that name (ADR-0023).
+            install.prepare()?;
             state.accept_packages();
             info!(
                 supervisor = %block.name,
@@ -167,6 +173,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             supervisor_dir,
             config_dir,
             program: program.path,
+            install,
             stop_timeout: Duration::from_secs(block.stop_timeout_secs),
             apply_grace: Duration::from_secs(block.apply_grace_secs),
             archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
@@ -243,6 +250,38 @@ mod tests {
         assert!(
             dir.path().join("other/agent/instance-uid").is_file(),
             "the relocated root is where the supervisor's state went"
+        );
+    }
+
+    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0023). The
+    /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
+    /// replace a directory something else created and filled — so preparing the program's parent,
+    /// which is right for a single file, would make every first install of a tree fail.
+    #[tokio::test]
+    async fn a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"fluent-bit\"\n\
+             program_path = \"bin/fluent-bit\"\n",
+            state = dir.path().join("state").to_string_lossy(),
+        );
+        let parsed: ClientConfig = toml::from_str(&config).expect("parse");
+        let mut engine = build_engine(&parsed, &shutdown).expect("build");
+
+        assert!(
+            accepts_packages(&mut engine),
+            "a bare name is the consent whether the package is one file or a tree"
+        );
+        let program_dir = dir.path().join("state/supervisors/agent/program");
+        assert!(
+            program_dir.is_dir(),
+            "the root the tree is renamed into exists"
+        );
+        assert!(
+            !program_dir.join("tree").exists(),
+            "nothing occupies the name the first install has to rename onto"
         );
     }
 

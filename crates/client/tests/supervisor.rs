@@ -93,6 +93,45 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     let _ = client.wait();
 }
 
+/// ADR-0023 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// program from inside it. The tree is put in place here rather than delivered, because what this
+/// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
+/// at startup is the path the process is actually spawned from, across the process boundary.
+#[test]
+fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    let supervisor_dir = dir.path().join("supervisors");
+
+    // Where an installed package tree ends up: <supervisor_dir>/<name>/program/tree/<program_path>.
+    // Named with the platform's executable suffix, because Windows spawns `x.exe` when told `x`
+    // and would not find a file that is missing it.
+    let file_name = format!("stub-agent{}", std::env::consts::EXE_SUFFIX);
+    let inside = format!("bin/{file_name}");
+    let program = supervisor_dir.join("stub/program/tree").join(&inside);
+    std::fs::create_dir_all(program.parent().expect("a parent")).expect("create the tree");
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &program).expect("place the program");
+
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
+         [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {file_name:?}\n\
+         program_path = {inside:?}\nargs = [\"--touch\", {marker:?}]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("client.toml");
+    std::fs::write(&config_path, config).expect("write client.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for("the stub's marker file", Duration::from_secs(20), || {
+        marker.exists()
+    });
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
 #[test]
 fn a_command_supervisor_spawns_the_configured_process() {
     let dir = tempfile::tempdir().expect("tempdir");

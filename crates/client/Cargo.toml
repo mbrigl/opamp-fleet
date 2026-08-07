@@ -48,8 +48,10 @@ windows-service.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# Tests build the `.7z` fixtures they then open; the shipped Client only ever decompresses, so the
-# encoder rides in dev-dependencies alone (ADR-0018).
+# Tests build the `.7z` fixtures they then open. The encoder used to ride here alone, because the
+# Client daemon only ever decompresses — it is now on for the workspace as well, since
+# `opamp-package-sign pack` is a shipped bin target of this crate and dev-dependencies do not reach
+# a bin. Stated here too: what the tests need does not depend on why the workspace enables it.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.
 server = { path = "../server" }

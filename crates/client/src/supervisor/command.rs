@@ -66,6 +66,7 @@ impl Plugin for CommandPlugin {
             .as_ref()
             .map(|d| PathBuf::from(ctx.expand(&d.to_string_lossy())));
         let command = ctx.program;
+        let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         if let Some(version_args) = settings.version_args.clone() {
             tokio::spawn(probe_version(
@@ -78,8 +79,8 @@ impl Plugin for CommandPlugin {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
-            // A package (ADR-0015) swaps this command's binary.
-            binary: Some(command.clone()),
+            // A package (ADR-0015) swaps this command's program — one file, or a whole tree.
+            install: Some(install),
             archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,

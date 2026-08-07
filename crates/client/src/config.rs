@@ -95,17 +95,33 @@ pub struct SupervisorBlock {
     pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
+    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g.
+    /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0015: one
+    /// member, one file. Setting it is what asks for the tree to be unpacked whole.
+    ///
+    /// It never decides *whether* packages are taken; the written shape of `binary`/`command`
+    /// still does that alone (ADR-0021).
+    pub program_path: Option<PathBuf>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
 
 /// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0021).
 ///
-/// Called `program` and not `bin` on purpose: it holds one file today, and if a Foreign Agent's
-/// whole tree — an executable with the shared objects it loads — is ever unpacked here, it lands
-/// under the same root and no path on disk moves. A directory name is cheap; a layout migration
-/// on every host is not.
+/// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
+/// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
+/// the same root (ADR-0023, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
+/// directory name is cheap; a layout migration on every host is not.
 pub const PROGRAM_DIR: &str = "program";
+
+/// The subdirectory of `program/` holding an unpacked package tree (ADR-0023), with the tree it
+/// replaced kept beside it under the same name plus `.rollback`.
+///
+/// Two fixed names rather than a version directory and a pointer: it is the mechanism the
+/// single-file swap already uses, a directory rename is atomic on every platform this Client runs
+/// on, and nothing has to be reconciled after a crash halfway through an install. Which version is
+/// in there is reported by the Agent, not spelled on disk.
+pub const TREE_DIR: &str = "tree";
 
 /// The subdirectory a downloaded artifact is staged in, per Supervisor.
 const PACKAGES_DIR: &str = "packages";
@@ -140,10 +156,21 @@ pub struct Program {
 pub fn resolve_program(
     key: &str,
     value: &Path,
+    program_path: Option<&Path>,
     supervisor_dir: &Path,
     name: &str,
 ) -> Result<Program, String> {
     if value.is_absolute() {
+        // A tree is unpacked into a directory this Client owns, and an absolute path says the
+        // program is the machine's. Refusing beats picking one of the two to ignore.
+        if program_path.is_some() {
+            return Err(format!(
+                "supervisor {name:?}: `{key} = {}` is the machine's program, so there is nowhere \
+                 to unpack a package into — drop `program_path`, or name the program with a bare \
+                 file name to keep it in this Supervisor's own directory",
+                value.display()
+            ));
+        }
         return Ok(Program {
             path: value.to_path_buf(),
             owned: false,
@@ -166,10 +193,13 @@ pub fn resolve_program(
     let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none();
     if bare {
-        return Ok(Program {
-            path: supervisor_dir.join(PROGRAM_DIR).join(value),
-            owned: true,
-        });
+        // With a tree the program is one file *inside* the unpacked package (ADR-0023), and the
+        // bare name above is what it always was: the consent, readable in the file.
+        let path = match program_path {
+            Some(inside) => supervisor_dir.join(PROGRAM_DIR).join(TREE_DIR).join(inside),
+            None => supervisor_dir.join(PROGRAM_DIR).join(value),
+        };
+        return Ok(Program { path, owned: true });
     }
     Err(format!(
         "supervisor {name:?}: `{key} = {}` is neither — it must be a bare file name, and then \
@@ -209,6 +239,15 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        let program_path = match take_string(&mut table, "program_path")
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?
+        {
+            None => None,
+            Some(raw) => Some(
+                validate_program_path(&raw)
+                    .map_err(|e| format!("supervisor {name:?}: `program_path = {raw:?}` {e}"))?,
+            ),
+        };
         // `package = "name"` chose the artifact on the host; ADR-0017 moved that decision to the
         // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
@@ -236,9 +275,44 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             attributes,
+            program_path,
             settings: table,
         })
     }
+}
+
+/// Checks a `program_path` (ADR-0023): a relative path inside the package, and nothing that could
+/// reach outside it.
+///
+/// The same three refusals the archive sanitizer makes, made here instead — at startup, where the
+/// operator is still looking at the file, rather than at rollout time on every matched host.
+///
+/// # Errors
+/// Returns an error naming which rule the value breaks.
+fn validate_program_path(raw: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let path = Path::new(raw);
+    if raw.trim().is_empty() {
+        return Err("names nothing".to_string());
+    }
+    let mut components = path.components().peekable();
+    if components.peek().is_none() {
+        return Err("names nothing".to_string());
+    }
+    for component in components {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => return Err("must not contain `.`".to_string()),
+            Component::ParentDir => return Err("must not contain `..`".to_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(
+                    "must be relative — it names a path *inside* the package, not on the host"
+                        .to_string(),
+                )
+            }
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 fn take_string(table: &mut toml::Table, key: &str) -> Result<Option<String>, String> {
@@ -666,8 +740,14 @@ mod tests {
     fn a_bare_name_is_owned_and_anything_between_the_two_cases_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
 
-        let owned = resolve_program("binary", Path::new("otelcol-contrib"), &dir, "otelcol")
-            .expect("a bare file name resolves");
+        let owned = resolve_program(
+            "binary",
+            Path::new("otelcol-contrib"),
+            None,
+            &dir,
+            "otelcol",
+        )
+        .expect("a bare file name resolves");
         assert_eq!(
             owned,
             Program {
@@ -679,10 +759,78 @@ mod tests {
         // `..` in particular never reaches a `join`, which is why nothing downstream has a path
         // to sanitize.
         for refused in ["./otelcol", "bin/otelcol", "../otelcol", "a/../../b", ""] {
-            let err = resolve_program("binary", Path::new(refused), &dir, "otelcol")
+            let err = resolve_program("binary", Path::new(refused), None, &dir, "otelcol")
                 .expect_err("must be refused: {refused}");
             assert!(err.contains("bare file name"), "{refused}: {err}");
         }
+    }
+
+    /// With a tree (ADR-0023) the program is one file *inside* the package, so the spawn path is
+    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0021
+    /// made it mean, which is consent and nothing else.
+    #[test]
+    fn a_tree_spawns_from_the_path_written_inside_the_package() {
+        let dir = PathBuf::from("/srv/fleet/fluent-bit");
+
+        let resolved = resolve_program(
+            "command",
+            Path::new("fluent-bit"),
+            Some(Path::new("bin/fluent-bit")),
+            &dir,
+            "fluent-bit",
+        )
+        .expect("a bare name with a program_path resolves");
+        assert_eq!(
+            resolved,
+            Program {
+                path: dir.join(PROGRAM_DIR).join(TREE_DIR).join("bin/fluent-bit"),
+                owned: true,
+            },
+            "the spawn path is readable in the file, before any package exists"
+        );
+
+        // The machine's program has no directory this Client may unpack into, and picking one of
+        // the two keys to ignore would be the worst of the three answers.
+        let err = resolve_program(
+            "command",
+            Path::new("/opt/fluent-bit/bin/fluent-bit"),
+            Some(Path::new("bin/fluent-bit")),
+            &dir,
+            "fluent-bit",
+        )
+        .expect_err("absolute and a tree cannot both be meant");
+        assert!(err.contains("program_path"), "{err}");
+    }
+
+    /// Refused at startup, where the operator is still looking at the file — not at rollout time
+    /// on every matched host, which is where the archive sanitizer would catch the same thing.
+    #[test]
+    fn a_program_path_must_stay_inside_the_package() {
+        assert_eq!(
+            validate_program_path("bin/fluent-bit").expect("relative"),
+            PathBuf::from("bin/fluent-bit")
+        );
+        for (refused, because) in [
+            ("../../etc/passwd", ".."),
+            ("bin/../../x", ".."),
+            ("./bin/fluent-bit", "`.`"),
+            ("", "nothing"),
+            ("   ", "nothing"),
+        ] {
+            let err = validate_program_path(refused).expect_err("must be refused: {refused}");
+            assert!(
+                err.contains(because),
+                "{refused}: {err} does not say {because}"
+            );
+        }
+        #[cfg(unix)]
+        assert!(validate_program_path("/opt/fluent-bit/bin/fluent-bit")
+            .expect_err("absolute")
+            .contains("relative"));
+        #[cfg(windows)]
+        assert!(validate_program_path("C:\\fluent-bit\\bin\\fluent-bit.exe")
+            .expect_err("absolute")
+            .contains("relative"));
     }
 
     /// The other half of the rule, whose *spelling* is platform-specific even though the rule is
@@ -697,7 +845,7 @@ mod tests {
         #[cfg(windows)]
         let foreign = r"C:\Program Files\otelcol\otelcol-contrib.exe";
 
-        let resolved = resolve_program("binary", Path::new(foreign), &dir, "otelcol")
+        let resolved = resolve_program("binary", Path::new(foreign), None, &dir, "otelcol")
             .expect("an absolute path resolves");
         assert_eq!(
             resolved,
