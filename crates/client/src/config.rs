@@ -30,6 +30,11 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Where the per-Supervisor directories live (ADR-0019); absent means
+    /// `<state_dir>/supervisors`, which is where they have always been. Set it to put the
+    /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
+    /// onto a volume sized for a few hundred megabytes of agent rather than for state.
+    pub supervisor_dir: Option<PathBuf>,
     /// Operator-defined attributes (ADR-0012), reported as non-identifying attributes of **every**
     /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
     /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
@@ -90,15 +95,89 @@ pub struct SupervisorBlock {
     pub apply_grace_secs: u64,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
-    /// Whether this Supervisor's Managed Process is updated from Server-offered packages
-    /// (ADR-0015, ADR-0016). `true` declares `AcceptsPackages` and takes whichever top-level
-    /// package the Server selects for this Agent; `false` (the default) takes no package offers.
-    ///
-    /// **Which** artifact arrives is the Server's decision, expressed as the package's Selector —
-    /// so a rollout is steered centrally rather than by editing this file on every host.
-    pub accepts_packages: bool,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
+}
+
+/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0019).
+///
+/// Called `program` and not `bin` on purpose: it holds one file today, and if a Foreign Agent's
+/// whole tree — an executable with the shared objects it loads — is ever unpacked here, it lands
+/// under the same root and no path on disk moves. A directory name is cheap; a layout migration
+/// on every host is not.
+pub const PROGRAM_DIR: &str = "program";
+
+/// The subdirectory a downloaded artifact is staged in, per Supervisor.
+const PACKAGES_DIR: &str = "packages";
+
+/// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
+/// replace it (ADR-0019).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    /// What the process is spawned from, and what a package is installed over.
+    pub path: PathBuf,
+    /// Whether the Client owns the directory `path` sits in. The swap renames within that
+    /// directory rather than writing the file in place, so owning it is exactly what makes an
+    /// update possible — which is why this is also the Agent's consent to `AcceptsPackages`.
+    pub owned: bool,
+}
+
+/// Resolves the program path of a `[[supervisor]]` block and decides, in the same step, whether
+/// that Supervisor takes package updates (ADR-0019).
+///
+/// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
+/// wrote. Three cases, and nothing between them:
+///
+/// - a **bare file name** — the program lives in `<supervisor_dir>/program/`, a directory this
+///   Client creates and owns, so it may be replaced: `owned` is true. A bare name cannot escape
+///   that directory, which is why nothing here has to sanitize a path.
+/// - an **absolute path** — the machine's file, put there by a distribution package or by
+///   configuration management. Spawned, never written to: `owned` is false.
+/// - **anything else** — `./x`, `a/b`, `../x`. Refused, rather than guessed at.
+///
+/// # Errors
+/// Returns an error for the third case, naming the rule.
+pub fn resolve_program(
+    key: &str,
+    value: &Path,
+    supervisor_dir: &Path,
+    name: &str,
+) -> Result<Program, String> {
+    if value.is_absolute() {
+        return Ok(Program {
+            path: value.to_path_buf(),
+            owned: false,
+        });
+    }
+    // On Windows a rooted path with no drive — `\Program Files\otelcol\otelcol.exe` — is
+    // *drive-relative*: it resolves against whichever drive the process happens to be on, which
+    // under a service manager is nothing an operator controls. It looks absolute and is not, so it
+    // gets a message that says which half is missing instead of the general one below.
+    #[cfg(windows)]
+    if value.has_root() {
+        return Err(format!(
+            "supervisor {name:?}: `{key} = {}` is relative to the current drive rather than \
+             absolute — name the drive (`C:\\...`) to leave the program to the machine, or use a \
+             bare file name to keep it in this Supervisor's own directory",
+            value.display()
+        ));
+    }
+    let mut components = value.components();
+    let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if bare {
+        return Ok(Program {
+            path: supervisor_dir.join(PROGRAM_DIR).join(value),
+            owned: true,
+        });
+    }
+    Err(format!(
+        "supervisor {name:?}: `{key} = {}` is neither — it must be a bare file name, and then \
+         the program lives in this Supervisor's own directory and is updated from Server-offered \
+         packages, or an absolute path, and then it is the machine's program and this Client \
+         leaves it alone",
+        value.display()
+    ))
 }
 
 impl TryFrom<toml::Table> for SupervisorBlock {
@@ -134,13 +213,22 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
             return Err(format!(
-                "supervisor {name:?}: `package` is no longer a supervisor key — set \
-                 `accepts_packages = true` and give the package a Selector on the Server \
-                 (PUT /api/v1/packages/<name>/selector), which is what now decides which \
-                 artifact this Agent receives"
+                "supervisor {name:?}: `package` is no longer a supervisor key — the Server \
+                 decides which artifact this Agent receives, through the package's Selector \
+                 (PUT /api/v1/packages/<name>/selector)"
             ));
         }
-        let accepts_packages = take_bool(&mut table, "accepts_packages")?.unwrap_or(false);
+        // And `accepts_packages = true` said *whether*, while the program's path said *where* —
+        // two keys for one truth, and nothing ever checked that the second permitted the first
+        // (ADR-0019). The path alone decides now, so the key would only be a way to disagree.
+        if table.contains_key("accepts_packages") {
+            return Err(format!(
+                "supervisor {name:?}: `accepts_packages` is no longer a supervisor key — a \
+                 program named by a bare file name lives in this Supervisor's own directory and \
+                 is updated from Server-offered packages; one named by an absolute path belongs \
+                 to the machine and is left alone"
+            ));
+        }
         Ok(SupervisorBlock {
             kind,
             name,
@@ -148,7 +236,6 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             attributes,
-            accepts_packages,
             settings: table,
         })
     }
@@ -160,17 +247,6 @@ fn take_string(table: &mut toml::Table, key: &str) -> Result<Option<String>, Str
         Some(toml::Value::String(s)) => Ok(Some(s)),
         Some(other) => Err(format!(
             "`{key}` must be a string, not {}",
-            other.type_str()
-        )),
-    }
-}
-
-fn take_bool(table: &mut toml::Table, key: &str) -> Result<Option<bool>, String> {
-    match table.remove(key) {
-        None => Ok(None),
-        Some(toml::Value::Boolean(b)) => Ok(Some(b)),
-        Some(other) => Err(format!(
-            "`{key}` must be true or false, not {}",
             other.type_str()
         )),
     }
@@ -327,6 +403,7 @@ impl Default for ClientConfig {
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
+            supervisor_dir: None,
             attributes: BTreeMap::new(),
             tls: None,
             auth: None,
@@ -386,6 +463,35 @@ impl ClientConfig {
     /// The Ed25519 public key package signatures are verified against (ADR-0015), or `None`.
     pub fn package_key(&self) -> Option<&[u8]> {
         self.package_key.as_deref()
+    }
+
+    /// The root the per-Supervisor directories sit under (ADR-0019) — `supervisor_dir` when the
+    /// operator set one, and `<state_dir>/supervisors` when they did not.
+    #[must_use]
+    pub fn supervisors_root(&self) -> PathBuf {
+        self.supervisor_dir
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("supervisors"))
+    }
+
+    /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
+    /// a single root the operator can place (ADR-0019).
+    #[must_use]
+    pub fn supervisor_dir(&self, name: &str) -> PathBuf {
+        self.supervisors_root().join(name)
+    }
+
+    /// Where the artifact offered to the Agent at `index` is staged. Inside that Supervisor's own
+    /// directory, so that the install which follows is a rename within one filesystem instead of a
+    /// copy across two (ADR-0019); the Client's own Agent stages under `state_dir`, beside the
+    /// versions a self-update writes (ADR-0018).
+    #[must_use]
+    pub fn staging_dir(&self, index: usize) -> PathBuf {
+        index
+            .checked_sub(crate::supervisor::SELF_AGENT_OFFSET)
+            .and_then(|block| self.supervisors.get(block))
+            .map(|block| self.supervisor_dir(&block.name).join(PACKAGES_DIR))
+            .unwrap_or_else(|| self.state_dir.join(PACKAGES_DIR))
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -515,49 +621,152 @@ mod tests {
         assert!(err.contains("max_message_size_bytes"), "{err}");
     }
 
-    /// ADR-0016 moved the choice of artifact to the Server, so the Supervisor only consents. The
-    /// key that used to name a package is refused rather than ignored: an operator who still has
-    /// it in a file believes it does something.
+    /// Both keys that once configured package delivery on the host are refused rather than
+    /// ignored: `package` named the artifact (ADR-0016 moved that to the Server's Selector), and
+    /// `accepts_packages` said whether to take one (ADR-0019 derives that from the program's
+    /// path). An operator who still has either in a file believes it does something.
     #[test]
-    fn a_supervisor_consents_to_packages_and_the_old_naming_key_is_refused() {
-        let consenting: ClientConfig = toml::from_str(
-            r#"
-            [[supervisor]]
-            type = "command"
-            name = "agent"
-            command = "/usr/local/bin/agent"
-            accepts_packages = true
-            "#,
-        )
-        .expect("parse");
-        assert!(consenting.supervisors[0].accepts_packages);
-
-        // Absent means no package offers, as before.
-        let quiet: ClientConfig = toml::from_str(
-            r#"
-            [[supervisor]]
-            type = "command"
-            name = "agent"
-            command = "/usr/local/bin/agent"
-            "#,
-        )
-        .expect("parse");
-        assert!(!quiet.supervisors[0].accepts_packages);
-
-        let stale = toml::from_str::<ClientConfig>(
-            r#"
-            [[supervisor]]
-            type = "command"
-            name = "agent"
-            command = "/usr/local/bin/agent"
-            package = "otelcol"
-            "#,
-        )
-        .expect_err("the old key must fail loudly");
-        let message = stale.to_string();
+    fn the_retired_package_keys_are_refused() {
+        let block = |extra: &str| {
+            format!(
+                r#"
+                [[supervisor]]
+                type = "command"
+                name = "agent"
+                command = "/usr/local/bin/agent"
+                {extra}
+                "#
+            )
+        };
         assert!(
-            message.contains("accepts_packages") && message.contains("Selector"),
-            "the error says what to do instead: {message}"
+            toml::from_str::<ClientConfig>(&block("")).is_ok(),
+            "a block without either key still parses"
+        );
+
+        let stale = toml::from_str::<ClientConfig>(&block("package = \"otelcol\""))
+            .expect_err("the old naming key must fail loudly");
+        assert!(
+            stale.to_string().contains("Selector"),
+            "the error says what decides instead: {stale}"
+        );
+
+        let consent = toml::from_str::<ClientConfig>(&block("accepts_packages = true"))
+            .expect_err("the old consent key must fail loudly");
+        let message = consent.to_string();
+        assert!(
+            message.contains("bare file name") && message.contains("absolute path"),
+            "the error states the rule that replaced it: {message}"
+        );
+    }
+
+    /// A bare name is what makes the program this Client's to replace, and everything that is
+    /// neither a bare name nor absolute is refused rather than guessed at. Both halves are
+    /// spelled the same way on every platform, which is why they are tested here together.
+    #[test]
+    fn a_bare_name_is_owned_and_anything_between_the_two_cases_is_refused() {
+        let dir = PathBuf::from("/srv/fleet/otelcol");
+
+        let owned = resolve_program("binary", Path::new("otelcol-contrib"), &dir, "otelcol")
+            .expect("a bare file name resolves");
+        assert_eq!(
+            owned,
+            Program {
+                path: dir.join(PROGRAM_DIR).join("otelcol-contrib"),
+                owned: true,
+            }
+        );
+
+        // `..` in particular never reaches a `join`, which is why nothing downstream has a path
+        // to sanitize.
+        for refused in ["./otelcol", "bin/otelcol", "../otelcol", "a/../../b", ""] {
+            let err = resolve_program("binary", Path::new(refused), &dir, "otelcol")
+                .expect_err("must be refused: {refused}");
+            assert!(err.contains("bare file name"), "{refused}: {err}");
+        }
+    }
+
+    /// The other half of the rule, whose *spelling* is platform-specific even though the rule is
+    /// not: on Unix a leading `/` makes a path absolute, on Windows nothing does until it names a
+    /// drive. Written per platform rather than with one string that only happens to work on the
+    /// machine the tests were first run on.
+    #[test]
+    fn an_absolute_program_path_is_the_machines_and_takes_no_packages() {
+        let dir = PathBuf::from("/srv/fleet/otelcol");
+        #[cfg(unix)]
+        let foreign = "/usr/local/bin/otelcol-contrib";
+        #[cfg(windows)]
+        let foreign = r"C:\Program Files\otelcol\otelcol-contrib.exe";
+
+        let resolved = resolve_program("binary", Path::new(foreign), &dir, "otelcol")
+            .expect("an absolute path resolves");
+        assert_eq!(
+            resolved,
+            Program {
+                path: PathBuf::from(foreign),
+                owned: false,
+            }
+        );
+    }
+
+    /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
+    /// but no drive, so it resolves against whichever drive the process is on — it *looks*
+    /// absolute and is not. Refused like any other in-between path, but told apart from a typo:
+    /// the operator wrote something meaningful, it just is not a path a service can rely on.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_relative_windows_path_is_refused_and_says_what_is_missing() {
+        let dir = PathBuf::from(r"C:\ProgramData\fleet\otelcol");
+        let err = resolve_program(
+            "binary",
+            Path::new(r"\Program Files\otelcol\otelcol.exe"),
+            &dir,
+            "otelcol",
+        )
+        .expect_err("a drive-relative path must be refused");
+        assert!(
+            err.contains("current drive"),
+            "the message names what is missing rather than calling it neither: {err}"
+        );
+    }
+
+    /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and
+    /// everything that Supervisor owns hangs off the same place (ADR-0019).
+    #[test]
+    fn the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable() {
+        let default = ClientConfig {
+            state_dir: PathBuf::from("/var/lib/fleet/state"),
+            ..ClientConfig::default()
+        };
+        assert_eq!(
+            default.supervisor_dir("otelcol"),
+            PathBuf::from("/var/lib/fleet/state/supervisors/otelcol")
+        );
+
+        let moved: ClientConfig = toml::from_str(
+            r#"
+            state_dir = "/var/lib/fleet/state"
+            supervisor_dir = "/opt/fleet/supervisors"
+
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "agent"
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            moved.supervisor_dir("agent"),
+            PathBuf::from("/opt/fleet/supervisors/agent")
+        );
+        // The Client's own Agent keeps staging beside its versions; a Supervisor stages in its own
+        // directory, which is what makes the install a rename rather than a copy.
+        assert_eq!(
+            moved.staging_dir(crate::supervisor::SELF_AGENT_INDEX),
+            PathBuf::from("/var/lib/fleet/state/packages")
+        );
+        assert_eq!(
+            moved.staging_dir(crate::supervisor::SELF_AGENT_OFFSET),
+            PathBuf::from("/opt/fleet/supervisors/agent/packages")
         );
     }
 
