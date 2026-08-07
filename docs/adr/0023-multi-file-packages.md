@@ -44,10 +44,13 @@ Four forces shape what may be done about it:
 
 ## Decision
 
-We will let a package be a **directory tree**, unpacked whole into a **versioned directory beside
-the running one**, with a pointer moved to switch — the layout
-[ADR-0010](0010-client-os-service-and-cli.md) already uses for the Client's own versions, and
-[ADR-0020](0020-client-self-update.md) already trusts for replacing a running program.
+We will let a package be a **directory tree**, unpacked whole **beside the one it replaces** and
+swapped in by renaming directories — the same move the single-file path already makes with
+`<binary>.rollback`, one level up. The principle is the one
+[ADR-0010](0010-client-os-service-and-cli.md) uses for the Client's own versions and
+[ADR-0020](0020-client-self-update.md) trusts for replacing a running program: build the new one
+somewhere else entirely, switch by a single atomic operation, and keep what ran until the new one
+has proved itself.
 
 1. **A `[[supervisor]]` block gains one optional key, `program_path`** — a relative path *inside*
    the package, e.g. `bin/fluent-bit`. Absent, the layout is what it is today: one member, one file.
@@ -100,8 +103,8 @@ the running one**, with a pointer moved to switch — the layout
    its program made executable and nothing else, so an agent that ships helper executables beside
    its program is a reason to use `.tar.gz` — the format upstream releases use anyway.
 
-6. **Nothing changes for a single-file package.** No `program_path`, no tree, no version directory —
-   the existing path stays exactly as it is, including its rollback. This decision adds a second
+6. **Nothing changes for a single-file package.** No `program_path`, no tree, no `tree.rollback` —
+   the existing path stays exactly as it is, including its own rollback. This decision adds a second
    shape; it does not migrate the first.
 
 ## Alternatives considered
