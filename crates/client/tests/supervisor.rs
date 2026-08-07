@@ -70,9 +70,14 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     });
     let argv = std::fs::read_to_string(&marker).expect("read the marker");
 
-    let expected = supervisor_dir.join("stub/config/agent-conf");
+    // Built the way the Client builds it — a path, so its separators are the platform's — with the
+    // rest of the argument appended as the operator wrote it, which is what expansion leaves alone.
+    let expected = format!(
+        "{}/agent-conf",
+        supervisor_dir.join("stub").join("config").display()
+    );
     assert!(
-        argv.contains(&expected.to_string_lossy().into_owned()),
+        argv.contains(&expected),
         "the placeholder resolved to the relocated directory: {argv}"
     );
     assert!(

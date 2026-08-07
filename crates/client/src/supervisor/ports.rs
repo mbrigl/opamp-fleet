@@ -172,10 +172,22 @@ mod tests {
     use super::*;
     use crate::service::runtime::shutdown_channel;
 
-    fn context(supervisor_dir: &str) -> SupervisorContext {
+    /// A per-Supervisor root that is absolute on *this* platform — on Windows that means naming a
+    /// drive (ADR-0021), and it is why nothing below spells a path out with POSIX separators: what
+    /// a placeholder expands to is a `PathBuf`, so its separators are the platform's own.
+    #[cfg(windows)]
+    fn root(place: &str) -> PathBuf {
+        PathBuf::from(format!("C:\\{place}\\supervisors\\fluent-bit"))
+    }
+
+    #[cfg(not(windows))]
+    fn root(place: &str) -> PathBuf {
+        PathBuf::from(format!("/{place}/supervisors/fluent-bit"))
+    }
+
+    fn context(supervisor_dir: PathBuf) -> SupervisorContext {
         let (_tx, shutdown) = shutdown_channel();
         let (event_tx, _events) = mpsc::channel(1);
-        let supervisor_dir = PathBuf::from(supervisor_dir);
         SupervisorContext {
             name: "fluent-bit".to_string(),
             config_dir: supervisor_dir.join("config"),
@@ -195,19 +207,32 @@ mod tests {
     /// cannot leave the process reading a file nobody writes to.
     #[test]
     fn the_placeholders_name_this_supervisors_own_directories() {
-        let ctx = context("/opt/fleet/supervisors/fluent-bit");
+        let ctx = context(root("opt"));
+        // The placeholder becomes the directory the Client itself writes to; what the operator
+        // wrote after it is a string and survives verbatim, separator included.
         assert_eq!(
             ctx.expand("${config_dir}/fluent-bit-conf"),
-            "/opt/fleet/supervisors/fluent-bit/config/fluent-bit-conf"
+            format!("{}/fluent-bit-conf", ctx.config_dir.display())
         );
-        assert_eq!(
-            ctx.expand("${supervisor_dir}"),
-            "/opt/fleet/supervisors/fluent-bit"
+        // Two different directories, and the configuration's is the one inside.
+        let supervisor = ctx.expand("${supervisor_dir}");
+        let config = ctx.expand("${config_dir}");
+        assert_ne!(supervisor, config);
+        assert!(
+            config.starts_with(&supervisor),
+            "{config} must sit inside {supervisor}"
         );
         // Relocating the root moves the expansion with it — that is the whole point.
-        assert_eq!(
-            context("/var/lib/other/fluent-bit").expand("${config_dir}/x"),
-            "/var/lib/other/fluent-bit/config/x"
+        let moved = context(root("var"));
+        assert_ne!(
+            moved.expand("${config_dir}/x"),
+            ctx.expand("${config_dir}/x")
+        );
+        assert!(
+            moved
+                .expand("${config_dir}/x")
+                .starts_with(&moved.supervisor_dir.display().to_string()),
+            "the expansion follows the relocated root"
         );
     }
 
@@ -216,7 +241,7 @@ mod tests {
     /// catch a typo — which is the trade ADR-0022 makes, deliberately and in this direction.
     #[test]
     fn an_unknown_placeholder_is_passed_through_untouched() {
-        let ctx = context("/opt/fleet/supervisors/fluent-bit");
+        let ctx = context(root("opt"));
         for verbatim in [
             "${FLB_LOG_LEVEL}",
             "${config-dir}", // a typo: passed on, not refused
@@ -234,7 +259,7 @@ mod tests {
         // And a known placeholder still expands when it sits beside an unknown one.
         assert_eq!(
             ctx.expand("${config_dir}/${FLB_ENV}.conf"),
-            "/opt/fleet/supervisors/fluent-bit/config/${FLB_ENV}.conf"
+            format!("{}/${{FLB_ENV}}.conf", ctx.config_dir.display())
         );
     }
 }
