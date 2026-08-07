@@ -41,6 +41,53 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
     path
 }
 
+/// ADR-0022 end to end: what the Foreign Agent is actually invoked with. The stub writes every
+/// argument it received into the marker, so this asserts on the expanded command line rather than
+/// on the substitution function — the argument has to survive all the way into `argv`, which is
+/// the only place the silent failure this prevents would show up.
+#[test]
+fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    // Relocated on purpose: an argument written against the default layout would be wrong here,
+    // which is exactly the drift the placeholders exist to make impossible.
+    let supervisor_dir = dir.path().join("elsewhere");
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
+         [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {command:?}\n\
+         args = [\"--touch\", {marker:?}, \"-c\", \"${{config_dir}}/agent-conf\", \"--keep\", \"${{FLB_LEVEL}}\"]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
+        command = env!("CARGO_BIN_EXE_stub_agent"),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("client.toml");
+    std::fs::write(&config_path, config).expect("write client.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for("the stub's marker file", Duration::from_secs(20), || {
+        marker.exists()
+    });
+    let argv = std::fs::read_to_string(&marker).expect("read the marker");
+
+    let expected = supervisor_dir.join("stub/config/agent-conf");
+    assert!(
+        argv.contains(&expected.to_string_lossy().into_owned()),
+        "the placeholder resolved to the relocated directory: {argv}"
+    );
+    assert!(
+        !argv.contains("${config_dir}"),
+        "nothing unexpanded reached the process: {argv}"
+    );
+    assert!(
+        argv.contains("${FLB_LEVEL}"),
+        "an unknown placeholder is the process's own business: {argv}"
+    );
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
 #[test]
 fn a_command_supervisor_spawns_the_configured_process() {
     let dir = tempfile::tempdir().expect("tempdir");

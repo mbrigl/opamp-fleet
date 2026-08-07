@@ -47,11 +47,24 @@ impl Plugin for CommandPlugin {
         "command"
     }
 
-    fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        let settings: CommandSettings = ctx
-            .settings
+    fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
+        // Taken out rather than consumed with `ctx`, because the placeholder expansion below is a
+        // method on the context and needs it whole.
+        let settings: CommandSettings = std::mem::take(&mut ctx.settings)
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        // Everything the operator wrote about *where* things are goes through the placeholders
+        // (ADR-0022) — the program itself deliberately does not.
+        let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
+        let env: Vec<(String, String)> = settings
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), ctx.expand(v)))
+            .collect();
+        let working_dir = settings
+            .working_dir
+            .as_ref()
+            .map(|d| PathBuf::from(ctx.expand(&d.to_string_lossy())));
         let command = ctx.program;
         let (commands, command_rx) = mpsc::channel(16);
         if let Some(version_args) = settings.version_args.clone() {
@@ -74,13 +87,9 @@ impl Plugin for CommandPlugin {
             build: Box::new(move || {
                 Some(ProcessSpec {
                     program: command.clone(),
-                    args: settings.args.clone(),
-                    env: settings
-                        .env
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    working_dir: settings.working_dir.clone(),
+                    args: args.clone(),
+                    env: env.clone(),
+                    working_dir: working_dir.clone(),
                 })
             }),
         };

@@ -164,11 +164,22 @@ state_dir = "client-state"
 # restarts the process on a change so it re-reads it. A Foreign Agent that is more than one file
 # — an executable plus the shared objects it loads — cannot be delivered as a package yet; name
 # it by an absolute path and update it however it was installed.
+#
+# args, working_dir and env values may use two placeholders naming this Supervisor's own
+# directories (ADR-0022), so nothing has to be kept in sync with state_dir or supervisor_dir:
+#
+#   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
+#   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
+#
+# Any other ${...} is passed to the process untouched, so an agent's own variable syntax keeps
+# working — which also means a misspelled placeholder is handed over rather than refused. The
+# program itself (command, binary) is never substituted: its written form is what decides package
+# consent (ADR-0021), and that must be readable in this file.
 # [[supervisor]]
 # type = "command"
 # name = "fluent-bit"
 # command = "/opt/fluent-bit/bin/fluent-bit"
-# args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/fluent-bit-conf"]
+# args = ["-c", "${config_dir}/fluent-bit-conf"]
 # working_dir = "/var/lib/fluent-bit"   # optional
 # [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)
 # role = "edge"

@@ -55,6 +55,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `instance-uid` included — so each Supervisor re-registers as a **new** Agent on the Server;
   nothing migrates automatically.
 
+- **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
+  `env` values** ([ADR-0022](docs/adr/0022-supervisor-path-placeholders-in-process-arguments.md)),
+  so a Foreign Agent's command line is derived from the same place the Client derives it from:
+
+  ```toml
+  args = ["-c", "${config_dir}/fluent-bit-conf"]
+  ```
+
+  An absolute path still works and is still wrong the moment `supervisor_dir` moves or the
+  Supervisor is renamed — the process then starts happily on a file nobody writes to, with nothing
+  reporting a problem. The shipped example carried exactly that mistake and now uses the
+  placeholder. Any other `${…}` is passed to the process untouched, so an agent's own variable
+  syntax keeps working; the flip side is that a misspelled placeholder is handed over rather than
+  refused. The program itself (`binary`, `command`) is never substituted.
+
 ### Changed
 
 - A Supervisor's package downloads are staged in its own directory

@@ -164,6 +164,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
 
         let commands = plugin.start(SupervisorContext {
             name: block.name.clone(),
+            supervisor_dir,
             config_dir,
             program: program.path,
             stop_timeout: Duration::from_secs(block.stop_timeout_secs),
