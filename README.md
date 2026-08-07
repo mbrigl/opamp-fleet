@@ -280,6 +280,7 @@ service logs are lost until a log-to-file follow-up.
 
 ```
 README.md             # overview & setup for humans
+CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix

@@ -183,8 +183,10 @@ impl Runner {
     /// caller respawns it).
     ///
     /// Everything here moves *files*: the old binary is renamed aside rather than read into
-    /// memory, and the artifact is copied in a stream. A program can weigh hundreds of megabytes,
-    /// and holding two copies of one in RAM to update it is not a trade this makes.
+    /// memory, and the artifact is moved or streamed rather than loaded. A program can weigh
+    /// hundreds of megabytes, and holding two copies of one in RAM to update it is not a trade
+    /// this makes. The artifact may already be gone by the time it is cleaned up —
+    /// [`install_executable`] moves it when it can — so every removal of it is best-effort.
     async fn swap_and_gate(
         &self,
         staged: PathBuf,
@@ -538,47 +540,59 @@ enum GraceOutcome {
     ShuttingDown,
 }
 
-/// Writes `bytes` to `path` atomically (temp + rename) and marks it executable on Unix — the
-/// binary swap a package apply performs (ADR-0015). A rename is atomic within a directory, so a
-/// crash mid-write never leaves a half-written binary in place.
-/// Installs a downloaded artifact as `path`: written in a stream (the download lives in the state
-/// directory, which may be on another filesystem, so this cannot be a rename), made executable,
-/// then renamed into place — the rename being what makes the swap atomic.
+/// Installs a downloaded artifact as `path`: put in place beside it, made executable, then renamed
+/// over `path` — the final rename being what makes the swap atomic, so a crash mid-install never
+/// leaves a half-written program where one is about to be started.
+///
+/// A raw artifact is **moved** rather than copied when it can be: since ADR-0021 the download is
+/// staged in the same Supervisor directory the program lives in, so the two are normally on one
+/// filesystem and the install costs a metadata update instead of a second full write of several
+/// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
+/// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
+/// directory an operator has put elsewhere; either way the stream below is the fallback, and the
+/// error that matters is reported from there rather than from the attempt.
 ///
 /// The artifact may be the program or an archive holding it (ADR-0018). An archive is opened here,
 /// where the binary's name is known, and the member of that name is what gets installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
-/// its author published.
+/// its author published. Unpacking always writes; only the raw case can be a move.
 fn install_executable(
     artifact: &std::path::Path,
     path: &std::path::Path,
     archive_key: Option<&str>,
 ) -> Result<(), String> {
     let temp = path.with_extension("staged");
-    let mut target = std::fs::File::create(&temp)
-        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-    match crate::archive::detect(artifact)? {
-        crate::archive::Kind::Raw => {
-            let mut source = std::fs::File::open(artifact)
-                .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-            std::io::copy(&mut source, &mut target)
-                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    let kind = crate::archive::detect(artifact)?;
+    if kind == crate::archive::Kind::Raw && std::fs::rename(artifact, &temp).is_ok() {
+        info!(artifact = %artifact.display(), "moved the package artifact into place");
+    } else {
+        let mut target = std::fs::File::create(&temp)
+            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        match kind {
+            crate::archive::Kind::Raw => {
+                let mut source = std::fs::File::open(artifact)
+                    .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
+                std::io::copy(&mut source, &mut target)
+                    .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+            }
+            kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
+                let member = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
+                let written = match kind {
+                    crate::archive::Kind::SevenZ => {
+                        crate::archive::extract_7z(artifact, &member, &mut target, archive_key)?
+                    }
+                    _ => crate::archive::extract_tar_gz(artifact, &member, &mut target)?,
+                };
+                info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the package archive");
+            }
         }
-        kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
-            let member = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
-            let written = match kind {
-                crate::archive::Kind::SevenZ => {
-                    crate::archive::extract_7z(artifact, &member, &mut target, archive_key)?
-                }
-                _ => crate::archive::extract_tar_gz(artifact, &member, &mut target)?,
-            };
-            info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the package archive");
-        }
+        drop(target);
     }
-    drop(target);
+    // Whatever put the bytes there, the mode is ours to set: a moved artifact carries the
+    // download's permissions, and a written one the process umask.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1243,5 +1257,83 @@ mod tests {
         assert!(acked, "ApplyConfig must be acknowledged");
         harness.shutdown_tx.send(true).expect("signal shutdown");
         let _ = harness.task.await;
+    }
+
+    /// ADR-0021 stages the download in the same directory the program lives in, so installing a
+    /// raw artifact is a move and not a second full write of several hundred megabytes. What makes
+    /// that observable is *why* the artifact is gone: it became the program, rather than being
+    /// copied and deleted.
+    ///
+    /// The mode assertion is the one this change could genuinely break. A written file gets its
+    /// permissions from the process umask and was always chmod'ed afterwards; a moved one carries
+    /// whatever the download had — 0644 here, as `File::create` leaves it — so skipping the chmod
+    /// would install a program that cannot be executed.
+    #[test]
+    fn a_raw_artifact_beside_the_program_is_moved_into_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("packages/agent.staged");
+        std::fs::create_dir_all(artifact.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&artifact, b"#!/bin/sh\nexec sleep 600\n").expect("stage");
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let program = dir.path().join("program/agent");
+        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+        install_executable(&artifact, &program, None).expect("install");
+
+        assert_eq!(
+            std::fs::read(&program).expect("read"),
+            b"#!/bin/sh\nexec sleep 600\n"
+        );
+        assert!(
+            !artifact.exists(),
+            "the artifact was moved, not copied — the caller's cleanup of it is best-effort"
+        );
+        let mode = std::fs::metadata(&program)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "a moved artifact is still made executable"
+        );
+    }
+
+    /// An archive can never be moved: what belongs at the program's path is one member of it, not
+    /// the container. It is unpacked, and the artifact stays for the caller to clean up.
+    ///
+    /// This is also the stream branch of `install_executable`. The other way into it — a rename
+    /// that fails because the staging directory an operator configured is on another filesystem —
+    /// runs the same code and is not forced here; doing so would need a second mount.
+    #[test]
+    fn an_archive_is_unpacked_and_the_artifact_survives_the_install() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&artifact).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let content = b"#!/bin/sh\n# v2\nexec sleep 600\n".as_slice();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "agent-2.0.0/agent", content)
+                .expect("append");
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+
+        let program = dir.path().join("agent");
+        install_executable(&artifact, &program, None).expect("install");
+
+        assert_eq!(
+            std::fs::read(&program).expect("read"),
+            b"#!/bin/sh\n# v2\nexec sleep 600\n"
+        );
+        assert!(
+            artifact.exists(),
+            "the archive is read, never consumed — only its member is installed"
+        );
     }
 }

@@ -98,6 +98,11 @@ pub struct SupervisorContext {
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
+    /// The Managed Process itself, already resolved (ADR-0021): either inside this Supervisor's
+    /// own `program/` directory, or the absolute path the block named. The plugin spawns this
+    /// rather than reading its own `binary`/`command` key, so the path rule — and the package
+    /// consent derived from it — lives in one place instead of once per plugin.
+    pub program: PathBuf,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -120,6 +125,12 @@ pub struct SupervisorContext {
 pub trait Plugin {
     /// The TOML `type` value this plugin serves.
     fn kind(&self) -> &'static str;
+
+    /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
+    /// for the example Custom Supervisor. The core takes that key out of the settings, applies
+    /// ADR-0021's path rule to it, and hands the result back as
+    /// [`SupervisorContext::program`]; the plugin never sees the raw value.
+    fn program_key(&self) -> &'static str;
 
     /// Validate the settings and start the adapter task, returning the command side of the Port.
     ///

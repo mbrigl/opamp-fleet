@@ -8,8 +8,6 @@
 //! and effective configuration to the Supervisor Endpoint; one without it is observed from the
 //! outside. Either way it is the same plugin (goal 16 versus plain supervision).
 
-use std::path::PathBuf;
-
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -17,11 +15,12 @@ use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
+///
+/// `binary` is not among them: the core takes it out and resolves it (ADR-0021), and what arrives
+/// here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectorSettings {
-    /// The Collector binary to run.
-    binary: PathBuf,
     /// Extra arguments, appended after the `--config` flags.
     #[serde(default)]
     args: Vec<String>,
@@ -34,18 +33,23 @@ impl Plugin for CollectorPlugin {
         "collector"
     }
 
+    fn program_key(&self) -> &'static str {
+        "binary"
+    }
+
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
         let settings: CollectorSettings = ctx
             .settings
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         let config_dir = ctx.config_dir;
+        let binary = ctx.program;
         let (commands, command_rx) = mpsc::channel(16);
         // The Collector states its version on `--version` — probe it once, so even a Collector
         // without the opampextension (which never self-reports) shows its own version, not
         // none. An extension's later self-report replaces the probed value.
         tokio::spawn(probe_version(
-            settings.binary.clone(),
+            binary.clone(),
             vec!["--version".to_string()],
             ctx.events.clone(),
         ));
@@ -54,7 +58,7 @@ impl Plugin for CollectorPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             // A package (ADR-0015) swaps this Collector binary.
-            binary: Some(settings.binary.clone()),
+            binary: Some(binary.clone()),
             archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,
@@ -74,7 +78,7 @@ impl Plugin for CollectorPlugin {
                 }
                 args.extend(settings.args.iter().cloned());
                 Some(ProcessSpec {
-                    program: settings.binary.clone(),
+                    program: binary.clone(),
                     args,
                     env: Vec::new(),
                     working_dir: None,
@@ -90,15 +94,15 @@ impl Plugin for CollectorPlugin {
 mod tests {
     use super::*;
 
+    /// `binary` is gone from these settings — the core resolves it (ADR-0021) — so a block that
+    /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
-        let table: toml::Table =
-            toml::from_str("binary = \"/usr/local/bin/otelcol\"\nargs = [\"--feature-gates=x\"]\n")
-                .expect("table");
+        let table: toml::Table = toml::from_str("args = [\"--feature-gates=x\"]\n").expect("table");
         let settings: CollectorSettings = table.try_into().expect("settings");
-        assert_eq!(settings.binary, PathBuf::from("/usr/local/bin/otelcol"));
+        assert_eq!(settings.args, vec!["--feature-gates=x".to_string()]);
 
-        let typo: toml::Table = toml::from_str("binry = \"/x\"").expect("table");
+        let typo: toml::Table = toml::from_str("arg = [\"--x\"]").expect("table");
         assert!(typo.try_into::<CollectorSettings>().is_err());
     }
 }

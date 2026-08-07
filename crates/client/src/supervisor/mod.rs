@@ -1,9 +1,9 @@
 //! The supervision domain (ADR-0011): builds the Agents the [`Engine`](crate::engine) carries.
 //!
-//! With `[[supervisor]]` blocks configured, each becomes one Supervisor-backed Agent — its state
-//! under `<state_dir>/supervisors/<name>/`, its Managed Process driven by the plugin the block's
-//! `type` selects. Without any, the Client presents itself as the single self-Agent — the same
-//! state machine with no Managed Process behind it.
+//! With `[[supervisor]]` blocks configured, each becomes one Supervisor-backed Agent — everything
+//! it owns under `<supervisor_dir>/<name>/` (ADR-0021), its Managed Process driven by the plugin
+//! the block's `type` selects. Without any, the Client presents itself as the single self-Agent —
+//! the same state machine with no Managed Process behind it.
 
 pub mod agent;
 pub mod collector;
@@ -15,6 +15,7 @@ pub mod process;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tracing::info;
 
 use crate::config::ClientConfig;
 use crate::engine::Engine;
@@ -28,8 +29,9 @@ use ports::{EventSender, Plugin, SupervisorContext};
 /// index is its block's position plus this.
 pub const SELF_AGENT_INDEX: usize = 0;
 
-/// What a Supervisor's block position must be shifted by to reach its Engine index.
-const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
+/// What a Supervisor's block position must be shifted by to reach its Engine index — and, read
+/// the other way, what an Engine index is shifted back by to find the block it came from.
+pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 
 /// The compiled-in plugin registry (ADR-0011). A new process kind is a new module and one line
 /// here — the supervision core stays untouched (goal 8).
@@ -92,19 +94,62 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
                 )
             })?;
 
-        let state_dir = config.state_dir.join("supervisors").join(&block.name);
-        let storage = Storage::new(state_dir.clone())
-            .map_err(|e| format!("cannot prepare {}: {e}", state_dir.display()))?;
+        let supervisor_dir = config.supervisor_dir(&block.name);
+        let storage = Storage::new(supervisor_dir.clone())
+            .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
         let config_dir = storage.config_dir();
+
+        // The program's path is taken out of the settings and resolved here, not in the plugin:
+        // the rule that derives package consent from it (ADR-0021) belongs to the core, and a
+        // plugin that parsed its own key could disagree with the Agent's declared capability.
+        let mut settings = block.settings.clone();
+        let key = plugin.program_key();
+        let raw = settings
+            .remove(key)
+            .ok_or_else(|| format!("supervisor {:?}: needs a `{key}`", block.name))?;
+        let raw = raw.as_str().ok_or_else(|| {
+            format!(
+                "supervisor {:?}: `{key}` must be a path, not {}",
+                block.name,
+                raw.type_str()
+            )
+        })?;
+        let program = crate::config::resolve_program(
+            key,
+            std::path::Path::new(raw),
+            &supervisor_dir,
+            &block.name,
+        )?;
+
         let mut state = declare_heartbeat(
             AgentState::supervised(block.name.clone(), storage)
                 .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
                 .with_attributes(config.agent_attributes(Some(block))),
         );
-        // A Supervisor that consents takes whichever top-level package the Server selects for it
-        // (ADR-0015, ADR-0017).
-        if block.accepts_packages {
+        // Owning the directory the program sits in *is* the consent (ADR-0021): a Supervisor that
+        // has it takes whichever top-level package the Server selects for it (ADR-0015, ADR-0017).
+        // Logged either way — the consent is now derived rather than written, and an operator who
+        // changes a path should not have to infer what it did to the fleet.
+        if program.owned {
+            let dir = program
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot prepare {}: {e}", dir.display()))?;
             state.accept_packages();
+            info!(
+                supervisor = %block.name,
+                program = %program.path.display(),
+                "packages accepted: the program is this supervisor's own"
+            );
+        } else {
+            info!(
+                supervisor = %block.name,
+                program = %program.path.display(),
+                "packages declined: the program is named by an absolute path"
+            );
         }
 
         // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
@@ -120,14 +165,114 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         let commands = plugin.start(SupervisorContext {
             name: block.name.clone(),
             config_dir,
+            program: program.path,
             stop_timeout: Duration::from_secs(block.stop_timeout_secs),
             apply_grace: Duration::from_secs(block.apply_grace_secs),
             archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
-            settings: block.settings.clone(),
+            settings,
             events: EventSender::new(index, event_tx.clone()),
             shutdown: shutdown.clone(),
         })?;
         agents.push((state, Some(commands)));
     }
     Ok(Engine::with_processes(agents, events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::runtime::shutdown_channel;
+    use opamp::proto::AgentCapabilities;
+    use std::path::PathBuf;
+
+    fn config(root: &std::path::Path, program: &str, supervisor_dir: Option<PathBuf>) -> String {
+        format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n{moved}\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = {program:?}\n",
+            state = root.join("state").to_string_lossy(),
+            moved = supervisor_dir
+                .map(|d| format!("supervisor_dir = {:?}\n", d.to_string_lossy()))
+                .unwrap_or_default(),
+        )
+    }
+
+    fn accepts_packages(engine: &mut Engine) -> bool {
+        let reports = engine.poll_reports();
+        let supervisor = &reports[SELF_AGENT_OFFSET];
+        supervisor.capabilities & AgentCapabilities::AcceptsPackages as u64 != 0
+    }
+
+    /// ADR-0021's rule where it actually becomes visible to the Server: owning the directory the
+    /// program sits in is the consent, so the capability follows the shape of the path and nothing
+    /// else. The directory is created for the owned case — the swap renames inside it, so it has
+    /// to exist before the first package rather than after it.
+    #[tokio::test]
+    async fn the_program_path_decides_the_declared_package_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+
+        let owned: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let mut engine = build_engine(&owned, &shutdown).expect("build");
+        assert!(
+            accepts_packages(&mut engine),
+            "a bare name puts the program in our own directory, which is the consent"
+        );
+        assert!(
+            dir.path().join("state/supervisors/agent/program").is_dir(),
+            "the directory the swap renames inside exists before any package arrives"
+        );
+
+        let foreign = dir.path().join("elsewhere/managed-agent");
+        let machines: ClientConfig = toml::from_str(&config(
+            dir.path(),
+            &foreign.to_string_lossy(),
+            Some(dir.path().join("other")),
+        ))
+        .expect("parse");
+        let mut engine = build_engine(&machines, &shutdown).expect("build");
+        assert!(
+            !accepts_packages(&mut engine),
+            "an absolute path is the machine's program; we declare nothing"
+        );
+        assert!(
+            !dir.path().join("other/agent/program").exists(),
+            "nothing is created for a program we do not own"
+        );
+        assert!(
+            dir.path().join("other/agent/instance-uid").is_file(),
+            "the relocated root is where the supervisor's state went"
+        );
+    }
+
+    /// The third case of the rule: refused at startup, not resolved against something.
+    #[tokio::test]
+    async fn a_program_path_that_is_neither_fails_the_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config: ClientConfig =
+            toml::from_str(&config(dir.path(), "./managed-agent", None)).expect("parse");
+        let Err(err) = build_engine(&config, &shutdown) else {
+            panic!("a path that is neither must not start");
+        };
+        assert!(err.contains("bare file name"), "{err}");
+    }
+
+    /// A block that names no program at all is a startup error too — the key moved out of the
+    /// plugin's strict parse, and that must not turn a missing one into a default.
+    #[tokio::test]
+    async fn a_block_without_a_program_fails_the_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config: ClientConfig = toml::from_str(&format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\n",
+            state = dir.path().join("state").to_string_lossy(),
+        ))
+        .expect("parse");
+        let Err(err) = build_engine(&config, &shutdown) else {
+            panic!("a block without a program must not start");
+        };
+        assert!(err.contains("needs a `command`"), "{err}");
+    }
 }

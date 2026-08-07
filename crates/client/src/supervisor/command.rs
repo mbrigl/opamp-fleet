@@ -13,11 +13,12 @@ use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
+///
+/// `command` is not among them: the core takes it out and resolves it (ADR-0021), and what
+/// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandSettings {
-    /// The command to run.
-    command: PathBuf,
     /// Its arguments, verbatim.
     #[serde(default)]
     args: Vec<String>,
@@ -42,15 +43,20 @@ impl Plugin for CommandPlugin {
         "command"
     }
 
+    fn program_key(&self) -> &'static str {
+        "command"
+    }
+
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
         let settings: CommandSettings = ctx
             .settings
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        let command = ctx.program;
         let (commands, command_rx) = mpsc::channel(16);
         if let Some(version_args) = settings.version_args.clone() {
             tokio::spawn(probe_version(
-                settings.command.clone(),
+                command.clone(),
                 version_args,
                 ctx.events.clone(),
             ));
@@ -60,14 +66,14 @@ impl Plugin for CommandPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             // A package (ADR-0015) swaps this command's binary.
-            binary: Some(settings.command.clone()),
+            binary: Some(command.clone()),
             archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.
             build: Box::new(move || {
                 Some(ProcessSpec {
-                    program: settings.command.clone(),
+                    program: command.clone(),
                     args: settings.args.clone(),
                     env: settings
                         .env
@@ -87,11 +93,12 @@ impl Plugin for CommandPlugin {
 mod tests {
     use super::*;
 
+    /// `command` is gone from these settings — the core resolves it (ADR-0021) — so a block that
+    /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
         let table: toml::Table = toml::from_str(
             r#"
-            command = "/usr/bin/thing"
             args = ["--a"]
             working_dir = "/tmp"
             version_args = ["--version"]
@@ -101,7 +108,7 @@ mod tests {
         )
         .expect("table");
         let settings: CommandSettings = table.try_into().expect("settings");
-        assert_eq!(settings.command, PathBuf::from("/usr/bin/thing"));
+        assert_eq!(settings.working_dir, Some(PathBuf::from("/tmp")));
         assert_eq!(settings.env.get("K").map(String::as_str), Some("v"));
         assert_eq!(settings.version_args, Some(vec!["--version".to_string()]));
 

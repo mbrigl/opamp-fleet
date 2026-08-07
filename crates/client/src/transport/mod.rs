@@ -52,7 +52,11 @@ pub async fn process_package_downloads<S: ReportSink>(
         );
         let progress = crate::packages::Progress::default();
         let started = std::time::Instant::now();
-        let download = crate::packages::download_and_verify(&package, config, &progress);
+        // Each Agent stages into its own directory (ADR-0021), so the Supervisor's install is a
+        // rename beside the download rather than a copy across filesystems.
+        let staging_dir = config.staging_dir(index);
+        let download =
+            crate::packages::download_and_verify(&package, config, &staging_dir, &progress);
         tokio::pin!(download);
         // Poll the download and a ticker together: every tick turns the progress the download has
         // been writing into a status report, without the download itself knowing about reporting.

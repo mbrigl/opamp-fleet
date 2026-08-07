@@ -55,12 +55,14 @@ pub fn resolve_url(download_url: &str, endpoint: &str) -> Result<String, String>
 /// Downloads the artifact to a file and verifies it (ADR-0015). Returns the path of the verified
 /// artifact, ready for the Supervisor to swap over the Managed Process's binary.
 ///
-/// The artifact is a program — tens or hundreds of megabytes — so it is streamed to
-/// `<state_dir>/packages/` and hashed as it arrives, never assembled in memory. Only a signature
-/// check reads it back, because Ed25519 verifies over the whole message.
+/// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
+/// and hashed as it arrives, never assembled in memory. Only a signature check reads it back,
+/// because Ed25519 verifies over the whole message. `staging_dir` is the receiving Agent's own
+/// (ADR-0021), so the install that follows is a rename inside one filesystem.
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
+    staging_dir: &Path,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
     let url = resolve_url(&package.download_url, &config.endpoint)?;
@@ -93,9 +95,9 @@ pub async fn download_and_verify(
         return Err(format!("{url} answered {}", response.status()));
     }
 
-    let dir = config.state_dir.join("packages");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let path = dir.join(format!("{}.staged", package.name));
+    std::fs::create_dir_all(staging_dir)
+        .map_err(|e| format!("cannot create {}: {e}", staging_dir.display()))?;
+    let path = staging_dir.join(format!("{}.staged", package.name));
 
     // Stream to disk, hashing on the way past: peak memory is one chunk, whatever the artifact
     // weighs. A failure anywhere leaves no half-written file behind for the next attempt to trip
