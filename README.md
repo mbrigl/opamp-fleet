@@ -13,6 +13,10 @@ Records** ([`docs/adr/`](docs/adr/)), so intent and the reasoning behind every s
 explicit and reviewable. How much of the protocol each end implements is tracked in
 [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
 
+> **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
+> start it, and every configuration key, split into [Server](docs/manual/server.md) and
+> [Client](docs/manual/client.md).
+
 > For agent instructions, see [`AGENTS.md`](AGENTS.md) — the single source of truth for all coding agents.
 
 ## Overview
@@ -182,6 +186,10 @@ and the Server for Linux.
 
 ## Usage
 
+This section is a tour. The complete operator reference — every option and every configuration key
+of both ends — is the **[User Manual](docs/manual/README.md)**:
+[Server](docs/manual/server.md) · [Client](docs/manual/client.md).
+
 A minimal closed control loop on one machine:
 
 1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves
@@ -282,6 +290,7 @@ service logs are lost until a log-to-file follow-up.
 README.md             # overview & setup for humans
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
+docs/manual/         # the user manual: Server and Client, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/adr/             # Architecture Decision Records (+ template)
