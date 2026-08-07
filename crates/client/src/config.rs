@@ -149,6 +149,19 @@ pub fn resolve_program(
             owned: false,
         });
     }
+    // On Windows a rooted path with no drive — `\Program Files\otelcol\otelcol.exe` — is
+    // *drive-relative*: it resolves against whichever drive the process happens to be on, which
+    // under a service manager is nothing an operator controls. It looks absolute and is not, so it
+    // gets a message that says which half is missing instead of the general one below.
+    #[cfg(windows)]
+    if value.has_root() {
+        return Err(format!(
+            "supervisor {name:?}: `{key} = {}` is relative to the current drive rather than \
+             absolute — name the drive (`C:\\...`) to leave the program to the machine, or use a \
+             bare file name to keep it in this Supervisor's own directory",
+            value.display()
+        ));
+    }
     let mut components = value.components();
     let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none();
@@ -646,10 +659,11 @@ mod tests {
         );
     }
 
-    /// ADR-0021's whole rule, in the three cases it admits. The bare name is what makes the
-    /// program this Client's to replace; the absolute path is what makes it the machine's.
+    /// A bare name is what makes the program this Client's to replace, and everything that is
+    /// neither a bare name nor absolute is refused rather than guessed at. Both halves are
+    /// spelled the same way on every platform, which is why they are tested here together.
     #[test]
-    fn the_program_path_decides_where_it_lives_and_who_owns_it() {
+    fn a_bare_name_is_owned_and_anything_between_the_two_cases_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
 
         let owned = resolve_program("binary", Path::new("otelcol-contrib"), &dir, "otelcol")
@@ -662,28 +676,57 @@ mod tests {
             }
         );
 
-        let foreign = resolve_program(
-            "binary",
-            Path::new("/usr/local/bin/otelcol-contrib"),
-            &dir,
-            "otelcol",
-        )
-        .expect("an absolute path resolves");
-        assert_eq!(
-            foreign,
-            Program {
-                path: PathBuf::from("/usr/local/bin/otelcol-contrib"),
-                owned: false,
-            }
-        );
-
-        // Everything in between is refused rather than guessed at — and `..` in particular never
-        // reaches a `join`, which is why nothing downstream has a path to sanitize.
+        // `..` in particular never reaches a `join`, which is why nothing downstream has a path
+        // to sanitize.
         for refused in ["./otelcol", "bin/otelcol", "../otelcol", "a/../../b", ""] {
             let err = resolve_program("binary", Path::new(refused), &dir, "otelcol")
                 .expect_err("must be refused: {refused}");
             assert!(err.contains("bare file name"), "{refused}: {err}");
         }
+    }
+
+    /// The other half of the rule, whose *spelling* is platform-specific even though the rule is
+    /// not: on Unix a leading `/` makes a path absolute, on Windows nothing does until it names a
+    /// drive. Written per platform rather than with one string that only happens to work on the
+    /// machine the tests were first run on.
+    #[test]
+    fn an_absolute_program_path_is_the_machines_and_takes_no_packages() {
+        let dir = PathBuf::from("/srv/fleet/otelcol");
+        #[cfg(unix)]
+        let foreign = "/usr/local/bin/otelcol-contrib";
+        #[cfg(windows)]
+        let foreign = r"C:\Program Files\otelcol\otelcol-contrib.exe";
+
+        let resolved = resolve_program("binary", Path::new(foreign), &dir, "otelcol")
+            .expect("an absolute path resolves");
+        assert_eq!(
+            resolved,
+            Program {
+                path: PathBuf::from(foreign),
+                owned: false,
+            }
+        );
+    }
+
+    /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
+    /// but no drive, so it resolves against whichever drive the process is on — it *looks*
+    /// absolute and is not. Refused like any other in-between path, but told apart from a typo:
+    /// the operator wrote something meaningful, it just is not a path a service can rely on.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_relative_windows_path_is_refused_and_says_what_is_missing() {
+        let dir = PathBuf::from(r"C:\ProgramData\fleet\otelcol");
+        let err = resolve_program(
+            "binary",
+            Path::new(r"\Program Files\otelcol\otelcol.exe"),
+            &dir,
+            "otelcol",
+        )
+        .expect_err("a drive-relative path must be refused");
+        assert!(
+            err.contains("current drive"),
+            "the message names what is missing rather than calling it neither: {err}"
+        );
     }
 
     /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and

@@ -35,6 +35,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Client cannot write (`/usr/local/bin` under a non-root Client), an update could be configured but
   never succeed, and it failed at rollout time on every matched host rather than at startup on one.
 
+  **On Windows, "absolute" means the path names a drive.** `\Program Files\otelcol\otelcol.exe`
+  carries a root but no drive, so it resolves against whichever drive the process happens to be
+  on — it used to be spawned that way and is now refused at startup, with a message saying what is
+  missing. Write `C:\Program Files\otelcol\otelcol.exe`.
+
 - **A bare program name is no longer looked up in `$PATH`.** `command = "fluent-bit"` used to mean
   "find it on the path" and now names a file in that Supervisor's `program/` directory. This is
   silent — the process starts from a different path rather than erroring — so check any block whose
