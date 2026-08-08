@@ -5,60 +5,75 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Agents · OpAMP Fleet</title>
     <style>
+      /* Dark by default, after GitKraken: deep desaturated navy surfaces, a teal-green primary,
+         and violet for the one thing that is *selected*. Dark is the ground state rather than the
+         alternative, because that palette is the whole of the look being borrowed — a page that
+         came up light would show none of it. Light is a deliberate switch away, below; the system
+         preference is not consulted, so what an operator last chose is what they get.
+
+         The exact values are ours: GitKraken ships its own inside the application
+         (`dark.jsonc-default`) and publishes none, so this is the character, not a copy. */
       :root {
-        color-scheme: light dark;
-        --bg: #f7f8fa;
-        --panel: #ffffff;
-        --border: #e3e6ea;
-        --border-strong: #d3d8de;
-        --text: #1c2b39;
-        --muted: #64748b;
-        --link: #2563eb;
-        --primary: #2563eb;
-        --primary-hover: #1d4ed8;
-        --row-hover: #f5f8ff;
-        --chip-bg: #eef1f4;
-        --chip-fg: #475569;
-        --ok-bg: #16a34a;
+        color-scheme: dark;
+        --bg: #10131c;
+        --panel: #181c28;
+        --border: #252b3a;
+        --border-strong: #333a4e;
+        --text: #e6eaf4;
+        --muted: #8b95ad;
+        --link: #3fd0bb;
+        --primary: #2dd4bf;
+        /* What is legible *on* the primary — bright teal carries dark text, not white. */
+        --primary-fg: #06231f;
+        --primary-hover: #5fe0d0;
+        /* The second accent: what is picked, expanded, or being edited. */
+        --accent: #6f4cf5;
+        --accent-fg: #ffffff;
+        --row-hover: #1c2130;
+        --chip-bg: #222839;
+        --chip-fg: #aab3c8;
+        --ok-bg: #0f7d5f;
         --ok-fg: #ffffff;
-        --soft-green-bg: #e7f6ed;
-        --soft-green-fg: #0f7a3d;
-        --soft-gray-bg: #eef1f4;
-        --soft-gray-fg: #5b6673;
-        --soft-amber-bg: #fdf3e2;
-        --soft-amber-fg: #b7791f;
-        --soft-red-bg: #fdecec;
-        --soft-red-fg: #c0362c;
+        --soft-green-bg: #0f2f28;
+        --soft-green-fg: #4fd8ab;
+        --soft-gray-bg: #222839;
+        --soft-gray-fg: #9aa4bb;
+        --soft-amber-bg: #33280f;
+        --soft-amber-fg: #e6b45e;
+        --soft-red-bg: #331a1e;
+        --soft-red-fg: #f2908b;
         --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #0e1116;
-          --panel: #161a21;
-          --border: #262c36;
-          --border-strong: #333a45;
-          --text: #e6e8ec;
-          --muted: #96a0ad;
-          --link: #7aa2ff;
-          --primary: #3b82f6;
-          --primary-hover: #2f6fe0;
-          --row-hover: #1a1f28;
-          --chip-bg: #232a34;
-          --chip-fg: #b7c0cc;
-          --ok-bg: #1a9553;
+      /* The only other state. Dark needs no rule of its own — :root above *is* dark, so the
+         toggle either sets this attribute or removes it. */
+      :root[data-theme="light"] {
+          color-scheme: light;
+          --bg: #f3f6f9;
+          --panel: #ffffff;
+          --border: #e1e6ee;
+          --border-strong: #ccd3e0;
+          --text: #16202e;
+          --muted: #5b6678;
+          --link: #0a7568;
+          --primary: #0b7d70;
+          --primary-fg: #ffffff;
+          --primary-hover: #086158;
+          --accent: #6d4aff;
+          --accent-fg: #ffffff;
+          --row-hover: #eef7f6;
+          --chip-bg: #eaeef4;
+          --chip-fg: #46516a;
+          --ok-bg: #0c8062;
           --ok-fg: #ffffff;
-          --soft-green-bg: #113123;
-          --soft-green-fg: #57d98a;
-          --soft-gray-bg: #232a34;
-          --soft-gray-fg: #aab3bf;
-          --soft-amber-bg: #33260f;
-          --soft-amber-fg: #e0ad5b;
-          --soft-red-bg: #331719;
-          --soft-red-fg: #f28b82;
+          --soft-green-bg: #e2f6ef;
+          --soft-green-fg: #0a7259;
+          --soft-gray-bg: #eaeef4;
+          --soft-gray-fg: #54607a;
+          --soft-amber-bg: #fdf3e2;
+          --soft-amber-fg: #8a5d11;
+          --soft-red-bg: #fdecec;
+          --soft-red-fg: #b33227;
         }
-      }
-      :root[data-theme="light"] { color-scheme: light; }
-      :root[data-theme="dark"] { color-scheme: dark; }
 
       * { box-sizing: border-box; }
       body {
@@ -77,7 +92,7 @@
         border: 0; border-radius: 8px; padding: 9px 16px;
         font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
       }
-      .btn-primary { background: var(--primary); color: #fff; }
+      .btn-primary { background: var(--primary); color: var(--primary-fg); }
       .btn-primary:hover { background: var(--primary-hover); }
       .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
       .btn-ghost:hover { background: var(--row-hover); }
@@ -95,7 +110,11 @@
         font-family: var(--mono);
       }
       .config-fields input::placeholder { color: var(--muted); }
-      .chip.selected { background: var(--primary); color: #fff; }
+      /* A field whose value is a short token, so four of them fit one row. */
+      .config-fields input.narrow { flex: 0 1 190px; min-width: 150px; }
+      /* Selected is the second accent, not the primary: the primary is what you press, this is
+         what you are looking at. */
+      .chip.selected { background: var(--accent); color: var(--accent-fg); }
       .chip.clickable { cursor: pointer; }
       textarea {
         width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
@@ -130,6 +149,12 @@
       th .arrow { opacity: .55; font-size: 10px; }
       tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
       tbody tr:last-child td { border-bottom: 0; }
+      /* An agent is a row plus the rows under it that carry its sets. The separator belongs after
+         the last of them, or every agent would read as several. */
+      tbody tr.agent td, tbody tr.detail td { border-bottom: 0; }
+      tbody tr.detail.last td { border-bottom: 1px solid var(--border); }
+      tbody tr.detail td { padding-top: 0; padding-bottom: 4px; }
+      tbody tr.detail:hover { background: transparent; }
       tbody tr:hover { background: var(--row-hover); }
       td.chk, th.chk { width: 34px; }
       input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
@@ -153,6 +178,16 @@
       .empty { padding: 40px 0; text-align: center; color: var(--muted); }
       .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }
     </style>
+    <script>
+      // Before the first paint, or a stored choice of light would show dark for a frame and then
+      // swap. Only light needs setting: dark is what the stylesheet already is. The button below
+      // re-applies the same value once the page is up.
+      try {
+        if (localStorage.getItem("opamp-fleet-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch (e) { /* storage denied — dark, the stylesheet's ground state */ }
+    </script>
   </head>
   <body>
     <div class="wrap">
@@ -162,6 +197,7 @@
           <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s) · <a class="name" href="/api/v1/docs" target="_blank" rel="noopener">API docs</a></p>
         </div>
         <div style="display: flex; gap: 10px;">
+          <button id="theme-toggle" class="btn btn-ghost" title="Theme">☾ Dark</button>
           <button id="toggle-packages" class="btn btn-ghost">Packages</button>
           <button id="toggle-config" class="btn btn-primary">Configurations</button>
         </div>
@@ -188,17 +224,22 @@
       <section id="packages-card" class="card config">
         <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
+        <!-- What identifies one artifact: the package it belongs to, its version, and the machine
+             it runs on. All four are what a release file name already says, so picking the file
+             fills this row. -->
         <div class="config-fields">
           <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
-          <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+          <input id="package-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
+                 title="The operating system this artifact is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
+          <input id="package-arch" class="narrow" placeholder="arch: amd64, arm64" autocomplete="off"
+                 title="The architecture this artifact is built for, as the agent reports host.arch. Other spellings (x86_64, aarch64) are accepted and stored canonically." />
         </div>
-        <div class="config-fields">
-          <input id="package-os" placeholder="os: linux, darwin, windows — as the agent reports os.type" autocomplete="off" />
-          <input id="package-arch" placeholder="arch: amd64, arm64 — as the agent reports host.arch" autocomplete="off" />
-        </div>
+        <!-- Whom it goes to, and what proves it on arrival. -->
         <div class="config-fields">
           <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
+          <input id="package-signature" placeholder="signature: hex Ed25519 (optional)" autocomplete="off"
+                 title="Hex-encoded Ed25519 signature over the artifact, checked by every agent against its configured verification key before it installs." />
         </div>
         <div class="config-fields">
           <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
@@ -209,6 +250,7 @@
             <input type="checkbox" id="package-addon" /> addon (default: top-level, a Managed Process's binary)
           </label>
           <input id="package-file" type="file" style="color: var(--muted); font-size: 13px;" />
+          <span class="sub">a file or source url named <code>&lt;name&gt;-&lt;version&gt;-&lt;os&gt;-&lt;arch&gt;.7z</code> fills the fields above (<code>-</code> or <code>_</code>)</span>
         </div>
         <div class="config-actions">
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
@@ -246,7 +288,6 @@
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
-              <th>Labels</th>
             </tr>
           </thead>
           <tbody id="agents"></tbody>
@@ -257,6 +298,34 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
+
+      // Theme: dark or light, and nothing else. Dark is what the stylesheet is, so light is the
+      // one state that sets an attribute — the system preference is never consulted, which is why
+      // a first visit is dark wherever it happens. The choice is remembered per browser; there is
+      // nothing per-operator on the server to keep it in.
+      const THEME_KEY = "opamp-fleet-theme";
+      const THEME_LABEL = { dark: "☾ Dark", light: "☀ Light" };
+      function storedTheme() {
+        // Storage can be denied outright (private mode, a locked-down profile). Dark is then the
+        // answer every time, which is the stylesheet's own ground state and so costs nothing.
+        try {
+          return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+        } catch (e) {
+          return "dark";
+        }
+      }
+      function applyTheme(theme) {
+        if (theme === "light") document.documentElement.dataset.theme = "light";
+        else delete document.documentElement.dataset.theme;
+        const other = theme === "light" ? "dark" : "light";
+        $("theme-toggle").textContent = THEME_LABEL[theme];
+        $("theme-toggle").title = `Showing ${theme} — click for ${other}`;
+        try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* not remembered, still applied */ }
+      }
+      $("theme-toggle").addEventListener("click", () => {
+        applyTheme(storedTheme() === "light" ? "dark" : "light");
+      });
+      applyTheme(storedTheme());
       let agents = [];
       let filterText = "";
       let sortKey = "name";
@@ -316,7 +385,10 @@
         // host.arch appear in the OS column too, and that is not a duplicate — there they are the
         // artifact's platform (`linux-amd64`, what an upload is keyed by), here they are attribute
         // pairs (`os.type: linux`, what a selector matches). Two questions, two spellings.
-        for (const [k, v] of Object.entries(a.non_identifying_attributes || {})) {
+        // By key, so the same attribute sits in the same place on every row and the eye can go
+        // straight to it. Sorted here rather than trusted from the server, which orders them by a
+        // map it is free to change.
+        for (const [k, v] of Object.entries(a.non_identifying_attributes || {}).sort(([x], [y]) => x.localeCompare(y))) {
           chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
         }
         const caps = a.capabilities || [];
@@ -350,7 +422,9 @@
           }
           chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
         }
-        return `<div class="chips">${chips.join("")}</div>`;
+        // The chips only — the row below the agent supplies the `.chips` box they lay out in, and
+        // a second one nested inside it would wrap them as a single item rather than individually.
+        return chips.join("");
       }
       function matchedConfigs(a) {
         const names = a.matched_configurations || [];
@@ -379,7 +453,7 @@
         $("empty").style.display = rows.length ? "none" : "block";
         $("agents").innerHTML = rows.map((a) => {
           const row = `
-          <tr>
+          <tr class="agent">
             <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
             <td>${statusPill(a)}</td>
@@ -390,24 +464,29 @@
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
-            <td>${labels(a)}</td>
           </tr>`;
-          let details = "";
-          const detailRow = (label, chips) => `
-          <tr>
+          // Everything about an agent that is a *set* rather than a value goes under its row
+          // rather than into a column of its own: a column has to be as wide as its widest cell,
+          // and one agent with a dozen attributes then pushed every other column off the screen.
+          const detailRow = ([label, chips], i, all) => `
+          <tr class="detail${i === all.length - 1 ? " last" : ""}">
             <td class="chk"></td>
-            <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
+            <td colspan="9"><div class="chips" style="padding: 2px 0 6px">
               <span class="sub" style="align-self: center">${label}:</span>
               ${chips || `<span class="chip">none</span>`}
             </div></td>
           </tr>`;
+          const below = [["labels", labels(a)]];
           if (expandedCaps.has(a.instance_uid)) {
-            details += detailRow("declared capabilities", (a.capabilities || []).map((c) => `<span class="chip">${esc(c)}</span>`).join(""));
+            // A copy, sorted: the list arrives in the order of the protocol's capability bitmask,
+            // which is an implementation detail of the wire and not a reading order. `caps` in
+            // `labels` is searched by name, so the original must not be reordered under it.
+            below.push(["declared capabilities", [...(a.capabilities || [])].sort().map((c) => `<span class="chip">${esc(c)}</span>`).join("")]);
           }
           if (expandedComponents.has(a.instance_uid)) {
-            details += detailRow("available components", (a.available_components || []).map((c) => `<span class="chip">${esc(c)}</span>`).join(""));
+            below.push(["available components", [...(a.available_components || [])].sort().map((c) => `<span class="chip">${esc(c)}</span>`).join("")]);
           }
-          return row + details;
+          return row + below.map(detailRow).join("");
         }).join("");
         document.querySelectorAll("th.sortable").forEach((th) => {
           const arrow = th.querySelector(".arrow");
@@ -641,6 +720,98 @@
           : "This artifact has never replaced another, so there is nothing to go back to.";
         renderPackageList();
       }
+      // Older and foreign spellings, mirroring the server's table. The server canonicalises
+      // whatever it is sent anyway, so a drift here costs a prefilled field and never correctness.
+      const OS_ALIASES = { macos: "darwin", osx: "darwin", win: "windows", win32: "windows", win64: "windows" };
+      const ARCH_ALIASES = { x86_64: "amd64", x64: "amd64", aarch64: "arm64" };
+      const KNOWN_OS = new Set(["linux", "darwin", "windows", ...Object.keys(OS_ALIASES)]);
+      const KNOWN_ARCH = new Set(["amd64", "arm64", ...Object.keys(ARCH_ALIASES)]);
+
+      // What an artifact's file name already says. A release is `<name><sep><version><sep><os>`
+      // `<sep><arch>.7z`, and the last two fields are exactly the pair the upload is keyed by
+      // (ADR-0031) — so naming the file answers all four. Both `-` and `_` separate.
+      //
+      // The platform is found by **matching the known tokens** at the end, not by splitting the
+      // name into pieces. Splitting cannot work once `_` separates: `linux-x86_64` would come
+      // apart into `x86` and `64`, and the one spelling this project shipped for a year would stop
+      // being recognised. Anchoring on the vocabulary also leaves the separators inside the name
+      // and the version untouched, so `otelcol-contrib_0.109.0` keeps both of its own.
+      //
+      // The version then starts at the first separator followed by a digit — the only way to tell
+      // where a name ends when both may carry separators. A tail the vocabulary does not know
+      // returns null rather than a guess, because a wrong platform is a package no agent is ever
+      // offered.
+      const PLATFORM_TAIL = new RegExp(
+        "[-_](" + [...KNOWN_OS].sort((a, b) => b.length - a.length).join("|") + ")" +
+        "[-_](" + [...KNOWN_ARCH].sort((a, b) => b.length - a.length).join("|") + ")$", "i");
+
+      function fromArtifactName(fileName) {
+        const stem = fileName.replace(/\.(7z|tgz|tar\.gz)$/i, "");
+        const tail = PLATFORM_TAIL.exec(stem);
+        if (!tail) return null;
+        const head = stem.slice(0, tail.index);
+        const os = tail[1].toLowerCase();
+        const arch = tail[2].toLowerCase();
+        const at = head.search(/[-_]\d/);
+        return {
+          name: at === -1 ? head : head.slice(0, at),
+          version: at === -1 ? "" : head.slice(at + 1),
+          os: OS_ALIASES[os] || os,
+          arch: ARCH_ALIASES[arch] || arch,
+        };
+      }
+
+      // The last path segment of a source url is a file name like any other, so an address that
+      // names its artifact fills the same four fields — and they are then what the request carries,
+      // rather than something to retype from the address bar.
+      function fromArtifactUrl(url) {
+        try {
+          const path = new URL(url, window.location.origin).pathname;
+          return fromArtifactName(decodeURIComponent(path.slice(path.lastIndexOf("/") + 1)));
+        } catch (e) {
+          return null; // not an address yet — the operator is still typing
+        }
+      }
+
+      // Naming an artifact is a statement about what is being uploaded, so it fills the fields it
+      // can answer — and clears none it cannot, so a name that says nothing leaves the form alone.
+      function fillFromArtifact(parsed) {
+        if (!parsed) return;
+        if (parsed.name) $("package-name").value = parsed.name;
+        if (parsed.version) $("package-version").value = parsed.version;
+        $("package-os").value = parsed.os;
+        $("package-arch").value = parsed.arch;
+        $("package-error").textContent = "";
+      }
+      $("package-file").addEventListener("change", () => {
+        const file = $("package-file").files[0];
+        if (file) fillFromArtifact(fromArtifactName(file.name));
+      });
+      // On `change`, not on every keystroke: a half-typed address would otherwise rewrite the
+      // fields under the operator's hands. Blurring to press a button fires it first, so what the
+      // request sends is what the address said.
+      $("package-url").addEventListener("change", () => {
+        fillFromArtifact(fromArtifactUrl($("package-url").value.trim()));
+      });
+
+      // A checksum is copied from wherever it was published — a release's `SHA256SUMS`, a registry,
+      // an OCI descriptor — and half of those write it `sha256:<hex>`. The field takes either and
+      // shows the hex, so what is sent is what the API asks for. The tolerance lives here rather
+      // than in the server: the API's contract stays exact, and this is the tool the paste lands in.
+      //
+      // Only `sha256:` is dropped, and case does not matter. Any *other* algorithm keeps its name
+      // and is refused as the invalid hex it is — a `sha512:` digest thrown its name away would be
+      // read as a SHA-256 of the wrong length, and that hash is the whole of what protects a
+      // referenced artifact (ADR-0018).
+      $("package-sha256").addEventListener("change", () => {
+        const field = $("package-sha256");
+        const given = field.value.trim();
+        const colon = given.indexOf(":");
+        field.value = colon !== -1 && given.slice(0, colon).trim().toLowerCase() === "sha256"
+          ? given.slice(colon + 1).trim()
+          : given;
+      });
+
       // Both halves of the platform, or a message saying why nothing was sent.
       function platformParams() {
         const os = $("package-os").value.trim();
