@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
+use crate::supervisor::process::{ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
@@ -68,13 +68,12 @@ impl Plugin for CommandPlugin {
         let command = ctx.program;
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
-        if let Some(version_args) = settings.version_args.clone() {
-            tokio::spawn(probe_version(
-                command.clone(),
-                version_args,
-                ctx.events.clone(),
-            ));
-        }
+        // Asked at startup and again after every package swap, so a Foreign Agent the Server
+        // updated describes the version it now runs rather than the one it replaced.
+        let version_probe = settings.version_args.clone().map(|args| VersionProbe {
+            program: command.clone(),
+            args,
+        });
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -82,6 +81,7 @@ impl Plugin for CommandPlugin {
             // A package (ADR-0015) swaps this command's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
+            version_probe,
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.

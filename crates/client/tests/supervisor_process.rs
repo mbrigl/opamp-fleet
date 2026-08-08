@@ -20,7 +20,9 @@ use std::time::Duration;
 use client::config::TREE_DIR;
 use client::service::runtime::shutdown_channel;
 use client::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent};
-use client::supervisor::process::{probe_version, InstallTarget, ProcessSpec, Runner};
+use client::supervisor::process::{
+    probe_version, InstallTarget, ProcessSpec, Runner, VersionProbe,
+};
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
 
@@ -63,10 +65,11 @@ struct Harness {
 }
 
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
-/// are what the package tests vary.
+/// are what the package tests vary; `version_probe` is set only where the probe is the subject.
 fn runner(
     install: Option<InstallTarget>,
     apply_grace: Duration,
+    version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
     let (event_tx, events) = mpsc::channel(64);
@@ -78,6 +81,7 @@ fn runner(
         apply_grace,
         install,
         archive_key: None,
+        version_probe,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
@@ -92,14 +96,14 @@ fn runner(
 
 /// Zero grace: the pre-grace instant acknowledgement most supervision tests exercise.
 fn start(build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
-    runner(None, Duration::ZERO, build)
+    runner(None, Duration::ZERO, None, build)
 }
 
 fn start_with_grace(
     apply_grace: Duration,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
-    runner(None, apply_grace, build)
+    runner(None, apply_grace, None, build)
 }
 
 async fn next_health(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> ComponentHealth {
@@ -211,6 +215,76 @@ async fn a_failing_or_versionless_probe_stays_silent() {
         events.try_recv().is_err(),
         "neither probe may emit an event"
     );
+}
+
+async fn next_probed_version(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> Option<String> {
+    loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("a probed description in time")
+            .expect("an open channel");
+        if let ProcessEvent::Description(description) = event {
+            return description
+                .identifying_attributes
+                .iter()
+                .find(|kv| kv.key == "service.version")
+                .and_then(|kv| kv.value.clone())
+                .and_then(|v| v.value)
+                .map(|v| match v {
+                    opamp::proto::any_value::Value::StringValue(s) => s,
+                    other => panic!("expected a string version, got {other:?}"),
+                });
+        }
+    }
+}
+
+/// A swapped program is a different program, and only the program knows its own version — so the
+/// swap has to ask again. Without this the Agent reports the package as installed while going on
+/// describing the version it replaced (or none at all, on a first install onto an empty
+/// `program/`), and only a restart of the Client ever corrects it.
+///
+/// Both probes here read the same stub and therefore the same version; what the second event
+/// proves is that the swap asked at all, which is the whole of the regression. Draining the
+/// startup probe's answer first is what makes "the second one" mean something: one probe emits at
+/// most one event, so anything arriving after it was asked by the swap.
+#[tokio::test]
+async fn a_swapped_binary_is_probed_again_for_its_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let staged = dir.path().join("downloaded.staged");
+    std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
+
+    let mut harness = runner(
+        Some(InstallTarget::Binary(binary.clone())),
+        Duration::from_millis(200),
+        Some(VersionProbe {
+            program: binary.clone(),
+            args: vec!["--version".to_string()],
+        }),
+        || None, // an unconfigured Collector: nothing runs, the version is still owed
+    );
+    assert_eq!(
+        next_probed_version(&mut harness.events).await.as_deref(),
+        Some("9.9.9"),
+        "the startup probe reports what is on disk before the swap"
+    );
+
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert_eq!(result, Ok("9.9.9".to_string()));
+    assert_eq!(
+        next_probed_version(&mut harness.events).await.as_deref(),
+        Some("9.9.9"),
+        "the swap must ask the newly installed program for its version"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
 }
 
 // ── Supervision ──────────────────────────────────────────────────────────────
@@ -388,6 +462,7 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
     runner(
         Some(InstallTarget::Binary(binary.to_path_buf())),
         apply_grace,
+        None,
         move || Some(spec(&program)),
     )
 }
@@ -485,6 +560,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let mut harness = runner(
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
+        None,
         || None,
     );
     let _ = next_health(&mut harness.events).await; // "awaiting configuration"
@@ -574,6 +650,7 @@ fn tree_harness(root: &Path) -> Harness {
             program_path: inside,
         }),
         Duration::from_millis(200),
+        None,
         move || Some(spec(&program)),
     )
 }

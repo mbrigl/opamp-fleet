@@ -31,21 +31,31 @@
 //! name. `sc config` changes the one field it is given and leaves the rest alone. This is also how
 //! the service was created: the backend is the `sc.exe` wrapper.
 //!
+//! The **description** is a fourth, and is not the display name under another word: the services
+//! list has a Description column of its own, nothing that registers the service fills it, and a
+//! service with a display name still shows an empty one. It is set the same way, with the one
+//! `sc.exe` verb that carries it.
+//!
 //! Everything here is a no-op on Unix.
 
-/// Configure what the Windows backend does not: failure recovery, and the display name.
+/// Configure what the Windows backend does not: failure recovery, the display name, and the
+/// description.
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
 /// the service manager already carries the policy, and neither systemd nor launchd has a display
-/// name to set.
+/// name or a description column to fill.
 #[cfg(not(windows))]
-pub fn configure(_service_name: &str, _display_name: &str) -> Result<(), String> {
+pub fn configure(
+    _service_name: &str,
+    _display_name: &str,
+    _description: &str,
+) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(windows)]
-pub fn configure(service_name: &str, display_name: &str) -> Result<(), String> {
+pub fn configure(service_name: &str, display_name: &str, description: &str) -> Result<(), String> {
     use std::time::Duration;
 
     use windows_service::service::{
@@ -86,27 +96,50 @@ pub fn configure(service_name: &str, display_name: &str) -> Result<(), String> {
             format!("cannot enable recovery on reported failures for {service_name}: {e}")
         })?;
 
-    set_display_name(service_name, display_name)
+    // The name the services list shows (ADR-0022). `sc.exe` wants `displayname=` with the space
+    // **after** the equals sign: the token is the option and the *next* argument is its value, so
+    // `displayname=x` as one word is parsed as an option nobody knows and silently changes nothing.
+    sc(
+        &["config", service_name, "displayname="],
+        display_name,
+        &format!("display name of {service_name}"),
+    )?;
+
+    // The Description column beside it. `sc description` takes its text **positionally** — there is
+    // no `description=` token, and adding one would write the token into the field. The two verbs
+    // disagreeing about this is exactly why each call says which shape it uses.
+    sc(
+        &["description", service_name],
+        description,
+        &format!("description of {service_name}"),
+    )
 }
 
-/// The name the Windows services list shows (ADR-0022), set through `sc.exe config`.
+/// Runs `sc.exe` with a trailing value argument — the shape both fields above are set with, so
+/// neither can be the one that forgets to check whether `sc.exe` actually accepted it.
 ///
-/// `sc.exe` wants `displayname=` with the space **after** the equals sign: the token is the option
-/// and the next argument is its value, so `displayname=x` as one word is parsed as an option nobody
-/// knows and silently changes nothing.
+/// A refusal for want of rights is **not** retried through a UAC prompt here, and cannot usefully
+/// be: by the time these calls run the service is registered, which needed Administrator, so a
+/// process that got this far already has the rights — and one that does not never gets here,
+/// because [`windows_rights`](super::windows_rights) stops the install before it writes anything.
+/// Asking per `sc.exe` verb would in any case prompt twice for one install, and could not cover the
+/// `CHANGE_CONFIG` handle above, which is refused before either verb runs.
+///
+/// `what` names the field for the error, because `sc.exe` reports failure through an exit code and
+/// a line on stdout rather than through anything a caller could tell apart.
 #[cfg(windows)]
-fn set_display_name(service_name: &str, display_name: &str) -> Result<(), String> {
+fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
     let output = std::process::Command::new("sc.exe")
-        .args(["config", service_name, "displayname="])
-        .arg(display_name)
+        .args(args)
+        .arg(value)
         .output()
-        .map_err(|e| format!("cannot run sc.exe to name {service_name}: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot set the display name of {service_name}: sc.exe exited with {} ({})",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim()
-        ));
+        .map_err(|e| format!("cannot run sc.exe to set the {what}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    Err(format!(
+        "cannot set the {what}: sc.exe exited with {} ({})",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim()
+    ))
 }

@@ -13,7 +13,129 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added
+
+- **The Windows services list now shows a description**: **OpAMP Fleet Client for Windows**. It is a
+  field of its own beside the display name, and nothing that registers a service fills it — so the
+  Client had a display name and an empty Description column. It is the same text on every instance;
+  the display name beside it (`OpAMP Fleet Client (prod)`) is what distinguishes them.
+
+  An already-installed service keeps its empty description until it is registered again — the field
+  is written at install time. `service uninstall` then `service install` fills it.
+
+- **A Windows install without Administrator now says so before it writes anything.** `service
+  install` asks the service control manager up front whether this process may register a service at
+  all, and stops with the one thing that fixes it — open a shell with "Run as administrator" — if it
+  may not.
+
+  Before, the refusal came from `sc create` in the middle of the install, as a bare (and localised)
+  `OpenSCManager` access-denied error, and only *after* the layout had been written: `%ProgramData%`
+  lets an ordinary user create folders, so a staged version directory and a `current` junction were
+  left behind by an install that had registered nothing. Delete such a root, or just re-run the
+  install from an elevated shell.
+
+  There is no UAC prompt, on any `service` verb: a running process cannot raise its own rights, so
+  an elevated shell is the way in. The earlier, unreleased retry of a refused `sc.exe` call through
+  `Start-Process -Verb RunAs` is gone — it sat *after* the registration, which is what gets refused
+  first, so it could never fire.
+
+- **Every Agent now reports the attributes the protocol names.** Alongside `os.type` and
+  `host.arch`, an Agent reports `os.name`, `os.version`, `host.name`, and `host.id` — so a Selector
+  can target a distribution release, or pin one machine by its host name.
+
+  **`host.name` in particular was promised and missing.**
+  [ADR-0016](docs/adr/0016-what-a-package-is-and-how-it-is-aimed.md) offers "a Selector matching that host's
+  `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
+  Selector silently matched nothing. It works now.
+
+  An attribute the host cannot answer is **left out rather than reported empty** — a container
+  without `/etc/machine-id` reports no `host.id` — so a Selector on one reaches exactly the hosts
+  that have it. Nothing has to be changed on any host; the new attributes appear on the next
+  connection.
+
+- **`service_namespace` in `client.toml`**, for the one attribute the protocol makes conditional on
+  the environment ("if it is used in the environment where the Agent runs"). It is reported as an
+  *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
+  unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
+
+### Fixed
+
+- **An Agent that installed a package went on reporting the version it replaced.** The package
+  itself was reported correctly — `Installed`, with the new version, in the fleet view's package
+  pill — but the Agent's own `service.version`, which is the fleet table's **Version** column, still
+  named the old one. On a first install onto an empty `program/` it named nothing at all, and the
+  column stayed empty beside a package the Server had just seen installed.
+
+  Only the program knows its own version, so the Client asks it: it runs the Managed Process's
+  version flag (a Collector's `--version`, or a `command` Supervisor's configured `version_args`)
+  and reports what it prints. That question was asked once, when the Supervisor started — never
+  again after a swap replaced the binary it had asked. A Collector carrying the `opampextension`
+  corrected itself the moment it next started and self-reported; one without the extension, and one
+  with no configuration to run on yet, had nothing that ever would. Restarting the Client was the
+  only cure.
+
+  The program is now asked again after every successful swap, and the two sources — the probe and
+  the extension's self-report — are merged per attribute instead of each replacing the other.
+  Nothing to change on a host: an affected Agent reports its version within seconds of the next
+  install, and a Client restart still fixes an Agent that installed before this version.
+
 ### Changed — breaking
+
+- **A package now holds one artifact per platform, and `os`/`arch` are required**
+  ([ADR-0017](docs/adr/0017-package-artifacts.md)). An Agent is offered only the artifact
+  built for the operating system and architecture it reported, and never another — so uploading a
+  Windows build no longer installs it over every Linux host in the fleet.
+
+  **Every Server has to be migrated before it will start.** A package stored without a platform is
+  refused at startup, naming the file. For each one, upload it again with its platform, or delete it:
+
+  ```console
+  $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
+         "http://<server>:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+  ```
+
+  **Four routes change.** `PUT /api/v1/packages/{name}` and `PUT …/{name}/source` require `os` and
+  `arch`; `POST …/{name}/rollback` and `GET …/{name}/file` require them in the query. `DELETE
+  …/{name}` still deletes the whole package, and now takes an optional `?os=…&arch=…` for one
+  artifact. Generated clients must be regenerated.
+
+  **`GET /api/v1/packages` answers a new shape.** `version`, `addon`, `source_url` and
+  `previous_version` moved out of the package and into a `variants` array, one entry per platform,
+  each with its own `os`, `arch` and rollback history. `selector` stays on the package: the Selector
+  aims, the platform fits.
+
+  A rollback names one platform and moves only that one — a canary taken back on Linux must not push
+  macOS off a version it never left.
+
+- **The Client reports `host.arch` as `amd64`/`arm64`**, the semantic-convention values the protocol
+  points at, where it used to report Rust's `x86_64`/`aarch64`
+  ([ADR-0017](docs/adr/0017-package-artifacts.md)).
+
+  **A Selector written against `host.arch` must be edited on the Server** — `{"host.arch": "x86_64"}`
+  now matches nothing. Change it to `amd64` (or `aarch64` → `arm64`); nothing changes on any host.
+
+  This also closes a quiet defect: a Managed Process's attributes are folded over the Supervisor's,
+  and the Collector's `opampextension` already reported `amd64`. The same machine therefore changed
+  architecture depending on whether a Collector happened to run on it, and Selectors written against
+  either spelling broke without anything having changed.
+
+- **Release artifacts are named `<name>_<version>_<os>_<arch>.7z`** —
+  `opamp-fleet-client_1.2.3_linux_amd64.7z`, `opamp-fleet-client_1.2.3_darwin_arm64.7z`. Both halves
+  of that changed: the platform tokens, which used to say `macos` and `x86_64`
+  ([ADR-0017](docs/adr/0017-package-artifacts.md)), and the separator between the four
+  fields, which used to be `-`
+  ([ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md)) — both
+  superseding the naming in [ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md).
+
+  **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
+  releases already published keep the names they have, and nothing is renamed.
+
+  The gain is that the name says what it holds without being guessed at. The two platform fields are
+  exactly the pair an Agent reports, so uploading a release needs no translation table — and because
+  neither a package name (`[a-z0-9-]`) nor a version (`1.2.3-dev`) can contain `_` while both contain
+  `-`, the four fields can be read off the file name by splitting it. That is what lets the release
+  notes publish an upload loop that takes `os` and `arch` out of each file rather than being handed
+  the name and version it has to strip first.
 
 - **The service is registered as `opamp-fleet-client` on every platform**
   ([ADR-0022](docs/adr/0022-the-client-is-named-opamp-fleet-client.md)). It used to be

@@ -138,6 +138,13 @@ Where a platform has a second, human-readable name, it is **OpAMP Fleet Client**
 Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
 as its `Description`, and a launchd job has no name besides its label.
 
+The Windows services list has a **Description** column beside that name, and it is a separate field
+that nothing fills on its own — a service can carry a display name and still show an empty
+description, which is what this one did. It now reads **OpAMP Fleet Client for Windows**, the same
+on every instance: the display name beside it is what says *which* Client this is.
+
+Both are set right after the registration, with `sc.exe config` and `sc.exe description`.
+
 The root holds versioned installs side by side, a `current` pointer the service is registered
 against, and the default state directory:
 
@@ -154,6 +161,26 @@ After a crash the service manager restarts the service; after an explicit stop i
 platform gaps, tracked in ADR-0010: on macOS `service status` is advisory and `install` does not
 auto-start, and on Windows the SCM discards stderr, so service logs are lost until logging to a file
 lands.
+
+### Windows needs an elevated shell, and says so before it writes
+
+Registering a machine-wide service needs Administrator, and a running process cannot raise its own
+rights — there is no UAC prompt to be had from inside a command that has already started. So
+`service install` asks the service control manager up front whether this process may register a
+service at all, and stops with a message naming the fix if it may not:
+
+```console
+C:\> opamp-fleet-client service install
+the Windows service control manager denied access: registering a machine-wide service needs
+Administrator, and a running process cannot raise its own rights. Open a shell with "Run as
+administrator" — from PowerShell, `Start-Process powershell -Verb RunAs` — and run this command
+again. Nothing has been installed or written.
+```
+
+That the check comes *before* the first write is the point of it: `%ProgramData%` lets an ordinary
+user create folders, so an install refused only at `sc create` had already staged a version directory
+and pointed `current` at it, leaving half an install behind. `uninstall`, `start`, and `stop` write
+nothing beforehand and simply report the manager's own refusal.
 
 ## Configuration reference
 
@@ -190,10 +217,25 @@ region = "eu-central"
 A `[[supervisor]]` block may add its own `[supervisor.attributes]` table, which overrides these per
 key for that Agent alone.
 
-Every Agent additionally reports, without configuration: `service.name`, `service.instance.id`,
-`os.type`, `host.arch`, and `os.description` — plus `service.version`, which for the Client's own
-Agent is the Client's baked-in version and for a Supervisor-backed Agent is whatever the Managed
-Process reports about itself.
+Every Agent additionally reports, without configuration, everything the protocol names to describe
+an Agent and where it runs: `service.name`, `service.instance.id`, `os.type`, `os.name`,
+`os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus `service.version`,
+which for the Client's own Agent is the Client's baked-in version and for a Supervisor-backed Agent
+is whatever the Managed Process reports about itself.
+
+An attribute the host cannot answer is **left out, never reported empty** — a container without
+`/etc/machine-id` reports no `host.id` at all rather than a blank one a Selector could match. So a
+Selector on `host.id` reaches exactly the hosts that have one.
+
+One attribute is configured rather than detected, because only an operator knows it — the protocol
+asks for `service.namespace` "if it is used in the environment where the Agent runs":
+
+```toml
+service_namespace = "telemetry"
+```
+
+Unlike `[attributes]`, it *identifies* the Agent rather than tagging it, which is where the protocol
+puts it. Leave it out and nothing is reported.
 
 ### `[tls]`
 
@@ -528,17 +570,21 @@ Self-update therefore requires an installed service — it is the service manage
 restart.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`opamp-fleet-client-<version>-<os>-<arch>.7z`
-([ADR-0021](../adr/0021-release-pipeline-and-artifacts.md)) — and that file *is* a package artifact:
-it holds the Client under the name the install layout gives it, so it is uploaded exactly as
-downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing repacks it.
+`opamp-fleet-client_<version>_<os>_<arch>.7z`
+([ADR-0021](../adr/0021-release-pipeline-and-artifacts.md)) — and that file
+*is* a package artifact: it holds the Client under the name the install layout gives it, so it is
+uploaded exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies.
+Nothing repacks it. The fields are separated by `_` because two of them carry `-` — the name
+(`opamp-fleet-client`) and a prerelease version (`1.2.3-dev`) — so the last two fields are the
+platform and can be read off the name.
 
 **The version in the query is the release number** — the one in the file name
-([ADR-0009](../adr/0009-version-baking-comparison-and-display.md)):
+([ADR-0009](../adr/0009-version-baking-comparison-and-display.md)) — and the
+platform is required with it (ADR-0017), spelled as the Agent reports it:
 
 ```console
-$ curl -X PUT --data-binary @opamp-fleet-client-1.2.3-linux-x86_64.7z \
-       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3"
+$ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
+       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
 ```
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the

@@ -189,8 +189,12 @@ and the Server for Linux.
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
-`opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
-on, plus a `SHA256SUMS` file. Started with `dry_run` (the default) it builds and packs everything and
+`opamp-fleet-client_<version>_<os>_<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+on, plus a `SHA256SUMS` file. The fields are separated by `_` because a name and a version both
+contain `-` ([ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md)),
+and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
+`darwin_arm64`, …), so uploading a whole release under one package
+name needs no translation ([ADR-0017](docs/adr/0017-package-artifacts.md)). Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
 forgotten bump costs seconds rather than five build jobs — and the built binary must report the
@@ -243,8 +247,12 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
 
-# One step back (ADR-0016): re-offer the version this package replaced. 409 when there is none.
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/otelcol/rollback
+# A package holds one artifact per platform (ADR-0017); each Agent is offered the one that fits it.
+$ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
+       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+
+# One step back (ADR-0016): re-offer the version this artifact replaced. 409 when there is none.
+$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/rollback?os=linux&arch=amd64"
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
