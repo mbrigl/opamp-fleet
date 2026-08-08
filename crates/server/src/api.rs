@@ -20,7 +20,7 @@ use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec};
-use crate::fleet::{AgentView, AppState, RestartError};
+use crate::fleet::{AgentView, AppState, ForgetError, RestartError};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -41,6 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
+        .routes(routes!(forget_agent))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
@@ -156,6 +157,49 @@ async fn restart_agent(
         Err(RestartError::NoCapability) => error(
             StatusCode::CONFLICT,
             format!("agent {uid} does not declare AcceptsRestartCommand"),
+        ),
+    }
+}
+
+/// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
+///
+/// Reaches no host: nothing is stopped, nothing is uninstalled, and no credential is revoked —
+/// there is none per Agent to revoke. A Client that is still running reappears on its next report.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agents/{instance_uid}",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
+                   view (ADR-0039). Nothing happens on the host — no process is stopped, nothing \
+                   is uninstalled, and no credential is revoked, because a credential here proves \
+                   fleet membership rather than one Agent's identity. A Client still configured \
+                   for this Server therefore comes back on its next report. Refused while the \
+                   Agent is still reporting, since forgetting it would have its configuration \
+                   offered again and a managed process restarted with it.",
+    responses(
+        (status = 204, description = "The Agent is forgotten"),
+        (status = 400, description = "Malformed Instance UID", body = ErrorBody),
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "The Agent is still reporting", body = ErrorBody)
+    )
+)]
+async fn forget_agent(
+    State(state): State<Arc<AppState>>,
+    Path(instance_uid): Path<String>,
+) -> Response {
+    let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{instance_uid:?} is not an Instance UID"),
+        );
+    };
+    match state.forget_agent(&uid) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(ForgetError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(ForgetError::StillReporting) => error(
+            StatusCode::CONFLICT,
+            format!("agent {uid} is still reporting; stop it or wait for it to go stale"),
         ),
     }
 }
@@ -286,6 +330,15 @@ struct PackageView {
     /// One artifact per platform. An Agent is offered the one built for the machine it reported,
     /// and never another (ADR-0031).
     variants: Vec<PackageVariantView>,
+    /// How many Agents in the fleet this package reaches as things stand — fitted by type and
+    /// platform, then aimed by Selector, exactly as the offer resolves it.
+    ///
+    /// **`0` is the value worth looking at.** A package targets nobody when its `service_name` is
+    /// unset or misspelled, when no artifact matches any reported platform, or when its Selector
+    /// matches no Agent — and none of those is an upload error, so nothing else would say so. It
+    /// counts the fleet *as reported so far*: a package staged for hosts that have not connected
+    /// yet is legitimately at `0`, which is why this is a number to read rather than a rejection.
+    targeted_agents: usize,
 }
 
 /// One platform's artifact of a package.
@@ -315,9 +368,10 @@ struct PackageVariantView {
     previous_source_url: Option<String>,
 }
 
-impl From<crate::packages::PackageSummary> for PackageView {
-    fn from(summary: crate::packages::PackageSummary) -> Self {
+impl PackageView {
+    fn of(summary: crate::packages::PackageSummary, targeted_agents: usize) -> Self {
         PackageView {
+            targeted_agents,
             name: summary.name,
             selector: summary.selector,
             service_name: summary.service_name,
@@ -406,7 +460,10 @@ struct PackageUpload {
 /// now is, including the version a rollback would restore.
 fn package_response(state: &AppState, name: &str) -> Response {
     match state.packages().and_then(|store| store.summary(name)) {
-        Some(summary) => Json(PackageView::from(summary)).into_response(),
+        Some(summary) => {
+            let reach = state.package_reach().get(name).copied().unwrap_or(0);
+            Json(PackageView::of(summary, reach)).into_response()
+        }
         None => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
     }
 }
@@ -423,14 +480,21 @@ fn package_response(state: &AppState, name: &str) -> Response {
 )]
 async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     match state.packages() {
-        Some(store) => Json(
-            store
-                .list()
-                .into_iter()
-                .map(PackageView::from)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Some(store) => {
+            let summaries = store.list();
+            // One pass over the fleet for the whole list, rather than one per package.
+            let reach = state.package_reach();
+            Json(
+                summaries
+                    .into_iter()
+                    .map(|summary| {
+                        let targeted = reach.get(&summary.name).copied().unwrap_or(0);
+                        PackageView::of(summary, targeted)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
         None => error(
             StatusCode::NOT_FOUND,
             "package delivery is not configured on this Server",

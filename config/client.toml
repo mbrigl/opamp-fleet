@@ -30,6 +30,18 @@ max_message_size_bytes = 67108864
 # directory needs room for one agent binary.
 state_dir = "client-state"
 
+# The Client's own log on disk (ADR-0041), written **only while it runs as a service** — in the
+# foreground it goes to stderr alone, because somebody is reading it there. It exists because the
+# Windows SCM discards a service's stderr, so a Client installed there had no readable log at all;
+# on Linux and macOS it duplicates what journalctl and `log show` already keep, so that "where are
+# the logs" has one answer on every platform. This is not the own-telemetry of ADR-0036: that needs
+# a Server it can already reach, which is exactly what a start-up failure does not have.
+# It is the machine's — nothing here ever arrives from the Server.
+# [logging]
+# enabled = true            # false writes nothing; for a host whose platform already collects stderr
+# dir = "/var/log/opamp"    # default: <state_dir>/logs, which survives updates and `uninstall`
+# keep = 7                  # daily files kept, then deleted. A bound, not a switch: 0 is refused
+
 # Where the per-Supervisor directories live (ADR-0021); the default is <state_dir>/supervisors.
 # Each Supervisor owns everything under its own directory — its identity, the received
 # configuration, its program/, and the artifact staging its updates go through:
@@ -45,6 +57,26 @@ state_dir = "client-state"
 # table, which overrides these per key.
 # [attributes]
 # env = "prod"
+
+# Optional Gateway Mode (ADR-0037): this Client stands at a network boundary, accepts OpAMP from
+# other Clients, and folds them onto a small pool of upstream connections. It composes with the
+# [[supervisor]] blocks below — a host may supervise its own processes and gateway for others.
+#
+# upstream_connections is a CAP, not a count: connections are opened as Agents appear, so a Gateway
+# in front of three Agents holds three. Each Agent sticks to its connection while that lives.
+#
+# The Gateway makes no authentication decisions — it forwards each peer's credential upstream
+# untouched. Mutual TLS is per hop: [gateway.tls] verifies the Agents connecting to *this* Client,
+# while the identity presented to the Server is the one in [tls] below. The endpoint above must be
+# ws:// or wss://, since a polling connection cannot carry the Server's pushes to the Agents behind
+# a Gateway.
+# [gateway]
+# listen = "0.0.0.0:4320"
+# upstream_connections = 10
+# [gateway.tls]
+# cert_file = "gateway.pem"
+# key_file = "gateway-key.pem"
+# client_ca_file = "client-ca.pem"
 
 # Optional TLS (ADR-0007, ADR-0035). Every key is optional on its own, so this section may carry a
 # trust override, a client identity, or both.

@@ -78,6 +78,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. |
+| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale** (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 | `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset for the ordinary single-listener case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when downloads must go through a different host. |
 
 ### `[tls]`
@@ -324,7 +325,9 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 
 The value is compared **raw** against the `service.name` the Agents report — there is no canonical
 set of Agent types to normalise against, so spell it exactly as they do; a typo here is a rollout
-that never starts rather than an error. Read it off a fleet row, or off the `service_name` a
+that never starts rather than an error. **`targeted_agents` on the package is how you catch that**:
+it says how many Agents the package reaches as things stand, and the package list in the UI shows
+`⚠ reaches no agent` at zero. Read it off a fleet row, or off the `service_name` a
 `[[supervisor]]` block sets. Like the Selector it belongs to the *name*, so it covers every platform
 of the package at once.
 
@@ -397,11 +400,12 @@ show.
 |---|---|
 | `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, matching Configurations, package installations, health, and sync state. |
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
+| `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
 | `GET /api/v1/configurations` | Every Configuration. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
 | `PUT /api/v1/configurations/{name}` | Create or replace it. Body: `{"selector": {…}, "body": "…", "role": "…"}` — `selector` and `role` may be omitted. |
 | `DELETE /api/v1/configurations/{name}` | Remove it. Agents that matched it stop matching; they keep running what they last applied. |
-| `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore. |
+| `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
 | `PUT /api/v1/packages/{name}` | Upload an artifact. See above for the query parameters. |
 | `PUT /api/v1/packages/{name}/source` | Point the package at an artifact hosted elsewhere. |
 | `PUT /api/v1/packages/{name}/type` | Set the Agent type it is built for. Body: `{"service_name": "…"}`. Required before it is offered to anyone; `400` on an empty value. |
@@ -412,11 +416,35 @@ show.
 
 The package routes answer `404` while package delivery is not configured on this Server.
 
+### Whom a package actually reaches
+
+Every stored package carries **`targeted_agents`**: how many Agents in the fleet it would be offered
+to right now. It is not a separate calculation — the Server resolves it exactly as it resolves the
+offer itself, fitting by Agent type and platform and then aiming by Selector, so the number cannot
+promise a reach the fleet does not get.
+
+**Zero is the number to look for.** A package targets nobody when
+
+- its **Agent type** is unset or misspelled — compared raw, with nothing to catch a typo (ADR-0034);
+- no **artifact** matches a platform any Agent reports (ADR-0031);
+- its **Selector** matches no Agent (ADR-0017); or
+- two equally specific Selectors reach the same Agents, so the Server refuses to guess and offers
+  nothing.
+
+None of those is an upload error — the package stores fine, validates fine, and reaches no one — so
+without this number a mistyped rollout looks exactly like a successful one until somebody notices
+the version never moved.
+
+It counts the fleet **as reported so far**, which means a package staged ahead of the hosts it is
+for legitimately reads `0`. That is why it is a number to read rather than something the Server
+refuses to store.
+
 **What a fleet row tells you.** `GET /api/v1/agents` is what the UI renders, and the fields worth
 knowing by name:
 
 | Field | Meaning |
 |---|---|
+| `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away. On plain HTTP there is no socket to close, so `connected` turns true on the first poll and is cleared only by the Agent's `agent_disconnect` on shutdown — a poller that dies without saying goodbye stays `connected` forever, and `stale` is the fact worth reading. |
 | `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
 | `identifying_attributes`, `non_identifying_attributes` | Everything a Selector can match on. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
@@ -427,6 +455,33 @@ knowing by name:
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
 | `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |
+
+### Forgetting an Agent
+
+A host that was decommissioned leaves a row behind, and nothing ages it out. `DELETE
+/api/v1/agents/{instance_uid}` — the `✕ forget` action on a fleet row — drops what this Server knows
+about that Agent (ADR-0039).
+
+**It does nothing on the machine.** No process is stopped, nothing is uninstalled, and no credential
+is revoked: a credential here proves *fleet membership*, never which Agent is speaking, so there is
+none belonging to one Agent to take away. A Client that is still running and still pointed at this
+Server reports again within its polling or heartbeat interval and the row comes back. Forgetting
+tidies the view; **to remove an agent for good, stop it on the host** (`opamp-fleet-client service
+uninstall`) and then forget it here.
+
+It is refused with `409` while the Agent is still reporting — connected, and heard from within the
+staleness budget. That is not caution for its own sake: the record holds the hashes that tell this
+Server not to re-offer what an Agent already has, so forgetting a live Agent has its configuration
+sent again, and a Managed Process restarts whenever a configuration arrives. Stop the agent first,
+or wait for it to fall silent. An Agent that is already disconnected can be forgotten at once.
+
+The same applies to one that comes back later: it is offered its configuration, its connection
+settings, and its packages afresh. The packages cost nothing — the Client re-installs nothing whose
+content hash it already has — but the configuration is applied again, which for a managed agent is
+one restart. That is the price of forgetting something that was not really gone.
+
+Nothing expires on its own: there is no retention sweep and no inactivity timeout, so a row stays
+until someone forgets it.
 
 ## Authentication
 

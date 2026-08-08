@@ -185,6 +185,17 @@ async fn the_openapi_document_describes_the_contract() {
     let document: serde_json::Value = response.json().await.expect("json");
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
+    // Forgetting an Agent is part of the contract a portal generates against (ADR-0039), and the
+    // description is where the "reaches no host" caveat has to be readable.
+    let forget = &paths["/api/v1/agents/{instance_uid}"]["delete"];
+    assert!(forget.is_object(), "DELETE on an Agent is described");
+    assert!(
+        forget["description"]
+            .as_str()
+            .expect("description")
+            .contains("Nothing happens on the host"),
+        "the description says what it does not do"
+    );
     assert!(paths.contains_key("/api/v1/configurations"));
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
     // The resource schemas ride along, so a client can be generated without the source.
@@ -257,4 +268,126 @@ async fn configurations_survive_a_server_restart() {
     let restored = reopened.configurations().list();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].name, "keeper");
+}
+
+/// ADR-0039. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
+/// it would have its configuration offered again — which restarts a Managed Process.
+#[tokio::test]
+async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "live", 1)).await;
+
+    let refused = client
+        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("message")
+            .contains("still reporting"),
+        "the refusal says why: {body}"
+    );
+    assert_eq!(agents(&client, server.addr).await.len(), 1, "the row stays");
+}
+
+/// ADR-0039, points 1 and 3: forgetting drops the record and reaches no host, so a Client that is
+/// still running simply comes back — and the Server, which now knows nothing about it, asks for
+/// full state exactly as it does for any Agent it has never seen.
+#[tokio::test]
+async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
+    // A zero budget makes the Agent silent the moment the clock ticks past its last report; the
+    // rule under test is the comparison, not the duration.
+    let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "gone", 1)).await;
+    assert_eq!(agents(&client, server.addr).await.len(), 1);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let forgotten = client
+        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(forgotten.status(), 204);
+    assert!(
+        agents(&client, server.addr).await.is_empty(),
+        "the row is gone"
+    );
+
+    // Nothing happened on the host, so the Client reports again — and is a stranger.
+    let reply = report(&client, server.addr, &support::compressed_report(&uid, 2)).await;
+    assert_ne!(
+        reply.flags & opamp::proto::ServerToAgentFlags::ReportFullState as u64,
+        0,
+        "an Agent the Server does not know is asked for full state"
+    );
+    assert_eq!(
+        agents(&client, server.addr).await.len(),
+        1,
+        "and it is back"
+    );
+}
+
+/// The two ways to ask for something that is not there. `404` rather than a silent `204`: the
+/// restart endpoint answers the same condition the same way, and an operator who mistypes a UID
+/// should be told, not thanked.
+#[tokio::test]
+async fn forgetting_what_is_not_there_is_reported() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    let unknown = client
+        .delete(url(
+            server.addr,
+            &format!("/api/v1/agents/{}", opamp::uid::InstanceUid::default()),
+        ))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(unknown.status(), 404);
+
+    let malformed = client
+        .delete(url(server.addr, "/api/v1/agents/not-a-uid"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(malformed.status(), 400);
+}
+
+/// The fleet as the REST API shows it.
+async fn agents(client: &reqwest::Client, addr: std::net::SocketAddr) -> Vec<serde_json::Value> {
+    client
+        .get(url(addr, "/api/v1/agents"))
+        .send()
+        .await
+        .expect("agents")
+        .json()
+        .await
+        .expect("json")
+}
+
+/// One OpAMP report over plain HTTP, the way a Client sends it.
+async fn report(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    msg: &opamp::proto::AgentToServer,
+) -> opamp::proto::ServerToAgent {
+    use prost::Message;
+    let response = client
+        .post(url(addr, "/v1/opamp"))
+        .header("content-type", "application/x-protobuf")
+        .body(msg.encode_to_vec())
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 200);
+    opamp::proto::ServerToAgent::decode(response.bytes().await.expect("body").as_ref())
+        .expect("decode")
 }

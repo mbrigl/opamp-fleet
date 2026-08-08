@@ -68,6 +68,13 @@ max_message_size_bytes = 67108864
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
 
+# How long an Agent that declares ReportsHeartbeat may be silent before the fleet view calls it
+# stale (ADR-0038). It is an observation, never a state change: nothing is torn down, and the next
+# report clears it. Ignored when [connection_offer] names a heartbeat interval — the period this
+# Server actually asked for is a better answer than a default. Three times the protocol's own
+# default heartbeat of 30 s, because one missed beat is a lost packet.
+stale_after_secs = 90
+
 # Optional destinations for the Agents' own telemetry (ADR-0036). Each signal is independent, and
 # each is offered only to Agents that declare they can report it. The endpoints are full OTLP/HTTP
 # URLs WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing

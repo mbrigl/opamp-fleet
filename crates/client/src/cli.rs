@@ -119,10 +119,10 @@ pub enum Command {
 /// Arguments for `run`.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
-    /// Set by `service install`; routes into the Windows SCM dispatcher. Hidden, and ignored on
-    /// non-Windows platforms (where the manager supervises a plain foreground process).
+    /// Set by `service install` on every platform. On Windows it routes into the SCM dispatcher;
+    /// everywhere it says the machine's service manager started this process and no terminal is
+    /// watching, which is what turns on the log file (ADR-0041).
     #[arg(long, hide = true)]
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub service: bool,
 }
 

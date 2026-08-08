@@ -15,6 +15,118 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **A Client running as a service now writes its own log to disk**
+  ([ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)), at
+  `<state_dir>/logs/`, one file per day with seven days kept.
+
+  **On Windows this closes a hole**: the SCM discards a service's stderr, so a Client installed
+  there had no readable log at all — a service that would not start left nothing behind to explain
+  why. The file is written on Linux and macOS too, where it duplicates `journalctl` and
+  Console/`log show`, so that the answer to "where are the logs" is the same on every platform and
+  in a container, where neither exists.
+
+  Running the Client in the foreground writes no file; stderr is already in front of you.
+
+  It is not a replacement for `ReportsOwnLogs` (ADR-0036): that ships to a destination the Server
+  offers, over a connection that must already work, and the failures most worth reading are the ones
+  where it does not.
+
+  The new `[logging]` section moves the directory, changes the retention, or switches it off:
+
+  ```toml
+  [logging]
+  dir = "/var/log/opamp"   # default: <state_dir>/logs
+  keep = 7                 # daily files kept, then deleted
+  enabled = false          # write nothing
+  ```
+
+  **`keep = 0` is refused at startup** rather than read as "keep everything": on a fleet host the
+  unbounded setting is the one that fills a disk, so switching the log off is spelled
+  `enabled = false`. A log directory that cannot be written is reported and the Client runs anyway.
+
+- **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
+  and the package list in the UI shows `⚠ reaches no agent` when it is zero.
+
+  This closes a silent failure the follow-ups of ADR-0031, ADR-0033 and ADR-0034 all named: a
+  package can target nobody — through an Agent type that is unset or misspelled, artifacts for
+  platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
+  The package stored fine and reached no one, and nothing said so until somebody noticed the version
+  had not moved.
+
+  The count is the Server's own resolution of the offer, not a second calculation beside it, so it
+  cannot claim a reach the fleet does not get. It counts the fleet **as reported so far**: a package
+  staged ahead of the hosts it is meant for reads `0` legitimately, which is why it is a number to
+  read rather than a rejected upload.
+
+- **An Agent can be forgotten** ([ADR-0039](docs/adr/0039-forgetting-an-agent.md)).
+  `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
+  bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
+  row forever.
+
+  **It reaches no host.** Nothing is stopped, nothing is uninstalled, and no credential is revoked —
+  a credential here proves fleet membership, not one Agent's identity, so there is none to revoke.
+  A Client that is still configured for this Server therefore reappears on its next report. To
+  remove an agent for good, stop it on the machine; forgetting only tidies the view.
+
+  It is refused with `409` while the Agent is still reporting — that is, while it is connected *and*
+  something has been heard from it within the staleness budget. Forgetting drops the hashes that stop
+  the Server re-offering, so a live Agent would be sent its configuration again, and a managed
+  process restarts when one arrives. Stop the agent, or wait for it to fall silent.
+
+  An Agent that was forgotten and comes back is offered its configuration, its connection settings,
+  and its packages again. Packages cost nothing — the Client re-installs nothing it already has —
+  but the configuration is applied again, which for a managed agent is one restart.
+
+- **A fleet row now says when an Agent stopped talking**
+  ([ADR-0038](docs/adr/0038-an-agent-that-stops-reporting-goes-stale.md)). `AgentView` gains
+  `stale`, and the bundled UI shows it beside the connection pill.
+
+  It is a second fact, not a replacement: `connected` still means "a connection carrying this Agent
+  is open" — behind a Gateway, the *Gateway's* — and `stale` means nothing has been heard from the
+  Agent itself for longer than its budget. `connected: true, stale: true` is exactly the gatewayed
+  case, and it was invisible before.
+
+  Only an Agent declaring `ReportsHeartbeat` can go stale: that capability is the promise that makes
+  silence meaningful. The budget is the offered `heartbeat_interval_secs` times three, or
+  `stale_after_secs` in `server.toml` (default 90) when no interval is offered.
+
+  Nothing changes for a stale Agent — it keeps its configuration, its packages, and its identity,
+  and its next report clears the flag. Nothing is stored and no timer runs.
+
+- **Gateway Mode** ([ADR-0037](docs/adr/0037-gateway-mode.md)): a Client can now stand at a network
+  boundary, accept OpAMP from other Clients, and carry them upstream over a small pool of
+  connections. This is the last of the specification's goals to be built.
+
+  ```toml
+  [gateway]
+  listen = "0.0.0.0:4320"
+  upstream_connections = 10       # a cap, not a count
+  [gateway.tls]                   # optional; the downstream hop's own TLS
+  cert_file = "gateway.pem"
+  key_file = "gateway-key.pem"
+  client_ca_file = "client-ca.pem"
+  ```
+
+  Point the Clients behind it at the Gateway's address instead of the Server's — nothing else about
+  them changes, and the Server sees them as the Agents they are. Both transports are served
+  downstream, so a polling Client works as well as a WebSocket one.
+
+  **The pool costs what it uses.** `upstream_connections` is a ceiling: connections are opened as
+  Agents appear, so a Gateway in front of three Agents holds three. Each Agent sticks to its
+  connection for as long as it lives.
+
+  **A Gateway makes no authentication decisions.** It forwards each peer's credential upstream
+  untouched. Mutual TLS is per hop: `[gateway.tls]` verifies the Agents connecting *to* it, while
+  the identity it presents *to the Server* is its own, from the top-level `[tls]` or the CSR flow.
+  The Gateway's upstream endpoint must be `ws://` or `wss://` — a polling connection could not carry
+  the Server's pushes to the Agents behind it, and the configuration says so at startup.
+
+  **Two limits to know.** An Agent whose Client vanishes without saying goodbye stays "connected" in
+  the fleet view until someone notices: the Gateway forwards no `agent_disconnect` it did not
+  receive, because that would put words in an Agent's mouth. And when a pooled connection drops, the
+  Server marks every Agent that rode it disconnected until each reports again — one heartbeat
+  interval where one is configured.
+
 - **Every Agent can now report its own telemetry** — metrics, logs, and traces — to a destination
   the **Server** names ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).
 

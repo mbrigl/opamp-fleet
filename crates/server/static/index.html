@@ -271,6 +271,7 @@
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+        <span id="fleet-error" class="err"></span>
       </div>
 
       <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
@@ -369,9 +370,14 @@
       };
 
       function statusPill(a) {
-        return a.connected
+        // Two facts, not one (ADR-0038): the pill says whether a connection is open — behind a
+        // Gateway, the Gateway's — and "Stale" beside it says the Agent itself stopped talking.
+        const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
           : `<span class="pill gray"><span class="dot"></span>Disconnected</span>`;
+        return a.stale
+          ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
+          : base;
       }
       function configPill(a) {
         if (a.remote_config_status === "FAILED")
@@ -415,6 +421,10 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        // Offered on every row rather than pre-filtered (ADR-0039): whether an Agent may be
+        // forgotten is a question about silence, which this view does not carry. The Server holds
+        // the rule and says no with a reason — one place to be right instead of two to drift.
+        chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
         }
@@ -448,7 +458,7 @@
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -519,6 +529,19 @@
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
             .then(() => refreshAgents());
+          return;
+        }
+        const forget = e.target.closest(".forget-btn");
+        if (forget) {
+          fetch(`/api/v1/agents/${encodeURIComponent(forget.dataset.uid)}`, { method: "DELETE" })
+            .then(async (res) => {
+              // A refusal is a normal answer here — the Agent is still reporting — so it is shown
+              // rather than swallowed.
+              $("fleet-error").textContent = res.ok
+                ? ""
+                : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+              refreshAgents();
+            });
           return;
         }
         const comp = e.target.closest(".comp-toggle");
@@ -689,12 +712,22 @@
       // One chip per artifact, not per package: a name with five platforms is five different
       // binaries with five versions and five rollback histories, and a list that showed one row
       // would have to pick one of them to be honest about.
+      // How many Agents this package reaches, as the Server resolves it. The count belongs to the
+      // *name*, not to the artifact the chip shows: a package reaches an Agent through whichever
+      // platform fits it. Zero is the case worth seeing — a mistyped agent type, a Selector that
+      // matches nobody, or artifacts for platforms this fleet does not run — none of which is an
+      // upload error, so nothing else would say it.
+      const reachText = (p) => {
+        if (typeof p.targeted_agents !== "number") return "";
+        if (p.targeted_agents === 0) return " · ⚠ reaches no agent";
+        return ` · ${p.targeted_agents} agent${p.targeted_agents === 1 ? "" : "s"}`;
+      };
       function renderPackageList() {
         const chips = packages.flatMap((p) =>
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
             const selected = p.name === selectedPackage && tag === selectedPlatform;
-            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
           })
         );
         $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;

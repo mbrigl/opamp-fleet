@@ -35,7 +35,10 @@ use server::fleet::{AgentView, AppState};
 /// and never collides with an operator's `default`.
 const INSTANCE: &str = "ci-smoke";
 
-/// What the Agent calls itself, so it can be found in the fleet view.
+/// The operator's name for this Agent — written as `name` in the `client.toml` below and reported
+/// as `service.instance.name` (ADR-0033), which is what the fleet view is searched by. Deliberately
+/// not `service.name`: that carries the Agent *type*, which for this Client is always
+/// `opamp-fleet-client` and is the same for every instance.
 const AGENT_NAME: &str = "service-smoke-client";
 
 fn instance() -> InstanceName {
@@ -96,7 +99,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
     state
         .snapshot()
         .into_iter()
-        .find(|a| a.service_name == AGENT_NAME)
+        .find(|a| a.service_instance_name == AGENT_NAME)
 }
 
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running

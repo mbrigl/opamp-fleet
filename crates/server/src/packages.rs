@@ -1071,6 +1071,24 @@ impl PackageStore {
         }))
     }
 
+    /// The names of the packages this Agent would actually be offered — fitted by Agent type and
+    /// platform, then aimed by Selector.
+    ///
+    /// Deliberately the same [`resolve`] the offer itself runs, so a count built from this cannot
+    /// claim a reach the fleet does not get. Ambiguous targeting yields nothing, exactly as it does
+    /// for the offer: the Server refuses to guess, so the Agent receives no package.
+    pub fn offered_names(&self, description: Option<&AgentDescription>) -> Vec<String> {
+        let packages = self.packages.read().expect("packages lock");
+        resolve(&packages, description)
+            .map(|matching| {
+                matching
+                    .iter()
+                    .map(|(name, _)| (*name).to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The aggregate hash for one Agent, to gate re-offering without building the whole message.
     /// Empty when nothing matches or the targeting is ambiguous — in both cases the Agent is
     /// offered nothing, and has nothing to be in sync with.
@@ -1311,6 +1329,79 @@ mod tests {
         store
             .set_service_name(name, "otelcol".to_string())
             .expect("agent type");
+    }
+
+    /// The reach count and the offer must never disagree — the count exists to predict what an
+    /// Agent gets, so it is built from the same `resolve` and this asserts the two stay one thing.
+    #[test]
+    fn what_a_package_reaches_is_exactly_what_it_is_offered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+
+        let linux_agent = agent("linux", "amd64", &[]);
+        let windows_agent = agent("windows", "amd64", &[]);
+
+        // No Agent type yet: inert, and the count says so rather than the operator finding out
+        // when a rollout reaches nobody.
+        assert!(store.offered_names(Some(&linux_agent)).is_empty());
+        assert!(offered(&store, &linux_agent).is_empty(), "and no offer");
+
+        arm(&store, "otelcol");
+        assert_eq!(store.offered_names(Some(&linux_agent)), ["otelcol"]);
+        assert_eq!(
+            offered(&store, &linux_agent),
+            vec![("otelcol".to_string(), "1.0.0".to_string())],
+            "the count predicted the offer"
+        );
+
+        // No artifact for that platform (ADR-0031): reached by neither.
+        assert!(store.offered_names(Some(&windows_agent)).is_empty());
+        assert!(offered(&store, &windows_agent).is_empty());
+
+        // A Selector that matches nobody is the third way to reach zero, and the least visible.
+        store
+            .set_selector(
+                "otelcol",
+                BTreeMap::from([("env".to_string(), "prod".to_string())]),
+            )
+            .expect("selector");
+        assert!(store.offered_names(Some(&linux_agent)).is_empty());
+        assert!(offered(&store, &linux_agent).is_empty());
+        assert_eq!(
+            store.offered_names(Some(&agent("linux", "amd64", &[("env", "prod")]))),
+            ["otelcol"],
+            "and the Agent it does aim at is reached"
+        );
+    }
+
+    /// An Agent reporting nothing identifiable fits nothing — the count must not invent a reach
+    /// where the offer refuses to guess one.
+    #[test]
+    fn an_agent_that_reports_nothing_is_reached_by_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        arm(&store, "otelcol");
+        assert!(store.offered_names(None).is_empty());
     }
 
     fn offered(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {

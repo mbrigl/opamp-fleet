@@ -10,6 +10,7 @@ Server sends them, reports back what they are doing, and can replace their binar
 - [Running it](#running-it)
 - [Running it as an OS service](#running-it-as-an-os-service)
 - [Configuration reference](#configuration-reference)
+- [Gateway Mode: carrying other Clients](#gateway-mode-carrying-other-clients)
 - [Supervisors: putting a process under management](#supervisors-putting-a-process-under-management)
 - [Which programs take updates](#which-programs-take-updates)
 - [Agents that are more than one file](#agents-that-are-more-than-one-file)
@@ -137,6 +138,43 @@ So the same command works everywhere it exists: `systemctl status opamp-fleet-cl
 Where a platform has a second, human-readable name, it is **OpAMP Fleet Client** (`OpAMP Fleet
 Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
 as its `Description`, and a launchd job has no name besides its label.
+
+### Where the service's logs are
+
+A Client started by the service manager writes its own log to **`<state_dir>/logs/`** on every
+platform (ADR-0041), one file per day, seven days kept:
+
+```
+<state_dir>/logs/opamp-fleet-client.2026-08-09.log
+```
+
+**On Windows this is the only copy there is** — the SCM discards a service's stderr, so `sc query`
+telling you the service will not start is all the platform itself offers. On Linux and macOS the
+same lines are also in `journalctl -u opamp-fleet-client` and Console/`log show`; the file is
+written anyway so the answer to "where are the logs" is the same everywhere, including in a
+container where neither exists.
+
+Running the Client **in the foreground writes no file** — stderr is right there in front of you.
+
+The `[logging]` section moves it, changes how many days are kept, or turns it off:
+
+```toml
+[logging]
+dir = "/var/log/opamp"   # default: <state_dir>/logs
+keep = 7                 # daily files kept, then deleted
+enabled = false          # write nothing; for a host whose platform already collects stderr
+```
+
+`keep = 0` is **refused at startup**. It is a retention bound, not a switch — on a fleet host the
+unbounded setting is the one that eventually fills a disk, so turning the log off is spelled
+`enabled = false` and cannot be reached by typing a zero. If the directory cannot be written, the
+Client says so and runs anyway: a monitoring agent that refuses to start because of its own log
+file has turned a diagnostic into an outage.
+
+This is a different thing from the Client's own telemetry (`ReportsOwnLogs`, ADR-0036), which ships
+log records to a destination the **Server** offers. That needs a Server it can already reach — which
+is exactly what a bad `client.toml`, an unusable certificate, or a refused endpoint does not give
+it. The file on disk is what explains those.
 
 The Windows services list has a **Description** column beside that name, and it is a separate field
 that nothing fills on its own — a service can carry a display name and still show an empty
@@ -314,6 +352,54 @@ package = "opamp-fleet-client"
 See [Updating the Client itself](#updating-the-client-itself). Absent — the default — the Client's
 own Agent declares no package capability at all and no offer can reach it.
 
+## Gateway Mode: carrying other Clients
+
+A Client can stand at a network boundary and carry other Clients' Agents upstream over a small pool
+of connections (ADR-0037) — for a segmented network the Server cannot reach into, or simply for a
+fleet too large to give every Agent its own connection:
+
+```toml
+[gateway]
+listen = "0.0.0.0:4320"
+upstream_connections = 10          # a cap, not a count
+```
+
+Point the Clients behind it at this address instead of the Server's. Nothing else about them
+changes: the Server tells Agents apart by `instance_uid`, never by the connection that carried them,
+so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
+downstream, so a polling Client works as well as a WebSocket one.
+
+`upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
+front of three Agents holds three, and each Agent stays on its connection while that lives.
+
+This mode composes with `[[supervisor]]` blocks: one host may supervise its own processes *and*
+gateway for others.
+
+### What a Gateway does not do
+
+- **It makes no authentication decision.** Each downstream peer's credential is forwarded upstream
+  untouched, so policy stays on the Server and rotating a credential never means visiting gateways.
+- **It never speaks for an Agent.** If a downstream Client disappears without sending
+  `agent_disconnect`, the Gateway forwards nothing — inventing that message would tell the Server
+  the Agent said something it did not. What makes such an Agent visible instead is the Server's
+  staleness flag (ADR-0038): the connection stays up, because it is the Gateway's, and the row reads
+  **Connected + Stale**. It needs a heartbeat configured on the Agent to work, since staleness only
+  applies to Agents that promised to report periodically.
+- **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop (ADR-0035):
+  `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
+  this Client's own, from the top-level `[tls]` or issued through the CSR flow.
+
+```toml
+[gateway.tls]
+cert_file = "gateway.pem"          # what this Gateway presents to its Agents
+key_file = "gateway-key.pem"
+client_ca_file = "client-ca.pem"   # optional: require a certificate from them
+```
+
+The upstream endpoint must be `ws://` or `wss://`. A polling connection cannot carry the Server's
+pushes to the Agents behind a Gateway, and the configuration refuses it at startup rather than
+leaving you to notice that configuration changes never arrive.
+
 ## Supervisors: putting a process under management
 
 Each `[[supervisor]]` block runs one Supervisor managing one local process, and appears to the
@@ -476,6 +562,7 @@ The Client's own Agent keeps its state in `state_dir`:
 <state_dir>/remote-config.pb          # the last configuration it received
 <state_dir>/connection-settings.pb    # Server-offered settings, if any
 <state_dir>/packages/                 # staging for a self-update artifact
+<state_dir>/logs/                     # the service's own rotating log (ADR-0041)
 ```
 
 Each Supervisor owns everything under its own directory (ADR-0021):

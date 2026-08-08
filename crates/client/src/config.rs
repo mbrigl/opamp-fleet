@@ -1,6 +1,7 @@
 //! The Client's own configuration file — TOML (ADR-0008).
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -8,7 +9,7 @@ use serde::Deserialize;
 
 /// `client.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
 /// startup instead of silently applying a default.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     /// The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0007):
@@ -50,6 +51,8 @@ pub struct ClientConfig {
     /// code or the Managed Process reports win over configured ones.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
+    /// Optional Gateway Mode (ADR-0037); absent means this Client gateways for nobody.
+    pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// Optional authentication toward the Server (ADR-0013); absent means no `Authorization`
@@ -65,6 +68,10 @@ pub struct ClientConfig {
     /// Consent for the Server to replace this Client's own binary (ADR-0020); absent — the
     /// default — means the Client's Agent accepts no packages at all.
     pub self_update: Option<SelfUpdateConfig>,
+    /// Where this Client's own log goes when it runs as a service (ADR-0041). Absent takes the
+    /// defaults: a rotating file in the state directory, seven days kept.
+    #[serde(default)]
+    pub logging: LoggingConfig,
     /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
@@ -400,7 +407,7 @@ fn take_string_table(
 
 /// The `[auth]` block (ADR-0013): exactly one scheme — `bearer_token`, or `username` and
 /// `password` together. Mixing or halving them fails loudly at startup (ADR-0008).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     pub bearer_token: Option<String>,
@@ -428,7 +435,7 @@ impl AuthConfig {
 }
 
 /// The `[packages]` block (ADR-0015): how downloaded package artifacts are verified.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
     /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
@@ -448,7 +455,7 @@ pub struct PackagesConfig {
 ///
 /// Absent — the default — the Client's own Agent declares no package capability at all, and no
 /// offer can reach it. Present, it takes exactly the package named here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
     /// The name of the package that carries this Client. **Required**, and the whole of the
@@ -459,7 +466,101 @@ pub struct SelfUpdateConfig {
     pub package: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// The `[logging]` section (ADR-0041): this Client's own log, on disk, while it runs as a service.
+///
+/// It exists because the Windows SCM discards a service's stderr, so a Client installed there had
+/// no readable log at all — and because the OTLP own-logs bridge (ADR-0036) needs a Server that is
+/// already reachable, which is precisely what a startup failure is not. In the foreground nothing
+/// is written: somebody is reading stderr there.
+///
+/// It is the machine's, never the Server's. A Server able to redirect or silence a Client's own log
+/// could hide its own effects, so nothing here arrives over the wire.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    /// Write the file at all. `false` is for an operator whose platform already collects stderr —
+    /// systemd and launchd do — and who does not want the copy.
+    #[serde(default = "default_logging_enabled")]
+    pub enabled: bool,
+    /// Where the file goes. Absent puts it in the instance's state directory, which survives an
+    /// update and which `uninstall` deliberately does not delete (ADR-0010) — the lifetime a log
+    /// wants, since one that vanished with a failed install would be missing exactly when needed.
+    pub dir: Option<PathBuf>,
+    /// How many daily files to keep. The bound is not optional: `0` is refused at load rather than
+    /// read as "keep everything", because unbounded is the setting that fills a disk on a host
+    /// nobody is watching.
+    #[serde(default = "default_log_keep_days")]
+    pub keep: usize,
+}
+
+fn default_logging_enabled() -> bool {
+    true
+}
+
+fn default_log_keep_days() -> usize {
+    7
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        LoggingConfig {
+            enabled: default_logging_enabled(),
+            dir: None,
+            keep: default_log_keep_days(),
+        }
+    }
+}
+
+/// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
+/// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
+/// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
+/// (ADR-0003).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayConfig {
+    /// Where the downstream OpAMP endpoint binds. No default: a Gateway that binds nothing is a
+    /// configuration error, and loopback is the Supervisor Endpoint's job.
+    pub listen: SocketAddr,
+    /// The **cap** on upstream connections, not the count. The pool grows to it as Agents appear
+    /// and never beyond, so a Gateway in front of three Agents holds three connections.
+    #[serde(default = "default_upstream_connections")]
+    pub upstream_connections: usize,
+    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0035): what this verifies is the
+    /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    pub tls: Option<GatewayTlsConfig>,
+}
+
+/// The downstream hop's TLS material (ADR-0037). Separate from the top-level `[tls]`, which is
+/// about reaching the Server: this is about being reached.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayTlsConfig {
+    /// PEM certificate chain this Gateway presents to the Agents that connect to it.
+    pub cert_file: PathBuf,
+    /// PEM private key for it.
+    pub key_file: PathBuf,
+    /// Optional PEM bundle a downstream Agent's client certificate must chain to. Absent accepts
+    /// any peer at the TLS layer, which is what a fleet still bootstrapping wants.
+    pub client_ca_file: Option<PathBuf>,
+}
+
+impl GatewayConfig {
+    /// Loud validation (ADR-0008): a pool of zero would carry nothing, and the pool is a WebSocket
+    /// pool — a polling upstream cannot carry the Server's pushes to the Agents behind it.
+    fn check(&self, endpoint: &str) -> Result<(), String> {
+        if self.upstream_connections == 0 {
+            return Err("[gateway] upstream_connections must be at least 1".to_string());
+        }
+        if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
+            return Err(format!(
+                "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} —                  a polling connection cannot carry the Server's pushes to the Agents behind a                  Gateway"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
@@ -514,6 +615,12 @@ fn default_heartbeat_interval_secs() -> u64 {
     30
 }
 
+/// The pool cap when none is configured — the OpAMP Gateway Extension's default (ADR-0037). It is
+/// a ceiling, not a cost: connections are opened as Agents appear.
+fn default_upstream_connections() -> usize {
+    10
+}
+
 fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
@@ -535,12 +642,14 @@ impl Default for ClientConfig {
         ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
+            logging: LoggingConfig::default(),
             service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
             supervisor_dir: None,
             attributes: BTreeMap::new(),
+            gateway: None,
             tls: None,
             auth: None,
             authorization_override: None,
@@ -574,6 +683,11 @@ impl ClientConfig {
             tls.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        if let Some(gateway) = &config.gateway {
+            gateway
+                .check(&config.endpoint)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         // Decode the package verification key once — a malformed key must fail startup, not the
         // first package offer.
         if let Some(key_hex) = config
@@ -594,6 +708,16 @@ impl ClientConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        // The retention bound is not optional (ADR-0041). Elsewhere a zero often means "no limit";
+        // here that is the one setting that fills a disk on a host nobody is watching, so it fails
+        // startup instead of being reachable by typing a digit.
+        if config.logging.enabled && config.logging.keep == 0 {
+            return Err(format!(
+                "{}: [logging] keep must be at least 1 — it is a retention bound, not a switch; \
+                 set enabled = false to write no log at all",
                 path.display()
             ));
         }
@@ -759,6 +883,49 @@ mod tests {
             toml::from_str::<ClientConfig>("service_namesapce = \"telemetry\"\n").is_err(),
             "a typo fails startup rather than silently reporting no namespace"
         );
+    }
+
+    /// ADR-0041. The log is on by default with a bound that cannot be removed, and `[logging]` is
+    /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
+    /// that would have explained the next failure.
+    #[test]
+    fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
+        let defaults = ClientConfig::default().logging;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.keep, 7);
+        assert!(defaults.dir.is_none(), "the state directory decides");
+
+        let configured: ClientConfig =
+            toml::from_str("[logging]\nkeep = 3\ndir = \"/var/log/opamp\"\n").expect("parse");
+        assert_eq!(configured.logging.keep, 3);
+        assert_eq!(
+            configured.logging.dir.expect("dir"),
+            PathBuf::from("/var/log/opamp")
+        );
+
+        let off: ClientConfig = toml::from_str("[logging]\nenabled = false\n").expect("parse");
+        assert!(!off.logging.enabled);
+
+        assert!(
+            toml::from_str::<ClientConfig>("[logging]\nkep = 3\n").is_err(),
+            "a typo fails startup rather than silently taking the default"
+        );
+
+        // `keep = 0` is the one setting that fills a disk on a host nobody watches, so it is not
+        // reachable: it fails startup and the message points at the switch that does mean "off".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "[logging]\nkeep = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero retention must fail startup");
+        assert!(err.contains("keep"), "{err}");
+        assert!(
+            err.contains("enabled = false"),
+            "it names the way out: {err}"
+        );
+
+        // ...but a zero is irrelevant when no file is written at all.
+        std::fs::write(&path, "[logging]\nenabled = false\nkeep = 0\n").expect("write");
+        assert!(ClientConfig::load(&path).is_ok());
     }
 
     /// ADR-0020: self-update is off unless the file says otherwise, and saying so means naming the

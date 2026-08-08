@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
@@ -31,6 +31,9 @@ use crate::packages::PackageStore;
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
 pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0038).
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
@@ -93,6 +96,16 @@ pub enum RestartError {
     /// The Agent does not declare `AcceptsRestartCommand` — capability negotiation is binding,
     /// so the Server refuses rather than sending a command the Agent would ignore.
     NoCapability,
+}
+
+/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0039).
+pub enum ForgetError {
+    /// No Agent of that identity is known.
+    UnknownAgent,
+    /// The Agent is still reporting — connected, and not stale. Forgetting it would drop the
+    /// hashes that stop the Server re-offering, so its next exchange would re-apply its
+    /// configuration, which for a managed Agent restarts the Managed Process.
+    StillReporting,
 }
 
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
@@ -220,6 +233,10 @@ pub struct AppState {
     /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
     /// message, so it is bounded separately and far more generously.
     max_package_size: usize,
+    /// How long an Agent that promised to report periodically may be silent before the fleet view
+    /// calls it stale (ADR-0038). Overridden by an offered heartbeat interval, which is the period
+    /// this Server actually asked for.
+    stale_after: Duration,
 }
 
 impl AppState {
@@ -245,6 +262,7 @@ impl AppState {
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
+            stale_after: DEFAULT_STALE_AFTER,
         })
     }
 
@@ -279,6 +297,29 @@ impl AppState {
     pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
         self.connection_offer = offer;
         self
+    }
+
+    /// Sets how long a heartbeating Agent may be silent before it reads as stale (ADR-0038).
+    #[must_use]
+    pub fn with_stale_after(mut self, stale_after: Duration) -> Self {
+        self.stale_after = stale_after;
+        self
+    }
+
+    /// The staleness budget in force: the heartbeat interval this Server offered when it offered
+    /// one — the period it actually asked for — else the configured default. Three of them, not
+    /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
+    /// hiccup is one nobody trusts.
+    fn stale_after(&self) -> Duration {
+        match self
+            .connection_offer
+            .as_ref()
+            .map(|offer| offer.settings.heartbeat_interval_seconds)
+            .filter(|seconds| *seconds > 0)
+        {
+            Some(seconds) => Duration::from_secs(seconds.saturating_mul(3)),
+            None => self.stale_after,
+        }
     }
 
     /// Offers the fleet somewhere to send its own telemetry (ADR-0036).
@@ -367,6 +408,61 @@ impl AppState {
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "restart requested");
+        Ok(())
+    }
+
+    /// How many Agents in the fleet each stored package would actually reach today.
+    ///
+    /// A package is inert until its Agent type is set (ADR-0034), it only reaches hosts it has an
+    /// artifact for (ADR-0031), and its Selector narrows it further (ADR-0017) — three ways to
+    /// target nobody, none of which announces itself. A typo in a `service_name` is not a rejected
+    /// upload; it is a rollout that silently arrives nowhere, and there is no canonicalisation that
+    /// would catch it. Counting is what turns that into something an operator can see.
+    ///
+    /// It answers for the fleet *as reported so far*: a package aimed at hosts that have not
+    /// connected yet legitimately reaches nobody, which is why this is a count to be read rather
+    /// than an error to be raised.
+    pub fn package_reach(&self) -> BTreeMap<String, usize> {
+        let mut reach = BTreeMap::new();
+        let Some(store) = self.packages() else {
+            return reach;
+        };
+        let fleet = self.fleet.lock().expect("fleet lock");
+        for record in fleet.values() {
+            for name in store.offered_names(record.description.as_ref()) {
+                *reach.entry(name).or_insert(0) += 1;
+            }
+        }
+        reach
+    }
+
+    /// Forgets everything this Server knows about one Agent (ADR-0039): the record is dropped and
+    /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
+    /// credential revoked, since a credential here proves fleet membership and never which Agent
+    /// is speaking (ADR-0013, ADR-0035). A Client still running therefore reappears on its next
+    /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
+    ///
+    /// Refused while the Agent is still reporting: the record holds the hashes that gate
+    /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
+    /// Collector plugin restarts its Managed Process when a configuration arrives. An operator who
+    /// wants a restart asks for one through [`request_restart`](Self::request_restart).
+    ///
+    /// `connected` alone would not do. Behind a Gateway the open connection is the *Gateway's*, so
+    /// a Gatewayed Agent that died still reads as connected; and plain-HTTP polling has no socket
+    /// to close, so an Agent that stops polling without saying goodbye stays connected forever.
+    /// Silence is the second half of the test — and it is [`is_silent`], not [`is_stale`]: an
+    /// Agent that declared no heartbeat is never called stale, and gating on staleness would leave
+    /// its row on a decommissioned host permanently unremovable.
+    pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get(uid).ok_or(ForgetError::UnknownAgent)?;
+        if record.connected && !is_silent(record, self.stale_after()) {
+            return Err(ForgetError::StillReporting);
+        }
+        fleet.remove(uid);
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "agent forgotten");
         Ok(())
     }
 
@@ -988,7 +1084,14 @@ impl AppState {
                 let desired = self.configs.desired_for(record.description.as_ref());
                 let matched = self.configs.matching_names(record.description.as_ref());
                 let package_conflict = self.package_conflict(record);
-                AgentView::from_record(uid, record, desired.as_ref(), matched, package_conflict)
+                AgentView::from_record(
+                    uid,
+                    record,
+                    desired.as_ref(),
+                    matched,
+                    package_conflict,
+                    self.stale_after(),
+                )
             })
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
@@ -1106,6 +1209,16 @@ pub struct AgentView {
     pub in_sync: bool,
     pub sequence_num: u64,
     pub last_seen_ms: u64,
+    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0038).
+    ///
+    /// Beside [`connected`](Self::connected), never instead of it: that one says a connection
+    /// carrying this Agent is open — behind a Gateway, the *Gateway's* — and this one says whether
+    /// the Agent itself is still talking. `connected: true, stale: true` is precisely the gatewayed
+    /// case, and precisely what an operator needs to be told.
+    ///
+    /// Only an Agent declaring `ReportsHeartbeat` can be stale: that capability is the promise that
+    /// makes silence mean something. Derived on read, never stored.
+    pub stale: bool,
 }
 
 /// One package's installation state as the REST API and UI see it (ADR-0015).
@@ -1222,6 +1335,7 @@ impl AgentView {
         desired: Option<&DesiredConfig>,
         matched_configurations: Vec<String>,
         package_conflict: Option<String>,
+        stale_after: Duration,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
             Some(d) => (
@@ -1307,8 +1421,31 @@ impl AgentView {
             in_sync,
             sequence_num: record.sequence_num,
             last_seen_ms: record.last_seen_ms,
+            stale: is_stale(record, stale_after),
         }
     }
+}
+
+/// Whether nothing has been heard from this Agent for longer than its budget (ADR-0038).
+///
+/// Gated on `ReportsHeartbeat`: an Agent that never promised to report periodically is not late,
+/// however long it has been quiet, and flagging it would train an operator to ignore the flag.
+fn is_stale(record: &AgentRecord, stale_after: Duration) -> bool {
+    if record.capabilities & opamp::proto::AgentCapabilities::ReportsHeartbeat as u64 == 0 {
+        return false;
+    }
+    is_silent(record, stale_after)
+}
+
+/// Nothing has been heard from this Agent for longer than `budget` — the plain fact, without the
+/// promise [`is_stale`] adds on top of it.
+///
+/// The two are deliberately not the same test. Calling an Agent *stale* accuses it of being late,
+/// which is only fair when it declared `ReportsHeartbeat` and so promised to be punctual. Asking
+/// whether it is safe to forget (ADR-0039) is a question about evidence, not about promises: an
+/// Agent nobody has heard from cannot be disturbed by being forgotten, whatever it once declared.
+fn is_silent(record: &AgentRecord, budget: Duration) -> bool {
+    now_ms().saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
 }
 
 /// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
@@ -1381,6 +1518,163 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The gatewayed case, which is why this exists: the connection is up — it is the Gateway's —
+    /// and the Agent behind it has stopped talking. Both facts are reported, neither overwrites
+    /// the other (ADR-0038).
+    #[test]
+    fn an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up() {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
+        record.connected = true;
+        record.last_seen_ms = now_ms() - 120_000;
+        assert!(is_stale(&record, Duration::from_secs(90)));
+        assert!(record.connected, "connectedness is a separate fact");
+    }
+
+    /// One missed beat is a lost packet. The budget is three intervals, so a report inside it is
+    /// not late.
+    #[test]
+    fn an_agent_inside_its_budget_is_not_stale() {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
+        record.last_seen_ms = now_ms() - 40_000;
+        assert!(!is_stale(&record, Duration::from_secs(90)));
+    }
+
+    /// An Agent that never promised to report periodically is not late, however long it is quiet —
+    /// flagging it would train an operator to ignore the flag.
+    #[test]
+    fn an_agent_that_promised_no_heartbeat_never_goes_stale() {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.last_seen_ms = now_ms() - 86_400_000;
+        assert!(!is_stale(&record, Duration::from_secs(90)));
+    }
+
+    /// The offered interval wins over the configured default: it is the period this Server actually
+    /// asked for, so it is the one silence should be measured against.
+    #[test]
+    fn an_offered_heartbeat_interval_sets_the_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let offer = ConnectionOffer::from_config(
+            &toml::from_str::<crate::config::ConnectionOfferConfig>(
+                "heartbeat_interval_secs = 10\n",
+            )
+            .expect("offer config"),
+        )
+        .expect("offer");
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_connection_offer(Some(offer))
+            .with_stale_after(Duration::from_secs(90));
+        assert_eq!(
+            state.stale_after(),
+            Duration::from_secs(30),
+            "three intervals"
+        );
+    }
+
+    /// ADR-0039. The tidy-up case: a host that was decommissioned, its Agent gone with it.
+    #[test]
+    fn a_disconnected_agent_is_forgotten() {
+        let state = forgettable_state();
+        let uid = insert(&state, record_with(0));
+        assert!(state.forget_agent(&uid).is_ok());
+        assert!(state.snapshot().is_empty(), "the row is gone");
+    }
+
+    /// The gate: forgetting a live Agent would drop the hashes that stop the Server re-offering,
+    /// so its next exchange re-applies its configuration — and a managed process restarts with it.
+    #[test]
+    fn an_agent_that_is_still_reporting_is_refused() {
+        let state = forgettable_state();
+        let mut record = record_with(0);
+        record.connected = true;
+        record.last_seen_ms = now_ms();
+        let uid = insert(&state, record);
+        assert!(matches!(
+            state.forget_agent(&uid),
+            Err(ForgetError::StillReporting)
+        ));
+        assert_eq!(state.snapshot().len(), 1, "the row stays");
+    }
+
+    /// The gatewayed case: the connection is up because it is the *Gateway's*, and the Agent behind
+    /// it stopped talking long ago. `connected` alone would refuse this forever.
+    #[test]
+    fn a_connected_agent_that_went_quiet_is_forgotten() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
+        record.connected = true;
+        record.last_seen_ms = now_ms() - 120_000;
+        let uid = insert(&state, record);
+        assert!(state.forget_agent(&uid).is_ok());
+    }
+
+    /// The case that made the rule test silence rather than staleness (ADR-0039): an Agent that
+    /// promised no heartbeat is never *stale*, and plain-HTTP polling never clears `connected` —
+    /// so gating on the flag would have left this row on a dead host permanently unremovable.
+    #[test]
+    fn a_silent_agent_is_forgotten_although_it_can_never_be_stale() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.connected = true;
+        record.transport = Transport::Http;
+        record.last_seen_ms = now_ms() - 86_400_000;
+        let uid = insert(&state, record);
+        assert!(
+            !is_stale(&record_at(now_ms() - 86_400_000), Duration::from_secs(90)),
+            "it declares no heartbeat, so it is never stale"
+        );
+        assert!(state.forget_agent(&uid).is_ok(), "but it is forgettable");
+    }
+
+    #[test]
+    fn forgetting_an_agent_that_was_never_known_says_so() {
+        let state = forgettable_state();
+        assert!(matches!(
+            state.forget_agent(&InstanceUid::default()),
+            Err(ForgetError::UnknownAgent)
+        ));
+    }
+
+    fn forgettable_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The directory outlives the state only for the length of a test; the Configuration store
+        // is not what these exercise.
+        AppState::new(dir.keep().join("configs"))
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90))
+    }
+
+    fn insert(state: &AppState, record: AgentRecord) -> InstanceUid {
+        let uid = InstanceUid::default();
+        state.fleet.lock().expect("fleet lock").insert(uid, record);
+        uid
+    }
+
+    fn record_at(last_seen_ms: u64) -> AgentRecord {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.last_seen_ms = last_seen_ms;
+        record
+    }
+
+    fn record_with(capabilities: u64) -> AgentRecord {
+        AgentRecord {
+            sequence_num: 1,
+            capabilities,
+            description: None,
+            health: None,
+            effective_config: None,
+            remote_config_status: None,
+            transport: Transport::WebSocket,
+            connected: false,
+            last_seen_ms: now_ms(),
+            restart_pending: false,
+            available_components: None,
+            connection_settings_status: None,
+            package_statuses: None,
+            owner: None,
+        }
+    }
+
     /// ADR-0029: the fleet table shows the release, and the build stays reachable beside it. A
     /// Foreign Agent that numbers itself in its own way is shown as it reported.
     #[test]
