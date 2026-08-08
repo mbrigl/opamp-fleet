@@ -32,6 +32,11 @@ use server::packages::PackageStore;
 use client::selfupdate::EXIT_RESTART_FOR_UPDATE;
 use client::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 
+/// The version directory laid out before the update. Joined one component at a time, never as
+/// `versions/<name>`: this test builds the Windows pointer with `mklink`, a `cmd` builtin that
+/// reads an embedded `/` as the start of a switch.
+const PREVIOUS_VERSION_DIR: &str = "opamp-client-0.0.0-previous";
+
 async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -88,7 +93,7 @@ fn version_of(binary: &Path) -> String {
 /// host that installed by hand and one that arrived by package differ exactly here, and the
 /// interesting case is the one where the two names differ.
 fn install_layout(root: &Path, client: &Path) -> PathBuf {
-    let version_dir = root.join("versions/opamp-client-0.0.0-previous");
+    let version_dir = root.join("versions").join(PREVIOUS_VERSION_DIR);
     std::fs::create_dir_all(&version_dir).expect("create the version directory");
     let binary = version_dir.join(CLIENT_BINARY);
     std::fs::copy(client, &binary).expect("copy the client");
@@ -255,7 +260,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let current = std::fs::canonicalize(root.join("current")).expect("current resolves");
     assert_ne!(
         current,
-        std::fs::canonicalize(root.join("versions/opamp-client-0.0.0-previous"))
+        std::fs::canonicalize(root.join("versions").join(PREVIOUS_VERSION_DIR))
             .expect("the previous version"),
         "current still points at the version that was running before the update"
     );
@@ -264,7 +269,8 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         "the new version is staged"
     );
     assert!(
-        root.join("versions/opamp-client-0.0.0-previous")
+        root.join("versions")
+            .join(PREVIOUS_VERSION_DIR)
             .join(CLIENT_BINARY)
             .is_file(),
         "the version it replaced is kept, so a rollback has a target"
