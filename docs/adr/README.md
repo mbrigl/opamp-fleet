@@ -55,4 +55,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0024](0024-client-library-target.md) | The Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
 | [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟢 accepted |
 | [0026](0026-version-from-cargo-toml.md) | The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it | 🟡 proposed |
+| [0027](0027-interactive-install-writes-the-first-configuration.md) | The first configuration is written by an interactive install — asked once, never overwritten, validated before the service is registered | 🟢 accepted |
+| [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | 🟢 accepted |
 

@@ -5,21 +5,24 @@
 //! keeps working unchanged. The Client is file-configured (ADR-0008) — there are no environment
 //! fallbacks; the flags only say where the file is and which instance is meant.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 /// The OpAMP Fleet Client command-line interface.
 #[derive(Debug, Parser)]
 #[command(
-    name = "client",
+    name = "opamp-fleet-client",
     // The git-derived version baked in at build time (ADR-0009) — never clap's default, which
     // would silently report the static crate version.
     version = crate::version::version(),
-    about = "OpAMP Fleet Client — runs standalone or as a native OS service (ADR-0010)"
+    about = "OpAMP Fleet Client — runs standalone or as a native OS service"
 )]
 pub struct Cli {
-    /// Path to the TOML configuration file (ADR-0008); defaults apply if it does not exist.
+    // ADR-0008: the file is the whole configuration; the flag only says where it is.
+    /// Path to the TOML configuration file; defaults apply if it does not exist.
     #[arg(long, global = true, default_value = "client.toml")]
     pub config: PathBuf,
     /// Instance name: selects the service identity (`io.opamp-fleet.client.<instance>`) and the
@@ -35,6 +38,60 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// A parsed command line, plus the one thing the parsed struct cannot say: whether `--config`
+/// carries a path the operator named or the default that stands in for one (ADR-0027).
+///
+/// The distinction is load-bearing exactly once. `service install` bakes an absolute config path
+/// into the service unit, and when nobody named a path, the right one is not the default resolved
+/// against a working directory the service manager will not have — it is the install root, which
+/// is derived per platform, scope, and instance.
+#[derive(Debug)]
+pub struct Parsed {
+    /// The command line as declared.
+    pub cli: Cli,
+    /// `true` when `--config` appeared on the command line, at any level.
+    pub config_named: bool,
+}
+
+/// Parse the process arguments, exiting with clap's own message and exit code on a bad one.
+#[must_use]
+pub fn parse() -> Parsed {
+    match parse_from(std::env::args_os()) {
+        Ok(parsed) => parsed,
+        Err(e) => e.exit(),
+    }
+}
+
+/// Parse an explicit argument list — what [`parse`] does, minus the exit, so tests can reach it.
+///
+/// # Errors
+/// Returns clap's error for an argument list it refuses (including `--help` and `--version`,
+/// which clap reports the same way).
+pub fn parse_from<I, T>(args: I) -> Result<Parsed, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let matches = Cli::command().try_get_matches_from(args)?;
+    let config_named = config_named(&matches);
+    Ok(Parsed {
+        cli: Cli::from_arg_matches(&matches)?,
+        config_named,
+    })
+}
+
+/// Whether `--config` was given on the command line. A global argument may be parsed at the level
+/// it was written on, so both `client --config x service install` and
+/// `client service install --config x` have to count — hence the walk down the subcommands.
+fn config_named(matches: &ArgMatches) -> bool {
+    if matches.value_source("config") == Some(ValueSource::CommandLine) {
+        return true;
+    }
+    matches
+        .subcommand()
+        .is_some_and(|(_, sub)| config_named(sub))
+}
+
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -46,7 +103,8 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Prove that this executable is an OpAMP Fleet Client and say which version (ADR-0020).
+    // ADR-0020.
+    /// Prove that this executable is an OpAMP Fleet Client and say which version.
     ///
     /// Run as a child process on a freshly staged binary before the `current` pointer moves to
     /// it. Two things are being asked at once: *does it run at all* on this host — the failure
@@ -71,8 +129,9 @@ pub struct RunArgs {
 /// Service-lifecycle actions (`service install|uninstall|start|stop|status`).
 #[derive(Debug, Subcommand)]
 pub enum ServiceAction {
+    // ADR-0010 decides the layout this lays out.
     /// Register this instance as a system (or `--user`) service and lay out the versioned
-    /// install (ADR-0010).
+    /// install.
     Install(InstallArgs),
     /// Deregister the service (the install layout and state are never deleted).
     Uninstall(ScopeArgs),
@@ -94,6 +153,15 @@ pub struct InstallArgs {
     /// to the platform data directory for the scope and instance — no path is ever fixed.
     #[arg(long)]
     pub root: Option<PathBuf>,
+    // ADR-0027.
+    /// Ask for the settings a fresh host cannot guess and write the configuration file before
+    /// registering the service.
+    ///
+    /// Off by default, because `install` is the command a provisioning run invokes and it must
+    /// never block on a question. An existing file is kept, never overwritten. With no terminal
+    /// on stdin this fails rather than waiting for an answer that cannot come.
+    #[arg(long)]
+    pub interactive: bool,
 }
 
 /// Whether an action targets the system service or the current user's service.
@@ -230,6 +298,65 @@ mod tests {
             })
         ));
         assert_eq!(cli.instance.as_str(), "staging");
+    }
+
+    /// ADR-0027: interactivity is something the operator asks for. Every invocation that existed
+    /// before this flag keeps meaning what it meant.
+    #[test]
+    fn install_is_not_interactive_unless_asked() {
+        let quiet = parse(&["client", "service", "install"]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = quiet.command
+        else {
+            panic!("expected service install");
+        };
+        assert!(!args.interactive);
+
+        let asked = parse(&["client", "service", "install", "--interactive"]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = asked.command
+        else {
+            panic!("expected service install");
+        };
+        assert!(args.interactive);
+    }
+
+    /// The default value of `--config` must not be mistaken for a path someone chose: it decides
+    /// whether `install` writes into the install root or where the operator pointed (ADR-0027).
+    #[test]
+    fn a_named_config_is_told_apart_from_the_default() {
+        let default = parse_from(["client", "service", "install"]).expect("parse");
+        assert!(!default.config_named);
+        assert_eq!(default.cli.config, PathBuf::from("client.toml"));
+
+        // A global argument counts from either side of the subcommand.
+        for args in [
+            [
+                "client",
+                "--config",
+                "/etc/opamp/client.toml",
+                "service",
+                "install",
+            ],
+            [
+                "client",
+                "service",
+                "install",
+                "--config",
+                "/etc/opamp/client.toml",
+            ],
+        ] {
+            let named = parse_from(args).expect("parse");
+            assert!(named.config_named, "{args:?}");
+            assert_eq!(named.cli.config, PathBuf::from("/etc/opamp/client.toml"));
+        }
+
+        // Even spelled with the same value as the default: what counts is that it was written.
+        let same =
+            parse_from(["client", "service", "install", "--config", "client.toml"]).expect("parse");
+        assert!(same.config_named);
     }
 
     #[test]

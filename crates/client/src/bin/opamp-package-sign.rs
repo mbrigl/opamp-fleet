@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 #[derive(Parser)]
 #[command(
     name = "opamp-package-sign",
-    about = "Build, hash, and sign OpAMP Fleet packages (ADR-0015, ADR-0018)"
+    about = "Build, hash, and sign OpAMP Fleet packages"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -66,7 +66,7 @@ enum Command {
     /// archive keeps it. Pack `./build/promtail` for a Supervisor whose `command = "promtail"` and
     /// the names already agree; `--program-name` is for when they do not.
     ///
-    /// Only the two containers the Client can open are produced (ADR-0018). There is deliberately
+    /// Only the two containers the Client can open are produced. There is deliberately
     /// no `zip`: the Client detects an artifact by its leading bytes, and anything that is neither
     /// gzip nor 7z is taken to *be* the program, so a `.zip` would be installed over the binary
     /// unopened.
@@ -90,7 +90,7 @@ enum Command {
         archive_key: Option<String>,
     },
     /// Print an artifact's SHA-256 (hex) — the `sha256` of `PUT /api/v1/packages/{name}/source`
-    /// for an artifact this Server will not hold (ADR-0018).
+    /// for an artifact this Server will not hold.
     Sha256 {
         /// The artifact to hash, exactly as the Agents will fetch it.
         artifact: PathBuf,
@@ -111,7 +111,9 @@ enum Format {
 /// The Client's own unpacker, used by this binary's tests rather than restated in them. What `pack`
 /// has to get right is not "is this a valid archive" but "does *this* code open it and find the
 /// member" — a container the Client cannot open would be discovered on a host, at rollout time, as
-/// a failed install on every matched Agent. Test-only: the tool itself never unpacks.
+/// a failed install on every matched Agent. Test-only: the tool itself never unpacks. (It does
+/// reach one item of `archive` outside tests — `unix_mode_attributes`, the 7z convention that
+/// module also decodes.)
 ///
 /// Until ADR-0024 this was `#[path = "../archive.rs"] mod archive`, a second compilation of the
 /// same file, because a binary in a crate without a library has no other way to reach it.
@@ -167,7 +169,7 @@ fn run(cli: Cli) -> Result<(), String> {
             if !program.is_file() {
                 return Err(format!(
                     "{} is not a file — a package delivers exactly one program, and an agent that \
-                     is more than one file cannot be delivered as one (ADR-0018)",
+                     is more than one file cannot be delivered as one",
                     program.display()
                 ));
             }
@@ -277,8 +279,24 @@ fn pack_7z(
             sevenz_rust2::encoder_options::Lzma2Options::default().into(),
         ]);
     }
+    // `mut` is used only by the Unix block below; on Windows there is nothing to set.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut entry = sevenz_rust2::ArchiveEntry::new_file(member);
+    // The member is a program, so it is marked executable — `7z x` on Linux or macOS then yields
+    // something that runs, without a `chmod +x` nobody documented. The tar path has always done
+    // this; a `.7z` says it through 7-Zip's Unix-attribute convention instead of a tar mode field.
+    //
+    // Only off Windows, which is 7-Zip's own rule: bit 15 means `FILE_ATTRIBUTE_INTEGRITY_STREAM`
+    // there, and the Windows build neither writes nor expects the Unix extension. It costs the
+    // release nothing — each artifact is packed on a runner of its own platform (ADR-0025), so the
+    // Linux and macOS ones carry the mode and `client.exe`, which has no use for it, does not.
+    #[cfg(unix)]
+    {
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = client::archive::unix_mode_attributes(0o755);
+    }
     writer
-        .push_archive_entry(sevenz_rust2::ArchiveEntry::new_file(member), Some(source))
+        .push_archive_entry(entry, Some(source))
         .map_err(|e| format!("cannot pack {}: {e}", program.display()))?;
     writer
         .finish()
@@ -408,6 +426,72 @@ mod tests {
         let mut out = std::fs::File::create(dir.path().join("nope")).expect("create");
         assert!(archive::extract_7z(&artifact, "promtail", &mut out, Some("wrong")).is_err());
         assert!(archive::extract_7z(&artifact, "promtail", &mut out, None).is_err());
+    }
+
+    /// What the release ships is a `.7z` (ADR-0025), and an operator who unpacks one by hand must
+    /// get a file that runs. Both containers therefore carry an executable mode of their own — the
+    /// tar in its header, the 7z in 7-Zip's Unix-attribute convention — rather than relying on the
+    /// Client, which sets the mode itself but only on the path where *it* installs the package.
+    #[test]
+    #[cfg(unix)]
+    fn a_packed_program_is_executable_when_it_is_unpacked_by_hand() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = program(dir.path(), "client");
+
+        let seven = dir.path().join("client.7z");
+        pack(&source, &seven, Format::SevenZ, None, None).expect("pack");
+        let reader = sevenz_rust2::ArchiveReader::open(&seven, Default::default()).expect("open");
+        let entry = reader
+            .archive()
+            .files
+            .iter()
+            .find(|e| e.name() == "client")
+            .expect("the member is there");
+        assert!(
+            entry.has_windows_attributes,
+            "without the attribute there is no mode to restore"
+        );
+        // Bit 15 says the high half is a Unix mode; the high half says a regular file, rwxr-xr-x.
+        assert_eq!(entry.windows_attributes() & 0x8000, 0x8000);
+        assert_eq!(entry.windows_attributes() >> 16, 0o100_755);
+
+        let tarball = dir.path().join("client.tar.gz");
+        pack(&source, &tarball, Format::TarGz, None, None).expect("pack");
+        let mut entries = tar::Archive::new(flate2::read::GzDecoder::new(
+            std::fs::File::open(&tarball).expect("open"),
+        ));
+        let mode = entries
+            .entries()
+            .expect("entries")
+            .next()
+            .expect("one member")
+            .expect("readable")
+            .header()
+            .mode()
+            .expect("a mode");
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    /// The member the Client itself would reject: the same convention that carries a mode can say
+    /// "symbolic link", and what `pack` writes must never be mistaken for one.
+    #[test]
+    #[cfg(unix)]
+    fn the_mode_a_pack_writes_is_not_read_back_as_a_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = program(dir.path(), "client");
+        let artifact = dir.path().join("client.7z");
+
+        pack(&source, &artifact, Format::SevenZ, None, None).expect("pack");
+
+        assert_eq!(
+            unpacked(&artifact, "client", None),
+            std::fs::read(&source).expect("read the program")
+        );
+        // The tree path is the one that validates every member before writing anything, and a
+        // member whose mode said `S_IFLNK` would refuse the whole archive there.
+        let dest = dir.path().join("tree");
+        archive::extract_tree_7z(&artifact, Path::new("client"), &dest, None)
+            .expect("no link was seen");
     }
 
     /// A release is named after its version and the Supervisor is not — `--program-name` is what

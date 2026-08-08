@@ -147,7 +147,7 @@ pub fn install(
     let (layout, running_dir) = Layout::enclosing(&exe).ok_or_else(|| {
         format!(
             "this Client does not run from a versioned install layout ({}); \
-             self-update needs `client service install` (ADR-0010)",
+             self-update needs `opamp-fleet-client service install`",
             exe.display()
         )
     })?;

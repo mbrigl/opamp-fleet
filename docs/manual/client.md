@@ -42,14 +42,14 @@ Server sends them, reports back what they are doing, and can replace their binar
 ## Running it
 
 ```console
-$ client --config /etc/opamp/client.toml     # foreground; `run` is implied
-$ client run --config /etc/opamp/client.toml # the same thing, said explicitly
-$ client --version
+$ opamp-fleet-client --config /etc/opamp/client.toml     # foreground; `run` is implied
+$ opamp-fleet-client run --config /etc/opamp/client.toml # the same thing, said explicitly
+$ opamp-fleet-client --version
 ```
 
 | Global flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `client.toml`; defaults apply if it does not exist. |
+| `--config <path>` | The TOML configuration file. Defaults to `client.toml`; defaults apply if it does not exist. `service install` is the one place where "not given" means something else: there the file is `<root>/client.toml` inside the install root, because a path resolved against this shell's working directory is not one the service manager shares. |
 | `--instance <name>` | Selects the service identity (`io.opamp-fleet.client.<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
 | `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
 
@@ -67,28 +67,70 @@ The Client registers *itself* with systemd, launchd, or the Windows SCM (ADR-001
 packaging step and no unit file to write:
 
 ```console
-$ client service install --config /etc/opamp/client.toml   # root / Administrator
-$ client service start
-$ client service status
-$ client service stop
-$ client service uninstall      # deregisters; never deletes the install layout or state
+$ opamp-fleet-client service install --config /etc/opamp/client.toml   # root / Administrator
+$ opamp-fleet-client service start
+$ opamp-fleet-client service status
+$ opamp-fleet-client service stop
+$ opamp-fleet-client service uninstall      # deregisters; never deletes the install layout or state
 ```
 
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
 | `--root <dir>` | `service install` | The install root. Defaults to the platform's data directory for the scope and instance — Linux `/var/lib/opamp-fleet/client/<instance>`, macOS `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`. No path is ever fixed. |
+| `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service (ADR-0027). See below. |
+
+### The first configuration, on a host that has none
+
+A release artifact is the bare binary, so a freshly downloaded Client has no `client.toml` to edit.
+Without one it still installs and starts — on the development defaults, dialling `127.0.0.1` and
+managing nothing. `--interactive` is the way past that:
+
+```console
+$ opamp-fleet-client service install --interactive        # root / Administrator
+No configuration at /var/lib/opamp-fleet/client/default/client.toml — answering these writes it …
+Server OpAMP endpoint [ws://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
+This Agent's name (service.name) [opamp-fleet-client]: host-01
+Authentication toward the Server: bearer token
+Bearer token: ********
+Does the Server present a certificate from a private CA? [y/N]: n
+Allow the Server to update this Client's own binary? [y/N]: n
+wrote /var/lib/opamp-fleet/client/default/client.toml
+installed io.opamp-fleet.client.default
+```
+
+What it asks about is only what has no useful default here: the endpoint, the Agent's name, the
+credential ([`[auth]`](#auth)), a private CA when the endpoint is `wss://` or `https://`
+([`[tls]`](#tls)), and last — defaulting to **no** — consent for the Server to replace this Client's
+own binary ([`[self_update]`](#self_update)). Everything else is written into the file as commented
+defaults. The credential is typed into a hidden prompt rather than passed as a flag, so it stays out
+of the shell history and out of the process list; on Unix the file is created mode `0600`.
+
+Four rules worth knowing before you script around it:
+
+- **Interactivity is never assumed.** Without the flag, `install` behaves as it always has — it only
+  prints a warning when the path it is about to bake into the unit holds no file.
+- **An existing file is kept, never overwritten.** Re-running `--interactive` on a configured host
+  says so and carries on, so a re-install cannot eat a credential typed into the first one.
+- **No terminal, no questionnaire.** `--interactive` in a provisioning run, a container build, or a
+  pipeline fails with a message instead of blocking forever on an answer nobody can give.
+- **Where it writes:** the path from `--config` when you name one, and otherwise
+  `<root>/client.toml` inside the install root — the same per-platform, per-instance location the
+  versions and the state directory already use. The file is validated by the ordinary loader before
+  the service is registered; a file that does not parse fails the install and stays on disk for you
+  to correct.
 
 The root holds versioned installs side by side, a `current` pointer the service is registered
 against, and the default state directory:
 
 ```
-<root>/versions/opamp-client-<version>-<commit>/client   # every installed version
-<root>/current -> versions/opamp-client-…/               # symlink (Unix), junction (Windows)
+<root>/versions/opamp-fleet-client-<version>-<commit>/opamp-fleet-client   # every version
+<root>/current -> versions/opamp-fleet-client-…/    # symlink (Unix), junction (Windows)
 <root>/state/                                            # the default state_dir
 ```
 
-Because the service runs `<root>/current/client`, switching versions never re-registers the service.
+Because the service runs `<root>/current/opamp-fleet-client`, switching versions never re-registers
+the service.
 
 After a crash the service manager restarts the service; after an explicit stop it stays down. Known
 platform gaps, tracked in ADR-0010: on macOS `service status` is advisory and `install` does not
@@ -184,7 +226,7 @@ that package's Selector (ADR-0017), never a key in this file.
 
 ```toml
 [self_update]
-package = "opamp-client"
+package = "opamp-fleet-client"
 ```
 
 See [Updating the Client itself](#updating-the-client-itself). Absent — the default — the Client's
@@ -447,7 +489,7 @@ the Server *replace* that version is opt-in, and the opt-in **names the package*
 
 ```toml
 [self_update]
-package = "opamp-client"
+package = "opamp-fleet-client"
 ```
 
 That name is the whole of the protection: a package with an empty Selector reaches every consenting
@@ -456,7 +498,7 @@ installed over the Client and take the host out of reach. An offer under any oth
 and reported, never applied.
 
 On an accepted offer the artifact is verified like any other, staged as a new version *beside* the
-running one in the install layout, and proved by running `client self-check` on it before the
+running one in the install layout, and proved by running `opamp-fleet-client self-check` on it before the
 `current` pointer moves — which asks two things at once: does this binary run at all on this host,
 and is it actually an OpAMP Fleet Client at the version offered. The process then exits and asks the
 service manager to restart it; it does not restart itself. A marker in `state_dir` carries the
@@ -468,7 +510,7 @@ Self-update therefore requires an installed service — it is the service manage
 restart.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`opamp-client-<version>-<os>-<arch>.7z`
+`opamp-fleet-client-<version>-<os>-<arch>.7z`
 ([ADR-0025](../adr/0025-release-pipeline-and-artifacts.md)) — and that file *is* a package artifact:
 it holds the Client under the name the install layout gives it, so it is uploaded exactly as
 downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing repacks it.
@@ -478,12 +520,12 @@ downloaded, and the SHA-256 the release published is the one the Agent verifies.
 it reaches:
 
 ```console
-$ curl -X PUT --data-binary @opamp-client-1.2.3-linux-x86_64.7z \
-       "http://<server>:4320/api/v1/packages/opamp-client?version=1.2.3+a1b2c3d"
+$ curl -X PUT --data-binary @opamp-fleet-client-1.2.3-linux-x86_64.7z \
+       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3+a1b2c3d"
 ```
 
 The file name carries the base version; the full string is in the release notes, and
-`client --version` prints it on any host already running that build.
+`opamp-fleet-client --version` prints it on any host already running that build.
 
 ## Connecting to the Server
 

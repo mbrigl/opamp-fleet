@@ -61,7 +61,7 @@ impl Drop for Registered {
 /// rather than the library is the point here: `service install` also stages the versioned layout,
 /// and an operator's mistake would be in that command line.
 fn client(args: &[&str], config: &Path) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_client"))
+    let output = Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
         .arg("--config")
         .arg(config)
         .args(["--instance", INSTANCE])

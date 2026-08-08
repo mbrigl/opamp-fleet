@@ -30,6 +30,38 @@ const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// hundred files; a hundred thousand empty ones is a way to spend an afternoon creating inodes.
 const MAX_TREE_MEMBERS: usize = 10_000;
 
+/// How a `.7z` says "Unix mode" — 7-Zip's own convention, which this module both reads and writes.
+///
+/// The format carries *Windows* attributes. p7zip stashed the Unix `st_mode` in the high 16 bits
+/// and set bit 15 to say it had done so, and 7-Zip on Linux and macOS still writes exactly that
+/// (`Attrib = (a << 16) | FILE_ATTRIBUTE_UNIX_EXTENSION`) while the Windows build does not. Reading
+/// it is how [`list_7z`] spots a symbolic link that the Windows bits alone would not reveal; writing
+/// it is how the packer marks a program executable, so `7z x` yields something that runs.
+mod unix_attributes {
+    /// Bit 15: the high half carries a Unix mode. On Windows the same bit means
+    /// `FILE_ATTRIBUTE_INTEGRITY_STREAM`, which is why 7-Zip only ever writes it off Windows.
+    pub const EXTENSION: u32 = 0x8000;
+    /// A symbolic link by another name — a Windows reparse point.
+    pub const REPARSE_POINT: u32 = 0x400;
+    /// The file-type field of a Unix mode.
+    pub const S_IFMT: u32 = 0o170000;
+    /// The file-type value saying "symbolic link".
+    pub const S_IFLNK: u32 = 0o120000;
+    /// The file-type value saying "regular file".
+    pub const S_IFREG: u32 = 0o100000;
+}
+
+/// The `windows_attributes` value that carries `mode` as a regular file's Unix mode.
+///
+/// The full `st_mode` goes in, file-type bits and all, because that is what `stat` hands 7-Zip and
+/// what the link check on the way back out reads. Used by `opamp-package-sign pack`; kept here
+/// beside the code that decodes it, so the convention has one definition rather than two that can
+/// drift apart.
+#[must_use]
+pub const fn unix_mode_attributes(mode: u32) -> u32 {
+    ((unix_attributes::S_IFREG | mode) << 16) | unix_attributes::EXTENSION
+}
+
 /// Whether a member's path may be written at all (ADR-0023).
 ///
 /// Unpacking a whole tree is the point where an archive starts having a say in *where* bytes land —
@@ -521,12 +553,9 @@ pub fn extract_tree_7z(
 
 /// Reads every member of a `.7z`, validating each — the counterpart to [`list_tar_gz`].
 fn list_7z(archive: &Path, key: Option<&str>) -> Result<Vec<std::path::PathBuf>, String> {
-    // Windows attribute bits a member may not carry. A reparse point is a symbolic link by another
-    // name; the unix-extension bit puts a mode in the high half, and a mode may say link too.
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    const UNIX_EXTENSION: u32 = 0x8000;
-    const S_IFMT: u32 = 0o170000;
-    const S_IFLNK: u32 = 0o120000;
+    // Attribute bits a member may not carry. A reparse point is a symbolic link by another name;
+    // the unix-extension bit puts a mode in the high half, and a mode may say link too.
+    use unix_attributes::{EXTENSION, REPARSE_POINT, S_IFLNK, S_IFMT};
 
     let password = key.map(sevenz_rust2::Password::from).unwrap_or_default();
     let reader = sevenz_rust2::ArchiveReader::open(archive, password).map_err(open_7z_error)?;
@@ -540,8 +569,8 @@ fn list_7z(archive: &Path, key: Option<&str>) -> Result<Vec<std::path::PathBuf>,
         }
         if entry.has_windows_attributes {
             let attributes = entry.windows_attributes;
-            let is_link = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || (attributes & UNIX_EXTENSION != 0 && (attributes >> 16) & S_IFMT == S_IFLNK);
+            let is_link = attributes & REPARSE_POINT != 0
+                || (attributes & EXTENSION != 0 && (attributes >> 16) & S_IFMT == S_IFLNK);
             if is_link {
                 return Err(format!(
                     "the archive holds a link ({:?}), which names a path outside itself — \

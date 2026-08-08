@@ -189,7 +189,7 @@ and the Server for Linux.
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
-`opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+`opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
 on, plus a `SHA256SUMS` file. Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
@@ -256,11 +256,11 @@ The Client registers *itself* as a native service on Linux (systemd), macOS (lau
 (SCM) — [ADR-0010](docs/adr/0010-client-os-service-and-cli.md):
 
 ```console
-$ client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
-$ client service start
-$ client service status
-$ client service stop
-$ client service uninstall                                   # never deletes layout or state
+$ opamp-fleet-client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
+$ opamp-fleet-client service start
+$ opamp-fleet-client service status
+$ opamp-fleet-client service stop
+$ opamp-fleet-client service uninstall                                   # never deletes layout or state
 ```
 
 - **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
@@ -268,7 +268,7 @@ $ client service uninstall                                   # never deletes lay
   and state — several differently-configured Clients coexist on one host.
 - **Install root:** `--root <dir>` overrides the per-platform default (Linux:
   `/var/lib/opamp-fleet/client/<instance>`); nothing is ever installed to a fixed path. The
-  root holds `versions/opamp-client-<version>-<commit>/`, the `current` pointer the service runs
+  root holds `versions/opamp-fleet-client-<version>-<commit>/`, the `current` pointer the service runs
   from, and the default `state/` directory.
 - **Scope:** `--user` targets the user-level manager (development); the default is a system
   service that starts at boot.
@@ -282,7 +282,7 @@ $ client service uninstall                                   # never deletes lay
 
   ```toml
   [self_update]
-  package = "opamp-client"   # only this package is ever installed over this binary
+  package = "opamp-fleet-client"   # only this package is ever installed over this binary
   ```
 
   A new version is staged beside the running one under `versions/`, run once to prove it is this

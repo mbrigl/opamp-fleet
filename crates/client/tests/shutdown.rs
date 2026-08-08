@@ -22,7 +22,7 @@ fn sigterm_shuts_the_client_down_cleanly() {
     )
     .expect("write the config");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_client"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
         .arg("--config")
         .arg(&config)
         .spawn()

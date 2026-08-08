@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  PRODUCT: opamp-client
+  PRODUCT: opamp-fleet-client
 
 jobs:
   # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
@@ -127,8 +127,10 @@ jobs:
         id: baked
         run: |
           set -euo pipefail
-          cargo build -p client --bin client --locked
-          full=$(./target/debug/client --version | awk '{print $NF}')
+          # `-p client` is the package (its name is a build-time identifier); the binary it
+          # produces is the shipped name (ADR-0028).
+          cargo build -p client --bin opamp-fleet-client --locked
+          full=$(./target/debug/opamp-fleet-client --version | awk '{print $NF}')
           echo "the binary reports $full"
           version='${{ steps.read.outputs.version }}'
           if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
@@ -169,14 +171,14 @@ jobs:
       - name: Add the target
         run: rustup target add ${{ matrix.target }}
       - name: Build the Client
-        run: cargo build --release -p client --bin client --target ${{ matrix.target }} --locked
+        run: cargo build --release -p client --bin opamp-fleet-client --target ${{ matrix.target }} --locked
       # A host build: it runs here, on this runner, to pack the artifact.
       - name: Build the packer
         run: cargo build --release -p client --bin opamp-package-sign --locked
       - name: The binary agrees with the name it will be given
         if: matrix.native
         run: |
-          reported=$(./target/${{ matrix.target }}/release/client${{ matrix.suffix }} --version | awk '{print $NF}')
+          reported=$(./target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }} --version | awk '{print $NF}')
           expected='${{ needs.version.outputs.full }}'
           if [ "$reported" != "$expected" ]; then
             echo "::error::this target reports $reported, the release is $expected"
@@ -186,12 +188,12 @@ jobs:
         id: pack
         run: |
           name="${PRODUCT}-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.7z"
-          # The packer names the single member after the program — `client`/`client.exe`, which is
+          # The packer names the single member after the program — `opamp-fleet-client`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
           sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
             --format 7z \
             --out "$name" \
-            "target/${{ matrix.target }}/release/client${{ matrix.suffix }}")
+            "target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }}")
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
@@ -234,11 +236,20 @@ jobs:
 
           \`\`\`console
           curl -X PUT --data-binary @${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z \\
-               "http://<server>:4320/api/v1/packages/opamp-client?version=${{ needs.version.outputs.full }}"
+               "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.full }}"
           \`\`\`
 
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
           the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0018).
+
+          Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
+          executable mode, so there is no \`chmod +x\` step:
+
+          \`\`\`console
+          7z x ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z
+          ./opamp-fleet-client service install --interactive   # root; answers write the configuration
+          ./opamp-fleet-client service start
+          \`\`\`
           EOF
           gh release create "version/${{ needs.version.outputs.version }}" \
             --repo "${{ github.repository }}" \
