@@ -25,7 +25,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the real per-instance identity is the installed service name
-/// `io.opamp-fleet.client.<instance>` — so it only needs to be stable.
+/// `opamp-fleet-client[-<instance>]` — so it only needs to be stable.
 const SERVICE_NAME: &str = "opamp-fleet-client";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 

@@ -50,4 +50,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟢 accepted |
 | [0020](0020-what-lives-in-which-crate.md) | What lives in which crate — the Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
 | [0021](0021-release-pipeline-and-artifacts.md) | A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install | 🟢 accepted |
+| [0022](0022-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, the version directory, and one service name on every platform | 🟢 accepted |
 

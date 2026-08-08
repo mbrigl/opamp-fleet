@@ -16,6 +16,7 @@
 pub mod archive;
 pub mod cli;
 pub mod config;
+pub mod config_init;
 pub mod connection;
 pub mod engine;
 pub mod packages;

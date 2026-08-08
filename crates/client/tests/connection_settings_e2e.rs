@@ -57,7 +57,7 @@ async fn spawn_armed_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile:
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_client"))
+        Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())

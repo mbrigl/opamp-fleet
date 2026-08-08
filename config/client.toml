@@ -81,7 +81,7 @@ state_dir = "client-state"
 # outcome across that restart: the new version commits itself once it reaches the Server, and one
 # that will not stay up is rolled back to its predecessor after three attempts.
 # [self_update]
-# package = "opamp-client"
+# package = "opamp-fleet-client"
 
 # Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
 # username and password together. The Authorization header rides every plain-HTTP request and

@@ -4,6 +4,12 @@
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 
+Point 10 replaces the probe comparison of
+[ADR-0018](0018-client-self-update.md) — the staged binary had to report the offered version
+*character for character* — and point 12 replaces the consequence
+[ADR-0021](0021-release-pipeline-and-artifacts.md) drew from it, that `?version=` "must therefore be
+the *full* baked string". Nothing else in those two ADRs changes.
+
 ## Context
 
 ### What a version is needed for
@@ -55,8 +61,44 @@ answer them rather than ignore them:
   alone would work, but the version would stop carrying the provenance (`+<hash>`, `-dev`) that
   ADR-0010's install directories and ADR-0018's self-update rely on, and every one of those rules
   would have to be re-decided.
-- **The self-update compares exactly.** `selfupdate::probe` refuses a staged binary whose reported
-  version is not the offered one, character for character.
+- **The self-update compares the version it was offered.** `selfupdate::probe` refuses a staged
+  binary whose reported version is not the offered one (point 10 says how far).
+
+### Comparing and showing a version
+
+An exact comparison met its first operator and lost. A Client package was uploaded as `0.1.1`, the
+binary in it reports `0.1.1+799e36a`, and the install never happened. The store still holds the
+fingerprint of the attempt to fix it by hand:
+
+```json
+{ "version": "0.1.1", "previous": { "version": "0.1.1 799e36a" } }
+```
+
+That space is not a typo. `+` in a URL query string decodes to a space, so
+`?version=0.1.1+799e36a` — the obvious way to type the full string — arrives as
+`0.1.1 799e36a` and can never match anything. The correct spelling is `?version=0.1.1%2B799e36a`,
+which is not a thing an operator should have to know to ship a release.
+
+So an exact comparison is unusable in the one place it is used. But the deeper problem is that
+**one string is carrying three different jobs**:
+
+| Job | What it needs | What one string gives it |
+|---|---|---|
+| *Which release is this?* | `MAJOR.MINOR.PATCH` | `0.1.1+799e36a` |
+| *Which build is on that host?* | the commit, the `-dev` marker | the same string |
+| *What does an operator read in a table?* | something scannable | `0.1.1-dev+799e36a` in a column headed "Version" |
+
+The codebase already resolves this tension once, in the other direction. ADR-0010's version
+directories are `opamp-client-<MAJOR.MINOR.PATCH>-<hash>` — deliberately "never the pre-release" —
+because a *directory* names a version of a component while the manifest inside it records the build.
+The identity is the base there, and the provenance sits beside it. This decision applies the same
+split to the two places that would otherwise conflate them.
+
+One thing the probe is **not** for, which is what makes relaxing it safe: proving *which bytes*
+arrived. That is settled before the probe runs — ADR-0015 verifies the artifact's content
+hash on every download, and its Ed25519 signature when a key is configured. The probe answers two
+narrower questions ADR-0018 states plainly: *does this binary run at all on this host*, and *is it
+this program rather than something else offered under the same name*. Neither needs a commit hash.
 
 ## Decision
 
@@ -68,6 +110,9 @@ with its provenance.
 We will take the release version from **`[workspace.package] version` in `Cargo.toml`** and have the
 **release pipeline create the `version/*` tag from it** — before it builds, so nothing downstream
 changes.
+
+We will treat a version's **build metadata as provenance** — recorded and reported everywhere,
+compared nowhere, and shown only where someone asked for detail.
 
 ### The number and the release
 
@@ -157,6 +202,41 @@ changes.
    install-directory names (`+` and `.` are legal filename characters on ext4, APFS, and NTFS).
    The Server adopts the same `build.rs` and helper when its builds need it.
 
+### How it is compared and shown
+
+9. **One parser, in the shared crate.** A small helper in `opamp` splits a version string into its
+   `MAJOR.MINOR.PATCH` base, an optional pre-release, and optional build metadata. It lives there
+   rather than in either end because the Client writes these strings and the Server displays them,
+   and ADR-0005 put the shared crate between them precisely so the two cannot drift.
+
+10. **The self-update probe compares everything except the build metadata.** `0.1.1` offered and
+   `0.1.1+799e36a` reported is a match; `0.1.1` offered and `0.1.1-dev+799e36a` reported is **not**.
+   Dropping `+<hash>` is what fixes the trap, because the hash is the part an operator cannot type
+   and does not know at upload time. Keeping the pre-release is what preserves the distinction
+   the `-dev` marker exists for (point 3): a `-dev` build is a build heading for a
+   release and is not that release, and this probe is the last gate that can say so before a fleet
+   installs one.
+
+11. **An offered version that has no parseable base fails the install**, naming the value. Fail
+   closed: a package version is free-form by the API's own contract, and one that is not a version
+   cannot be compared to a version. This is the Client's own package, where the shape is ours.
+
+12. **`?version=` takes the release number.** `0.1.1` is the expected spelling; the full string still
+   works, since its base and pre-release are the same. Nothing has to be percent-encoded.
+
+13. **The Server shows the base and the pre-release, and keeps the rest.** `AgentView.service_version`
+   is `MAJOR.MINOR.PATCH[-prerelease]` — what belongs in a column headed "Version" — and the
+   complete string as reported is in a `service_build` field beside it. The bundled UI shows
+   the former in its Version column and the latter on hover, and searches both.
+
+14. **The Client keeps reporting the full string.** `service.version` on the wire is unchanged;
+   provenance has to reach the Server for anyone to answer "which build is on that host". What
+   changes is what the Server puts in a column, not what an Agent says.
+
+15. **Everything written to disk keeps the full string** — the version directory's `manifest.toml`,
+   the self-update marker, `--version` output. Those are the internal record this decision relies on
+   existing.
+
 ## Alternatives considered
 
 - **The tag as the only source of the version** — `build.rs` resolves the base from a `version/*`
@@ -209,6 +289,27 @@ changes.
 - **Allow pre-release tags** (`version/1.2.3-rc.1`) — SemVer permits them, but strict released
   versions keep the tag grammar unambiguous; deferred until a release-candidate flow is actually
   wanted.
+- **Keep the exact comparison and document the encoding** (`%2B`) — the honest reading of an exact
+  rule, and it treats an unusable interface as a training problem. The operator who types the
+  release number is the one behaving reasonably.
+- **Compare the base only, dropping the pre-release too** — the literal form of the request that
+  prompted point 10, and one step further than the problem needs. It would let an offer
+  of `0.1.1` be satisfied by a `0.1.1-dev` build, which is exactly the confusion `-dev` exists to
+  prevent, at the only gate that inspects a binary before a fleet runs it. If the pre-release should
+  be ignored as well, that is a one-line change to the comparison and it belongs in this decision
+  rather than in a later surprise.
+- **Have the Client report only the base to the Server** — the smallest change to the display
+  problem, and it throws away the answer to "which build is on that host", which is the question a
+  fleet exists to answer.
+- **Leave `service_version` holding the full string and add a base field beside it** — additive, so
+  no API consumer breaks. Rejected for point 13 because it leaves a field called
+  `service_version` holding something nobody would call a version, and because the REST API is at
+  `v1` with no external consumer: the moment to give the field its right meaning is now, not after
+  one exists. This is the reversible half of the decision, and the CHANGELOG carries it as breaking
+  either way.
+- **Compare with a full SemVer precedence implementation** (a `semver` dependency) — the correct
+  answer if versions were ever *ordered* here. They are not: the probe asks "is this the one I was
+  offered", an equality question over a string this project itself produces.
 
 ## Sources / Prior art
 
@@ -218,6 +319,9 @@ changes.
   decision keeps that contract and moves the computation from the pipeline into `build.rs`.
 - Semantic Versioning 2.0.0 — the `MAJOR.MINOR.PATCH` grammar, pre-release ordering, and the rule
   that build metadata (`+…`) is ignored for precedence: <https://semver.org/>.
+  Rule 10: "Build metadata MUST be ignored when determining version precedence… two versions that
+  differ only in the build metadata have the same precedence." The specification the version
+  strings follow says the hash is not part of the identity.
 - Cargo build scripts — `cargo:rustc-env`, `rerun-if-changed`, `rerun-if-env-changed`:
   <https://doc.rust-lang.org/cargo/reference/build-scripts.html>.
 - `git2` — Rust bindings to libgit2, with vendored static builds via `libgit2-sys`:
@@ -237,6 +341,14 @@ changes.
   correctly.
   <https://doc.rust-lang.org/cargo/commands/cargo-metadata.html>
 - **This project's ADR-0021**, whose release pipeline mechanism this decision keeps.
+- The failure that prompted point 10, in `fleet-packages/opamp-fleet-client.json`: a
+  package registered as `0.1.1` against a binary reporting `0.1.1+799e36a`, and a previous attempt
+  recorded as `0.1.1 799e36a` — a `+` that a query string turned into a space.
+- [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-2.2) and the
+  `application/x-www-form-urlencoded` convention behind `+` meaning a space in a query string — why
+  the full string cannot be typed into a URL unencoded.
+- [ADR-0010](0010-client-os-service.md)'s version-directory naming — the same
+  base/provenance split, already decided once in this codebase.
 - Specification goals #10/#11 ([`docs/SPECIFICATION.md`](../SPECIFICATION.md)) — package delivery
   and self-update, both of which identify builds by version;
   [ADR-0010](0010-client-os-service.md), whose install layout consumes this version.
@@ -256,6 +368,10 @@ changes.
   rather than which one it descends from, which is what an operator reading a fleet view assumes it
   means — and there is no ordering nuance to warn about, since `0.1.0-dev` sorting before `0.1.0`
   is simply true rather than a trap.
+- Positive: a release is uploaded under the number it is called, with no encoding lore. The fleet
+  table is scannable and still answers the provenance question on hover. The probe keeps the two
+  checks it exists for and loses the one it never needed. `-dev` has a place where it is actually
+  enforced rather than merely displayed.
 - Negative / trade-offs: `git2` enters as a build-dependency and compiles vendored libgit2 (C) for
   the build script, lengthening cold builds and requiring a C compiler on build hosts — which
   `ring` (ADR-0007) already requires, so no new host prerequisite;
@@ -284,6 +400,15 @@ changes.
 - Negative / trade-offs: the release run needs `contents: write` to push a tag. A pipeline that
   can write to the repository is a larger blast radius than one that only reads it, and the token is
   the workflow's own rather than a human's.
+- Negative / trade-offs: `AgentView.service_version` changes meaning inside `/api/v1` — a
+  breaking change for any consumer, of which there is one, the bundled UI, changed in the same
+  commit. Two versions that differ only by commit are indistinguishable to the probe, so
+  re-offering a rebuilt artifact of the same release is accepted rather than refused; the content
+  hash is what distinguishes those bytes, and it already did.
 - Follow-ups: whether the `Cargo.lock` bump that accompanies every version change should be checked
   in CI, so a release cannot be cut from a tree whose lockfile still names the previous version.
   And whether the Server, published by no pipeline today, should follow the same rule when it is.
+  The operator manual's self-update walkthrough and the release notes template tell an operator to
+  type the release number, not the full version. Whether the *package* version of a Managed Process
+  (free-form by contract, an upstream project's own numbering) should be parsed at all is
+  deliberately left alone here.

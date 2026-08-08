@@ -62,7 +62,8 @@ async fn main() {
     {
         Ok(offer) => {
             if offer.is_some() {
-                info!("offering connection settings to the fleet (ADR-0014)");
+                // ADR-0014.
+                info!("offering connection settings to the fleet");
             }
             offer
         }
@@ -74,7 +75,8 @@ async fn main() {
     let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
         Ok(store) => {
             if !store.is_empty() {
-                info!("offering software packages to the fleet (ADR-0015)");
+                // ADR-0015.
+                info!("offering software packages to the fleet");
             }
             Some(server::fleet::PackageOffering::new(
                 store,
@@ -104,7 +106,8 @@ async fn main() {
         .as_ref()
         .map(server::transport::OpampAuth::from_config);
     if auth.is_some() {
-        info!("the OpAMP endpoint requires authentication (ADR-0013)");
+        // ADR-0013.
+        info!("the OpAMP endpoint requires authentication");
     }
     let app = server::app(state, auth);
 

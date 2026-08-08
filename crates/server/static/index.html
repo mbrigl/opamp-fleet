@@ -347,7 +347,7 @@
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+        const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -368,7 +368,7 @@
             <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
-            <td class="num">${esc(a.service_version) || "—"}</td>
+            <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
             <td>${esc(a.os) || "—"}</td>
             <td>${matchedConfigs(a)}</td>
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>

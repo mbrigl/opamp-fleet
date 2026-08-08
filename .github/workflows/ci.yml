@@ -56,9 +56,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: client-linux, os: ubuntu-latest, package: client, binary: target/release/client }
-          - { name: client-windows, os: windows-latest, package: client, binary: target/release/client.exe }
-          - { name: client-macos, os: macos-latest, package: client, binary: target/release/client }
+          - { name: client-linux, os: ubuntu-latest, package: client, binary: target/release/opamp-fleet-client }
+          - { name: client-windows, os: windows-latest, package: client, binary: target/release/opamp-fleet-client.exe }
+          - { name: client-macos, os: macos-latest, package: client, binary: target/release/opamp-fleet-client }
           - { name: server-linux, os: ubuntu-latest, package: server, binary: target/release/server }
     steps:
       - uses: actions/checkout@v7

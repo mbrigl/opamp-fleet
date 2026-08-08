@@ -35,7 +35,7 @@ use client::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 /// The version directory laid out before the update. Joined one component at a time, never as
 /// `versions/<name>`: this test builds the Windows pointer with `mklink`, a `cmd` builtin that
 /// reads an embedded `/` as the start of a switch.
-const PREVIOUS_VERSION_DIR: &str = "opamp-client-0.0.0-previous";
+const PREVIOUS_VERSION_DIR: &str = "opamp-fleet-client-0.0.0-previous";
 
 async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -211,8 +211,17 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_client"));
-    let version = version_of(&client);
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
+    // Offered the way an operator uploads a release: the number on the archive, without the commit
+    // the build carries (ADR-0009). The staged binary reports the full string and must still be
+    // recognised as this release — the failure that ADR exists for.
+    let full = version_of(&client);
+    // Whether the two actually differ depends on how this build was versioned, so the guarantee
+    // itself is pinned by `selfupdate`'s own `the_probe_ignores_the_commit_a_build_came_from`;
+    // what this test adds is that the whole loop runs on the operator's spelling.
+    let version = opamp::version::identity(&full)
+        .unwrap_or_else(|| panic!("{full:?} is not a version"))
+        .to_string();
 
     // The artifact is this very binary: the only thing that will pass the staged binary's own
     // self-check, which requires it to *be* an OpAMP Fleet Client at the offered version.
@@ -221,7 +230,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
     store
         .put(
-            "opamp-client".to_string(),
+            "opamp-fleet-client".to_string(),
             version.clone(),
             false,
             None,
@@ -234,7 +243,8 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let program = install_layout(&root, &client);
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("client.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-client")).expect("write config");
+    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-fleet-client"))
+        .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -243,7 +253,10 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         service.tend();
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent.packages.iter().find(|p| p.name == "opamp-client")?;
+        let package = agent
+            .packages
+            .iter()
+            .find(|p| p.name == "opamp-fleet-client")?;
         (package.status == "Installed" && package.version == version).then_some(())
     })
     .await;
@@ -288,7 +301,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_client"));
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
     let version = version_of(&client);
 
     // A perfectly good Client artifact — under a name this Client did not consent to.
@@ -305,7 +318,8 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("client.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-client")).expect("write config");
+    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-fleet-client"))
+        .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -320,7 +334,7 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     .await;
 
     assert!(
-        error.contains("opamp-client") && error.contains("otelcol"),
+        error.contains("opamp-fleet-client") && error.contains("otelcol"),
         "the refusal names both what it takes and what it was offered: {error:?}"
     );
     assert!(

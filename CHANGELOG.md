@@ -15,6 +15,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed — breaking
 
+- **The service is registered as `opamp-fleet-client` on every platform**
+  ([ADR-0022](docs/adr/0022-the-client-is-named-opamp-fleet-client.md)). It used to be
+  `opamp-fleet-client.default.service` on systemd and `io.opamp-fleet.client.default` on launchd and
+  the Windows SCM — two names nobody chose, both falling out of how a reverse-DNS label happens to
+  be split. Now: `systemctl status opamp-fleet-client`, `launchctl list opamp-fleet-client`,
+  `sc query opamp-fleet-client`. A named instance appends its own name
+  (`opamp-fleet-client-prod`); the default instance carries the bare one.
+
+  **An already-installed service is not found under the new name.** Run
+  `service uninstall` with the *old* binary, then `service install` with the new one. The install
+  layout and the state directory are untouched by either.
+
+  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0010
+  promised and never actually set.
+
+
+- **A version is compared and shown without its build metadata**
+  ([ADR-0009](docs/adr/0009-version-baking-comparison-and-display.md)). Two
+  things change, and one of them is an API break.
+
+  **Uploading a Client package now takes the release number.** `?version=1.2.3` matches a binary
+  reporting `1.2.3+a1b2c3d`, because the commit a build came from is provenance, not identity — and
+  it is the one part of the string nobody can type at upload time. (A `+` in a URL query decodes to
+  a space, so the old requirement to pass the full string could only be met as `%2B`. That trap is
+  gone.) The pre-release is **not** ignored: a `1.2.3-dev` build offered as `1.2.3` is still
+  refused. The full string keeps working where you already pass it.
+
+  **`AgentView.service_version` now holds the release, not the build.** It is
+  `MAJOR.MINOR.PATCH`, with the pre-release when there is one; what the Agent reported verbatim
+  moved to the new **`service_build`** field beside it. **If you read `service_version` from
+  `/api/v1/fleet/agents` and need the commit, read `service_build`.** The bundled UI shows the
+  release in its Version column, the build on hover, and searches both. An Agent whose reported
+  version is not a version at all — a Foreign Agent numbering itself its own way — is shown
+  unchanged in both fields.
+
+
+- **The Client ships as `opamp-fleet-client`.** The release artifact is
+  `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
+  (`.exe` on Windows), and the version directory beside it is
+  `versions/opamp-fleet-client-<version>-<commit>/`
+  ([ADR-0022](docs/adr/0022-the-client-is-named-opamp-fleet-client.md)). One name from the download
+  to the process in `ps` to the Agent in the fleet view.
+
+  **Nothing in a fleet has to be migrated, because nothing has been released yet** — this is the one
+  moment the change is free. A *development* service installed under the old layout does have to be
+  re-registered: its unit points at `<root>/current/client`, which the new build no longer produces.
+  Run `opamp-fleet-client service uninstall` with the old binary, then
+  `opamp-fleet-client service install` with the new one.
+
+  The Cargo package stays `client`, so `cargo run -p client` and `cargo build -p client` are
+  unchanged — only the binary they produce is renamed. The service label
+  (`io.opamp-fleet.client.<instance>`) is unchanged too.
+
+
 - **`accepts_packages` is no longer a `[[supervisor]]` key** and a configuration still carrying it
   **fails at startup**. Whether a Managed Process takes Server-offered package updates is now
   decided by how its program is named
@@ -48,8 +102,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **A released `.7z` unpacks as an executable on Linux and macOS.** The member is packed with a
+  Unix mode of `0755` (7-Zip's Unix-attribute convention), so `7z x` yields a binary that runs
+  instead of one that needs a `chmod +x` nobody wrote down. `--format tar.gz` already did this in
+  its tar header; the two containers now agree. Nothing changes for a package the Server delivers —
+  the Client sets the mode itself when it installs one — and nothing changes for the Windows
+  artifact, where the bit means something else and 7-Zip does not write it either.
+
+- **`opamp-fleet-client service install --interactive` writes the first configuration.** A freshly downloaded
+  Client has no `client.toml` — the release artifact is the bare binary — and installing without one
+  produced a service that started, dialled `127.0.0.1`, and managed nothing. The flag asks for what
+  a fresh host cannot guess (endpoint, Agent name, credential, a private CA when the endpoint is
+  `wss://`/`https://`, and last, defaulting to *no*, consent for the Server to update this Client's
+  own binary), writes the file, and validates it before registering the service
+  ([ADR-0010](docs/adr/0010-client-os-service.md)).
+
+  Nothing about existing invocations changes: the flag is opt-in, an existing file is kept rather
+  than overwritten, and `--interactive` without a terminal on stdin fails instead of blocking a
+  provisioning run. The credential is typed into a hidden prompt, so it stays out of the shell
+  history and the process list, and on Unix the file is created mode `0600`. Installing *without*
+  the flag now prints a warning when the configured path holds no file — the silence was the bug.
+
 - **Released builds of the Client, one archive per platform.** A release publishes
-  `opamp-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
+  `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
   on `x86_64`, together with `SHA256SUMS`
   ([ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md)). Until now there was nothing to
   install but a build of your own.
@@ -63,10 +138,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
   **Each archive is also a package artifact**: it holds the Client under the name the install layout
   gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an
-  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` must carry the
-  **full** version the binary reports — `1.2.3+a1b2c3d`, build metadata included — because the
-  staged binary's self-check compares the two exactly. The file name carries only the base version;
-  the full string is in the release notes and in `client --version`.
+  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` takes the
+  release number — the one in the file name.
 
 - **`supervisor_dir`** (optional, top-level) places the per-Supervisor directories; the default is
   `<state_dir>/supervisors`, which is where they have always been. Set it to keep the Managed
@@ -168,11 +241,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- **`opamp-fleet-client service install` without `--config` now bakes `<root>/client.toml` into the unit**,
+  inside the install root, instead of `client.toml` resolved against whatever the working directory
+  happened to be
+  ([ADR-0010](docs/adr/0010-client-os-service.md)). A service
+  manager's working directory is `/` or `System32`, so the old default pointed at a file the
+  service could not have been relying on unless the install was run from exactly the right
+  directory. **If you installed by running `install` from the directory holding your
+  `client.toml`,** name it explicitly —
+  `opamp-fleet-client service install --config /etc/opamp/client.toml` —
+  or move the file to `<root>/client.toml`; the install prints the path it registered either way.
+
 - **What a Client reports as its version now names the release it is heading *for*, not the one it
   descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
   ([ADR-0009](docs/adr/0009-version-baking-comparison-and-display.md)): a build with no release tag on its commit
   reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
-  fleet view, `client --version`, and the name of the versioned install directory all shift with it,
+  fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
+  shift with it,
   so a host that has not changed will still look different after an upgrade. A commit carrying a
   `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
   than producing a binary that disagrees with its own tag.
