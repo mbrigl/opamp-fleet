@@ -121,6 +121,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- **On macOS, a Client installed as a service could never update itself** — every offer was refused
+  with "this Client does not run from a versioned install layout", and a torn `current` pointer was
+  never repaired either. The service is registered against `<root>/current/client` (ADR-0010), and
+  asking the operating system what is running answers with that path on macOS and with the version
+  directory behind it on Linux; only the second shape says where in the layout the binary sits. The
+  path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
+  to change on a host: an affected Client picks its updates up as soon as it runs this version.
+
 - **A Client that had just updated itself reported the update as failed, and then downloaded the
   artifact again — over and over.** After the restart the Server keeps offering the package until
   the Agent reports a terminal status for it; the Client answered "the offered version is the one

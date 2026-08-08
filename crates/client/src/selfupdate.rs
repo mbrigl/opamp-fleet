@@ -141,7 +141,7 @@ pub fn install(
     package_hash: &[u8],
     archive_key: Option<&str>,
 ) -> Result<Install, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
+    let exe = layout::running_exe()?;
     // Outside the versioned layout there is no pointer to switch and no previous version to go
     // back to — a `cargo run` build, or a binary an operator dropped somewhere by hand.
     let (layout, running_dir) = Layout::enclosing(&exe).ok_or_else(|| {
@@ -316,7 +316,7 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
     };
     marker.attempts += 1;
 
-    let exe = std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
+    let exe = layout::running_exe()?;
     let running_dir = Layout::enclosing(&exe).map(|(_, dir)| dir);
     let is_new_version = running_dir.as_deref().is_some_and(|dir| {
         std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&marker.new_dir).ok()

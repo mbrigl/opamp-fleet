@@ -179,7 +179,7 @@ fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
 /// resolves to the directory this binary actually runs from — a crash mid-switch otherwise
 /// leaves the pointer torn. Best-effort: a plain foreground run outside a layout is untouched.
 fn heal_torn_pointer() {
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = super::layout::running_exe() else {
         return;
     };
     let Some((layout, running_dir)) = super::layout::Layout::enclosing(&exe) else {
