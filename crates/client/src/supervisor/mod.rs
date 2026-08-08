@@ -132,8 +132,20 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             None => crate::supervisor::process::InstallTarget::Binary(program.path.clone()),
         };
 
+        // The Agent type this Supervisor presents until — and unless — its Managed Process reports
+        // one of its own (ADR-0033). The program's file name is the fallback because it is what
+        // the operator already wrote in this very block: read from configuration, never parsed out
+        // of a program's output, where a name has no grammar to recognise it by.
+        let service_name = block.service_name.clone().unwrap_or_else(|| {
+            program
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
         let mut state = declare_heartbeat(
-            AgentState::supervised(block.name.clone(), storage)
+            AgentState::supervised(block.name.clone(), service_name, storage)
                 .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
                 .with_attributes(config.agent_attributes(Some(block)))
                 .with_namespace(config.service_namespace.clone()),

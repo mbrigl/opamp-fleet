@@ -87,9 +87,23 @@ pub struct ClientConfig {
 pub struct SupervisorBlock {
     /// The plugin this block selects (the TOML key `type`), e.g. `"collector"` or `"command"`.
     pub kind: String,
-    /// The Supervisor's name: the Agent's `service.name` and its state directory name, so it
-    /// follows the instance-name grammar of ADR-0010. Must be unique across blocks.
+    /// The Supervisor's name: the Agent's `service.instance.name` and its state directory name, so
+    /// it follows the instance-name grammar of ADR-0010. Must be unique across blocks.
+    ///
+    /// It is the operator's name for *this* Agent, never its type — that is
+    /// [`service_name`](Self::service_name), which the grammar here could not spell anyway
+    /// (ADR-0033): a reverse FQDN has dots, and this value is a path component on three operating
+    /// systems.
     pub name: String,
+    /// The Agent *type* this Supervisor presents as `service.name` — the Baseline's "reverse FQDN
+    /// that uniquely identifies the Agent type" (ADR-0033). `None` falls back to the program's own
+    /// file name, and a Managed Process that reports a type of its own overrides both: a
+    /// Collector's `opampextension` states the `dist.name` it was built with, which is the truth
+    /// this key can only approximate.
+    ///
+    /// Set it for a Managed Process that reports nothing — the core `otelcol` distribution, every
+    /// Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0017).
+    pub service_name: Option<String>,
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.
     pub endpoint_port: u16,
@@ -226,6 +240,20 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             .ok_or_else(|| "a [[supervisor]] block needs a `name`".to_string())?;
         crate::cli::parse_instance_name(&name)
             .map_err(|e| format!("invalid supervisor name {name:?}: {e}"))?;
+        // Deliberately not run through `parse_instance_name`: a type may be a reverse FQDN
+        // (ADR-0033), which that grammar forbids. Only emptiness is refused — an empty
+        // `service.name` would report "no type" as if it were one.
+        let service_name = match take_string(&mut table, "service_name")
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?
+        {
+            Some(raw) if raw.trim().is_empty() => {
+                return Err(format!(
+                    "supervisor {name:?}: `service_name` must not be empty — leave it out to use \
+                     the program's file name"
+                ));
+            }
+            other => other,
+        };
         let endpoint_port = match take_integer(&mut table, "endpoint_port")? {
             None => 0,
             Some(port) => u16::try_from(port)
@@ -277,6 +305,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         Ok(SupervisorBlock {
             kind,
             name,
+            service_name,
             endpoint_port,
             stop_timeout_secs,
             apply_grace_secs,
@@ -1051,6 +1080,58 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(zero_grace.supervisors[0].apply_grace_secs, 0);
+    }
+
+    /// The Agent type is a common key like `name`, and — unlike `name` — is not bound by the
+    /// ADR-0010 instance grammar, because the Baseline asks for a reverse FQDN and that grammar
+    /// forbids the dots (ADR-0033).
+    #[test]
+    fn a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted() {
+        let cfg: ClientConfig = toml::from_str(
+            r#"
+            [[supervisor]]
+            type = "collector"
+            name = "otelcol-edge-01"
+            binary = "otelcol"
+            service_name = "io.opentelemetry.collector"
+            "#,
+        )
+        .expect("parse");
+        let block = &cfg.supervisors[0];
+        assert_eq!(block.name, "otelcol-edge-01");
+        assert_eq!(
+            block.service_name.as_deref(),
+            Some("io.opentelemetry.collector")
+        );
+        // A common key, never handed to the plugin's strict parse.
+        assert!(!block.settings.contains_key("service_name"));
+    }
+
+    /// Absent is the documented way to fall back to the program's file name. An empty string is
+    /// not the same thing — it would report "no type" as though it were one, which a Selector
+    /// could then match.
+    #[test]
+    fn an_empty_agent_type_is_refused_rather_than_treated_as_absent() {
+        let err = toml::from_str::<ClientConfig>(
+            r#"
+            [[supervisor]]
+            type = "collector"
+            name = "otelcol"
+            binary = "otelcol"
+            service_name = "  "
+            "#,
+        )
+        .expect_err("empty service_name must be refused");
+        assert!(
+            err.to_string().contains("`service_name` must not be empty"),
+            "unhelpful error: {err}"
+        );
+
+        let absent: ClientConfig = toml::from_str(
+            "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = \"otelcol\"\n",
+        )
+        .expect("parse");
+        assert_eq!(absent.supervisors[0].service_name, None);
     }
 
     #[test]

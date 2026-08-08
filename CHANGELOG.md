@@ -81,6 +81,64 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed — breaking
 
+- **A package now states the Agent type it is built for, and reaches no Agent of another**
+  ([ADR-0034](docs/adr/0034-a-package-states-the-agent-type-it-is-built-for.md)). ADR-0031 made the
+  Server refuse to send an artifact to a machine it cannot run on; this does the same for an Agent it
+  was not built for. A Promtail artifact can no longer be swapped over a Collector because someone
+  forgot the Selector.
+
+  **Every existing package is inert until its type is set**, including one in the middle of a
+  rollout. The Server starts normally and logs each untyped package by name; the package view marks
+  it. Set the type to the `service.name` its Agents report:
+
+  ```console
+  $ curl -X PUT -H 'Content-Type: application/json' \
+         -d '{"service_name": "otelcol-contrib"}' \
+         http://<server>:4320/api/v1/packages/otelcol/type
+  ```
+
+  The value is compared **raw** — there is no canonical set of Agent types to normalise against — so
+  a typo is a rollout that never starts rather than an error. Read the type off the Agent's fleet row
+  before typing it. It belongs to the package name, not to an artifact, so it is set once for all
+  platforms.
+
+  An Agent that reports no `service.name` at all is now offered no package, the same rule ADR-0031
+  applies to a missing platform. Every Client this project ships reports one.
+
+  **New route** `PUT /api/v1/packages/{name}/type`; `PackageView` gains `service_name`.
+
+- **`service.name` now reports the Agent *type*, not the Agent's name**
+  ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)). The name an
+  operator gives an Agent moved to a new attribute, `service.instance.name`. Before, a
+  `[[supervisor]]` block's `name` was reported as `service.name` — the slot the protocol reserves
+  for "a reverse FQDN that uniquely identifies the Agent type" — and a Collector carrying the
+  `opampextension` overwrote it with its own type the moment it connected, so every Collector of one
+  distribution collapsed onto one name in the fleet view.
+
+  **Any Selector matching `service.name` must be checked.** It now matches a type
+  (`otelcol-contrib`, `opamp-fleet-client`), not a Supervisor's name, so one written against a name
+  silently stops matching and its Configuration or package quietly stops being delivered. Nothing
+  detects this for you. Point it at the new attribute instead:
+
+  ```console
+  $ curl -X PUT -H 'Content-Type: application/json' \
+         -d '{"selector": {"service.instance.name": "otelcol-edge-01"}}' \
+         http://<server>:4320/api/v1/configurations/edge-config/selector
+  ```
+
+  Aiming at *what an Agent is* is what `service.name` is now good for — one Selector of
+  `{"service.name": "otelcol-contrib"}` reaches every Collector of that distribution, with nothing to
+  configure per host.
+
+  **`client.toml` needs no change**, and no Agent changes its identity: `instance_uid` and
+  `service.instance.id` are untouched, so nothing is re-registered. A Managed Process that reports no
+  type of its own now presents its program's file name as one; the new optional `service_name` key in
+  a `[[supervisor]]` block states a better one.
+
+  **The REST API's `AgentView` gained `service_instance_name`**, and `service_name` keeps its key
+  while changing what it holds. Anything reading `service_name` as a display name should read
+  `service_instance_name` and fall back to `service_name`, which is what the bundled UI now does.
+
 - **A package now holds one artifact per platform, and `os`/`arch` are required**
   ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)). An Agent is offered only the artifact
   built for the operating system and architecture it reported, and never another — so uploading a

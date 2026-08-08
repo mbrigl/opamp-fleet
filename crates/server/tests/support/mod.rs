@@ -73,7 +73,15 @@ async fn spawn_full(
     }
 }
 
-/// A full status report for one Agent, the way a fresh Client sends it.
+/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0033). It is a constant
+/// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
+/// which is also what makes one package able to reach several of them (ADR-0034).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
+
+/// A full status report for one Agent, the way a fresh Client sends it. `name` is the operator's
+/// name for it — `service.instance.name` — and is what tells two Agents apart; their *type* is the
+/// shared [`AGENT_TYPE`].
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToServer {
     AgentToServer {
@@ -87,10 +95,18 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
             identifying_attributes: vec![KeyValue {
                 key: "service.name".to_string(),
                 value: Some(AnyValue {
-                    value: Some(any_value::Value::StringValue(name.to_string())),
+                    value: Some(any_value::Value::StringValue(AGENT_TYPE.to_string())),
                 }),
             }],
             non_identifying_attributes: vec![
+                // The operator's name for this Agent (ADR-0033) — what distinguishes it from its
+                // neighbours, now that `service.name` says only what kind of thing it is.
+                KeyValue {
+                    key: "service.instance.name".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue(name.to_string())),
+                    }),
+                },
                 KeyValue {
                     key: "os.type".to_string(),
                     value: Some(AnyValue {

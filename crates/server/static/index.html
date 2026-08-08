@@ -222,7 +222,7 @@
       </section>
 
       <section id="packages-card" class="card config">
-        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
+        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. A package also states the <em>agent type</em> it is built for, matched against the agent's <code>service.name</code>: without one it reaches nobody, and it never reaches an agent of another type whatever its Selector says. An empty Selector then targets every agent of that type; a narrower one overrides it for the agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
         <!-- What identifies one artifact: the package it belongs to, its version, and the machine
              it runs on. All four are what a release file name already says, so picking the file
@@ -237,9 +237,13 @@
         </div>
         <!-- Whom it goes to, and what proves it on arrival. -->
         <div class="config-fields">
-          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
+          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent of the type below)" autocomplete="off" />
           <input id="package-signature" placeholder="signature: hex Ed25519 (optional)" autocomplete="off"
                  title="Hex-encoded Ed25519 signature over the artifact, checked by every agent against its configured verification key before it installs." />
+        </div>
+        <div class="config-fields">
+          <input id="package-type" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib) — required before it is offered" autocomplete="off"
+                 title="Matched for equality against the service.name an agent reports. A package with no agent type is offered to nobody; one typed for another kind of agent is never a candidate, whatever its selector says." />
         </div>
         <div class="config-fields">
           <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
@@ -256,6 +260,7 @@
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
           <button id="package-source" class="btn btn-ghost">Use source url</button>
           <button id="package-target" class="btn btn-ghost">Set selector</button>
+          <button id="package-set-type" class="btn btn-ghost">Set agent type</button>
           <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
@@ -347,8 +352,14 @@
         return Math.round(s / 3600) + "h ago";
       }
 
+      // What to call an Agent (ADR-0033): the operator's name for it, falling back to its type and
+      // then to the UID. A foreign OpAMP client reports no instance name, and every Collector of
+      // one distribution reports the same type — so both steps are needed for a row to stay
+      // distinguishable from its neighbours.
+      const displayName = (a) => a.service_instance_name || a.service_name || a.instance_uid;
+
       const sortVal = {
-        name: (a) => a.service_name || a.instance_uid,
+        name: displayName,
         connected: (a) => (a.connected ? 1 : 0),
         config: (a) => a.remote_config_status,
         version: (a) => a.service_version,
@@ -437,7 +448,7 @@
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -455,7 +466,7 @@
           const row = `
           <tr class="agent">
             <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
-            <td><a class="name" href="#">${esc(a.service_name) || "agent"}</a><div class="sub">${esc(a.instance_uid)}</div></td>
+            <td><a class="name" href="#" title="${esc(a.instance_uid)}">${esc(displayName(a)) || "agent"}</a><div class="sub">${esc(a.service_name) || "no type reported"}</div></td>
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
@@ -683,7 +694,7 @@
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
             const selected = p.name === selectedPackage && tag === selectedPlatform;
-            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${v.source_url ? " · ↗ source" : ""}</span>`;
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
           })
         );
         $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;
@@ -702,6 +713,7 @@
         $("package-name").value = pkg.name;
         // The selector is the package's; everything else belongs to the one artifact.
         $("package-selector").value = selectorText(pkg.selector);
+        $("package-type").value = pkg.service_name || "";
         $("package-os").value = variant ? variant.os : "";
         $("package-arch").value = variant ? variant.arch : "";
         $("package-version").value = variant ? variant.version || "" : "";
@@ -865,6 +877,27 @@
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ selector }),
+        });
+        if (!res.ok) {
+          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("package-error").textContent = "";
+        await refreshPackages();
+        refreshAgents();
+      });
+      // Saying which kind of agent a package is for is what arms it (ADR-0034): until this is set
+      // the artifact is stored and offered to nobody, which is the safe half of the bargain that
+      // stops a fleet-wide package reaching an agent it was never built for.
+      $("package-set-type").addEventListener("click", async () => {
+        const name = $("package-name").value.trim();
+        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
+        const service_name = $("package-type").value.trim();
+        if (!service_name) { $("package-error").textContent = "an agent type is the service.name its agents report"; return; }
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/type`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ service_name }),
         });
         if (!res.ok) {
           $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;

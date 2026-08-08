@@ -50,10 +50,22 @@ pub struct Handled {
     pub package_download: Option<PackageDownload>,
 }
 
+/// The Agent type the Client's own Agent presents as `service.name` (ADR-0028, ADR-0033). It is
+/// the shipped binary's name and a constant, not the configured instance name: every Client in a
+/// fleet is the same kind of thing, and that is what a type says.
+pub const CLIENT_SERVICE_NAME: &str = "opamp-fleet-client";
+
 pub struct AgentState {
     uid: InstanceUid,
     sequence_num: u64,
-    name: String,
+    /// The operator's name for this Agent, reported as `service.instance.name` (ADR-0033): the
+    /// `[[supervisor]]` block's `name`, or the top-level one for the Client's own Agent. Never
+    /// `service.name` — that is the type below.
+    instance_name: String,
+    /// The Agent *type*, reported as `service.name`. A Managed Process that reports one of its own
+    /// replaces it in the fold; this is what stands until then, and permanently for a process that
+    /// reports nothing.
+    service_name: String,
     /// This Agent's declared Capability Set: the base set plus whatever
     /// [`declare_capability`](Self::declare_capability) added. Carried in every report, so the
     /// Server's cached mask follows on the next exchange.
@@ -140,7 +152,11 @@ pub struct AgentState {
 impl AgentState {
     /// Restores identity and configuration from storage, so a restart reports the same Agent with
     /// the same applied config hash — and is therefore not reconfigured redundantly.
-    pub fn new(name: String, storage: Storage) -> std::io::Result<Self> {
+    ///
+    /// `instance_name` is the operator's name for this Agent; the type it presents is
+    /// [`CLIENT_SERVICE_NAME`], since this constructor builds the Client's own Agent. A
+    /// Supervisor-backed one comes from [`supervised`](Self::supervised), which is told its type.
+    pub fn new(instance_name: String, storage: Storage) -> std::io::Result<Self> {
         let uid = storage.load_or_create_uid()?;
         let applied = storage.load_remote_config();
         let status = applied.as_ref().map(|config| RemoteConfigStatus {
@@ -152,7 +168,8 @@ impl AgentState {
         Ok(AgentState {
             uid,
             sequence_num: 0,
-            name,
+            instance_name,
+            service_name: CLIENT_SERVICE_NAME.to_string(),
             capabilities: AGENT_CAPABILITIES,
             start_time_ns: now_ns(),
             storage,
@@ -255,8 +272,18 @@ impl AgentState {
 
     /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0011). Only
     /// such an Agent accepts a restart command — the self-Agent has no process to restart.
-    pub fn supervised(name: String, storage: Storage) -> std::io::Result<Self> {
-        let mut state = Self::new(name, storage)?;
+    ///
+    /// The type is a parameter rather than a builder default because there is no sensible default
+    /// for it (ADR-0033): the Client's own type would be a lie, and the instance name in that slot
+    /// is exactly the confusion this signature exists to prevent. The caller always knows one —
+    /// the block's `service_name`, or the program's file name.
+    pub fn supervised(
+        instance_name: String,
+        service_name: String,
+        storage: Storage,
+    ) -> std::io::Result<Self> {
+        let mut state = Self::new(instance_name, storage)?;
+        state.service_name = service_name;
         state.managed = true;
         state.declare_capability(AgentCapabilities::AcceptsRestartCommand);
         Ok(state)
@@ -810,7 +837,11 @@ impl AgentState {
     }
 
     fn describe(&self) -> AgentDescription {
-        let mut identifying_attributes = vec![string_attr("service.name", &self.name)];
+        // `service.name` is the Agent *type* — the Baseline's "reverse FQDN that uniquely
+        // identifies the Agent type" (ADR-0033). It used to carry the instance name, which a
+        // Managed Process reporting its own type then destroyed; the instance name now has its own
+        // key below, out of the way of the fold.
+        let mut identifying_attributes = vec![string_attr("service.name", &self.service_name)];
         // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
         // *which* deployment this service belongs to, so it belongs beside the name rather than
         // among the tags an operator hangs on it.
@@ -831,6 +862,12 @@ impl AgentState {
         // placeholder would say something false that a Selector could then match.
         let os = os_info();
         let mut non_identifying_attributes = vec![
+            // The operator's name for this Agent (ADR-0033). Non-identifying because the Baseline
+            // has no key for a human instance name and admits "any user-defined attributes the end
+            // user would like to associate with this Agent" here; identity itself stays
+            // `service.instance.id`. A Selector can match it, which is how ADR-0017's "pin one
+            // host" is expressed for a machine running several Supervisors.
+            string_attr("service.instance.name", &self.instance_name),
             string_attr("os.type", os_type()),
             string_attr("host.arch", host_arch()),
         ];
@@ -861,8 +898,12 @@ impl AgentState {
                     .push(string_attr(key, value));
             }
         }
-        // Fold in what the Managed Process reported about itself — except its identity: the
-        // Agent the Server sees is the Supervisor, keyed by the Supervisor's uid (goal 16).
+        // Fold in what the Managed Process reported about itself — except the two attributes that
+        // are the Supervisor's to state: the Agent the Server sees is the Supervisor, keyed by the
+        // Supervisor's uid (goal 16) and called what the operator called it (ADR-0033). A process
+        // cannot know either, so a value it reports under those keys is not an improvement. Its
+        // `service.name` deliberately *does* win — a Collector's `dist.name` is a better type than
+        // anything this file can infer.
         if let Some(reported) = &self.process_description {
             for attr in &reported.identifying_attributes {
                 if attr.key != "service.instance.id" {
@@ -870,7 +911,9 @@ impl AgentState {
                 }
             }
             for attr in &reported.non_identifying_attributes {
-                upsert_attr(&mut description.non_identifying_attributes, attr);
+                if attr.key != "service.instance.name" {
+                    upsert_attr(&mut description.non_identifying_attributes, attr);
+                }
             }
         }
         description
@@ -1261,6 +1304,100 @@ mod tests {
         }
     }
 
+    /// The defect ADR-0033 exists for: a Collector's `opampextension` reports the type it was
+    /// built with, and folding that in used to overwrite the operator's name for the Supervisor —
+    /// so every Collector of one distribution collapsed onto one name in the fleet view. Both
+    /// values must survive, each in its own key, each won by the side that actually knows it.
+    #[test]
+    fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol-edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+        )
+        .expect("agent");
+
+        let before = reported(&agent.describe());
+        assert_eq!(
+            before.get("service.name").map(String::as_str),
+            Some("otelcol")
+        );
+        assert_eq!(
+            before.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01")
+        );
+
+        // The extension connects and states its `dist.name` — and, being a Collector, knows
+        // nothing about the Supervisor that owns it, so its guess at an instance name is worthless.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+            non_identifying_attributes: vec![string_attr(
+                "service.instance.name",
+                "some-collector",
+            )],
+        });
+
+        let after = reported(&agent.describe());
+        assert_eq!(
+            after.get("service.name").map(String::as_str),
+            Some("otelcol-contrib"),
+            "the process states the better type and wins the type"
+        );
+        assert_eq!(
+            after.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01"),
+            "but it cannot rename the Supervisor the operator configured"
+        );
+    }
+
+    /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
+    /// shipped binary's name (ADR-0028) and not whatever the operator called this instance —
+    /// which is what makes `[self_update] package = "opamp-fleet-client"` line up with a Selector
+    /// on the type (ADR-0033).
+    #[test]
+    fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::new("edge-fra1".to_string(), storage).expect("agent");
+        let attributes = reported(&agent.describe());
+        assert_eq!(
+            attributes.get("service.name").map(String::as_str),
+            Some(CLIENT_SERVICE_NAME)
+        );
+        assert_eq!(
+            attributes.get("service.instance.name").map(String::as_str),
+            Some("edge-fra1")
+        );
+    }
+
+    /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
+    /// second way to set the two attributes the Supervisor itself owns.
+    #[test]
+    fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::supervised("edge-01".to_string(), "otelcol".to_string(), storage)
+            .expect("agent")
+            .with_attributes(
+                [
+                    ("service.name".to_string(), "hijacked".to_string()),
+                    ("service.instance.name".to_string(), "hijacked".to_string()),
+                ]
+                .into(),
+            );
+        let attributes = reported(&agent.describe());
+        assert_eq!(
+            attributes.get("service.name").map(String::as_str),
+            Some("otelcol")
+        );
+        assert_eq!(
+            attributes.get("service.instance.name").map(String::as_str),
+            Some("edge-01")
+        );
+    }
+
     /// ADR-0017 twice offers "a Selector matching that host's `host.name`" as the way to pin one
     /// host to one artifact. That only works if an Agent reports the attribute, which for a long
     /// time it did not.
@@ -1368,7 +1505,9 @@ mod tests {
 
         // A Supervisor-backed Agent reports no version until its Managed Process states one.
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
-        let mut supervised = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        let mut supervised =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         assert_eq!(version_of(&supervised), None);
 
         supervised.set_process_description(AgentDescription {
@@ -1386,7 +1525,9 @@ mod tests {
     fn what_the_process_reports_about_itself_accumulates_across_sources() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
-        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
 
         // The extension's self-report: everything but the version, which it happens not to state.
         agent.set_process_description(AgentDescription {
@@ -1455,7 +1596,8 @@ mod tests {
     fn a_restart_command_is_queued_by_supervised_agents_and_ignores_other_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
-        let mut supervised = AgentState::supervised("s".to_string(), storage).expect("agent");
+        let mut supervised =
+            AgentState::supervised("s".to_string(), "s".to_string(), storage).expect("agent");
         assert_ne!(
             supervised.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
             0,
@@ -1563,7 +1705,9 @@ mod tests {
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
-        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         let _ = agent.next_report();
 
@@ -1691,7 +1835,9 @@ mod tests {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
-        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         let _ = agent.next_report();
 
@@ -1739,7 +1885,9 @@ mod tests {
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
-        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         agent.offered_all_packages_hash = b"agg-2".to_vec();
         agent.server_offered = Some(("9.9.9".to_string(), b"bad".to_vec()));

@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_package_selector))
+        .routes(routes!(put_package_type))
         .routes(routes!(rollback_package))
         .routes(routes!(put_package_source))
         .routes(routes!(download_package))
@@ -277,6 +278,11 @@ struct PackageView {
     /// to one of its artifacts — every platform of a name is aimed at the same Agents (ADR-0031).
     #[serde(default)]
     selector: std::collections::BTreeMap<String, String>,
+    /// The Agent type this package is built for, matched against the `service.name` an Agent
+    /// reports before any Selector is considered (ADR-0034). **Empty means offered to nobody** —
+    /// not "every type" — so a package is inert until this is set.
+    #[serde(default)]
+    service_name: String,
     /// One artifact per platform. An Agent is offered the one built for the machine it reported,
     /// and never another (ADR-0031).
     variants: Vec<PackageVariantView>,
@@ -314,6 +320,7 @@ impl From<crate::packages::PackageSummary> for PackageView {
         PackageView {
             name: summary.name,
             selector: summary.selector,
+            service_name: summary.service_name,
             variants: summary
                 .variants
                 .into_iter()
@@ -364,6 +371,15 @@ struct PackageSelectorSpec {
     /// Equality pairs an Agent's reported attributes must all match; empty targets every Agent.
     #[serde(default)]
     selector: std::collections::BTreeMap<String, String>,
+}
+
+/// The Agent type a package is built for (ADR-0034).
+#[derive(Deserialize, ToSchema)]
+struct PackageTypeSpec {
+    /// Matched for equality against the `service.name` an Agent reports — `otelcol-contrib`,
+    /// `opamp-fleet-client`. Compared raw: there is no canonical set of Agent types to normalise
+    /// against, so this must be spelled exactly as the Agent reports it.
+    service_name: String,
 }
 
 /// The query parameters of a package upload: everything but the artifact, which is the body.
@@ -783,6 +799,44 @@ async fn put_package_selector(
         Err(e) if e.contains("not configured") || e.starts_with("no package") => {
             error(StatusCode::NOT_FOUND, e)
         }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Sets the Agent type a package is built for (ADR-0034) — for every platform of it at once,
+/// because a type is platform-independent, exactly as the Selector is aim-independent of bytes.
+///
+/// **This is what arms a package.** Until a type is set the package is offered to no Agent, so an
+/// artifact uploaded and then forgotten reaches nobody rather than everybody. The value is compared
+/// raw against the `service.name` an Agent reports, with no normalisation — there is no canonical
+/// set of Agent types — so a typo here is a rollout that never starts, not an error.
+#[utoipa::path(
+    put,
+    path = "/api/v1/packages/{name}/type",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    request_body = PackageTypeSpec,
+    responses(
+        (status = 200, description = "The package, with its Agent type", body = PackageView),
+        (status = 400, description = "The agent type is empty", body = ErrorBody),
+        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The agent type could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_type(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<PackageTypeSpec>,
+) -> Response {
+    match state.set_package_service_name(&name, spec.service_name.clone()) {
+        Ok(_) => {
+            info!(package = %name, service_name = %spec.service_name, "package agent type set");
+            package_response(&state, &name)
+        }
+        Err(e) if e.contains("not configured") || e.starts_with("no package") => {
+            error(StatusCode::NOT_FOUND, e)
+        }
+        Err(e) if e.starts_with("an agent type") => error(StatusCode::BAD_REQUEST, e),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

@@ -61,4 +61,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0030](0030-one-service-name-on-every-platform.md) | One service name on every platform — `opamp-fleet-client`, with the instance as a suffix | 🟢 accepted |
 | [0031](0031-per-platform-package-variants.md) | One platform vocabulary from the release file name to the offer — a package is one name with one artifact per platform | 🟢 accepted |
 | [0032](0032-release-artifacts-separate-their-fields-with-underscores.md) | A release artifact separates its four fields with `_` — `name_version_os_arch.7z` | 🟢 accepted |
+| [0033](0033-an-agents-type-and-its-instance-name-are-two-attributes.md) | An Agent's type and its instance name are two attributes — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
+| [0034](0034-a-package-states-the-agent-type-it-is-built-for.md) | A package states the Agent type it is built for, and reaches no Agent of another | 🟡 proposed |
 
