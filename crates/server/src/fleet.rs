@@ -445,6 +445,12 @@ impl AppState {
                     warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
                 }
             }
+            // An Agent that refuses the offer itself has no package to hang the reason on, so the
+            // report carries it. Logged and surfaced, or a Client refusing every offer it is sent
+            // would look like one that is simply not installing anything.
+            if !statuses.error_message.is_empty() {
+                warn!(agent = %uid, error = %statuses.error_message, "the agent refused the package offer");
+            }
             record.package_statuses = Some(statuses);
         }
         if let Some(incoming) = msg.available_components {
@@ -831,6 +837,11 @@ pub struct AgentView {
     /// Selectors both reach it (ADR-0017). Absent when the targeting is unambiguous.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
+    /// What the Agent said about the *offer* rather than about a package it holds — an offer it
+    /// refuses outright has no package status to carry the reason, and the Client's own Agent
+    /// refusing a package it was not configured to take (ADR-0020) is exactly that case. Empty
+    /// when the Agent has nothing to complain about.
+    pub package_error: String,
     pub transport: String,
     pub connected: bool,
     pub healthy: bool,
@@ -1006,6 +1017,11 @@ impl AgentView {
                 })
                 .unwrap_or_default(),
             package_conflict,
+            package_error: record
+                .package_statuses
+                .as_ref()
+                .map(|s| s.error_message.clone())
+                .unwrap_or_default(),
             packages: record
                 .package_statuses
                 .as_ref()

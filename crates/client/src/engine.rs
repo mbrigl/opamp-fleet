@@ -250,11 +250,22 @@ impl Engine {
             &hash,
             update.archive_key.as_deref(),
         ) {
-            Ok(_) => {
+            Ok(crate::selfupdate::Install::Staged) => {
                 // `Installing` is already the reported status and the caller flushes it before the
                 // run ends. What comes after the restart reports the outcome.
                 let _ = std::fs::remove_file(staged);
                 self.restart_for_update = true;
+            }
+            // The version offered is the one running — which is what a freshly updated Client is
+            // told every time, since the Server keeps offering until an Agent reports a terminal
+            // status for that package. Saying `Installed` is both true and what closes the loop:
+            // reporting a failure here left the Server offering and this Client downloading, over
+            // and over, for as long as both were up.
+            Ok(crate::selfupdate::Install::AlreadyRunning) => {
+                let _ = std::fs::remove_file(staged);
+                let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+                agent.state.package_applied(hash, Ok(version));
+                agent.owes_report = true;
             }
             Err(e) => {
                 warn!(error = %e, "the Client's self-update failed; staying on this version");

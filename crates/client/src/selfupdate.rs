@@ -112,9 +112,23 @@ fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
         .map_err(|e| format!("cannot write the update marker: {e}"))
 }
 
+/// What installing an offered artifact came to.
+#[derive(Debug)]
+pub enum Install {
+    /// Staged beside the running version, proved, and pointed at. The caller ends the run with
+    /// [`EXIT_RESTART_FOR_UPDATE`]; the terminal status comes from the process that starts next,
+    /// which reads the marker this wrote rather than being handed it.
+    Staged,
+    /// The offered version is the one already running — there is nothing to do, and saying so is
+    /// not a failure. The Baseline is explicit: an Agent that already has the offered version
+    /// "does not need to do anything, it already has the right version". Reporting anything else
+    /// leaves the Server's re-offer gate open, and a Server that keeps offering meets a Client
+    /// that keeps downloading.
+    AlreadyRunning,
+}
+
 /// Installs a verified artifact as a new version of *this Client* and points `current` at it
-/// (ADR-0020). The caller reports `Installing` and then ends the run with
-/// [`EXIT_RESTART_FOR_UPDATE`]; the terminal status comes from the process that starts next.
+/// (ADR-0020).
 ///
 /// # Errors
 /// Returns an error — with the previous version still current and still running — when this
@@ -126,7 +140,7 @@ pub fn install(
     version: &str,
     package_hash: &[u8],
     archive_key: Option<&str>,
-) -> Result<UpdateMarker, String> {
+) -> Result<Install, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
     // Outside the versioned layout there is no pointer to switch and no previous version to go
     // back to — a `cargo run` build, or a binary an operator dropped somewhere by hand.
@@ -140,9 +154,11 @@ pub fn install(
 
     let new_dir = layout.version_dir(&layout::version_dir_name(version));
     if new_dir == running_dir {
-        return Err(format!(
-            "the offered version {version:?} is the one already running"
-        ));
+        // Not a failure: this *is* the version the Server wants installed. It reaches here every
+        // time a freshly updated Client is offered the package it just installed, which is the
+        // ordinary course of events and not something to report as broken.
+        info!(version = %version, "the offered version is the one already running");
+        return Ok(Install::AlreadyRunning);
     }
     stage(&new_dir, artifact, version, archive_key)?;
 
@@ -161,7 +177,7 @@ pub fn install(
     store_marker(state_dir, &marker)?;
     layout.set_current(&new_dir)?;
     info!(version = %version, dir = %new_dir.display(), "staged a new Client version; restarting into it");
-    Ok(marker)
+    Ok(Install::Staged)
 }
 
 /// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0010 manifest.

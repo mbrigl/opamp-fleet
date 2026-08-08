@@ -119,6 +119,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
   is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
 
+### Fixed
+
+- **A Client that had just updated itself reported the update as failed, and then downloaded the
+  artifact again — over and over.** After the restart the Server keeps offering the package until
+  the Agent reports a terminal status for it; the Client answered "the offered version is the one
+  already running" as an *error*, which is not terminal, so the offer came back and the whole
+  artifact was fetched again every couple of seconds for as long as both ends were up. On a fleet
+  that is a self-inflicted flood against the Server, and a successful self-update that shows as
+  `InstallFailed` in the fleet view. The version already running is now reported `Installed`, which
+  is both true and what the Baseline asks for: an Agent that already has the offered version "does
+  not need to do anything". No configuration changes; a Client that was in this state leaves it as
+  soon as it runs this version.
+
+- **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
+  field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
+  reason — which is exactly what happens when the Client's own Agent is offered a package
+  `[self_update]` did not name (ADR-0020) — so the reason was reported by the Client, stored by the
+  Server, and shown nowhere. It is now also logged.
+
 ### Changed
 
 - A Supervisor's package downloads are staged in its own directory

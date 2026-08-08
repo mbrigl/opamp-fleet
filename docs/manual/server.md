@@ -271,6 +271,7 @@ knowing by name:
 | `effective_config` | What it says it is actually running. |
 | `healthy`, `health_status`, `connected`, `transport`, `last_seen_ms` | Liveness. |
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
+| `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |
 
 ## Authentication
