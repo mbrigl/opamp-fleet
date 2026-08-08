@@ -1,6 +1,6 @@
 # ADR-0024: The Client is a library with a thin binary on top, so a test can reach what it tests
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 
