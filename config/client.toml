@@ -24,9 +24,19 @@ max_message_size_bytes = 67108864
 # Where the Client persists its instance_uid, the received remote configuration, and any
 # Server-offered connection settings (ADR-0014). Persisted connection settings override
 # endpoint, [auth], and the intervals above; delete <state_dir>/connection-settings.pb to revert.
-# A package being installed (ADR-0015) is streamed to <state_dir>/packages/ first, so this
+# A package for the Client itself (ADR-0020) is streamed to <state_dir>/packages/ first, so this
 # directory needs room for one agent binary.
 state_dir = "client-state"
+
+# Where the per-Supervisor directories live (ADR-0021); the default is <state_dir>/supervisors.
+# Each Supervisor owns everything under its own directory — its identity, the received
+# configuration, its program/, and the artifact staging its updates go through:
+#
+#   <supervisor_dir>/<name>/instance-uid, remote-config.pb, config/, program/, packages/
+#
+# Set this when the programs must not live where the state does: /var/lib is often mounted
+# noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
+# supervisor_dir = "/opt/opamp-fleet/supervisors"
 
 # Operator-defined attributes (ADR-0012), reported by every Agent this Client presents so the
 # Server's Selectors can target them. A [[supervisor]] block may add its own [supervisor.attributes]
@@ -40,9 +50,10 @@ state_dir = "client-state"
 
 # Optional package verification (ADR-0015). With a key set, every Server-offered package MUST
 # carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
-# its content hash alone and a signed one is refused. A [[supervisor]] block opts into package
-# delivery with `accepts_packages = true` below; *which* artifact it then receives is the Server's
-# decision, expressed as that package's Selector (ADR-0017), never a key in this file.
+# its content hash alone and a signed one is refused. A [[supervisor]] block takes package
+# delivery by naming its program with a bare file name (ADR-0021, see the blocks below); *which*
+# artifact it then receives is the Server's decision, expressed as that package's Selector
+# (ADR-0017), never a key in this file.
 # Generate a key and sign artifacts with the `opamp-package-sign` helper
 # (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
 # [packages]
@@ -53,6 +64,24 @@ state_dir = "client-state"
 #                          # its own (ADR-0014): a rotation would leave every archive unopenable.
 #                          # The Server never learns this key; the artifact stays encrypted
 #                          # wherever it is stored and is opened only on the host that runs it.
+
+# Consent for the Server to replace *this Client's own* binary (ADR-0020). Absent — the default —
+# the Client's Agent declares no package capability at all and no offer can reach it.
+#
+# Unlike a [[supervisor]], which only consents while the Server picks the artifact (ADR-0017), the
+# Client must NAME its package, and that name is the whole of the protection: a package with an
+# empty Selector reaches every consenting Agent, so without a name to match, the first fleet-wide
+# Collector artifact someone uploads would be installed over the Client and take the host out of
+# reach. An offer under any other name is refused and reported, never applied.
+#
+# What happens on an accepted offer: the artifact is verified like any other, staged as a new
+# version *beside* the running one in the ADR-0010 install layout, and proved by running
+# `client self-check` on it before the `current` pointer moves. The process then exits and asks the
+# service manager to restart it — it does not restart itself. A marker in state_dir carries the
+# outcome across that restart: the new version commits itself once it reaches the Server, and one
+# that will not stay up is rolled back to its predecessor after three attempts.
+# [self_update]
+# package = "opamp-client"
 
 # Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
 # username and password together. The Authorization header rides every plain-HTTP request and
@@ -69,6 +98,18 @@ state_dir = "client-state"
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above. The three blocks below show the three
 # ways a Managed Process is brought into the fleet.
+#
+# How a block names its program — `binary` for a collector, `command` for a custom one — is also
+# what decides whether the Server may update it (ADR-0021), because replacing a program means
+# writing in the directory it sits in:
+#
+#   a bare file name    the program lives in <supervisor_dir>/<name>/program/, a directory this
+#                       Client creates and owns. It takes package updates.
+#   an absolute path    the machine's program, put there by a distribution package or by
+#                       configuration management. It is started, never written to.
+#
+# Anything in between — ./x, bin/x — fails at startup rather than being guessed at. Note that a
+# bare name is NOT searched for in $PATH; it names a file in that one directory.
 
 # 1. A Collector WITH the opampextension — it reports its own description, health, and
 # effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
@@ -88,45 +129,113 @@ state_dir = "client-state"
 # [[supervisor]]
 # type = "collector"
 # name = "otelcol"
-# binary = "/usr/local/bin/otelcol-contrib"
+# binary = "otelcol-contrib"  # bare, so it lives in this Supervisor's program/ directory and
+#                          # takes binary updates from the Server (ADR-0015, ADR-0017, ADR-0021):
+#                          # the artifact the Server selects for this Agent is verified, swapped
+#                          # over it, health-gated on apply_grace_secs, and rolled back if it will
+#                          # not stay up. *Which* artifact is the Server's decision — give the
+#                          # package a Selector there (PUT /api/v1/packages/<name>/selector), so a
+#                          # rollout is aimed centrally instead of from this file.
+#                          # An artifact that is a .tar.gz is unpacked here (ADR-0018): the member
+#                          # whose file name matches this one is what gets installed, so an
+#                          # upstream release can be uploaded exactly as published.
+#                          # Put the first copy there yourself; every later one arrives by package.
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
-# accepts_packages = true  # (ADR-0015, ADR-0017) take binary updates from the Server: the
-#                          # artifact it selects for this Agent is verified, swapped over
-#                          # `binary`, health-gated on apply_grace_secs, and rolled back if it
-#                          # will not stay up. *Which* artifact is the Server's decision — give
-#                          # the package a Selector there (PUT /api/v1/packages/<name>/selector),
-#                          # so a rollout is aimed centrally instead of from this file.
-#                          # An artifact that is a .tar.gz is unpacked here (ADR-0018): the member
-#                          # whose file name matches `binary` is what gets installed, so an
-#                          # upstream release can be uploaded exactly as published
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
 # the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
-# Every received config-map entry is written to <state_dir>/supervisors/<name>/config/ under its
+# Every received config-map entry is written to <supervisor_dir>/<name>/config/ under its
 # Configuration's name (ADR-0012) and passed as its own --config; a change restarts the collector.
+# The absolute path here is the other half of the rule above: this Collector came from the
+# machine's package manager, so the Server never writes over it — it is supervised, not updated.
 # [[supervisor]]
 # type = "collector"
 # name = "otelcol-plain"
 # binary = "/usr/local/bin/otelcol"
-# accepts_packages = true
 
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
 # Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
 # (named after the Configuration on the Server, here "fluent-bit-conf") and the Supervisor
-# restarts the process on a change so it re-reads it.
+# restarts the process on a change so it re-reads it. Named by an absolute path here, so it is
+# the machine's program: installed and updated by whatever put it there. Block 5 below is the
+# same agent delivered by the Server instead.
+#
+# args, working_dir and env values may use two placeholders naming this Supervisor's own
+# directories (ADR-0022), so nothing has to be kept in sync with state_dir or supervisor_dir:
+#
+#   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
+#   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
+#
+# Any other ${...} is passed to the process untouched, so an agent's own variable syntax keeps
+# working — which also means a misspelled placeholder is handed over rather than refused. The
+# program itself (command, binary) is never substituted: its written form is what decides package
+# consent (ADR-0021), and that must be readable in this file.
 # [[supervisor]]
 # type = "command"
 # name = "fluent-bit"
 # command = "/opt/fluent-bit/bin/fluent-bit"
-# accepts_packages = true
-# args = ["-c", "/var/lib/opamp-fleet/client/default/state/supervisors/fluent-bit/config/fluent-bit-conf"]
+# args = ["-c", "${config_dir}/fluent-bit-conf"]
 # working_dir = "/var/lib/fluent-bit"   # optional
 # [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)
 # role = "edge"
 # [supervisor.env]                      # optional environment for the process
 # FLB_LOG_LEVEL = "info"
+
+# 4. A single-file Foreign Agent the SERVER delivers. Same plugin as 3, one difference that
+# changes who owns the program: the bare file name puts it in <supervisor_dir>/<name>/program/,
+# a directory this Client creates and owns, so this Agent declares AcceptsPackages and the
+# Server's artifact is installed over it (ADR-0021). Fluent Bit above cannot do this — it is an
+# executable plus the shared objects it loads, and exactly one archive member is ever installed
+# (ADR-0018); a single static binary can.
+#
+# Nothing has to be put on the host first. Until a package arrives the Supervisor reports
+# "no process installed" and keeps running, so the first version and every later one take the
+# same path — build the artifact, upload it, aim it:
+#
+#   opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
+#   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+#   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
+#        "http://<server>:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig"
+#   curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "prod"}}' \
+#        http://<server>:4320/api/v1/packages/promtail/selector
+#
+# The archive must hold the member "promtail" — the program's own file name, which is what this
+# block configures and what the Supervisor looks for. `pack` names it after the file it packs;
+# use --program-name when an upstream release names it otherwise. Only .tar.gz and .7z are
+# opened: anything else is taken to *be* the program, so a .zip would be written over the binary
+# unopened. An encrypted .7z (`pack --format 7z --archive-key ...`) needs [packages] archive_key
+# above, and the Server never learns that key.
+# [[supervisor]]
+# type = "command"
+# name = "promtail"
+# command = "promtail"                  # bare: this Supervisor's own program/, takes packages
+# args = ["-config.file=${config_dir}/promtail-conf"]
+# version_args = ["--version"]          # what it reports as service.version
+
+# 5. An agent that is MORE THAN ONE FILE, delivered by the Server (ADR-0023). Fluent Bit is an
+# executable plus the shared objects it loads, so the single member of block 4 is not enough:
+# `program_path` says where the program sits *inside* the package, and the whole archive is then
+# unpacked into <supervisor_dir>/<name>/program/tree/, keeping its own structure.
+#
+# The path is matched from its end, so the version-named directory an upstream release wraps
+# everything in — fluent-bit-3.1.0/bin/fluent-bit — needs no mention here and the value keeps
+# being right at the next release. Write more of the path only if it matches several members.
+#
+#   opamp-package-sign sha256 fluent-bit-3.1.0.tar.gz   # or pack a tree yourself
+#   curl -X PUT --data-binary @fluent-bit-3.1.0.tar.gz \
+#        "http://<server>:4320/api/v1/packages/fluent-bit?version=3.1.0"
+#
+# The tree that was running is kept as program/tree.rollback until the new one has survived
+# apply_grace_secs, and put back whole if it has not. A .tar.gz carries its own file modes and is
+# the right format here; a .7z is opened too, but only the program is made executable.
+# [[supervisor]]
+# type = "command"
+# name = "fluent-bit-managed"
+# command = "fluent-bit"                # bare: consent, exactly as everywhere else (ADR-0021)
+# program_path = "bin/fluent-bit"       # where the program sits inside the package
+# args = ["-c", "${config_dir}/fluent-bit-conf"]

@@ -93,8 +93,13 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     let (addr, state, dir) = spawn_server(store).await;
 
-    // The managed binary starts as a copy of the stub; the package swap replaces it in place.
-    let managed = dir.path().join("managed-agent");
+    // The managed binary starts as a copy of the stub, in the Supervisor's own `program/`
+    // directory — which is what a bare `command` names, and what consents to the update
+    // (ADR-0021). The package swap replaces it there.
+    let state_dir = dir.path().join("client-state");
+    let program_dir = state_dir.join("supervisors/myagent/program");
+    std::fs::create_dir_all(&program_dir).expect("create the program dir");
+    let managed = program_dir.join("managed-agent");
     std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &managed).expect("copy stub");
     #[cfg(unix)]
     {
@@ -102,7 +107,6 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
     let marker = dir.path().join("marker");
-    let state_dir = dir.path().join("client-state");
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -113,15 +117,13 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"myagent\"\n",
-            "accepts_packages = true\n",
             "apply_grace_secs = 1\n",
-            "command = {managed:?}\n",
+            "command = \"managed-agent\"\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         key = public_key_hex,
-        managed = managed.to_string_lossy(),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("client.toml");

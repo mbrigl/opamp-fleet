@@ -41,6 +41,97 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
     path
 }
 
+/// ADR-0022 end to end: what the Foreign Agent is actually invoked with. The stub writes every
+/// argument it received into the marker, so this asserts on the expanded command line rather than
+/// on the substitution function — the argument has to survive all the way into `argv`, which is
+/// the only place the silent failure this prevents would show up.
+#[test]
+fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    // Relocated on purpose: an argument written against the default layout would be wrong here,
+    // which is exactly the drift the placeholders exist to make impossible.
+    let supervisor_dir = dir.path().join("elsewhere");
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
+         [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {command:?}\n\
+         args = [\"--touch\", {marker:?}, \"-c\", \"${{config_dir}}/agent-conf\", \"--keep\", \"${{FLB_LEVEL}}\"]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
+        command = env!("CARGO_BIN_EXE_stub_agent"),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("client.toml");
+    std::fs::write(&config_path, config).expect("write client.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for("the stub's marker file", Duration::from_secs(20), || {
+        marker.exists()
+    });
+    let argv = std::fs::read_to_string(&marker).expect("read the marker");
+
+    // Built the way the Client builds it — a path, so its separators are the platform's — with the
+    // rest of the argument appended as the operator wrote it, which is what expansion leaves alone.
+    let expected = format!(
+        "{}/agent-conf",
+        supervisor_dir.join("stub").join("config").display()
+    );
+    assert!(
+        argv.contains(&expected),
+        "the placeholder resolved to the relocated directory: {argv}"
+    );
+    assert!(
+        !argv.contains("${config_dir}"),
+        "nothing unexpanded reached the process: {argv}"
+    );
+    assert!(
+        argv.contains("${FLB_LEVEL}"),
+        "an unknown placeholder is the process's own business: {argv}"
+    );
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
+/// ADR-0023 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// program from inside it. The tree is put in place here rather than delivered, because what this
+/// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
+/// at startup is the path the process is actually spawned from, across the process boundary.
+#[test]
+fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    let supervisor_dir = dir.path().join("supervisors");
+
+    // Where an installed package tree ends up: <supervisor_dir>/<name>/program/tree/<program_path>.
+    // Named with the platform's executable suffix, because Windows spawns `x.exe` when told `x`
+    // and would not find a file that is missing it.
+    let file_name = format!("stub-agent{}", std::env::consts::EXE_SUFFIX);
+    let inside = format!("bin/{file_name}");
+    let program = supervisor_dir.join("stub/program/tree").join(&inside);
+    std::fs::create_dir_all(program.parent().expect("a parent")).expect("create the tree");
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &program).expect("place the program");
+
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
+         [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {file_name:?}\n\
+         program_path = {inside:?}\nargs = [\"--touch\", {marker:?}]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("client.toml");
+    std::fs::write(&config_path, config).expect("write client.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for("the stub's marker file", Duration::from_secs(20), || {
+        marker.exists()
+    });
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
 #[test]
 fn a_command_supervisor_spawns_the_configured_process() {
     let dir = tempfile::tempdir().expect("tempdir");

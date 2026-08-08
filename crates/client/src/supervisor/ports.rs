@@ -95,9 +95,21 @@ impl EventSender {
 pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
+    /// Everything this Supervisor owns: its state, its `program/`, its package staging
+    /// (ADR-0021). Placed by `supervisor_dir`, so nothing may assume where it is.
+    pub supervisor_dir: PathBuf,
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
+    /// The Managed Process itself, already resolved (ADR-0021): either inside this Supervisor's
+    /// own `program/` directory, or the absolute path the block named. The plugin spawns this
+    /// rather than reading its own `binary`/`command` key, so the path rule — and the package
+    /// consent derived from it — lives in one place instead of once per plugin.
+    pub program: PathBuf,
+    /// What an offered package replaces (ADR-0015, ADR-0023) — resolved beside `program` and for
+    /// the same reason: a plugin that decided this for itself could disagree with the Agent's
+    /// declared consent.
+    pub install: crate::supervisor::process::InstallTarget,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -114,6 +126,31 @@ pub struct SupervisorContext {
     pub shutdown: Shutdown,
 }
 
+impl SupervisorContext {
+    /// Expands the placeholders naming this Supervisor's own directories (ADR-0022):
+    /// `${supervisor_dir}` and `${config_dir}`.
+    ///
+    /// They exist because a Custom Supervisor is told where its configuration is *through its own
+    /// command line*, and an absolute path written there drifts the moment `supervisor_dir` moves
+    /// or the Supervisor is renamed — silently, since the process then starts happily on a file
+    /// nobody writes to.
+    ///
+    /// An unrecognized `${…}` is **left exactly as written**, neither refused nor emptied. A
+    /// Foreign Agent's own configuration language may use the same syntax — Fluent Bit's does —
+    /// and eating those to catch a typo would break a working deployment. What this substitutes
+    /// is the two names below; everything else is the process's business.
+    ///
+    /// Never applied to the program itself: under ADR-0021 the written shape of that path is what
+    /// decides whether the Agent declares `AcceptsPackages`, and a substituted one would make a
+    /// fleet-visible capability depend on something the file does not literally say.
+    #[must_use]
+    pub fn expand(&self, value: &str) -> String {
+        value
+            .replace("${supervisor_dir}", &self.supervisor_dir.to_string_lossy())
+            .replace("${config_dir}", &self.config_dir.to_string_lossy())
+    }
+}
+
 /// A compiled-in Supervisor Plugin (ADR-0011): the adapter factory on the Managed-Process side.
 /// A new process kind is a new implementation and one line in
 /// [`registry`](crate::supervisor::registry).
@@ -121,9 +158,115 @@ pub trait Plugin {
     /// The TOML `type` value this plugin serves.
     fn kind(&self) -> &'static str;
 
+    /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
+    /// for the example Custom Supervisor. The core takes that key out of the settings, applies
+    /// ADR-0021's path rule to it, and hands the result back as
+    /// [`SupervisorContext::program`]; the plugin never sees the raw value.
+    fn program_key(&self) -> &'static str;
+
     /// Validate the settings and start the adapter task, returning the command side of the Port.
     ///
     /// # Errors
     /// Returns an error when the settings do not parse — startup fails loudly, nothing spawns.
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::runtime::shutdown_channel;
+
+    /// A per-Supervisor root that is absolute on *this* platform — on Windows that means naming a
+    /// drive (ADR-0021), and it is why nothing below spells a path out with POSIX separators: what
+    /// a placeholder expands to is a `PathBuf`, so its separators are the platform's own.
+    #[cfg(windows)]
+    fn root(place: &str) -> PathBuf {
+        PathBuf::from(format!("C:\\{place}\\supervisors\\fluent-bit"))
+    }
+
+    #[cfg(not(windows))]
+    fn root(place: &str) -> PathBuf {
+        PathBuf::from(format!("/{place}/supervisors/fluent-bit"))
+    }
+
+    fn context(supervisor_dir: PathBuf) -> SupervisorContext {
+        let (_tx, shutdown) = shutdown_channel();
+        let (event_tx, _events) = mpsc::channel(1);
+        SupervisorContext {
+            name: "fluent-bit".to_string(),
+            config_dir: supervisor_dir.join("config"),
+            supervisor_dir,
+            program: PathBuf::from("/opt/fluent-bit/bin/fluent-bit"),
+            install: crate::supervisor::process::InstallTarget::Binary(PathBuf::from(
+                "/opt/fluent-bit/bin/fluent-bit",
+            )),
+            stop_timeout: Duration::from_secs(1),
+            apply_grace: Duration::from_secs(0),
+            archive_key: None,
+            settings: toml::Table::new(),
+            events: EventSender::new(0, event_tx),
+            shutdown,
+        }
+    }
+
+    /// The case ADR-0022 exists for: the argument that points a Foreign Agent at its configuration
+    /// is derived from the same value the Client derives it from, so relocating `supervisor_dir`
+    /// cannot leave the process reading a file nobody writes to.
+    #[test]
+    fn the_placeholders_name_this_supervisors_own_directories() {
+        let ctx = context(root("opt"));
+        // The placeholder becomes the directory the Client itself writes to; what the operator
+        // wrote after it is a string and survives verbatim, separator included.
+        assert_eq!(
+            ctx.expand("${config_dir}/fluent-bit-conf"),
+            format!("{}/fluent-bit-conf", ctx.config_dir.display())
+        );
+        // Two different directories, and the configuration's is the one inside.
+        let supervisor = ctx.expand("${supervisor_dir}");
+        let config = ctx.expand("${config_dir}");
+        assert_ne!(supervisor, config);
+        assert!(
+            config.starts_with(&supervisor),
+            "{config} must sit inside {supervisor}"
+        );
+        // Relocating the root moves the expansion with it — that is the whole point.
+        let moved = context(root("var"));
+        assert_ne!(
+            moved.expand("${config_dir}/x"),
+            ctx.expand("${config_dir}/x")
+        );
+        assert!(
+            moved
+                .expand("${config_dir}/x")
+                .starts_with(&moved.supervisor_dir.display().to_string()),
+            "the expansion follows the relocated root"
+        );
+    }
+
+    /// Anything else is left exactly as written. Fluent Bit's own configuration language uses
+    /// `${…}` too, and a Client that ate or refused those would break a working deployment to
+    /// catch a typo — which is the trade ADR-0022 makes, deliberately and in this direction.
+    #[test]
+    fn an_unknown_placeholder_is_passed_through_untouched() {
+        let ctx = context(root("opt"));
+        for verbatim in [
+            "${FLB_LOG_LEVEL}",
+            "${config-dir}", // a typo: passed on, not refused
+            "-c",
+            "",
+            "$config_dir",
+            "${}",
+        ] {
+            assert_eq!(
+                ctx.expand(verbatim),
+                verbatim,
+                "must pass through untouched"
+            );
+        }
+        // And a known placeholder still expands when it sits beside an unknown one.
+        assert_eq!(
+            ctx.expand("${config_dir}/${FLB_ENV}.conf"),
+            format!("{}/${{FLB_ENV}}.conf", ctx.config_dir.display())
+        );
+    }
 }

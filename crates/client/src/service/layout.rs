@@ -160,6 +160,61 @@ pub fn version_dir_name(full_version: &str) -> String {
     }
 }
 
+/// This executable's path, resolved through the pointer it was started by.
+///
+/// `std::env::current_exe` is documented to differ exactly here: started through a symbolic link,
+/// "some platforms will return the path of the symbolic link and other platforms will return the
+/// path of the symbolic link's target". Linux reads `/proc/self/exe` and returns the target; macOS
+/// returns the link. The service is registered against `<root>/current/client` — the whole point of
+/// the pointer — so on the platforms that return the link, the path is `<root>/current/client`,
+/// whose grandparent is not `versions`, and [`Layout::enclosing`] finds no layout at all. What
+/// depends on that: the self-update (ADR-0020) and the torn-pointer repair, neither of which would
+/// ever run.
+///
+/// The resolution is what makes the two platforms agree. On Windows the pointer is a junction and
+/// the same difference applies, but `canonicalize` answers in the `\\?\` verbatim form there, which
+/// `mklink /J` will not take — so the prefix is stripped back off.
+///
+/// # Errors
+/// Returns an error when the executable cannot be located at all.
+pub fn running_exe() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
+    Ok(resolve(exe))
+}
+
+/// The resolution [`running_exe`] performs, apart from it — the function above can only ever ask
+/// about the process running it, which on this platform is already resolved.
+///
+/// An unresolvable path is not a reason to fail: what it names is still where this binary runs
+/// from, and every caller is better off with it than with an error.
+fn resolve(exe: PathBuf) -> PathBuf {
+    match std::fs::canonicalize(&exe) {
+        Ok(resolved) => plain(resolved),
+        Err(_) => exe,
+    }
+}
+
+/// Windows' `canonicalize` answers `\\?\C:\…` (and `\\?\UNC\server\share`); every other platform
+/// hands the path back as it is.
+#[cfg(windows)]
+fn plain(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(match rest.strip_prefix("UNC\\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_string(),
+        }),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn plain(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// Stage the running executable into its version directory, write the manifest, and point
 /// `current` at it. Returns the program path to register the service with
 /// (`<root>/current/client`). Staging an already-present version replaces its contents — an
@@ -311,5 +366,32 @@ mod tests {
         );
         assert!(Layout::enclosing(Path::new("/usr/bin/client")).is_none());
         assert!(Layout::enclosing(Path::new("client")).is_none());
+    }
+
+    /// What the service actually runs is `<root>/current/client`, and on macOS that is the path
+    /// `current_exe` hands back — the pointer, not the version directory behind it. The layout is
+    /// invisible from there, so the resolution has to happen before anything looks for it. Provoked
+    /// here with a symbolic link, which is what the pointer is on this platform anyway.
+    #[cfg(unix)]
+    #[test]
+    fn the_layout_is_found_from_the_pointer_the_service_was_registered_against() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
+        let version_dir = layout.version_dir("opamp-client-1.2.3-a1b2c3d");
+        std::fs::create_dir_all(&version_dir).expect("create the version dir");
+        std::fs::write(version_dir.join(BINARY_FILENAME), b"the-client").expect("write the binary");
+        layout.set_current(&version_dir).expect("point current");
+
+        // The macOS shape, unresolved: two directories up is the root, not `versions`.
+        let through_pointer = layout.current_binary();
+        assert!(
+            Layout::enclosing(&through_pointer).is_none(),
+            "the premise: this path alone says nothing about a layout"
+        );
+
+        let (found, running_dir) =
+            Layout::enclosing(&resolve(through_pointer)).expect("resolved, the layout is there");
+        assert_eq!(running_dir, version_dir);
+        assert_eq!(found.current(), layout.current());
     }
 }
