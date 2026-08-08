@@ -323,6 +323,17 @@ pub fn extract_tree_tar_gz(
     program_path: &Path,
     dest: &Path,
 ) -> Result<TreeSummary, String> {
+    extract_tree_tar_gz_within(archive, program_path, dest, MAX_UNPACKED_BYTES)
+}
+
+/// The same, with the total budget spelled out — the bound is across *all* members, so a tree of
+/// harmless-looking files still stops somewhere.
+fn extract_tree_tar_gz_within(
+    archive: &Path,
+    program_path: &Path,
+    dest: &Path,
+    limit: u64,
+) -> Result<TreeSummary, String> {
     let members = list_tar_gz(archive)?;
     let prefix = locate_program(&members, program_path)?;
 
@@ -360,7 +371,7 @@ pub fn extract_tree_tar_gz(
         prepare_parent(dest, &out_path)?;
         let mut out = File::create(&out_path)
             .map_err(|e| format!("cannot write {}: {e}", out_path.display()))?;
-        let written = copy_within(&mut entry, &mut out, MAX_UNPACKED_BYTES - summary.bytes)
+        let written = copy_within(&mut entry, &mut out, limit - summary.bytes)
             .map_err(|e| format!("cannot unpack {}: {e}", relative.display()))?;
         summary.files += 1;
         summary.bytes += written;
@@ -962,6 +973,157 @@ mod tests {
             .expect_err("must be refused");
 
         assert!(err.contains("not a file or a directory"), "{err}");
+        assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
+    }
+
+    /// The other kind of link, which tar spells with its own entry type: it names an existing
+    /// member rather than a path on the host, and is refused by the same rule for the same reason —
+    /// where its bytes end up is not decided by where the member goes.
+    #[test]
+    fn a_hard_link_member_refuses_the_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hardlinked.tar.gz");
+        {
+            let file = File::create(&path).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut program = tar::Header::new_gnu();
+            program.set_size(11);
+            program.set_mode(0o755);
+            program.set_cksum();
+            builder
+                .append_data(&mut program, "app/bin/fluent-bit", &b"the-program"[..])
+                .expect("append");
+            let mut link = tar::Header::new_gnu();
+            link.set_size(0);
+            link.set_mode(0o644);
+            link.set_entry_type(tar::EntryType::Link);
+            builder
+                .append_link(&mut link, "app/lib/second-name", "app/bin/fluent-bit")
+                .expect("append the hard link");
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        let dest = dest(dir.path());
+
+        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest)
+            .expect_err("must be refused");
+
+        assert!(err.contains("not a file or a directory"), "{err}");
+        assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
+    }
+
+    /// The member bound (ADR-0023). An archive of a hundred thousand empty files is not an agent,
+    /// and the count refuses it in the listing pass — before any path is turned into a write.
+    #[test]
+    fn an_archive_of_too_many_members_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("many.tar.gz");
+        {
+            let file = File::create(&path).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for i in 0..=MAX_TREE_MEMBERS {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("app/lib/plugin-{i}.so"), &b""[..])
+                    .expect("append");
+            }
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        let dest = dest(dir.path());
+
+        let err = extract_tree_tar_gz(&path, Path::new("bin/fluent-bit"), &dest)
+            .expect_err("must be refused");
+
+        assert!(err.contains("more than"), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&dest).expect("read").count(),
+            0,
+            "the count is reached before anything is written"
+        );
+    }
+
+    /// The byte bound is across the *whole* tree, not per member: three members no one of which is
+    /// large enough to refuse on its own still stop at the budget. What was written by then is the
+    /// caller's staging directory, which it removes — the point here is that the copy stopped.
+    #[test]
+    fn a_tree_that_outgrows_the_total_budget_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = tar_gz_at(
+            &dir.path().join("fat.tar.gz"),
+            &[
+                ("app/bin/fluent-bit", &[0u8; 2048]),
+                ("app/lib/libcrypto.so.3", &[0u8; 2048]),
+                ("app/lib/libssl.so.3", &[0u8; 2048]),
+            ],
+        );
+        let dest = dest(dir.path());
+
+        let err = extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 4096)
+            .expect_err("past the total limit");
+
+        assert!(err.contains("limit"), "{err}");
+        // No member is anywhere near the budget on its own, so a per-member bound would have let
+        // the whole tree through.
+        extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 16 * 1024)
+            .expect("the same tree fits in a budget that admits all of it");
+    }
+
+    /// A `.7z` carries neither tar's entry types nor its modes, so the same two refusals are read
+    /// out of Windows attributes instead: a reparse point is a link by another name, and an
+    /// anti-item is a deletion wearing a member's clothes. Both refuse the whole archive.
+    #[test]
+    fn a_7z_member_that_is_a_link_or_an_anti_item_refuses_the_archive() {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let write = |path: &Path, mark: fn(&mut sevenz_rust2::ArchiveEntry)| {
+            let mut writer = sevenz_rust2::ArchiveWriter::create(path).expect("create");
+            writer
+                .push_archive_entry(
+                    sevenz_rust2::ArchiveEntry::new_file("app/bin/fluent-bit"),
+                    Some(std::io::Cursor::new(&b"the-program"[..])),
+                )
+                .expect("push the program");
+            let mut suspect = sevenz_rust2::ArchiveEntry::new_file("app/lib/passwd");
+            mark(&mut suspect);
+            writer
+                .push_archive_entry(suspect, None::<std::io::Cursor<&[u8]>>)
+                .expect("push the suspect member");
+            writer.finish().expect("finish");
+        };
+
+        let linked = dir.path().join("linked.7z");
+        write(&linked, |entry| {
+            entry.has_stream = false;
+            entry.has_windows_attributes = true;
+            entry.windows_attributes = FILE_ATTRIBUTE_REPARSE_POINT;
+        });
+        let dest = dest(dir.path());
+        let err = extract_tree_7z(&linked, Path::new("bin/fluent-bit"), &dest, None)
+            .expect_err("a link must be refused");
+        assert!(err.contains("holds a link"), "{err}");
+        assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
+
+        let anti = dir.path().join("anti.7z");
+        write(&anti, |entry| {
+            entry.has_stream = false;
+            entry.is_anti_item = true;
+        });
+        let err = extract_tree_7z(&anti, Path::new("bin/fluent-bit"), &dest, None)
+            .expect_err("an anti-item must be refused");
+        assert!(err.contains("anti-item"), "{err}");
         assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
     }
 

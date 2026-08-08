@@ -1,6 +1,6 @@
 # ADR-0023: A package may be a directory tree, unpacked whole beside the one it replaces
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-07
 - **Deciders:** Markus Brigl
 
