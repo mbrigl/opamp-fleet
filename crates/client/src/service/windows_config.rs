@@ -31,21 +31,31 @@
 //! name. `sc config` changes the one field it is given and leaves the rest alone. This is also how
 //! the service was created: the backend is the `sc.exe` wrapper.
 //!
+//! The **description** is a fourth, and is not the display name under another word: the services
+//! list has a Description column of its own, nothing that registers the service fills it, and a
+//! service with a display name still shows an empty one. It is set the same way, with the one
+//! `sc.exe` verb that carries it.
+//!
 //! Everything here is a no-op on Unix.
 
-/// Configure what the Windows backend does not: failure recovery, and the display name.
+/// Configure what the Windows backend does not: failure recovery, the display name, and the
+/// description.
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
 /// the service manager already carries the policy, and neither systemd nor launchd has a display
-/// name to set.
+/// name or a description column to fill.
 #[cfg(not(windows))]
-pub fn configure(_service_name: &str, _display_name: &str) -> Result<(), String> {
+pub fn configure(
+    _service_name: &str,
+    _display_name: &str,
+    _description: &str,
+) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(windows)]
-pub fn configure(service_name: &str, display_name: &str) -> Result<(), String> {
+pub fn configure(service_name: &str, display_name: &str, description: &str) -> Result<(), String> {
     use std::time::Duration;
 
     use windows_service::service::{
@@ -86,27 +96,143 @@ pub fn configure(service_name: &str, display_name: &str) -> Result<(), String> {
             format!("cannot enable recovery on reported failures for {service_name}: {e}")
         })?;
 
-    set_display_name(service_name, display_name)
+    // The name the services list shows (ADR-0030). `sc.exe` wants `displayname=` with the space
+    // **after** the equals sign: the token is the option and the *next* argument is its value, so
+    // `displayname=x` as one word is parsed as an option nobody knows and silently changes nothing.
+    sc(
+        &["config", service_name, "displayname="],
+        display_name,
+        &format!("display name of {service_name}"),
+    )?;
+
+    // The Description column beside it. `sc description` takes its text **positionally** — there is
+    // no `description=` token, and adding one would write the token into the field. The two verbs
+    // disagreeing about this is exactly why each call says which shape it uses.
+    sc(
+        &["description", service_name],
+        description,
+        &format!("description of {service_name}"),
+    )
 }
 
-/// The name the Windows services list shows (ADR-0030), set through `sc.exe config`.
-///
-/// `sc.exe` wants `displayname=` with the space **after** the equals sign: the token is the option
-/// and the next argument is its value, so `displayname=x` as one word is parsed as an option nobody
-/// knows and silently changes nothing.
+/// `sc.exe` exits with the Win32 error code, and this is the one worth a second attempt:
+/// `ERROR_ACCESS_DENIED`. Matched on the number rather than on the message, which is localised.
 #[cfg(windows)]
-fn set_display_name(service_name: &str, display_name: &str) -> Result<(), String> {
+const ACCESS_DENIED: i32 = 5;
+
+/// Runs `sc.exe` with a trailing value argument — the shape both fields above are set with, so
+/// neither can be the one that forgets to check whether `sc.exe` actually accepted it.
+///
+/// **A refusal for want of rights is retried elevated**, which is the only way to ask for them: a
+/// running process cannot raise its own token, so UAC is reached by starting a *new* process with
+/// the `runas` verb. In the ordinary install this never happens — `sc create` and the
+/// `CHANGE_CONFIG` handle above both need Administrator and fail first — so the retry is what
+/// covers a service whose registration succeeded and whose reconfiguration is nevertheless
+/// refused, rather than the everyday path.
+///
+/// `what` names the field for the error, because `sc.exe` reports failure through an exit code and
+/// a line on stdout rather than through anything a caller could tell apart.
+#[cfg(windows)]
+fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
     let output = std::process::Command::new("sc.exe")
-        .args(["config", service_name, "displayname="])
-        .arg(display_name)
+        .args(args)
+        .arg(value)
         .output()
-        .map_err(|e| format!("cannot run sc.exe to name {service_name}: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot set the display name of {service_name}: sc.exe exited with {} ({})",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim()
-        ));
+        .map_err(|e| format!("cannot run sc.exe to set the {what}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    if output.status.code() == Some(ACCESS_DENIED) {
+        return sc_elevated(args, value).map_err(|e| format!("cannot set the {what}: {e}"));
+    }
+    Err(format!(
+        "cannot set the {what}: sc.exe exited with {} ({})",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim()
+    ))
+}
+
+/// The same call again, through the UAC prompt.
+///
+/// `ShellExecuteEx` with the `runas` verb is what raises that prompt, and PowerShell's
+/// `Start-Process -Verb RunAs` is that call — reachable on every Windows this Client supports and
+/// without binding a Win32 API this project has no other use for. `-Wait -PassThru` is what makes
+/// the elevated child's exit code observable at all; without it the prompt would be answered and
+/// the outcome lost.
+///
+/// A declined prompt is a terminating error under `$ErrorActionPreference = 'Stop'`, so PowerShell
+/// exits non-zero and it reads as the refusal it is rather than as a silent success.
+#[cfg(windows)]
+fn sc_elevated(args: &[&str], value: &str) -> Result<(), String> {
+    let list = args
+        .iter()
+        .copied()
+        .chain(std::iter::once(value))
+        .map(quote_for_powershell)
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $p = Start-Process -FilePath 'sc.exe' -ArgumentList {list} -Verb RunAs -Wait -PassThru; \
+         exit $p.ExitCode"
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command"])
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("cannot run powershell.exe to ask for Administrator rights: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "sc.exe was refused, and the elevated retry exited with {} — run this as Administrator \
+         ({})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// One PowerShell single-quoted string. Inside those, `'` is the only character with a meaning, and
+/// it is escaped by doubling — so a display name carrying an apostrophe stays one argument instead
+/// of ending the string and becoming script.
+///
+/// Single quotes throughout are also what keeps the whole script free of `"`: it is handed to
+/// `powershell.exe` as one argument, and Rust quotes that with `"`, so a double quote inside would
+/// have to survive two levels of escaping to arrive intact.
+///
+/// Compiled into test builds everywhere, because this is the one part of the elevated path that
+/// can be checked on a machine that is not Windows.
+#[cfg(any(windows, test))]
+fn quote_for_powershell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_for_powershell;
+
+    /// The elevated retry hands `sc.exe`'s arguments to PowerShell as script text, so a value that
+    /// closes its own quote stops being an argument and becomes code. The service name follows the
+    /// ADR-0010 grammar and cannot do that, but the display name is prose and could.
+    #[test]
+    fn a_value_cannot_break_out_of_its_quotes() {
+        assert_eq!(
+            quote_for_powershell("OpAMP Fleet Client"),
+            "'OpAMP Fleet Client'"
+        );
+        assert_eq!(quote_for_powershell("displayname="), "'displayname='");
+        assert_eq!(
+            quote_for_powershell("Bob's Client"),
+            "'Bob''s Client'",
+            "an apostrophe is doubled, not left to end the string"
+        );
+        assert_eq!(
+            quote_for_powershell("'; Remove-Item C:\\ -Recurse; '"),
+            "'''; Remove-Item C:\\ -Recurse; '''",
+            "every quote is doubled, so the payload stays one string argument"
+        );
+        // Nothing needs a double quote, which is what keeps the script survivable through Rust's
+        // own argument quoting.
+        assert!(!quote_for_powershell("a\"b").contains('\\'));
+    }
 }

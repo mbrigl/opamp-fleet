@@ -138,6 +138,16 @@ Where a platform has a second, human-readable name, it is **OpAMP Fleet Client**
 Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
 as its `Description`, and a launchd job has no name besides its label.
 
+The Windows services list has a **Description** column beside that name, and it is a separate field
+that nothing fills on its own — a service can carry a display name and still show an empty
+description, which is what this one did. It now reads **OpAMP Fleet Client for Windows**, the same
+on every instance: the display name beside it is what says *which* Client this is.
+
+Both are set right after the registration, with `sc.exe config` and `sc.exe description`. If either
+call is refused for want of rights, it is retried through a UAC prompt — which in practice never
+appears, because registering the service needs Administrator in the first place and fails earlier
+and more plainly.
+
 The root holds versioned installs side by side, a `current` pointer the service is registered
 against, and the default state directory:
 

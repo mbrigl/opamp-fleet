@@ -63,6 +63,16 @@ pub fn display_name(instance: &InstanceName) -> String {
     }
 }
 
+/// What the Windows services list shows in its **Description** column — a field of its own, beside
+/// the display name rather than derived from it, and left empty by everything that registers the
+/// service unless it is set explicitly.
+///
+/// It carries no instance. The display name beside it already distinguishes those; this column
+/// answers "what is this?", and the answer is the same on a host running one Client and on a host
+/// running four. Windows is the only platform with somewhere to put it — systemd shows the unit
+/// name as its `Description` and a launchd job has no such field at all (ADR-0030).
+pub const WINDOWS_DESCRIPTION: &str = "OpAMP Fleet Client for Windows";
+
 /// The service label, built so that **every backend renders it identically** (ADR-0030).
 ///
 /// `service-manager` renders a label through two functions that do not agree — `{organization}-`
@@ -134,7 +144,7 @@ pub fn install(spec: &InstallSpec) -> Result<(), String> {
     install_service(spec)?;
     // What `service-manager` does not do on Windows, done here (see `windows_config`).
     let name = service_name(&spec.instance);
-    super::windows_config::configure(&name, &display_name(&spec.instance))
+    super::windows_config::configure(&name, &display_name(&spec.instance), WINDOWS_DESCRIPTION)
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {
@@ -297,6 +307,25 @@ mod tests {
         assert_eq!(service_name(&instance("prod")), "opamp-fleet-client-prod");
         assert_eq!(display_name(&instance("default")), "OpAMP Fleet Client");
         assert_eq!(display_name(&instance("prod")), "OpAMP Fleet Client (prod)");
+    }
+
+    /// The Windows Description column is its own field: a service can carry a display name and
+    /// still show nothing there, which is what it did. It is one string for every instance —
+    /// the display name beside it is what says *which* Client this is.
+    #[test]
+    fn the_windows_services_list_has_a_description_to_show() {
+        assert_eq!(WINDOWS_DESCRIPTION, "OpAMP Fleet Client for Windows");
+        assert!(
+            !WINDOWS_DESCRIPTION.is_empty(),
+            "an empty one clears the field"
+        );
+        for named in ["default", "prod"] {
+            assert_ne!(
+                WINDOWS_DESCRIPTION,
+                display_name(&instance(named)),
+                "the description repeats the product, it does not restate the display name"
+            );
+        }
     }
 
     #[test]

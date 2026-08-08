@@ -15,6 +15,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **The Windows services list now shows a description**: **OpAMP Fleet Client for Windows**. It is a
+  field of its own beside the display name, and nothing that registers a service fills it — so the
+  Client had a display name and an empty Description column. It is the same text on every instance;
+  the display name beside it (`OpAMP Fleet Client (prod)`) is what distinguishes them.
+
+  An already-installed service keeps its empty description until it is registered again — the field
+  is written at install time. `service uninstall` then `service install` fills it.
+
+  A `sc.exe` call refused for want of rights is now retried through a UAC prompt. In the ordinary
+  install this never fires: registering the service needs Administrator first and fails earlier with
+  a clearer message.
+
 - **Every Agent now reports the attributes the protocol names.** Alongside `os.type` and
   `host.arch`, an Agent reports `os.name`, `os.version`, `host.name`, and `host.id` — so a Selector
   can target a distribution release, or pin one machine by its host name.
