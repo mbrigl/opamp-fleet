@@ -791,9 +791,18 @@ mod tests {
 
         // The machine's program has no directory this Client may unpack into, and picking one of
         // the two keys to ignore would be the worst of the three answers.
+        //
+        // Written per platform, for the reason the test below this one states: `/opt/...` is not
+        // absolute on Windows, it is *drive-relative*, and it would be refused there for that
+        // reason instead — the same green result for the wrong reason, which is how a rule stops
+        // being tested without anyone noticing.
+        #[cfg(unix)]
+        let foreign = "/opt/fluent-bit/bin/fluent-bit";
+        #[cfg(windows)]
+        let foreign = r"C:\fluent-bit\bin\fluent-bit.exe";
         let err = resolve_program(
             "command",
-            Path::new("/opt/fluent-bit/bin/fluent-bit"),
+            Path::new(foreign),
             Some(Path::new("bin/fluent-bit")),
             &dir,
             "fluent-bit",
