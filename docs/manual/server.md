@@ -160,22 +160,36 @@ and `in_sync`.
 ## Packages: distributing software
 
 Package delivery is armed by `packages_dir`; the Server declares the capability only while the store
-holds something. A package is offered to an Agent when the package's Selector matches it **and** the
-Agent accepts packages at all — which is the Client's decision, made by how it names its program
+holds something. A package is offered to an Agent when the artifact **fits** the machine it reported *and* the
+package's Selector matches it, *and* the Agent accepts packages at all — which is the Client's
+decision, made by how it names its program
 (see [the Client](client.md#which-programs-take-updates)).
+
+**One name, one artifact per platform** (ADR-0031). A package name carries a whole release: the
+Linux build, the macOS builds, the Windows build. The Server hands each Agent the one built for
+its `os.type` and `host.arch` and never another, so a mixed fleet is one rollout rather than one
+per platform. **The Selector aims, the platform fits** — which Agents a package is for is your
+choice, which bytes each of them gets is not.
 
 **Upload an artifact.** The artifact is the raw request body, its metadata rides the query:
 
 ```console
 $ curl -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64&signature=$sig"
 ```
 
 | Query parameter | Meaning |
 |---|---|
 | `version` | Free-form version string, e.g. a SemVer the Agent can compare. Required. |
+| `os` | The operating system this artifact runs on, as Agents report `os.type`: `linux`, `darwin`, `windows`. **Required.** |
+| `arch` | The architecture, as Agents report `host.arch`: `amd64`, `arm64`. **Required.** |
 | `addon` | `true` marks an addon package. The default is a top-level package — a Managed Process's binary. A Supervisor has no way to apply an addon, so an Agent refuses one with `InstallFailed`. |
 | `signature` | Hex-encoded Ed25519 signature over the artifact, verified by the Agent before it installs. |
+
+Other spellings are accepted and answered canonically, so the tokens off an upstream release's file
+name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean `amd64`, `aarch64`
+means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather than refused —
+the fleet may run a system nobody here anticipated.
 
 **Or reference an artifact hosted elsewhere** (ADR-0018). The Server stores the address and your
 SHA-256, offers them verbatim, and never downloads the artifact — so the hash, and the signature
@@ -183,7 +197,8 @@ when one is configured, is the whole of the protection:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…", "version": "0.109.0"}' \
+       -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…",
+            "version": "0.109.0", "os": "linux", "arch": "amd64"}' \
        http://127.0.0.1:4320/api/v1/packages/otelcol/source
 ```
 
@@ -200,18 +215,33 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        http://127.0.0.1:4320/api/v1/packages/otelcol/selector
 ```
 
+A Selector aims **every** platform of that package at once, because the aim belongs to the name.
+
 Where several packages match one Agent, **the most specific Selector wins** — a fleet-wide package
 plus a narrower one is how a rollout starts on part of the fleet. Two equally specific Selectors
 reaching the same Agent leave it with no offer at all, and the fleet view says so on that Agent, in
-`package_conflict`.
+`package_conflict`. Two platforms of *one* package can never collide this way: only one of them is
+ever a candidate.
 
-**One step back** (ADR-0019). Replacing a package's artifact keeps its predecessor, and a rollback
-re-offers it — an ordinary offer naming an older artifact. The Selector is untouched. A package that
-has replaced nothing answers `409`:
+**An Agent that reports no `os.type` or `host.arch` is offered nothing** — there is no artifact that
+can be known to run on it, and guessing is how a fleet-wide outage starts. Every Client this project
+ships reports both.
+
+**One step back** (ADR-0019). Replacing an artifact keeps its predecessor, and a rollback re-offers
+it — an ordinary offer naming an older artifact. The Selector is untouched. An artifact that has
+replaced nothing answers `409`:
 
 ```console
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/otelcol/rollback
+$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/rollback?os=linux&arch=amd64"
 ```
+
+The rollback names **one platform**, and moves only that one. A canary that reached Linux and went
+badly is taken back on Linux; rolling the whole name back would push every other platform to a
+predecessor it never left.
+
+**Deleting.** `DELETE /api/v1/packages/otelcol` removes the package and every platform's artifact;
+adding `?os=…&arch=…` removes just that one. Taking the last artifact away takes the package with
+it — a name with nothing to offer is not a package.
 
 **Building and signing** (ADR-0015, ADR-0018). The helper that ships with the Client writes the
 artifact, hashes it, and signs it:

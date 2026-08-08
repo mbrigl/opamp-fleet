@@ -190,10 +190,25 @@ region = "eu-central"
 A `[[supervisor]]` block may add its own `[supervisor.attributes]` table, which overrides these per
 key for that Agent alone.
 
-Every Agent additionally reports, without configuration: `service.name`, `service.instance.id`,
-`os.type`, `host.arch`, and `os.description` — plus `service.version`, which for the Client's own
-Agent is the Client's baked-in version and for a Supervisor-backed Agent is whatever the Managed
-Process reports about itself.
+Every Agent additionally reports, without configuration, everything the protocol names to describe
+an Agent and where it runs: `service.name`, `service.instance.id`, `os.type`, `os.name`,
+`os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus `service.version`,
+which for the Client's own Agent is the Client's baked-in version and for a Supervisor-backed Agent
+is whatever the Managed Process reports about itself.
+
+An attribute the host cannot answer is **left out, never reported empty** — a container without
+`/etc/machine-id` reports no `host.id` at all rather than a blank one a Selector could match. So a
+Selector on `host.id` reaches exactly the hosts that have one.
+
+One attribute is configured rather than detected, because only an operator knows it — the protocol
+asks for `service.namespace` "if it is used in the environment where the Agent runs":
+
+```toml
+service_namespace = "telemetry"
+```
+
+Unlike `[attributes]`, it *identifies* the Agent rather than tagging it, which is where the protocol
+puts it. Leave it out and nothing is reported.
 
 ### `[tls]`
 

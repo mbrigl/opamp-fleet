@@ -650,6 +650,7 @@ impl AppState {
     pub fn put_package(
         &self,
         name: String,
+        platform: crate::packages::Platform,
         version: String,
         addon: bool,
         signature: Option<Vec<u8>>,
@@ -660,26 +661,33 @@ impl AppState {
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.put_staged(name.clone(), version, addon, signature, staged)?;
+        let tag = format!("{}-{}", platform.os, platform.arch);
+        store.put_staged(name.clone(), platform, version, addon, signature, staged)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, "package stored and offered");
+        info!(package = %name, platform = %tag, "package stored and offered");
         Ok(())
     }
 
-    /// Where an upload for `name` is streamed before it becomes a package.
-    pub fn package_staging_path(&self, name: &str) -> Result<std::path::PathBuf, String> {
+    /// Where an upload for one platform of `name` is streamed before it becomes an artifact.
+    pub fn package_staging_path(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<std::path::PathBuf, String> {
         self.packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store()
-            .staging_path(name)
+            .staging_path(name, platform)
     }
 
     /// Points a package at an artifact hosted elsewhere (ADR-0018) and wakes every WebSocket loop,
     /// so a targeted Agent is offered the new address now rather than at its next poll.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_package_source(
         &self,
         name: &str,
+        platform: &crate::packages::Platform,
         version: &str,
         addon: bool,
         content_hash: Vec<u8>,
@@ -691,35 +699,74 @@ impl AppState {
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.set_source(name, version, addon, content_hash, signature, source)?;
+        store.set_source(
+            name,
+            platform,
+            version,
+            addon,
+            content_hash,
+            signature,
+            source,
+        )?;
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package now referenced from its source");
         Ok(())
     }
 
+    /// Puts one platform's artifact back to the version it replaced (ADR-0019) and wakes every
+    /// WebSocket loop, so the Agents it reaches are offered the restored version now.
+    pub fn rollback_package(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.rollback(name, platform)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package rolled back one step");
+        Ok(())
+    }
+
+    /// Deletes one platform's artifact; `Ok(false)` when the package holds none for it.
+    pub fn delete_package_variant(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<bool, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        let deleted = store.delete_variant(name, platform)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(package = %name, "package artifact deleted");
+        }
+        Ok(deleted)
+    }
+
     /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
-    /// change newly targets is offered it now rather than at its next poll. Returns the package's
-    /// version, for the response.
+    /// change newly targets is offered it now rather than at its next poll. It aims every platform
+    /// of the package at once, because the aim belongs to the name (ADR-0031).
     pub fn set_package_selector(
         &self,
         name: &str,
         selector: BTreeMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let store = self
             .packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
         store.set_selector(name, selector)?;
-        let version = store
-            .list()
-            .into_iter()
-            .find(|p| p.name == name)
-            .map(|p| p.version)
-            .unwrap_or_default();
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package selector changed");
-        Ok(version)
+        Ok(())
     }
 
     /// Deletes a package; `Ok(false)` when none of that name exists.

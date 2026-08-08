@@ -59,4 +59,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | 🟢 accepted |
 | [0029](0029-a-version-is-compared-and-shown-without-its-build-metadata.md) | A version is compared and shown without its build metadata — the commit is provenance, not identity | 🟢 accepted |
 | [0030](0030-one-service-name-on-every-platform.md) | One service name on every platform — `opamp-fleet-client`, with the instance as a suffix | 🟢 accepted |
+| [0031](0031-per-platform-package-variants.md) | One platform vocabulary from the release file name to the offer — a package is one name with one artifact per platform | 🟢 accepted |
 

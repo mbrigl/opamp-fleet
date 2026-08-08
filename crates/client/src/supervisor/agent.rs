@@ -131,6 +131,10 @@ pub struct AgentState {
     /// Operator-defined attributes from `client.toml` (ADR-0012), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
+    /// The deployment's `service.namespace`, when it has one. The Baseline asks for it "if it is
+    /// used in the environment where the Agent runs" — which only an operator knows, so it is
+    /// configured rather than detected, and absent until it is set.
+    namespace: Option<String>,
 }
 
 impl AgentState {
@@ -181,6 +185,7 @@ impl AgentState {
             offer_error: String::new(),
             send_package_status: false,
             configured_attributes: Vec::new(),
+            namespace: None,
         })
     }
 
@@ -275,6 +280,15 @@ impl AgentState {
         attributes: std::collections::BTreeMap<String, String>,
     ) -> Self {
         self.configured_attributes = attributes.into_iter().collect();
+        self
+    }
+
+    /// Attaches the deployment's `service.namespace`, reported by every Agent this Client presents.
+    /// `None` — the default — reports nothing, which is what the Baseline's "if it is used in the
+    /// environment" amounts to for a deployment that does not use one.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
         self
     }
 
@@ -784,6 +798,12 @@ impl AgentState {
 
     fn describe(&self) -> AgentDescription {
         let mut identifying_attributes = vec![string_attr("service.name", &self.name)];
+        // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
+        // *which* deployment this service belongs to, so it belongs beside the name rather than
+        // among the tags an operator hangs on it.
+        if let Some(namespace) = &self.namespace {
+            identifying_attributes.push(string_attr("service.namespace", namespace));
+        }
         // `service.version` is the *Agent's* version. The self-Agent is the Client, so its baked
         // version is the truth; a Supervisor-backed Agent stands for its Managed Process, whose
         // version only the process itself can report (folded in below, goal 16) — never invented
@@ -792,12 +812,25 @@ impl AgentState {
             identifying_attributes.push(string_attr("service.version", crate::version::version()));
         }
         identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
+        // The rest of what the Baseline asks for "to describe where the Agent runs": `os.*` and
+        // `host.*`. Every one of them is best effort, and what the platform cannot answer is left
+        // out rather than filled in — an absent attribute says "unknown", where one carrying a
+        // placeholder would say something false that a Selector could then match.
+        let os = os_info();
         let mut non_identifying_attributes = vec![
             string_attr("os.type", os_type()),
-            string_attr("host.arch", std::env::consts::ARCH),
+            string_attr("host.arch", host_arch()),
         ];
-        if let Some(os) = os_description() {
-            non_identifying_attributes.push(string_attr("os.description", os));
+        for (key, value) in [
+            ("os.name", os.name.as_deref()),
+            ("os.version", os.version.as_deref()),
+            ("os.description", os.description.as_deref()),
+            ("host.name", host_name()),
+            ("host.id", host_id()),
+        ] {
+            if let Some(value) = value {
+                non_identifying_attributes.push(string_attr(key, value));
+            }
         }
         let mut description = AgentDescription {
             identifying_attributes,
@@ -876,53 +909,221 @@ fn os_type() -> &'static str {
     }
 }
 
-/// Human-readable operating-system description (OTel `os.description`, e.g. "Ubuntu 24.04.2
-/// LTS") — best effort per platform, computed once, absent when the platform gives none.
-fn os_description() -> Option<&'static str> {
-    static DESCRIPTION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    DESCRIPTION.get_or_init(read_os_description).as_deref()
+/// OpenTelemetry semantic-convention value for `host.arch` — the convention says `amd64`/`arm64`
+/// where Rust's constant says `x86_64`/`aarch64` (ADR-0031).
+///
+/// The Baseline points at the conventions for these keys, and the Collector's `opampextension`
+/// reports `runtime.GOARCH`, which is already this vocabulary. Reporting Rust's spelling instead
+/// meant the *same host* changed architecture depending on whether a Collector was running on it:
+/// a Managed Process's attributes are folded over the Supervisor's, so `amd64` overwrote `x86_64`
+/// and any Selector written against one of them stopped matching.
+fn host_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+/// What the operating system says about itself — the Baseline's `os.*`. Read **once** per process
+/// and as one answer: two of the three platforms have to be asked by running a program, and asking
+/// them once per attribute would start three processes to learn what one printout already holds.
+/// A field the platform does not answer stays `None` and is then not reported at all.
+#[derive(Default)]
+struct OsInfo {
+    /// `os.description` — the human-readable line: "Ubuntu 24.04.2 LTS".
+    description: Option<String>,
+    /// `os.name` — the system's own name, without a version: "Ubuntu", "macOS", "Windows".
+    name: Option<String>,
+    /// `os.version` — the version that name is at: "24.04", "15.5", "10.0.26100.2033".
+    version: Option<String>,
+}
+
+fn os_info() -> &'static OsInfo {
+    static INFO: std::sync::OnceLock<OsInfo> = std::sync::OnceLock::new();
+    INFO.get_or_init(read_os_info)
 }
 
 #[cfg(target_os = "linux")]
-fn read_os_description() -> Option<String> {
-    // os-release(5): PRETTY_NAME="Ubuntu 24.04.2 LTS"
-    let text = std::fs::read_to_string("/etc/os-release").ok()?;
-    text.lines()
-        .find_map(|line| line.strip_prefix("PRETTY_NAME="))
-        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
-        .filter(|value| !value.is_empty())
+fn read_os_info() -> OsInfo {
+    // os-release(5): NAME="Ubuntu", VERSION_ID="24.04", PRETTY_NAME="Ubuntu 24.04.2 LTS".
+    let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
+        return OsInfo::default();
+    };
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+            .filter(|value| !value.is_empty())
+    };
+    OsInfo {
+        description: field("PRETTY_NAME"),
+        name: field("NAME"),
+        version: field("VERSION_ID"),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn read_os_description() -> Option<String> {
+fn read_os_info() -> OsInfo {
     // `sw_vers` prints ProductName/ProductVersion/BuildVersion lines, e.g. "macOS" / "15.5".
-    let output = std::process::Command::new("sw_vers").output().ok()?;
+    let Ok(output) = std::process::Command::new("sw_vers").output() else {
+        return OsInfo::default();
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     let field = |name: &str| {
         text.lines()
             .find_map(|line| line.strip_prefix(name))
             .map(|value| value.trim_start_matches(':').trim().to_string())
+            .filter(|value| !value.is_empty())
     };
-    match (field("ProductName"), field("ProductVersion")) {
+    let name = field("ProductName");
+    let version = field("ProductVersion");
+    let description = match (&name, &version) {
         (Some(name), Some(version)) => Some(format!("{name} {version}")),
-        (Some(name), None) => Some(name),
+        (Some(name), None) => Some(name.clone()),
         _ => None,
+    };
+    OsInfo {
+        description,
+        name,
+        version,
     }
 }
 
 #[cfg(windows)]
-fn read_os_description() -> Option<String> {
+fn read_os_info() -> OsInfo {
     // `cmd /c ver` prints e.g. "Microsoft Windows [Version 10.0.26100.2033]".
-    let output = std::process::Command::new("cmd")
+    let Ok(output) = std::process::Command::new("cmd")
         .args(["/c", "ver"])
         .output()
-        .ok()?;
+    else {
+        return OsInfo::default();
+    };
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    if text.is_empty() {
+        return OsInfo::default();
+    }
+    // The version is what stands between "[Version " and "]". When that shape is not what this
+    // Windows printed, the line is still the description — which is the whole of what this
+    // platform offers instead of a structured answer.
+    let version = text
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(inside, _)| inside.trim_start_matches("Version").trim().to_string())
+        .filter(|value| !value.is_empty());
+    OsInfo {
+        description: Some(text),
+        name: Some("Windows".to_string()),
+        version,
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn read_os_description() -> Option<String> {
+fn read_os_info() -> OsInfo {
+    OsInfo::default()
+}
+
+/// The host's name (`host.name`) — read once. ADR-0017 twice offers a Selector on this attribute
+/// as the way to pin one host to one artifact, so a fleet that does not report it cannot be aimed
+/// at a machine at all.
+fn host_name() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(read_host_name).as_deref()
+}
+
+#[cfg(unix)]
+fn read_host_name() -> Option<String> {
+    // HOST_NAME_MAX is 64 on Linux and 255 on macOS; 256 holds either. A name that had to be
+    // truncated is not required to be terminated, which is why the end is scanned for rather
+    // than assumed.
+    let mut buffer = vec![0u8; 256];
+    // SAFETY: `buffer` is writable for `buffer.len()` bytes and outlives the call.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..end]).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(windows)]
+fn read_host_name() -> Option<String> {
+    // The SCM starts the service with the machine's environment, where COMPUTERNAME is always
+    // set — so this one answer costs no process, unlike every other one this platform gives.
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_host_name() -> Option<String> {
+    None
+}
+
+/// The host's installation identity (`host.id`) — read once. What still names the machine after it
+/// has been renamed, which `host.name` by itself does not.
+fn host_id() -> Option<&'static str> {
+    static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ID.get_or_init(read_host_id).as_deref()
+}
+
+#[cfg(target_os = "linux")]
+fn read_host_id() -> Option<String> {
+    // machine-id(5): 32 hex characters, generated once per installation. The D-Bus copy is where
+    // it lives on systems that do not populate /etc/machine-id.
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| {
+            let value = std::fs::read_to_string(path).ok()?.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn read_host_id() -> Option<String> {
+    // ioreg prints `"IOPlatformUUID" = "…"` among the platform device's properties.
+    let output = std::process::Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = text
+        .lines()
+        .find(|line| line.contains("IOPlatformUUID"))?
+        .split_once('=')?
+        .1
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(windows)]
+fn read_host_id() -> Option<String> {
+    // The MachineGuid the installer writes. `reg query` prints
+    // "    MachineGuid    REG_SZ    <guid>" and needs no registry binding to read.
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = text
+        .lines()
+        .find(|line| line.contains("MachineGuid"))?
+        .split_whitespace()
+        .last()?
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn read_host_id() -> Option<String> {
     None
 }
 
@@ -1016,6 +1217,116 @@ mod tests {
         };
         assert!(!text.is_empty());
         assert_ne!(text, "linux", "the PRETTY_NAME, not the os.type");
+    }
+
+    /// Every reported attribute as `key -> value`, both lists together: what the Server actually
+    /// receives, and therefore what a Selector matches against.
+    fn reported(description: &AgentDescription) -> std::collections::BTreeMap<String, String> {
+        description
+            .identifying_attributes
+            .iter()
+            .chain(&description.non_identifying_attributes)
+            .map(|kv| {
+                let value = match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
+                    Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+                    other => panic!("{} must be a string, got {other:?}", kv.key),
+                };
+                (kv.key.clone(), value)
+            })
+            .collect()
+    }
+
+    /// Best effort means **absent**, never blank. An attribute reported as an empty string is one
+    /// a Selector can be written against and match, so a platform that cannot answer — this
+    /// container has no `/etc/machine-id`, so it cannot answer `host.id` — must leave the key off
+    /// entirely rather than report nothing under it.
+    #[test]
+    fn nothing_the_platform_cannot_answer_is_reported_as_an_empty_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (key, value) in reported(&make_agent(dir.path()).describe()) {
+            assert!(!value.is_empty(), "{key} is reported as an empty value");
+        }
+    }
+
+    /// ADR-0017 twice offers "a Selector matching that host's `host.name`" as the way to pin one
+    /// host to one artifact. That only works if an Agent reports the attribute, which for a long
+    /// time it did not.
+    #[cfg(unix)]
+    #[test]
+    fn the_agent_reports_the_host_name_a_selector_would_pin_it_by() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attributes = reported(&make_agent(dir.path()).describe());
+        assert!(
+            attributes.contains_key("host.name"),
+            "no host.name among {attributes:?}"
+        );
+    }
+
+    /// The Baseline names `os.version` beside `os.type`. `os.description` does not stand in for it:
+    /// it is prose, and nothing can compare prose. Asserted against the file the values are read
+    /// from, so this states a fact about the mapping rather than about the machine it runs on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_os_is_reported_as_a_name_and_a_version_not_only_as_prose() {
+        let Ok(release) = std::fs::read_to_string("/etc/os-release") else {
+            return;
+        };
+        let field = |key: &str| {
+            release
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+                .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+                .filter(|value| !value.is_empty())
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attributes = reported(&make_agent(dir.path()).describe());
+        assert_eq!(attributes.get("os.name").cloned(), field("NAME"));
+        // `VERSION_ID` is optional in os-release(5) — a rolling distribution carries none — so
+        // what is asserted is that the two agree, present or absent.
+        assert_eq!(attributes.get("os.version").cloned(), field("VERSION_ID"));
+        assert_ne!(
+            attributes.get("os.name").map(String::as_str),
+            Some(os_type()),
+            "the distribution's NAME, not the os.type"
+        );
+    }
+
+    /// `service.namespace` is the Baseline's one conditional attribute — "if it is used in the
+    /// environment where the Agent runs" — so it is silent until an operator configures it, and
+    /// then it *identifies* the Agent rather than tagging it.
+    #[test]
+    fn the_service_namespace_is_absent_until_configured_and_then_identifies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let named = |description: &AgentDescription| {
+            let in_identifying = description
+                .identifying_attributes
+                .iter()
+                .any(|kv| kv.key == "service.namespace");
+            let in_non_identifying = description
+                .non_identifying_attributes
+                .iter()
+                .any(|kv| kv.key == "service.namespace");
+            (in_identifying, in_non_identifying)
+        };
+
+        let plain = make_agent(&dir.path().join("plain")).describe();
+        assert_eq!(named(&plain), (false, false));
+
+        let storage = Storage::new(dir.path().join("configured")).expect("storage");
+        let configured = AgentState::new("test-agent".to_string(), storage)
+            .expect("agent")
+            .with_namespace(Some("telemetry".to_string()))
+            .describe();
+        assert_eq!(
+            named(&configured),
+            (true, false),
+            "it belongs among what identifies the Agent, and only there"
+        );
+        assert_eq!(
+            reported(&configured).get("service.namespace").cloned(),
+            Some("telemetry".to_string())
+        );
     }
 
     #[test]

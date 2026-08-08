@@ -13,7 +13,73 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added
+
+- **Every Agent now reports the attributes the protocol names.** Alongside `os.type` and
+  `host.arch`, an Agent reports `os.name`, `os.version`, `host.name`, and `host.id` — so a Selector
+  can target a distribution release, or pin one machine by its host name.
+
+  **`host.name` in particular was promised and missing.**
+  [ADR-0017](docs/adr/0017-selector-targeted-packages.md) offers "a Selector matching that host's
+  `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
+  Selector silently matched nothing. It works now.
+
+  An attribute the host cannot answer is **left out rather than reported empty** — a container
+  without `/etc/machine-id` reports no `host.id` — so a Selector on one reaches exactly the hosts
+  that have it. Nothing has to be changed on any host; the new attributes appear on the next
+  connection.
+
+- **`service_namespace` in `client.toml`**, for the one attribute the protocol makes conditional on
+  the environment ("if it is used in the environment where the Agent runs"). It is reported as an
+  *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
+  unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
+
 ### Changed — breaking
+
+- **A package now holds one artifact per platform, and `os`/`arch` are required**
+  ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)). An Agent is offered only the artifact
+  built for the operating system and architecture it reported, and never another — so uploading a
+  Windows build no longer installs it over every Linux host in the fleet.
+
+  **Every Server has to be migrated before it will start.** A package stored without a platform is
+  refused at startup, naming the file. For each one, upload it again with its platform, or delete it:
+
+  ```console
+  $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
+         "http://<server>:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+  ```
+
+  **Four routes change.** `PUT /api/v1/packages/{name}` and `PUT …/{name}/source` require `os` and
+  `arch`; `POST …/{name}/rollback` and `GET …/{name}/file` require them in the query. `DELETE
+  …/{name}` still deletes the whole package, and now takes an optional `?os=…&arch=…` for one
+  artifact. Generated clients must be regenerated.
+
+  **`GET /api/v1/packages` answers a new shape.** `version`, `addon`, `source_url` and
+  `previous_version` moved out of the package and into a `variants` array, one entry per platform,
+  each with its own `os`, `arch` and rollback history. `selector` stays on the package: the Selector
+  aims, the platform fits.
+
+  A rollback names one platform and moves only that one — a canary taken back on Linux must not push
+  macOS off a version it never left.
+
+- **The Client reports `host.arch` as `amd64`/`arm64`**, the semantic-convention values the protocol
+  points at, where it used to report Rust's `x86_64`/`aarch64`
+  ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)).
+
+  **A Selector written against `host.arch` must be edited on the Server** — `{"host.arch": "x86_64"}`
+  now matches nothing. Change it to `amd64` (or `aarch64` → `arm64`); nothing changes on any host.
+
+  This also closes a quiet defect: a Managed Process's attributes are folded over the Supervisor's,
+  and the Collector's `opampextension` already reported `amd64`. The same machine therefore changed
+  architecture depending on whether a Collector happened to run on it, and Selectors written against
+  either spelling broke without anything having changed.
+
+- **Release artifacts are named `<os>-<arch>` with those same tokens** — `opamp-fleet-client-1.2.3-linux-amd64.7z`,
+  `…-darwin-arm64.7z`, where they used to say `macos` and `x86_64`
+  ([ADR-0031](docs/adr/0031-per-platform-package-variants.md), superseding the naming in
+  [ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)). Anything scripted against the old
+  names breaks; earlier releases keep theirs. The gain is that the two tokens in a file name are now
+  exactly the pair an Agent reports, so uploading a release needs no translation table.
 
 - **The service is registered as `opamp-fleet-client` on every platform**
   ([ADR-0030](docs/adr/0030-one-service-name-on-every-platform.md)). It used to be

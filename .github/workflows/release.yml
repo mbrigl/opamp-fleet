@@ -152,14 +152,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: x86_64, suffix: "", native: true }
-          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: aarch64, suffix: "", native: true }
-          - { target: aarch64-apple-darwin, runner: macos-latest, os: macos, arch: aarch64, suffix: "", native: true }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true }
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true }
           # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
           # than depending on an Intel macOS runner label (ADR-0025). Nothing here can run it, so
           # the version assertion below is skipped for this one row.
-          - { target: x86_64-apple-darwin, runner: macos-latest, os: macos, arch: x86_64, suffix: "", native: false }
-          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: x86_64, suffix: ".exe", native: true }
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -230,13 +230,22 @@ jobs:
           cat > notes.md <<EOF
           Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
 
-          Hand the artifact to a Server under its release number for a Client self-update
+          Hand the artifacts to a Server under its release number for a Client self-update
           (ADR-0020, ADR-0029) — the commit this build carries,
-          \`${{ needs.version.outputs.full }}\`, is provenance and is not compared:
+          \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
+
+          Upload **all** of them under the **one** package name: the Server holds one artifact per
+          platform and offers each Agent the one built for the machine it reported (ADR-0031), so a
+          mixed fleet updates from a single \`[self_update] package = "opamp-fleet-client"\`. The
+          \`<os>-<arch>\` in each file name is exactly the pair an Agent reports as \`os.type\` and
+          \`host.arch\`, which is why this needs no table:
 
           \`\`\`console
-          curl -X PUT --data-binary @${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z \\
-               "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}"
+          for f in ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-*.7z; do
+            p=\${f#${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-}; p=\${p%.7z}   # linux-amd64
+            curl -X PUT --data-binary @"\$f" \\
+              "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}&os=\${p%-*}&arch=\${p#*-}"
+          done
           \`\`\`
 
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
@@ -246,7 +255,7 @@ jobs:
           executable mode, so there is no \`chmod +x\` step:
 
           \`\`\`console
-          7z x ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z
+          7z x ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-amd64.7z
           ./opamp-fleet-client service install --interactive   # root; answers write the configuration
           ./opamp-fleet-client service start
           \`\`\`

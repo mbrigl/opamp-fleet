@@ -272,20 +272,36 @@ async fn delete_configuration(
 #[derive(Serialize, ToSchema)]
 struct PackageView {
     name: String,
+    /// Whom this package is offered to (ADR-0017): equality pairs that must all match an
+    /// attribute the Agent reported. Empty targets the whole fleet. It belongs to the package, not
+    /// to one of its artifacts — every platform of a name is aimed at the same Agents (ADR-0031).
+    #[serde(default)]
+    selector: std::collections::BTreeMap<String, String>,
+    /// One artifact per platform. An Agent is offered the one built for the machine it reported,
+    /// and never another (ADR-0031).
+    variants: Vec<PackageVariantView>,
+}
+
+/// One platform's artifact of a package.
+#[derive(Serialize, ToSchema)]
+struct PackageVariantView {
+    /// The operating system, as `os.type` reports it: `linux`, `darwin`, `windows`.
+    os: String,
+    /// The architecture, as `host.arch` reports it: `amd64`, `arm64`.
+    arch: String,
     version: String,
     /// `true` for an addon, `false` for a top-level package (a Managed Process's binary).
     #[serde(default)]
     addon: bool,
-    /// Whom this package is offered to (ADR-0017): equality pairs that must all match an
-    /// attribute the Agent reported. Empty targets the whole fleet.
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
+    /// The artifact's size in bytes; `0` for a referenced one, whose bytes this Server never holds.
+    size: u64,
     /// Where Agents fetch the artifact when this Server does not hold it (ADR-0018). Absent for an
-    /// uploaded package, which is served from here.
+    /// uploaded one, which is served from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_url: Option<String>,
-    /// The version `POST /api/v1/packages/{name}/rollback` would put back (ADR-0019). Absent when
-    /// this package has never replaced another — in which case a rollback answers `409`.
+    /// The version `POST /api/v1/packages/{name}/rollback?os=…&arch=…` would put back (ADR-0019).
+    /// Absent when this artifact has never replaced another — in which case a rollback answers
+    /// `409`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_version: Option<String>,
     /// Where that previous version is fetched from, when it is a referenced one (ADR-0018).
@@ -297,13 +313,47 @@ impl From<crate::packages::PackageSummary> for PackageView {
     fn from(summary: crate::packages::PackageSummary) -> Self {
         PackageView {
             name: summary.name,
-            version: summary.version,
-            addon: summary.addon,
             selector: summary.selector,
-            source_url: summary.source_url,
-            previous_version: summary.previous_version,
-            previous_source_url: summary.previous_source_url,
+            variants: summary
+                .variants
+                .into_iter()
+                .map(|variant| PackageVariantView {
+                    os: variant.os,
+                    arch: variant.arch,
+                    version: variant.version,
+                    addon: variant.addon,
+                    size: variant.size,
+                    source_url: variant.source_url,
+                    previous_version: variant.previous_version,
+                    previous_source_url: variant.previous_source_url,
+                })
+                .collect(),
         }
+    }
+}
+
+/// The Platform an artifact route names (ADR-0031). Required wherever bytes are written or served,
+/// because a package name alone no longer names one file.
+#[derive(Deserialize, IntoParams)]
+struct PlatformQuery {
+    /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
+    /// off a release file name — are accepted and answered canonically.
+    os: String,
+    /// The architecture, as `host.arch`: `amd64`, `arm64`. Other spellings — `x86_64`, `aarch64` —
+    /// are accepted and answered canonically.
+    arch: String,
+}
+
+/// The Platform on a route where naming none means "the whole package".
+#[derive(Deserialize, IntoParams)]
+struct OptionalPlatformQuery {
+    os: Option<String>,
+    arch: Option<String>,
+}
+
+impl PlatformQuery {
+    fn platform(&self) -> Result<crate::packages::Platform, String> {
+        crate::packages::Platform::new(&self.os, &self.arch)
     }
 }
 
@@ -321,6 +371,12 @@ struct PackageSelectorSpec {
 struct PackageUpload {
     /// The package version (free-form, e.g. a SemVer the Agent may compare).
     version: String,
+    /// The operating system this artifact is built for, as `os.type`: `linux`, `darwin`,
+    /// `windows`. **Required** — an artifact the Server cannot fit to a machine is one it will not
+    /// offer (ADR-0031).
+    os: String,
+    /// The architecture this artifact is built for, as `host.arch`: `amd64`, `arm64`. **Required**.
+    arch: String,
     /// `true` marks an addon; the default is a top-level package (a Managed Process's binary).
     #[serde(default)]
     addon: bool,
@@ -408,7 +464,11 @@ async fn put_package(
         },
         None => None,
     };
-    let staged = match state.package_staging_path(&name) {
+    let platform = match crate::packages::Platform::new(&upload.os, &upload.arch) {
+        Ok(platform) => platform,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
+    };
+    let staged = match state.package_staging_path(&name, &platform) {
         Ok(path) => path,
         Err(e) => return error(StatusCode::NOT_FOUND, e),
     };
@@ -433,6 +493,7 @@ async fn put_package(
     };
     match state.put_package(
         name.clone(),
+        platform,
         upload.version.clone(),
         upload.addon,
         signature,
@@ -463,29 +524,31 @@ async fn put_package(
     post,
     path = "/api/v1/packages/{name}/rollback",
     tag = "packages",
-    params(("name" = String, Path, description = "The package name")),
+    params(("name" = String, Path, description = "The package name"), PlatformQuery),
     responses(
         (status = 200, description = "The package, now back at its previous version", body = PackageView),
-        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The package has no previous version to go back to", body = ErrorBody),
+        (status = 400, description = "Missing or invalid platform", body = ErrorBody),
+        (status = 404, description = "No such package or platform, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "That platform's artifact has no previous version to go back to", body = ErrorBody),
         (status = 500, description = "The rollback could not be persisted", body = ErrorBody)
     )
 )]
 async fn rollback_package(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(query): Query<PlatformQuery>,
 ) -> Response {
-    let Some(store) = state.packages() else {
-        return error(
-            StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server",
-        );
+    let platform = match query.platform() {
+        Ok(platform) => platform,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
-    match store.rollback(&name) {
+    match state.rollback_package(&name, &platform) {
         Ok(()) => {
             info!(package = %name, "package rolled back to its previous version");
             package_response(&state, &name)
         }
+        Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
+        Err(e) if e.contains("holds no artifact") => error(StatusCode::NOT_FOUND, e),
         // A package at its first upload has nothing to go back to; the API says so rather than
         // silently doing nothing.
         Err(e) if e.contains("no previous version") => error(StatusCode::CONFLICT, e),
@@ -494,21 +557,43 @@ async fn rollback_package(
     }
 }
 
-/// Deletes a package. Agents that installed it keep running it; they simply receive no further
-/// offers of it.
+/// Deletes a package, or — when a platform is named — only that platform's artifact. Agents that
+/// installed it keep running it; they simply receive no further offers of it. Taking the last
+/// artifact away takes the package with it: a name with nothing to offer is not a package.
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{name}",
     tag = "packages",
-    params(("name" = String, Path, description = "The package name")),
+    params(("name" = String, Path, description = "The package name"), OptionalPlatformQuery),
     responses(
         (status = 204, description = "Deleted"),
-        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 400, description = "A platform was half-named — `os` without `arch`, or the reverse", body = ErrorBody),
+        (status = 404, description = "No such package or platform, or package delivery is not configured", body = ErrorBody),
         (status = 500, description = "The package could not be deleted", body = ErrorBody)
     )
 )]
-async fn delete_package(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
-    match state.delete_package(&name) {
+async fn delete_package(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<OptionalPlatformQuery>,
+) -> Response {
+    let deleted = match (&query.os, &query.arch) {
+        (None, None) => state.delete_package(&name),
+        (Some(os), Some(arch)) => match crate::packages::Platform::new(os, arch) {
+            Ok(platform) => state.delete_package_variant(&name, &platform),
+            Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
+        },
+        // Half a platform is not a narrower delete, it is an ambiguous one: the whole package or
+        // one artifact of it are very different things to lose.
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "name both `os` and `arch` to delete one platform's artifact, or neither to \
+                 delete the whole package",
+            )
+        }
+    };
+    match deleted {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
         Err(e) if e.contains("not configured") => error(StatusCode::NOT_FOUND, e),
@@ -528,6 +613,11 @@ struct PackageSourceSpec {
     sha256: String,
     /// The version Agents report having installed.
     version: String,
+    /// The operating system this artifact is built for, as `os.type`: `linux`, `darwin`,
+    /// `windows`. **Required** (ADR-0031).
+    os: String,
+    /// The architecture this artifact is built for, as `host.arch`: `amd64`, `arm64`. **Required**.
+    arch: String,
     /// `true` marks an addon; the default is a top-level package.
     #[serde(default)]
     addon: bool,
@@ -572,6 +662,10 @@ async fn put_package_source(
             format!("invalid name {name:?}: {e}"),
         );
     }
+    let platform = match crate::packages::Platform::new(&spec.os, &spec.arch) {
+        Ok(platform) => platform,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
+    };
     let content_hash = match hex::decode(spec.sha256.trim()) {
         Ok(bytes) => bytes,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid sha256: {e}")),
@@ -597,6 +691,7 @@ async fn put_package_source(
     };
     match state.set_package_source(
         &name,
+        &platform,
         &spec.version,
         spec.addon,
         content_hash,
@@ -699,21 +794,30 @@ async fn put_package_selector(
     get,
     path = "/api/v1/packages/{name}/file",
     tag = "packages",
-    params(("name" = String, Path, description = "The package name")),
+    params(("name" = String, Path, description = "The package name"), PlatformQuery),
     responses(
         (status = 200, description = "The artifact bytes", content_type = "application/octet-stream"),
-        (status = 404, description = "No such package", body = ErrorBody)
+        (status = 400, description = "Missing or invalid platform", body = ErrorBody),
+        (status = 404, description = "No such package, or none for that platform", body = ErrorBody)
     )
 )]
 async fn download_package(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(query): Query<PlatformQuery>,
 ) -> Response {
+    let platform = match query.platform() {
+        Ok(platform) => platform,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
+    };
     let Some(path) = state
         .packages()
-        .and_then(|store| store.artifact_path(&name))
+        .and_then(|store| store.artifact_path(&name, &platform))
     else {
-        return error(StatusCode::NOT_FOUND, format!("no package {name:?}"));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no package {name:?} for {}-{}", platform.os, platform.arch),
+        );
     };
     // Streamed from disk, never buffered: a fleet updating at once means many concurrent
     // downloads of the same artifact, and each one holding a copy of a program in memory is how a

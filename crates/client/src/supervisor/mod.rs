@@ -69,7 +69,8 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     let mut self_state = declare_heartbeat(
         AgentState::new(config.name.clone(), storage)
             .map_err(|e| format!("cannot restore the agent state: {e}"))?
-            .with_attributes(config.agent_attributes(None)),
+            .with_attributes(config.agent_attributes(None))
+            .with_namespace(config.service_namespace.clone()),
     );
     // Consenting to be updated is its own decision, made per Client, and it names the package it
     // will take — anything else is refused rather than written over this binary (ADR-0020).
@@ -134,7 +135,8 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         let mut state = declare_heartbeat(
             AgentState::supervised(block.name.clone(), storage)
                 .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
-                .with_attributes(config.agent_attributes(Some(block))),
+                .with_attributes(config.agent_attributes(Some(block)))
+                .with_namespace(config.service_namespace.clone()),
         );
         // Owning the directory the program sits in *is* the consent (ADR-0021): a Supervisor that
         // has it takes whichever top-level package the Server selects for it (ADR-0015, ADR-0017).

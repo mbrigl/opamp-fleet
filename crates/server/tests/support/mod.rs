@@ -97,6 +97,14 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                         value: Some(any_value::Value::StringValue("linux".to_string())),
                     }),
                 },
+                // The other half of the Platform a package is fitted against (ADR-0031). An Agent
+                // reporting no `host.arch` fits no artifact at all, which is its own test.
+                KeyValue {
+                    key: "host.arch".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("amd64".to_string())),
+                    }),
+                },
                 KeyValue {
                     key: "os.description".to_string(),
                     value: Some(AnyValue {

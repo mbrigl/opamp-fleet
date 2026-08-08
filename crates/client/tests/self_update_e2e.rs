@@ -23,7 +23,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use server::fleet::{AgentView, AppState, PackageOffering};
-use server::packages::PackageStore;
+use server::packages::{PackageStore, Platform};
+
+/// The Platform this test's Client will report about itself (ADR-0031) — the Server offers only
+/// the artifact that fits the machine, so a self-update test has to store one for this one.
+fn this_host() -> Platform {
+    Platform::new(std::env::consts::OS, std::env::consts::ARCH).expect("this host has a platform")
+}
 
 // What the Client exits with to ask its service manager for a restart, and its file name inside a
 // version directory. Imported rather than restated since ADR-0024: both were copied here with a
@@ -231,6 +237,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     store
         .put(
             "opamp-fleet-client".to_string(),
+            this_host(),
             version.clone(),
             false,
             None,
@@ -309,7 +316,14 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
     store
-        .put("otelcol".to_string(), version, false, None, artifact)
+        .put(
+            "otelcol".to_string(),
+            this_host(),
+            version,
+            false,
+            None,
+            artifact,
+        )
         .expect("put the package");
 
     let (addr, state) = spawn_server(store).await;

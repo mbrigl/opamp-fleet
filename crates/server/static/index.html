@@ -186,12 +186,16 @@
       </section>
 
       <section id="packages-card" class="card config">
-        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
+        <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. An empty Selector targets every Agent that accepts packages; a narrower one overrides it for the Agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
           <input id="package-signature" placeholder="signature: hex Ed25519 over the artifact (optional)" autocomplete="off" />
+        </div>
+        <div class="config-fields">
+          <input id="package-os" placeholder="os: linux, darwin, windows — as the agent reports os.type" autocomplete="off" />
+          <input id="package-arch" placeholder="arch: amd64, arm64 — as the agent reports host.arch" autocomplete="off" />
         </div>
         <div class="config-fields">
           <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent)" autocomplete="off" />
@@ -296,12 +300,24 @@
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
       }
+      // The platform this agent reports, `os.type`-`host.arch` — the exact pair a package artifact
+      // is stored under, so it can be read off a row and typed into the packages form. Empty when
+      // the agent reports neither, which is also why it would be offered no package at all.
+      function platformOf(a) {
+        const n = a.non_identifying_attributes || {};
+        return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
+      }
       function labels(a) {
         const chips = [];
         if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
         if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
+        // Every reported attribute, with nothing held back: this list is what a selector is
+        // written from, so leaving a key out of it hides a key you can target. os.type and
+        // host.arch appear in the OS column too, and that is not a duplicate — there they are the
+        // artifact's platform (`linux-amd64`, what an upload is keyed by), here they are attribute
+        // pairs (`os.type: linux`, what a selector matches). Two questions, two spellings.
         for (const [k, v] of Object.entries(a.non_identifying_attributes || {})) {
-          if (k !== "os.type") chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
+          chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
         }
         const caps = a.capabilities || [];
         if (caps.length) {
@@ -347,7 +363,7 @@
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.instance_uid, a.os, a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+        const hay = [a.service_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -369,7 +385,7 @@
             <td>${statusPill(a)}</td>
             <td>${configPill(a)}</td>
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
-            <td>${esc(a.os) || "—"}</td>
+            <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
             <td>${matchedConfigs(a)}</td>
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
@@ -578,34 +594,62 @@
       // PUT/DELETE per package. Packages are fleet-wide — no Selector, unlike Configurations.
       let packages = [];
       let selectedPackage = null;
+      let selectedPlatform = null;
 
+      // One chip per artifact, not per package: a name with five platforms is five different
+      // binaries with five versions and five rollback histories, and a list that showed one row
+      // would have to pick one of them to be honest about.
       function renderPackageList() {
-        $("package-list").innerHTML = packages.map((p) =>
-          `<span class="chip clickable${p.name === selectedPackage ? " selected" : ""}" data-name="${esc(p.name)}" title="${p.previous_version ? "rolls back to " + esc(p.previous_version) + (p.previous_source_url ? " from " + esc(p.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)}${p.version ? " · " + esc(p.version) : ""}${p.previous_version ? " ← " + esc(p.previous_version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${p.source_url ? " · ↗ source" : ""}</span>`
-        ).join("") || `<span class="chip">none yet</span>`;
+        const chips = packages.flatMap((p) =>
+          (p.variants || []).map((v) => {
+            const tag = `${v.os}-${v.arch}`;
+            const selected = p.name === selectedPackage && tag === selectedPlatform;
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent"}${v.source_url ? " · ↗ source" : ""}</span>`;
+          })
+        );
+        $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
-          chip.addEventListener("click", () => selectPackage(chip.dataset.name));
+          chip.addEventListener("click", () =>
+            selectPackage(chip.dataset.name, chip.dataset.os, chip.dataset.arch));
         });
       }
-      function selectPackage(name) {
+      function selectPackage(name, os, arch) {
         const pkg = packages.find((p) => p.name === name);
         if (!pkg) return;
+        const variants = pkg.variants || [];
+        const variant = variants.find((v) => v.os === os && v.arch === arch) || variants[0];
         selectedPackage = name;
+        selectedPlatform = variant ? `${variant.os}-${variant.arch}` : null;
         $("package-name").value = pkg.name;
-        $("package-version").value = pkg.version || "";
+        // The selector is the package's; everything else belongs to the one artifact.
         $("package-selector").value = selectorText(pkg.selector);
-        $("package-url").value = pkg.source_url || "";
-        $("package-addon").checked = !!pkg.addon;
+        $("package-os").value = variant ? variant.os : "";
+        $("package-arch").value = variant ? variant.arch : "";
+        $("package-version").value = variant ? variant.version || "" : "";
+        $("package-url").value = variant ? variant.source_url || "" : "";
+        $("package-addon").checked = !!(variant && variant.addon);
         $("package-error").textContent = "";
         // A rollback button that does not say what it will install is a dare (ADR-0019): it names
-        // the version, and stays disabled while there is nothing to go back to.
+        // the version, and stays disabled while there is nothing to go back to. It moves one
+        // platform, so it names that too.
+        const previous = variant && variant.previous_version;
         const rollback = $("package-rollback");
-        rollback.disabled = !pkg.previous_version;
-        rollback.textContent = pkg.previous_version ? `↩ Roll back to ${pkg.previous_version}` : "↩ Roll back";
-        rollback.title = pkg.previous_version
-          ? `Offer ${pkg.previous_version} again${pkg.previous_source_url ? ` from ${pkg.previous_source_url}` : ""}. The selector is untouched; agents pick it up on their next exchange.`
-          : "This package has never replaced another, so there is nothing to go back to.";
+        rollback.disabled = !previous;
+        rollback.textContent = previous ? `↩ Roll back ${selectedPlatform} to ${previous}` : "↩ Roll back";
+        rollback.title = previous
+          ? `Offer ${previous} again on ${selectedPlatform}${variant.previous_source_url ? ` from ${variant.previous_source_url}` : ""}. Other platforms and the selector are untouched; agents pick it up on their next exchange.`
+          : "This artifact has never replaced another, so there is nothing to go back to.";
         renderPackageList();
+      }
+      // Both halves of the platform, or a message saying why nothing was sent.
+      function platformParams() {
+        const os = $("package-os").value.trim();
+        const arch = $("package-arch").value.trim();
+        if (!os || !arch) {
+          $("package-error").textContent = "an artifact needs an os and an arch — it is only ever offered to machines that match";
+          return null;
+        }
+        return { os, arch };
       }
       $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
       $("package-close").addEventListener("click", () => $("packages-card").classList.remove("open"));
@@ -615,7 +659,9 @@
         const file = $("package-file").files[0];
         if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
         if (!file) { $("package-error").textContent = "choose an artifact file to upload"; return; }
-        const params = new URLSearchParams({ version, addon: $("package-addon").checked ? "true" : "false" });
+        const platform = platformParams();
+        if (!platform) return;
+        const params = new URLSearchParams({ version, ...platform, addon: $("package-addon").checked ? "true" : "false" });
         const signature = $("package-signature").value.trim();
         if (signature) params.set("signature", signature);
         let res;
@@ -632,6 +678,7 @@
         }
         $("package-error").textContent = "";
         selectedPackage = name;
+        selectedPlatform = `${platform.os}-${platform.arch}`;
         $("package-file").value = "";
         await refreshPackages();
         refreshAgents();
@@ -665,7 +712,9 @@
         const sha256 = $("package-sha256").value.trim();
         if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
         if (!url || !sha256) { $("package-error").textContent = "a source needs a url and the artifact's sha256"; return; }
-        const body = { url, sha256, version, addon: $("package-addon").checked };
+        const platform = platformParams();
+        if (!platform) return;
+        const body = { url, sha256, version, ...platform, addon: $("package-addon").checked };
         const signature = $("package-signature").value.trim();
         if (signature) body.signature = signature;
         const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/source`, {
@@ -679,6 +728,7 @@
         }
         $("package-error").textContent = "";
         selectedPackage = name;
+        selectedPlatform = `${platform.os}-${platform.arch}`;
         await refreshPackages();
         refreshAgents();
       });
@@ -688,14 +738,16 @@
       $("package-rollback").addEventListener("click", async () => {
         const name = $("package-name").value.trim();
         if (!name) return;
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/rollback`, { method: "POST" });
+        const platform = platformParams();
+        if (!platform) return;
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/rollback?${new URLSearchParams(platform)}`, { method: "POST" });
         if (!res.ok) {
           $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
         }
         $("package-error").textContent = "";
         await refreshPackages();
-        selectPackage(name);
+        selectPackage(name, platform.os, platform.arch);
         refreshAgents();
       });
       $("package-delete").addEventListener("click", async () => {
@@ -708,7 +760,9 @@
         }
         $("package-error").textContent = "";
         selectedPackage = null;
+        selectedPlatform = null;
         $("package-name").value = ""; $("package-version").value = ""; $("package-signature").value = "";
+        $("package-os").value = ""; $("package-arch").value = "";
         $("package-addon").checked = false; $("package-file").value = "";
         $("package-rollback").disabled = true; $("package-rollback").textContent = "↩ Roll back";
         await refreshPackages();

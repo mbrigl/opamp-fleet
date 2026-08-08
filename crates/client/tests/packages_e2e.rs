@@ -11,7 +11,14 @@ use std::time::{Duration, Instant};
 
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use server::fleet::{AgentView, AppState, PackageOffering};
-use server::packages::PackageStore;
+use server::packages::{PackageStore, Platform};
+
+/// The Platform this test's Client will report about itself (ADR-0031) — an artifact stored for
+/// any other one would not fit it, and would rightly never be offered. `std::env::consts` is the
+/// same source the Client reports from, and the store canonicalises both the same way.
+fn this_host() -> Platform {
+    Platform::new(std::env::consts::OS, std::env::consts::ARCH).expect("this host has a platform")
+}
 
 struct ClientUnderTest(Child);
 
@@ -84,6 +91,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     store
         .put(
             "myagent".to_string(),
+            this_host(),
             "2.0.0".to_string(),
             false,
             Some(signature),

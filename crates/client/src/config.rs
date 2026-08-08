@@ -18,6 +18,12 @@ pub struct ClientConfig {
     /// The Agent's `service.name`, its human identity in the fleet.
     #[serde(default = "default_name")]
     pub name: String,
+    /// The deployment's `service.namespace`. The Baseline asks for it "if it is used in the
+    /// environment where the Agent runs", which is knowledge only an operator has — so it is
+    /// configured rather than detected, and absent means it is not reported at all. Reported as
+    /// an **identifying** attribute of every Agent this Client presents, which is where the
+    /// Baseline puts it: it says which deployment the service belongs to.
+    pub service_namespace: Option<String>,
     /// How often the plain-HTTP transport polls. The Baseline's default is 30 seconds; ignored on
     /// WebSocket, where the Server pushes.
     #[serde(default = "default_poll_interval_secs")]
@@ -474,6 +480,7 @@ impl Default for ClientConfig {
         ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
+            service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
@@ -650,6 +657,27 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         let disabled: ClientConfig = toml::from_str("heartbeat_interval_secs = 0").expect("parse");
         assert_eq!(disabled.heartbeat_interval_secs, 0);
+    }
+
+    /// The Baseline asks for `service.namespace` "if it is used in the environment where the Agent
+    /// runs" — so the file is the only thing that can know, and silence means the deployment does
+    /// not use one. It must be a top-level key rather than an `[attributes]` entry, because it
+    /// identifies the Agent where those merely tag it.
+    #[test]
+    fn the_service_namespace_is_a_top_level_key_and_absent_by_default() {
+        assert!(ClientConfig::default().service_namespace.is_none());
+        let untouched: ClientConfig =
+            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+        assert!(untouched.service_namespace.is_none());
+
+        let configured: ClientConfig =
+            toml::from_str("service_namespace = \"telemetry\"\n").expect("parse");
+        assert_eq!(configured.service_namespace.as_deref(), Some("telemetry"));
+
+        assert!(
+            toml::from_str::<ClientConfig>("service_namesapce = \"telemetry\"\n").is_err(),
+            "a typo fails startup rather than silently reporting no namespace"
+        );
     }
 
     /// ADR-0020: self-update is off unless the file says otherwise, and saying so means naming the
