@@ -191,8 +191,10 @@ and the Server for Linux.
 nobody types a tag. Running it publishes one archive per platform,
 `opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
 on, plus a `SHA256SUMS` file. Started with `dry_run` (the default) it builds and packs everything and
-publishes nothing. A tag that already exists on another commit fails the release rather than moving,
-and the built binary must report the version the artifacts are named after. Each archive is also a
+publishes nothing. Before it builds anything at all it checks that the version is still free — a
+`version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
+forgotten bump costs seconds rather than five build jobs — and the built binary must report the
+version the artifacts are named after. Each archive is also a
 ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
 [self-update](docs/manual/client.md#updating-the-client-itself).
 

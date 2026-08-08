@@ -57,8 +57,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
   `version/*` tag from it ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)) — so a release is
   "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
-  a tag that already names another commit is never moved, and a binary that does not report the
-  version its artifacts are named after fails the run.
+  a version that already has a tag or a release is spent, and the run says so before it builds
+  anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
+  that does not report the version its artifacts are named after fails the run.
 
   **Each archive is also a package artifact**: it holds the Client under the name the install layout
   gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an

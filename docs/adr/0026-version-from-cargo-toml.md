@@ -68,9 +68,21 @@ changes.
    |---|---|
    | HEAD carries `version/<base>` | a release build: `<base>+<hash>` |
    | HEAD carries a `version/*` tag naming **something else** | **the build fails** — the file and the tag disagree and neither wins |
-   | `version/<v>` already exists on the commit being released | the pipeline reuses it; re-running a release is not an error |
-   | `version/<v>` exists on a **different** commit | **the release fails** — a release tag is never moved |
+   | `version/<v>` already exists, or a release names it | **the run fails before it builds** — the number is spent |
    | the run was started by a hand-pushed `version/*` tag | the tag and `Cargo.toml` must agree, or **fail** |
+
+   The third row is checked first, ahead of every build, and it does not care whether the run
+   *intends* to publish: whether a version can still be released is a property of the version, so a
+   dry run answers it too — which is the run that is meant to find a forgotten bump. Tag and release
+   are asked for separately, because either can exist without the other: a draft release reserves a
+   tag name that was never pushed, and a tag can be pushed without a release being cut. The one
+   exception is the tag a release run was *started* by, which is expected to be there.
+
+   This deliberately gives up re-running a release. Reusing a tag that is already on the commit
+   would be harmless in the ordinary case and would let a run that failed in `publish` be repeated —
+   but it also means a green run can overwrite artifacts that have already been downloaded, and it
+   is the same tolerance under which a forgotten bump releases nothing and says nothing. Recovering
+   a half-published release is rare and can be done by hand; catching the spent number is neither.
 
    And after building, the pipeline checks that the binary reports exactly `<version>+<hash>` — belt
    and braces, since `build.rs` has already refused the disagreement it would catch.
@@ -123,9 +135,13 @@ changes.
   version, which is what that layout is for.
 - Negative / trade-offs: **the drift ADR-0009 designed away is now real** — `Cargo.toml` and the
   tags are two places a version appears. It is caught rather than prevented: a version that was
-  already released fails on the tag guard instead of quietly re-releasing. A *forgotten* bump is
-  therefore a failed run, which is the outcome to prefer, but it is a failure where ADR-0009 had
-  nothing to fail.
+  already released fails on the guard, before a single target is built, instead of quietly
+  re-releasing. A *forgotten* bump is therefore a failed run, which is the outcome to prefer, but it
+  is a failure where ADR-0009 had nothing to fail.
+- Negative / trade-offs: **a release cannot be re-run.** Once the tag is pushed the number is spent,
+  so a run that dies in `publish` — after the tag but before the artifacts — leaves a release that
+  has to be finished by hand or a version that has to be skipped. That is the price of the guard
+  above, and it is paid rarely.
 - Negative / trade-offs: the release run now needs `contents: write` to push a tag. A pipeline that
   can write to the repository is a larger blast radius than one that only reads it, and the token is
   the workflow's own rather than a human's.

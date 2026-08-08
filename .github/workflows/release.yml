@@ -76,23 +76,52 @@ jobs:
           fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Nothing is built until it is certain this number is still free. A version that already
+      # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
+      # to move a tag or replace an artifact somebody may already hold (ADR-0026). Both are asked
+      # because either can exist alone: a draft release reserves a tag name without the tag being
+      # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
+      # run — whether a version can be released does not depend on whether this run intends to.
+      - name: This version has not been released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.read.outputs.version }}'
+          tag="version/$version"
+          taken=""
+
+          on=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$on" ]; then
+            # On a push run this very tag is what started us; anywhere else it is a spent number.
+            if [ "${{ github.event_name }}" = "push" ] && [ "$on" = "$GITHUB_SHA" ]; then
+              echo "$tag is the tag that started this run"
+            else
+              echo "::error::the tag $tag already exists, on ${on:0:7}"
+              taken=yes
+            fi
+          fi
+
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::a release $tag already exists"
+            taken=yes
+          fi
+
+          if [ -n "$taken" ]; then
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0026)"
+            exit 1
+          fi
+          echo "$tag is free"
       - name: Tag this commit
         if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
         run: |
           set -euo pipefail
           tag="version/${{ steps.read.outputs.version }}"
-          existing=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
-          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-            echo "::error::$tag already exists on $existing — a release tag is never moved (ADR-0026)"
-            exit 1
-          fi
-          if [ -z "$existing" ]; then
-            git tag "$tag" "$GITHUB_SHA"
-            git push origin "$tag"
-            echo "created $tag"
-          else
-            echo "$tag is already on this commit; re-releasing it"
-          fi
+          # The guard above proved the tag is free; the push is what proves it still is, since it
+          # is refused rather than forced if a concurrent run got there first.
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          echo "created $tag"
       # Debug: the version is baked identically and this build is only asked, never shipped.
       - name: The binary agrees
         id: baked
