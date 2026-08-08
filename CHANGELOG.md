@@ -15,6 +15,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed — breaking
 
+- **The service is registered as `opamp-fleet-client` on every platform**
+  ([ADR-0030](docs/adr/0030-one-service-name-on-every-platform.md)). It used to be
+  `opamp-fleet-client.default.service` on systemd and `io.opamp-fleet.client.default` on launchd and
+  the Windows SCM — two names nobody chose, both falling out of how a reverse-DNS label happens to
+  be split. Now: `systemctl status opamp-fleet-client`, `launchctl list opamp-fleet-client`,
+  `sc query opamp-fleet-client`. A named instance appends its own name
+  (`opamp-fleet-client-prod`); the default instance carries the bare one.
+
+  **An already-installed service is not found under the new name.** Run
+  `service uninstall` with the *old* binary, then `service install` with the new one. The install
+  layout and the state directory are untouched by either.
+
+  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0010
+  promised and never actually set.
+
+
 - **A version is compared and shown without its build metadata**
   ([ADR-0029](docs/adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)). Two
   things change, and one of them is an API break.

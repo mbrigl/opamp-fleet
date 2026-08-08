@@ -25,7 +25,7 @@ pub struct Cli {
     /// Path to the TOML configuration file; defaults apply if it does not exist.
     #[arg(long, global = true, default_value = "client.toml")]
     pub config: PathBuf,
-    /// Instance name: selects the service identity (`io.opamp-fleet.client.<instance>`) and the
+    /// Instance name: selects the service identity (`opamp-fleet-client-<instance>`) and the
     /// default install root, so several differently-configured Clients coexist on one host.
     #[arg(long, global = true, default_value = "default", value_parser = parse_instance_name)]
     pub instance: InstanceName,

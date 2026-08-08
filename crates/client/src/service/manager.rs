@@ -2,7 +2,7 @@
 //!
 //! `service-manager` targets the platform's native manager (systemd, launchd, Windows SCM) behind
 //! one API. This module wraps it in the project's vocabulary, parameterized by the instance name:
-//! every instance is its own independently registered service, `io.opamp-fleet.client.<instance>`.
+//! every instance is its own independently registered service, named by [`service_name`].
 //! The installed program is the layout's `current` pointer, so a future self-update is a pointer
 //! switch — never a re-registration.
 
@@ -17,7 +17,7 @@ use service_manager::{
     ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
 };
 
-use super::{ServiceControl, ServiceLevel, ServiceState};
+use super::{layout, ServiceControl, ServiceLevel, ServiceState};
 use crate::cli::InstanceName;
 
 /// Restart after a failure, never after a clean stop (ADR-0010) — with a delay so a Client that
@@ -28,19 +28,54 @@ const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
     reset_after_secs: None,
 };
 
-/// Read by [`windows_restart`](super::windows_restart) so both platforms wait the same before a
+/// Read by [`windows_config`](super::windows_config) so both platforms wait the same before a
 /// restart — and by the service smoke test, which has to outwait it before it may conclude that a
 /// killed service is not coming back (ADR-0024 widens visibility by need).
 pub const RESTART_DELAY_SECS: u32 = 5;
 
-/// The per-instance service label (reverse-DNS, per platform conventions): the systemd unit
-/// `io.opamp-fleet.client.<instance>.service`, the launchd label and plist name, the Windows
-/// service name.
+/// The name this instance's service is registered under — the same on every platform (ADR-0030).
+///
+/// `opamp-fleet-client` for the default instance, `opamp-fleet-client-<instance>` for any other:
+/// most hosts run exactly one Client and should show the product's name and nothing else, and the
+/// suffix appears only where an operator asked for a second one. A hyphen and not a dot, for the
+/// reason [`label`] gives.
+#[must_use]
+pub fn service_name(instance: &InstanceName) -> String {
+    if instance.as_str() == DEFAULT_INSTANCE {
+        layout::COMPONENT.to_string()
+    } else {
+        format!("{}-{instance}", layout::COMPONENT)
+    }
+}
+
+/// The instance every host has unless it asked for another — matching the CLI's default.
+const DEFAULT_INSTANCE: &str = "default";
+
+/// The name a human reads where the platform has somewhere to put one (ADR-0030): the Windows
+/// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
+/// label — neither has a second name to give.
+#[must_use]
+pub fn display_name(instance: &InstanceName) -> String {
+    if instance.as_str() == DEFAULT_INSTANCE {
+        "OpAMP Fleet Client".to_string()
+    } else {
+        format!("OpAMP Fleet Client ({instance})")
+    }
+}
+
+/// The service label, built so that **every backend renders it identically** (ADR-0030).
+///
+/// `service-manager` renders a label through two functions that do not agree — `{organization}-`
+/// `{application}` for systemd, `{qualifier}.{organization}.{application}` for launchd and the
+/// SCM — so any label with more than one part has two spellings in the field. With no qualifier
+/// and no organization both reduce to the application alone, which is why this is built by hand
+/// rather than parsed from a dotted string, and why the name must stay free of dots.
 fn label(instance: &InstanceName) -> Result<ServiceLabel, String> {
-    let qualified = format!("io.opamp-fleet.client.{instance}");
-    qualified
-        .parse()
-        .map_err(|e| format!("cannot parse the service label {qualified}: {e}"))
+    Ok(ServiceLabel {
+        qualifier: None,
+        organization: None,
+        application: service_name(instance),
+    })
 }
 
 /// Build the native service manager, selecting user-level when requested.
@@ -97,8 +132,9 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
 /// root/Administrator for a system-level service), or if the recovery actions cannot be set.
 pub fn install(spec: &InstallSpec) -> Result<(), String> {
     install_service(spec)?;
-    // What `service-manager` does not do on Windows, done here (see `windows_restart`).
-    super::windows_restart::configure(&label(&spec.instance)?.to_qualified_name())
+    // What `service-manager` does not do on Windows, done here (see `windows_config`).
+    let name = service_name(&spec.instance);
+    super::windows_config::configure(&name, &display_name(&spec.instance))
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {
@@ -119,7 +155,7 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
             //
             // Honoured natively on systemd (`Restart=on-failure`) and launchd
             // (`KeepAlive{SuccessfulExit:false}`). The Windows backend of `service-manager`
-            // *discards* this and only logs a warning, which is why `windows_restart` exists.
+            // *discards* this and only logs a warning, which is why `windows_config` exists.
             restart_policy: RESTART_POLICY,
         })
         .map_err(|e| {
@@ -238,10 +274,29 @@ mod tests {
         crate::cli::parse_instance_name(name).expect("a valid instance name")
     }
 
+    /// ADR-0030's whole mechanism: a label with no qualifier and no organization renders the
+    /// same through *both* of the crate's functions, so systemd, launchd, and the SCM show one
+    /// name. A dot anywhere in it would split the label again and undo that.
     #[test]
-    fn the_label_embeds_the_instance() {
-        let label = label(&instance("prod")).expect("parse the label");
-        assert_eq!(label.to_qualified_name(), "io.opamp-fleet.client.prod");
+    fn every_backend_renders_the_same_name() {
+        for (given, expected) in [
+            ("default", "opamp-fleet-client"),
+            ("prod", "opamp-fleet-client-prod"),
+        ] {
+            let label = label(&instance(given)).expect("build the label");
+            assert_eq!(label.to_qualified_name(), expected, "launchd and the SCM");
+            assert_eq!(label.to_script_name(), expected, "systemd");
+            assert!(!expected.contains('.'), "a dot would split the label again");
+        }
+    }
+
+    /// The default instance shows the product's name; a second Client says which one it is.
+    #[test]
+    fn the_names_a_human_reads() {
+        assert_eq!(service_name(&instance("default")), "opamp-fleet-client");
+        assert_eq!(service_name(&instance("prod")), "opamp-fleet-client-prod");
+        assert_eq!(display_name(&instance("default")), "OpAMP Fleet Client");
+        assert_eq!(display_name(&instance("prod")), "OpAMP Fleet Client (prod)");
     }
 
     #[test]
@@ -262,7 +317,7 @@ mod tests {
     }
 
     /// The Windows recovery actions are configured separately from the policy handed to
-    /// `service-manager` (see `windows_restart`), so the two could drift into disagreeing about
+    /// `service-manager` (see `windows_config`), so the two could drift into disagreeing about
     /// how long a failed Client waits before it comes back. They read one constant; this is what
     /// says so.
     #[test]

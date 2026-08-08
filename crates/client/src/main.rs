@@ -85,7 +85,10 @@ fn service_command(
         ServiceAction::Install(args) => install(config_path, config_named, instance, args),
         ServiceAction::Uninstall(scope) => {
             manager::uninstall(level(scope), &instance)?;
-            println!("service io.opamp-fleet.client.{instance} uninstalled (the install layout and state remain)");
+            println!(
+                "service {} uninstalled (the install layout and state remain)",
+                manager::service_name(&instance)
+            );
             Ok(())
         }
         ServiceAction::Start(scope) => manager::NativeService::new(level(scope), instance).start(),
@@ -160,7 +163,7 @@ fn install(
         state_dir: state_dir.clone(),
     })?;
 
-    println!("installed io.opamp-fleet.client.{instance}");
+    println!("installed {}", manager::service_name(&instance));
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
     println!("  state dir: {}", state_dir.display());

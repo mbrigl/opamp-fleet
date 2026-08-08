@@ -264,7 +264,7 @@ $ opamp-fleet-client service uninstall                                   # never
 ```
 
 - **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
-  independent service (`io.opamp-fleet.client.<name>`) with its own configuration, install root,
+  independent service (`opamp-fleet-client-<name>`) with its own configuration, install root,
   and state — several differently-configured Clients coexist on one host.
 - **Install root:** `--root <dir>` overrides the per-platform default (Linux:
   `/var/lib/opamp-fleet/client/<instance>`); nothing is ever installed to a fixed path. The
@@ -299,7 +299,7 @@ doing and nothing else asserts it. The test is `crates/client/tests/service_smok
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
-(`journalctl -u io.opamp-fleet.client.default` on Linux, Console/`log show` on macOS), the Agent in
+(`journalctl -u opamp-fleet-client` on Linux, Console/`log show` on macOS), the Agent in
 the fleet UI, and a second `--instance` beside the first. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there; the SCM discards stderr, so
 Windows service logs are lost until a log-to-file follow-up.

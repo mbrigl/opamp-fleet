@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use client::cli::{parse_instance_name, InstanceName};
-use client::service::manager::{NativeService, RESTART_DELAY_SECS};
+use client::service::manager::{service_name, NativeService, RESTART_DELAY_SECS};
 use client::service::{ServiceControl, ServiceLevel, ServiceState};
 use server::fleet::{AgentView, AppState};
 
@@ -100,9 +100,11 @@ fn agent(state: &AppState) -> Option<AgentView> {
 }
 
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
-/// under that label — which is itself an answer the assertions below use.
+/// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    let qualified = format!("io.opamp-fleet.client.{INSTANCE}");
+    // One name on every platform since ADR-0030, so this is what systemd, launchd, and the SCM
+    // are each asked about.
+    let qualified = service_name(&instance());
     #[cfg(windows)]
     {
         // `sc queryex` prints `PID                : 1234`.

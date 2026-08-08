@@ -13,12 +13,14 @@
       "cwd": "${workspaceFolder}"
     },
     {
+      // The package is `client`, the binary it produces is `opamp-fleet-client` (ADR-0028):
+      // `--package` takes the first, `--bin` and the filter take the second.
       "type": "lldb",
       "request": "launch",
       "name": "Client",
       "cargo": {
-        "args": ["build", "--bin", "client", "--package", "client"],
-        "filter": { "name": "client", "kind": "bin" }
+        "args": ["build", "--bin", "opamp-fleet-client", "--package", "client"],
+        "filter": { "name": "opamp-fleet-client", "kind": "bin" }
       },
       "args": ["--config", "config/client.toml"],
       "cwd": "${workspaceFolder}"

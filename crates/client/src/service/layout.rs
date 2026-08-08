@@ -28,8 +28,9 @@ pub const BINARY_FILENAME: &str = if cfg!(windows) {
     "opamp-fleet-client"
 };
 
-/// The component prefix of every version directory (ADR-0028).
-const COMPONENT: &str = "opamp-fleet-client";
+/// The product's name: the prefix of every version directory (ADR-0028) and, since ADR-0030, the
+/// name the service is registered under as well. One definition, so the two cannot drift.
+pub const COMPONENT: &str = "opamp-fleet-client";
 
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";

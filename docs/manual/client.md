@@ -50,7 +50,7 @@ $ opamp-fleet-client --version
 | Global flag | Meaning |
 |---|---|
 | `--config <path>` | The TOML configuration file. Defaults to `client.toml`; defaults apply if it does not exist. `service install` is the one place where "not given" means something else: there the file is `<root>/client.toml` inside the install root, because a path resolved against this shell's working directory is not one the service manager shares. |
-| `--instance <name>` | Selects the service identity (`io.opamp-fleet.client.<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
+| `--instance <name>` | Selects the service identity (`opamp-fleet-client-<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`, whose service is plain `opamp-fleet-client`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
 | `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
 
 There are no environment-variable fallbacks for configuration (ADR-0008) — the flags say only where
@@ -96,7 +96,7 @@ Bearer token: ********
 Does the Server present a certificate from a private CA? [y/N]: n
 Allow the Server to update this Client's own binary? [y/N]: n
 wrote /var/lib/opamp-fleet/client/default/client.toml
-installed io.opamp-fleet.client.default
+installed opamp-fleet-client
 ```
 
 What it asks about is only what has no useful default here: the endpoint, the Agent's name, the
@@ -119,6 +119,24 @@ Four rules worth knowing before you script around it:
   versions and the state directory already use. The file is validated by the ordinary loader before
   the service is registered; a file that does not parse fails the install and stays on disk for you
   to correct.
+
+### What the service is called
+
+One name on every platform (ADR-0030) — the default instance is the product's name, and any other
+instance appends its own:
+
+| | `--instance default` | `--instance prod` |
+|---|---|---|
+| **Linux** (systemd) | `opamp-fleet-client.service` | `opamp-fleet-client-prod.service` |
+| **macOS** (launchd) | `opamp-fleet-client` (job and plist) | `opamp-fleet-client-prod` |
+| **Windows** (SCM) | `opamp-fleet-client` | `opamp-fleet-client-prod` |
+
+So the same command works everywhere it exists: `systemctl status opamp-fleet-client`,
+`launchctl list opamp-fleet-client`, `sc query opamp-fleet-client`.
+
+Where a platform has a second, human-readable name, it is **OpAMP Fleet Client** (`OpAMP Fleet
+Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
+as its `Description`, and a launchd job has no name besides its label.
 
 The root holds versioned installs side by side, a `current` pointer the service is registered
 against, and the default state directory:
