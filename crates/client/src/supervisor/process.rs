@@ -1,6 +1,6 @@
 //! The shared child runner both plugins drive: spawn, watch, restart with backoff, apply a new
-//! configuration by respawning, stop gracefully within the budget — plus the one-shot version
-//! probe both plugins use to learn a Managed Process's own version.
+//! configuration by respawning, stop gracefully within the budget — plus the version probe both
+//! plugins use to learn a Managed Process's own version, run at startup and after every swap.
 //!
 //! Mirrors the reference `opampsupervisor` (ADR-0011): SIGTERM → bounded wait → kill on Unix,
 //! `Child::kill` on Windows (which has no SIGTERM equivalent), and exponential backoff for a
@@ -146,6 +146,13 @@ impl InstallTarget {
     }
 }
 
+/// How to ask a Managed Process for its own version — the program to run and the arguments that
+/// make it print one. `None` on a Runner whose plugin has no such convention.
+pub struct VersionProbe {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
@@ -160,6 +167,8 @@ pub struct Runner {
     pub install: Option<InstallTarget>,
     /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
     pub archive_key: Option<String>,
+    /// How to learn the Managed Process's own version, when the plugin knows how to ask.
+    pub version_probe: Option<VersionProbe>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -168,6 +177,9 @@ pub struct Runner {
 impl Runner {
     pub async fn run(mut self, mut shutdown: Shutdown) {
         let mut backoff = Backoff::new();
+        // What runs today, before it runs: a Collector without the opampextension never reports
+        // its own version, and one that is not configured yet never even starts.
+        self.probe_version();
         let mut child = self.spawn_if_due().await;
 
         loop {
@@ -247,6 +259,11 @@ impl Runner {
                         }
                         match result {
                             GraceOutcome::Ok => {
+                                // A new binary is a new version, and the Agent's `service.version`
+                                // is what the program says about itself — so ask it again. Without
+                                // this the swap is reported as installed while the Agent goes on
+                                // describing the version it replaced, until the Client restarts.
+                                self.probe_version();
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Ok(version) })
                                     .await;
@@ -418,6 +435,20 @@ impl Runner {
                 *child = Some(proc);
                 GraceOutcome::Ok
             }
+        }
+    }
+
+    /// Asks the program for its own version, if the plugin knows how to ask.
+    ///
+    /// Out of band by design: the answer arrives whenever it arrives, as a Description event, and
+    /// a program that will not answer holds nothing up (see [`probe_version`]).
+    fn probe_version(&self) {
+        if let Some(probe) = &self.version_probe {
+            tokio::spawn(probe_version(
+                probe.program.clone(),
+                probe.args.clone(),
+                self.events.clone(),
+            ));
         }
     }
 

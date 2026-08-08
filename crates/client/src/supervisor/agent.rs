@@ -328,7 +328,20 @@ impl AgentState {
     /// The Managed Process reported its own description (through the Supervisor Endpoint); fold
     /// it into ours — identity stays the Supervisor's (goal 16).
     pub fn set_process_description(&mut self, description: AgentDescription) {
-        self.process_description = Some(description);
+        // Merged per attribute, not replaced wholesale: two sources describe the same process —
+        // the version probe, which reports `service.version` and nothing else, and the
+        // opampextension, which reports everything else — and whichever speaks second must not
+        // erase what the first said. On the same key the later report wins, so a swapped binary's
+        // probed version replaces the one it succeeded.
+        let merged = self
+            .process_description
+            .get_or_insert_with(AgentDescription::default);
+        for attr in &description.identifying_attributes {
+            upsert_attr(&mut merged.identifying_attributes, attr);
+        }
+        for attr in &description.non_identifying_attributes {
+            upsert_attr(&mut merged.non_identifying_attributes, attr);
+        }
         self.send_full = true;
     }
 
@@ -1363,6 +1376,65 @@ mod tests {
             non_identifying_attributes: vec![],
         });
         assert_eq!(version_of(&supervised).as_deref(), Some("0.142.0"));
+    }
+
+    /// Two sources describe the same Managed Process — the version probe, which reports
+    /// `service.version` alone after every package swap, and the opampextension, which reports
+    /// everything else. Replacing rather than merging would make each new probe erase the
+    /// extension's self-report, and each self-report erase the probed version.
+    #[test]
+    fn what_the_process_reports_about_itself_accumulates_across_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut agent = AgentState::supervised("otelcol".to_string(), storage).expect("agent");
+
+        // The extension's self-report: everything but the version, which it happens not to state.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+            non_identifying_attributes: vec![string_attr("host.id", "abc")],
+        });
+        // The probe, after a swap: the version and nothing else.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.version", "0.158.0")],
+            non_identifying_attributes: vec![],
+        });
+
+        let described = agent.describe();
+        let value = |attrs: &[KeyValue], key: &str| {
+            attrs
+                .iter()
+                .find(|kv| kv.key == key)
+                .and_then(|kv| kv.value.clone())
+                .and_then(|v| v.value)
+                .map(|v| match v {
+                    any_value::Value::StringValue(s) => s,
+                    other => format!("{other:?}"),
+                })
+        };
+        assert_eq!(
+            value(&described.identifying_attributes, "service.version").as_deref(),
+            Some("0.158.0"),
+            "the probed version survives"
+        );
+        assert_eq!(
+            value(&described.identifying_attributes, "service.name").as_deref(),
+            Some("otelcol-contrib"),
+            "and does not erase what the extension reported"
+        );
+        assert_eq!(
+            value(&described.non_identifying_attributes, "host.id").as_deref(),
+            Some("abc")
+        );
+
+        // A later self-report of the same key wins — a restarted process states the truth.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.version", "0.159.0")],
+            non_identifying_attributes: vec![],
+        });
+        assert_eq!(
+            value(&agent.describe().identifying_attributes, "service.version").as_deref(),
+            Some("0.159.0")
+        );
     }
 
     #[test]

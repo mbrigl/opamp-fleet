@@ -58,6 +58,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
   unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
 
+### Fixed
+
+- **An Agent that installed a package went on reporting the version it replaced.** The package
+  itself was reported correctly — `Installed`, with the new version, in the fleet view's package
+  pill — but the Agent's own `service.version`, which is the fleet table's **Version** column, still
+  named the old one. On a first install onto an empty `program/` it named nothing at all, and the
+  column stayed empty beside a package the Server had just seen installed.
+
+  Only the program knows its own version, so the Client asks it: it runs the Managed Process's
+  version flag (a Collector's `--version`, or a `command` Supervisor's configured `version_args`)
+  and reports what it prints. That question was asked once, when the Supervisor started — never
+  again after a swap replaced the binary it had asked. A Collector carrying the `opampextension`
+  corrected itself the moment it next started and self-reported; one without the extension, and one
+  with no configuration to run on yet, had nothing that ever would. Restarting the Client was the
+  only cure.
+
+  The program is now asked again after every successful swap, and the two sources — the probe and
+  the extension's self-report — are merged per attribute instead of each replacing the other.
+  Nothing to change on a host: an affected Agent reports its version within seconds of the next
+  install, and a Client restart still fixes an Agent that installed before this version.
+
 ### Changed — breaking
 
 - **A package now holds one artifact per platform, and `os`/`arch` are required**

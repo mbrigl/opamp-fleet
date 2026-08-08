@@ -128,7 +128,7 @@ state_dir = "client-state"
 #
 # [[supervisor]]
 # type = "collector"
-# name = "otelcol"
+# name = "otelcol-contrib"
 # binary = "otelcol-contrib"  # bare, so it lives in this Supervisor's program/ directory and
 #                          # takes binary updates from the Server (ADR-0015, ADR-0017, ADR-0021):
 #                          # the artifact the Server selects for this Agent is verified, swapped
@@ -155,8 +155,8 @@ state_dir = "client-state"
 # machine's package manager, so the Server never writes over it — it is supervised, not updated.
 # [[supervisor]]
 # type = "collector"
-# name = "otelcol-plain"
-# binary = "/usr/local/bin/otelcol"
+# name = "otelcol"
+# binary = "otelcol"
 
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
 # Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
