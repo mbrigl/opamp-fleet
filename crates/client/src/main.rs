@@ -2,27 +2,14 @@
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `client.toml`, restores the
 //! Agent's identity, and runs the transport the endpoint selects (ADR-0007) until stopped.
 
-mod archive;
-mod cli;
-mod config;
-mod connection;
-mod engine;
-mod packages;
-mod selfupdate;
-mod service;
-mod storage;
-mod supervisor;
-mod tls;
-mod transport;
-mod version;
-
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use cli::{Cli, Command, InstallArgs, InstanceName, ServiceAction};
-use config::ClientConfig;
-use service::runtime::{self, RunSpec};
-use service::{layout, manager, ServiceControl, ServiceLevel};
+use client::cli::{self, Cli, Command, InstallArgs, InstanceName, ServiceAction};
+use client::config::ClientConfig;
+use client::service::runtime::{self, RunSpec};
+use client::service::{layout, manager, ServiceControl, ServiceLevel};
+use client::{selfupdate, version};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -72,7 +59,7 @@ fn main() {
 fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
     #[cfg(windows)]
     if args.service {
-        return service::windows::run_as_service(spec);
+        return client::service::windows::run_as_service(spec);
     }
     let _ = args;
     runtime::run_foreground(spec)

@@ -108,13 +108,15 @@ enum Format {
     SevenZ,
 }
 
-/// The Client's own unpacker, compiled into this binary's tests rather than restated in them.
-/// What `pack` has to get right is not "is this a valid archive" but "does *this* code open it and
-/// find the member" — a container the Client cannot open would be discovered on a host, at rollout
-/// time, as a failed install on every matched Agent. Test-only: the tool itself never unpacks.
+/// The Client's own unpacker, used by this binary's tests rather than restated in them. What `pack`
+/// has to get right is not "is this a valid archive" but "does *this* code open it and find the
+/// member" — a container the Client cannot open would be discovered on a host, at rollout time, as
+/// a failed install on every matched Agent. Test-only: the tool itself never unpacks.
+///
+/// Until ADR-0024 this was `#[path = "../archive.rs"] mod archive`, a second compilation of the
+/// same file, because a binary in a crate without a library has no other way to reach it.
 #[cfg(test)]
-#[path = "../archive.rs"]
-mod archive;
+use client::archive;
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
