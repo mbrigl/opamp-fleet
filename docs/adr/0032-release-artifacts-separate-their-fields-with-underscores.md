@@ -1,6 +1,6 @@
 # ADR-0032: A release artifact separates its four fields with `_` — `name_version_os_arch.7z`
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 

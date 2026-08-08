@@ -570,17 +570,22 @@ Self-update therefore requires an installed service — it is the service manage
 restart.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`opamp-fleet-client-<version>-<os>-<arch>.7z`
-([ADR-0025](../adr/0025-release-pipeline-and-artifacts.md)) — and that file *is* a package artifact:
-it holds the Client under the name the install layout gives it, so it is uploaded exactly as
-downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing repacks it.
+`opamp-fleet-client_<version>_<os>_<arch>.7z`
+([ADR-0025](../adr/0025-release-pipeline-and-artifacts.md),
+[ADR-0032](../adr/0032-release-artifacts-separate-their-fields-with-underscores.md)) — and that file
+*is* a package artifact: it holds the Client under the name the install layout gives it, so it is
+uploaded exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies.
+Nothing repacks it. The fields are separated by `_` because two of them carry `-` — the name
+(`opamp-fleet-client`) and a prerelease version (`1.2.3-dev`) — so the last two fields are the
+platform and can be read off the name.
 
 **The version in the query is the release number** — the one in the file name
-([ADR-0029](../adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)):
+([ADR-0029](../adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)) — and the
+platform is required with it (ADR-0031), spelled as the Agent reports it:
 
 ```console
-$ curl -X PUT --data-binary @opamp-fleet-client-1.2.3-linux-x86_64.7z \
-       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3"
+$ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
+       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
 ```
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the

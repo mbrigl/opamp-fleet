@@ -187,7 +187,10 @@ jobs:
       - name: Pack
         id: pack
         run: |
-          name="${PRODUCT}-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.7z"
+          # `_` between the four fields, because two of them contain `-`: the name grammar is
+          # `[a-z0-9-]` (ADR-0010) and a prerelease version spells itself with a hyphen, so a
+          # hyphen-separated name does not parse back (ADR-0032).
+          name="${PRODUCT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.7z"
           # The packer names the single member after the program — `opamp-fleet-client`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
           sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
@@ -236,15 +239,16 @@ jobs:
 
           Upload **all** of them under the **one** package name: the Server holds one artifact per
           platform and offers each Agent the one built for the machine it reported (ADR-0031), so a
-          mixed fleet updates from a single \`[self_update] package = "opamp-fleet-client"\`. The
-          \`<os>-<arch>\` in each file name is exactly the pair an Agent reports as \`os.type\` and
-          \`host.arch\`, which is why this needs no table:
+          mixed fleet updates from a single \`[self_update] package = "opamp-fleet-client"\`. Each
+          file is named \`<name>_<version>_<os>_<arch>.7z\` (ADR-0032), and the last two fields are
+          exactly the pair an Agent reports as \`os.type\` and \`host.arch\` — so the upload reads
+          them out of the name and needs no table:
 
           \`\`\`console
-          for f in ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-*.7z; do
-            p=\${f#${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-}; p=\${p%.7z}   # linux-amd64
+          for f in *_${{ needs.version.outputs.version }}_*.7z; do
+            p=\${f%.7z}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
             curl -X PUT --data-binary @"\$f" \\
-              "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}&os=\${p%-*}&arch=\${p#*-}"
+              "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}&os=\$os&arch=\$arch"
           done
           \`\`\`
 
@@ -255,7 +259,7 @@ jobs:
           executable mode, so there is no \`chmod +x\` step:
 
           \`\`\`console
-          7z x ${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-amd64.7z
+          7z x ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.7z
           ./opamp-fleet-client service install --interactive   # root; answers write the configuration
           ./opamp-fleet-client service start
           \`\`\`

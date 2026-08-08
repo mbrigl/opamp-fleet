@@ -189,9 +189,11 @@ and the Server for Linux.
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
-`opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
-on, plus a `SHA256SUMS` file. The `<os>-<arch>` tokens are exactly what an Agent reports as `os.type`
-and `host.arch` (`linux-amd64`, `darwin-arm64`, …), so uploading a whole release under one package
+`opamp-fleet-client_<version>_<os>_<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+on, plus a `SHA256SUMS` file. The fields are separated by `_` because a name and a version both
+contain `-` ([ADR-0032](docs/adr/0032-release-artifacts-separate-their-fields-with-underscores.md)),
+and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
+`darwin_arm64`, …), so uploading a whole release under one package
 name needs no translation ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)). Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a

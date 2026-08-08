@@ -98,12 +98,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   architecture depending on whether a Collector happened to run on it, and Selectors written against
   either spelling broke without anything having changed.
 
-- **Release artifacts are named `<os>-<arch>` with those same tokens** — `opamp-fleet-client-1.2.3-linux-amd64.7z`,
-  `…-darwin-arm64.7z`, where they used to say `macos` and `x86_64`
-  ([ADR-0031](docs/adr/0031-per-platform-package-variants.md), superseding the naming in
-  [ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)). Anything scripted against the old
-  names breaks; earlier releases keep theirs. The gain is that the two tokens in a file name are now
-  exactly the pair an Agent reports, so uploading a release needs no translation table.
+- **Release artifacts are named `<name>_<version>_<os>_<arch>.7z`** —
+  `opamp-fleet-client_1.2.3_linux_amd64.7z`, `opamp-fleet-client_1.2.3_darwin_arm64.7z`. Both halves
+  of that changed: the platform tokens, which used to say `macos` and `x86_64`
+  ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)), and the separator between the four
+  fields, which used to be `-`
+  ([ADR-0032](docs/adr/0032-release-artifacts-separate-their-fields-with-underscores.md)) — both
+  superseding the naming in [ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md).
+
+  **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
+  releases already published keep the names they have, and nothing is renamed.
+
+  The gain is that the name says what it holds without being guessed at. The two platform fields are
+  exactly the pair an Agent reports, so uploading a release needs no translation table — and because
+  neither a package name (`[a-z0-9-]`) nor a version (`1.2.3-dev`) can contain `_` while both contain
+  `-`, the four fields can be read off the file name by splitting it. That is what lets the release
+  notes publish an upload loop that takes `os` and `arch` out of each file rather than being handed
+  the name and version it has to strip first.
 
 - **The service is registered as `opamp-fleet-client` on every platform**
   ([ADR-0030](docs/adr/0030-one-service-name-on-every-platform.md)). It used to be
