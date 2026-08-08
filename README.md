@@ -184,6 +184,14 @@ every setting has a default, so they also start with no file at all. The annotat
 build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
 and the Server for Linux.
 
+**Releases** ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)): pushing a `version/*`
+tag publishes one archive per platform — `opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS
+and Windows on the architectures each ships on — plus a `SHA256SUMS` file. The version is read out
+of the binary that was built, never written by hand, and a build that lost its tags fails instead of
+publishing itself as a development version. Each archive is also a ready package artifact: the same
+file an operator downloads is the one a fleet is handed for a Client
+[self-update](docs/manual/client.md#updating-the-client-itself).
+
 ## Usage
 
 This section is a tour. The complete operator reference — every option and every configuration key

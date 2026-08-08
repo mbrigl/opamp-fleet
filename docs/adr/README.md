@@ -53,5 +53,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0022](0022-supervisor-path-placeholders-in-process-arguments.md) | A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync | 🟢 accepted |
 | [0023](0023-multi-file-packages.md) | A package may be a directory tree, unpacked whole beside the one it replaces | 🟢 accepted |
 | [0024](0024-client-library-target.md) | The Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
-| [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟡 proposed |
+| [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟢 accepted |
 

@@ -467,6 +467,24 @@ to the Server by whichever version came up.
 Self-update therefore requires an installed service — it is the service manager that performs the
 restart.
 
+**Where the artifact comes from.** Every release publishes one archive per platform, named
+`opamp-client-<version>-<os>-<arch>.7z`
+([ADR-0025](../adr/0025-release-pipeline-and-artifacts.md)) — and that file *is* a package artifact:
+it holds the Client under the name the install layout gives it, so it is uploaded exactly as
+downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing repacks it.
+
+**The version in the query must be the one the binary reports** — build metadata and all, because
+`self-check` compares the two character for character and a mismatch fails the update on every host
+it reaches:
+
+```console
+$ curl -X PUT --data-binary @opamp-client-1.2.3-linux-x86_64.7z \
+       "http://<server>:4320/api/v1/packages/opamp-client?version=1.2.3+a1b2c3d"
+```
+
+The file name carries the base version; the full string is in the release notes, and
+`client --version` prints it on any host already running that build.
+
 ## Connecting to the Server
 
 **Choosing a transport.** `ws://`/`wss://` gets configuration changes pushed within a second.
