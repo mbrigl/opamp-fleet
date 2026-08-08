@@ -1,6 +1,6 @@
 # ADR-0029: A version is compared and shown without its build metadata — the commit is provenance, not identity
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 
