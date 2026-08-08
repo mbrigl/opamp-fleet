@@ -184,6 +184,20 @@ every setting has a default, so they also start with no file at all. The annotat
 build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
 and the Server for Linux.
 
+**Releases** ([ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md),
+[ADR-0009](docs/adr/0009-version-baking-comparison-and-display.md)): the version is
+`[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
+`version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
+nobody types a tag. Running it publishes one archive per platform,
+`opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+on, plus a `SHA256SUMS` file. Started with `dry_run` (the default) it builds and packs everything and
+publishes nothing. Before it builds anything at all it checks that the version is still free — a
+`version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
+forgotten bump costs seconds rather than five build jobs — and the built binary must report the
+version the artifacts are named after. Each archive is also a
+ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
+[self-update](docs/manual/client.md#updating-the-client-itself).
+
 ## Usage
 
 This section is a tour. The complete operator reference — every option and every configuration key

@@ -37,7 +37,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0006](0006-proto-vendoring-and-codegen.md) | Vendor the Baseline's protobuf schema and compile it with prost via protox (no system protoc) | 🟢 accepted |
 | [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
 | [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
-| [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟢 accepted |
+| [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟡 proposed |
 | [0010](0010-client-os-service.md) | The Client as a multi-instance native OS service, installed and run through its own CLI | 🟢 accepted |
 | [0011](0011-supervisor-mode-core-and-plugins.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins that own their process kind, n Agents over one connection | 🟢 accepted |
 | [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
@@ -49,4 +49,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0018](0018-client-self-update.md) | The Client updates itself — its own Agent, a staged version, a restart it does not issue, and a consent that names its package | 🟢 accepted |
 | [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟢 accepted |
 | [0020](0020-what-lives-in-which-crate.md) | What lives in which crate — the Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
+| [0021](0021-release-pipeline-and-artifacts.md) | A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install | 🟢 accepted |
 

@@ -1,0 +1,247 @@
+name: Release
+
+# Builds the Client for every target it ships on and publishes one `.7z` per target (ADR-0021).
+#
+# The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
+# `version/*` tag from it (ADR-0009) — *before* it builds, so `build.rs` finds a tag on
+# HEAD and bakes the same number into the binary with its commit metadata. Nothing about how a
+# binary learns its own version changed; only who decides it and who types the tag.
+#
+# The artifacts are packed by this project's own `opamp-package-sign`, so each one is also a valid
+# package artifact for a fleet self-update (ADR-0017, ADR-0018) — the file an operator downloads is
+# the file they hand the Server.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only — create no tag and no release"
+        type: boolean
+        default: true
+  # A hand-made tag still releases, for the case where someone tags deliberately. The tag this
+  # workflow pushes itself does not land here: events from the workflow's own token never start
+  # another run.
+  push:
+    tags: ["version/*"]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT: opamp-client
+
+jobs:
+  # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
+  # from this job's answer, so the artifacts cannot disagree with each other or with the binary.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      # Pushing the tag (ADR-0009). Read alone would be enough for everything else here.
+      contents: write
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      full: ${{ steps.baked.outputs.full }}
+      publish: ${{ steps.read.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The baked version is resolved from the repository's tags; a shallow clone would bake
+          # `0.0.0-dev` and publish it.
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - name: Read the version out of Cargo.toml
+        id: read
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "client") | .version')
+          echo "Cargo.toml says $version"
+          case "$version" in
+            "" | *[!0-9.]* ) echo "::error::$version is not a release version (MAJOR.MINOR.PATCH)"; exit 1 ;;
+          esac
+
+          # A hand-pushed tag still releases, but only if the two agree — this is the drift
+          # ADR-0009 accepts and refuses to resolve silently.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tagged="${GITHUB_REF_NAME#version/}"
+            if [ "$tagged" != "$version" ]; then
+              echo "::error::the tag says $tagged and Cargo.toml says $version — bump one of them"
+              exit 1
+            fi
+            publish=true
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            publish=false
+          else
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Nothing is built until it is certain this number is still free. A version that already
+      # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
+      # to move a tag or replace an artifact somebody may already hold (ADR-0009). Both are asked
+      # because either can exist alone: a draft release reserves a tag name without the tag being
+      # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
+      # run — whether a version can be released does not depend on whether this run intends to.
+      - name: This version has not been released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.read.outputs.version }}'
+          tag="version/$version"
+          taken=""
+
+          on=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$on" ]; then
+            # On a push run this very tag is what started us; anywhere else it is a spent number.
+            if [ "${{ github.event_name }}" = "push" ] && [ "$on" = "$GITHUB_SHA" ]; then
+              echo "$tag is the tag that started this run"
+            else
+              echo "::error::the tag $tag already exists, on ${on:0:7}"
+              taken=yes
+            fi
+          fi
+
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::a release $tag already exists"
+            taken=yes
+          fi
+
+          if [ -n "$taken" ]; then
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0009)"
+            exit 1
+          fi
+          echo "$tag is free"
+      - name: Tag this commit
+        if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          tag="version/${{ steps.read.outputs.version }}"
+          # The guard above proved the tag is free; the push is what proves it still is, since it
+          # is refused rather than forced if a concurrent run got there first.
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          echo "created $tag"
+      # Debug: the version is baked identically and this build is only asked, never shipped.
+      - name: The binary agrees
+        id: baked
+        run: |
+          set -euo pipefail
+          cargo build -p client --bin client --locked
+          full=$(./target/debug/client --version | awk '{print $NF}')
+          echo "the binary reports $full"
+          version='${{ steps.read.outputs.version }}'
+          if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0009)"
+            exit 1
+          fi
+          # The name carries the base version; the full string, build metadata and all, is what an
+          # operator must type into `?version=` for a self-update to pass its probe.
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: x86_64, suffix: "", native: true }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: aarch64, suffix: "", native: true }
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: macos, arch: aarch64, suffix: "", native: true }
+          # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
+          # than depending on an Intel macOS runner label (ADR-0021). Nothing here can run it, so
+          # the version assertion below is skipped for this one row.
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: macos, arch: x86_64, suffix: "", native: false }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: x86_64, suffix: ".exe", native: true }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build the Client
+        run: cargo build --release -p client --bin client --target ${{ matrix.target }} --locked
+      # A host build: it runs here, on this runner, to pack the artifact.
+      - name: Build the packer
+        run: cargo build --release -p client --bin opamp-package-sign --locked
+      - name: The binary agrees with the name it will be given
+        if: matrix.native
+        run: |
+          reported=$(./target/${{ matrix.target }}/release/client${{ matrix.suffix }} --version | awk '{print $NF}')
+          expected='${{ needs.version.outputs.full }}'
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::this target reports $reported, the release is $expected"
+            exit 1
+          fi
+      - name: Pack
+        id: pack
+        run: |
+          name="${PRODUCT}-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.7z"
+          # The packer names the single member after the program — `client`/`client.exe`, which is
+          # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
+          sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
+            --format 7z \
+            --out "$name" \
+            "target/${{ matrix.target }}/release/client${{ matrix.suffix }}")
+          echo "$sha  $name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            ${{ steps.pack.outputs.name }}
+            ${{ steps.pack.outputs.name }}.sha256
+          if-no-files-found: error
+
+  publish:
+    # A dry run builds and packs everything and stops here.
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect the checksums
+        run: |
+          cd artifacts
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          rm -f *.sha256
+          ls -l
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          cat > notes.md <<EOF
+          Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
+
+          The full version this build reports is \`${{ needs.version.outputs.full }}\` — that exact
+          string, build metadata and all, is what a fleet needs when the artifact is handed to a
+          Server for a self-update (ADR-0018):
+
+          \`\`\`console
+          curl -X PUT --data-binary @${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z \\
+               "http://<server>:4320/api/v1/packages/opamp-client?version=${{ needs.version.outputs.full }}"
+          \`\`\`
+
+          Each archive holds the Client under the name it is installed as, so it needs no repacking:
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0017).
+          EOF
+          gh release create "version/${{ needs.version.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ needs.version.outputs.version }}" \
+            --notes-file notes.md \
+            *.7z SHA256SUMS

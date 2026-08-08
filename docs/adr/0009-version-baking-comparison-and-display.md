@@ -1,6 +1,6 @@
 # ADR-0009: The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads
 
-- **Status:** 🟢 accepted
+- **Status:** 🟡 proposed
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 
@@ -17,10 +17,6 @@ it — the identifier a self-update stages, switches, and rolls back by. The wor
 
 Forces:
 
-- **The version must derive from the repository, not from a hand-maintained file.** The
-  maintainer's convention is a git tag `version/<major><sep><minor><sep><patch>` (separator `.` or
-  `/`). Bumping `Cargo.toml` per release would create a second source of truth that drifts from
-  the tags.
 - **Every build — not only release builds — must be identifiable.** A fleet Server, a bug report,
   or an install directory must distinguish two development builds from each other and any
   development build from a release. That demands two things of the version string: a SemVer
@@ -37,7 +33,30 @@ Forces:
   (`main:docs/adr/0008-release-pipeline-and-versioning.md`); this decision adopts that contract but
   moves the computation into the Rust build itself and stamps *every* build, so the release
   *pipeline* (build targets, archives, checksums, publishing) carries no version logic beyond
-  checking out the right commit.
+  creating the tag from `Cargo.toml` and checking out the right commit.
+
+### Where the number comes from
+
+`Cargo.toml` is where a Rust project's version lives. It is a value a reviewer sees in the diff of
+the release commit rather than in a ref nobody reads. The number should be decided once, in the
+source, and not typed a second time as a tag. The second typing is the failure: a tag is written by
+hand, at the keyboard, at the end of a working day, and it is the thing that names the release
+forever. With the tag as the only source, a release is two acts by a human — bump nothing, tag the
+commit, push the tag — on top of the release pipeline of
+[ADR-0021](0021-release-pipeline-and-artifacts.md).
+
+The forces that favour a tag as the only source have not disappeared, and the decision below has to
+answer them rather than ignore them:
+
+- **Two sources drift.** If `Cargo.toml` says one thing and a tag says another, something must
+  decide which is the release — and it must not be silence.
+- **The binary's identity may not become a build-environment property.** `build.rs` resolves the
+  version from the repository at compile time and bakes it in. Reading `Cargo.toml` at build time
+  alone would work, but the version would stop carrying the provenance (`+<hash>`, `-dev`) that
+  ADR-0010's install directories and ADR-0018's self-update rely on, and every one of those rules
+  would have to be re-decided.
+- **The self-update compares exactly.** `selfupdate::probe` refuses a staged binary whose reported
+  version is not the offered one, character for character.
 
 ## Decision
 
@@ -46,49 +65,78 @@ the binary crate's **`build.rs`**
 at compile time, from git, and bake it into the binary; every build — release or not — is stamped
 with its provenance.
 
-1. **Base version, resolved in `build.rs`, first match wins:**
-   1. **`OPAMP_FLEET_VERSION` environment override**, if set — the escape hatch for builds without
-      a git checkout (source tarballs, distro packaging). Validated like a tag (below); invalid
-      values fail the build.
-   2. **A `version/*` tag pointing at HEAD itself** (exact match, not a nearest reachable tag),
-      parsed against `^version/(0|[1-9][0-9]*)(\.|/)(0|[1-9][0-9]*)(\.|/)(0|[1-9][0-9]*)$` —
-      exactly three non-negative integers under **strict semantic versioning**: no leading zeros,
-      `.` or `/` (mixed permitted) as separator, no pre-release or build metadata — and normalised
-      to dot-separated `MAJOR.MINOR.PATCH`. A *malformed* `version/*` tag on HEAD **fails the
-      build** (fail closed) rather than being skipped or guessed at.
-   3. **The most recent `version/*` tag *reachable* from HEAD, with the pre-release `-dev`
-      appended** (git-describe semantics; same strict parsing and normalisation) — a development
-      build descending from the `version/1.2.3` release identifies as `1.2.3-dev`, so its release
-      lineage is visible at a glance while the SemVer pre-release `-dev` still marks it
-      unmistakably as *not* that release. If **no** `version/*` tag is reachable at all (a fresh
-      history — this repository today), the base falls back to **`0.0.0-dev`**.
+We will take the release version from **`[workspace.package] version` in `Cargo.toml`** and have the
+**release pipeline create the `version/*` tag from it** — before it builds, so nothing downstream
+changes.
 
-2. **Build metadata is always appended:** `+<short-hash>` — the abbreviated commit id of HEAD
+### The number and the release
+
+1. **`Cargo.toml` decides the number.** Bumping the version is an ordinary commit, reviewed like
+   any other.
+
+2. **The pipeline tags.** The release run reads the version, creates `version/<version>` at the
+   commit being released, and pushes it with the workflow's own token — which, by GitHub's rule
+   against recursive triggering, starts no second run. Only then does it build.
+
+3. **`build.rs` takes the base from the same file, and git says only what is *around* it.** The base
+   is `CARGO_PKG_VERSION`, which Cargo hands the build script from `Cargo.toml`; a `version/<base>`
+   tag on HEAD means this commit *is* that release, and its absence means the build is on the way to
+   it and gets the `-dev` pre-release. The commit short-hash is appended (point 6). So a
+   development build reports `0.1.0-dev+a1b2c3d` — the version it is heading for, not the version
+   it descends *from*. The `OPAMP_FLEET_VERSION` override, validated as strict `MAJOR.MINOR.PATCH`,
+   stays the escape hatch that states the base for builds without a git checkout.
+
+   This is the part that reaches furthest, and it is the point of taking the number from
+   `Cargo.toml`: with the base in the tag, `Cargo.toml` could say `0.1.0` while every binary built
+   from it said `0.0.0-dev`, and the file that supposedly decides the version would be one no
+   binary reads.
+
+4. **Drift is refused, never resolved** — and the first refusal is the compiler's:
+
+   | Situation | Answer |
+   |---|---|
+   | HEAD carries `version/<base>` | a release build: `<base>+<hash>` |
+   | HEAD carries a `version/*` tag naming **something else** | **the build fails** — the file and the tag disagree and neither wins |
+   | `version/<v>` already exists, or a release names it | **the run fails before it builds** — the number is spent |
+   | the run was started by a hand-pushed `version/*` tag | the tag and `Cargo.toml` must agree, or **fail** |
+
+   The third row is checked first, ahead of every build, and it does not care whether the run
+   *intends* to publish: whether a version can still be released is a property of the version, so a
+   dry run answers it too — which is the run that is meant to find a forgotten bump. Tag and release
+   are asked for separately, because either can exist without the other: a draft release reserves a
+   tag name that was never pushed, and a tag can be pushed without a release being cut. The one
+   exception is the tag a release run was *started* by, which is expected to be there.
+
+   This deliberately gives up re-running a release. Reusing a tag that is already on the commit
+   would be harmless in the ordinary case and would let a run that failed in `publish` be repeated —
+   but it also means a green run can overwrite artifacts that have already been downloaded, and it
+   is the same tolerance under which a forgotten bump releases nothing and says nothing. Recovering
+   a half-published release is rare and can be done by hand; catching the spent number is neither.
+
+   And after building, the pipeline checks that the binary reports exactly `<version>+<hash>` — belt
+   and braces, since `build.rs` has already refused the disagreement it would catch.
+
+5. **A dry run neither tags nor publishes.** `workflow_dispatch` takes a `dry-run` input, true by
+   default: it builds and packs all targets and stops. A `-dev` version is expected there, and only
+   there.
+
+### How it is stamped and read
+
+6. **Build metadata is always appended:** `+<short-hash>` — the abbreviated commit id of HEAD
    (7 hex characters of the full hash). Nothing time-dependent goes into the string, so rebuilding
    the same commit reproduces the byte-identical version — which also feeds ADR-0010's
    install-directory naming and must therefore not depend on *when* a binary was compiled.
-   Examples: `1.2.3+a1b2c3d` (release build), `1.2.3-dev+b4e5f6a` (a build descending from that
-   release), `0.0.0-dev+a1b2c3d` (no release tag reachable). Under SemVer, everything after `+` is
-   informational and ignored for precedence — version comparisons (a future self-update) compare
-   only the base and pre-release parts. One ordering nuance is deliberate and must be respected
-   there: SemVer orders `1.2.3-dev` *before* `1.2.3`, although the dev build descends from (is
-   newer than) the release — `-dev` versions are provenance labels, not points on the upgrade path,
-   and a future self-update must never treat a `-dev` build as an upgrade source or target for
-   ordering decisions; among dev builds, the commit in the metadata identifies but does not order
-   them.
+   Examples: `1.2.3+a1b2c3d` (release build), `1.2.3-dev+b4e5f6a` (a build heading for that
+   release). Under SemVer, everything after `+` is informational and ignored for precedence —
+   version comparisons compare only the base and pre-release parts. SemVer orders `1.2.3-dev`
+   *before* `1.2.3`, which is simply true of a build heading for that release; among dev builds,
+   the commit in the metadata identifies but does not order them.
 
-3. **Release = building a commit that carries a well-formed `version/*` tag.** No pipeline-side
-   version plumbing decides identity; the release workflow simply checks out the tag and builds —
-   and must fetch tags and **assert the produced binary reports no `-dev` pre-release**, so a
-   shallow clone without tags cannot silently publish a development build.
-
-4. **Mechanics: a git library in `build.rs`, no `git` binary.** `build.rs` reads the repository
+7. **Mechanics: a git library in `build.rs`, no `git` binary.** `build.rs` reads the repository
    through the **`git2`** library (the libgit2 bindings, vendored and statically compiled — nothing
    links against a system libgit2) as a **build-dependency**: discover the repository upward from
    the manifest directory (`Repository::discover`), take HEAD's commit id,
-   check which `refs/tags/version/*` point at HEAD, and otherwise resolve the most recent reachable
-   one (`git2`'s describe API with a `version/*` pattern — the library equivalent of
-   `git describe`).
+   and check which `refs/tags/version/*` point at HEAD.
    No `git` executable is required at build time,
    nothing parses CLI output, and the result cannot vary with the host's git version or locale.
    Build-dependencies are compiled into the build script only — **nothing of `git2`/libgit2 ends up
@@ -100,7 +148,7 @@ with its provenance.
    The binary reads the result through one helper — `crates/client/src/version.rs`,
    `pub fn version() -> &'static str { env!("OPAMP_BUILD_VERSION") }`.
 
-5. **One version everywhere — the CLI included from the start.** Every surface that states a
+8. **One version everywhere — the CLI included from the start.** Every surface that states a
    version calls `version()` and therefore always agrees: the OpAMP `service.version` identifying
    attribute, the **CLI `--version` output** — today's hand-rolled flag switches to `version()`
    immediately, and the subcommand CLI proposed in [ADR-0010](0010-client-os-service.md)
@@ -111,18 +159,28 @@ with its provenance.
 
 ## Alternatives considered
 
-- **Version from `Cargo.toml`, bumped per release** — the common Rust convention, but it makes the
-  version a hand-maintained file that must be kept in sync with tags; the tag as single source of
-  truth keeps `Cargo.toml` stable and removes a whole class of "forgot to bump" releases.
+- **The tag as the only source of the version** — `build.rs` resolves the base from a `version/*`
+  tag on HEAD, else from the most recent reachable one plus `-dev`, else `0.0.0-dev`, and
+  `Cargo.toml` stays a stable, unread `0.1.0`. It is the safer arrangement against drift, because
+  there is only one place a version appears, and it removes a whole class of "forgot to bump"
+  releases. The decider has weighed it and set it aside for the reasons in the Context: the
+  hand-typed tag is the failure, and a development build should say which release it is heading
+  for.
+- **Leave `build.rs` on the tag and let `Cargo.toml` decide only what the pipeline releases.** The
+  smaller change. It was tried and dropped on the evidence: with `Cargo.toml` at `0.1.0` and no
+  `version/*` tag in the repository at all, `client --version` answered `0.0.0-dev`, so the file
+  said one thing and every binary built from it said another. A version source no binary reads is
+  not a version source.
+- **Have the pipeline write `Cargo.toml` from a tag** — the same coupling in the other direction. It
+  needs the pipeline to commit to the branch during a release, which is a worse thing to automate
+  than a tag: a tag is immutable and inspectable, a commit changes the history a release was cut
+  from.
+- **Read `Cargo.toml` but leave the tagging to a human.** Half the change, and it keeps exactly the
+  step that motivated it — the hand-typed tag — while adding the file that can disagree with it.
 - **Pipeline-resolved version exported as an env var, `CARGO_PKG_VERSION` fallback** (the `main`
   lineage's mechanism) — keeps `cargo build` free of git access, but leaves every non-pipeline
   build indistinguishable (`0.1.0`, no provenance) and concentrates version logic in CI where
   developers never exercise it. The env var survives as the no-git escape hatch.
-- **A fixed `0.0.0-dev` base for every non-release build** — makes non-releases maximally uniform,
-  but hides which release line a development build descends from, information git already has.
-  Rejected per maintainer direction: the reachable-tag base plus `-dev` carries the lineage and the
-  pre-release marker still separates it from the release; the fixed base survives only as the
-  no-tag-reachable fallback.
 - **Raw `git describe` output as the dev version** (the classic `1.2.3-4-ga1b2c3d` convention) —
   encodes lineage too, but its suffix is not SemVer build metadata (it lands in the *pre-release*
   position with unpadded numerics, giving surprising ordering) and duplicates what the `+` metadata
@@ -170,6 +228,15 @@ with its provenance.
 - Reproducible builds — why nothing embedded in a binary should depend on the build clock
   (`SOURCE_DATE_EPOCH`): <https://reproducible-builds.org/docs/source-date-epoch/>.
 - `vergen` (the considered off-the-shelf `build.rs` stamper): <https://docs.rs/vergen/>.
+- **GitHub Actions documentation** on recursive triggering: "events triggered by the `GITHUB_TOKEN`
+  will not create a new workflow run", so a tag the pipeline pushes cannot start the pipeline again.
+  This is what lets one run tag *and* publish.
+  <https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow>
+- **`cargo metadata`** as the way to read the version, rather than parsing TOML in shell: it answers
+  with the resolved package version, so a workspace inheriting `version.workspace = true` is read
+  correctly.
+  <https://doc.rust-lang.org/cargo/commands/cargo-metadata.html>
+- **This project's ADR-0021**, whose release pipeline mechanism this decision keeps.
 - Specification goals #10/#11 ([`docs/SPECIFICATION.md`](../SPECIFICATION.md)) — package delivery
   and self-update, both of which identify builds by version;
   [ADR-0010](0010-client-os-service.md), whose install layout consumes this version.
@@ -179,23 +246,44 @@ with its provenance.
 - Positive: every binary is self-describing — base version, `-dev` pre-release marker, and commit
   hash — so a fleet report, a bug report, or an install directory always names the exact
   build;
-  releases need zero version plumbing in CI (check out the tag, build, assert non-dev); the
-  same commit always reproduces the same version string; the tag stays the single source of truth;
-  `Cargo.toml` stays stable;
+  the same commit always reproduces the same version string;
   no `git` executable is needed at build time, and the shipped binaries carry only the version
   string — no trace of the git library.
+- Positive: one number, in the file a Rust developer already looks at, changed in a reviewed commit
+  rather than typed into a ref. A release is "merge the bump, run the pipeline".
+- Positive: a mistyped tag cannot mint a wrong release, because no human types one.
+- Positive: `-dev` reads forwards. A development build says which release it is *heading for*
+  rather than which one it descends from, which is what an operator reading a fleet view assumes it
+  means — and there is no ordering nuance to warn about, since `0.1.0-dev` sorting before `0.1.0`
+  is simply true rather than a trap.
 - Negative / trade-offs: `git2` enters as a build-dependency and compiles vendored libgit2 (C) for
   the build script, lengthening cold builds and requiring a C compiler on build hosts — which
   `ring` (ADR-0007) already requires, so no new host prerequisite;
   building outside a git repository (a source tarball) fails unless `OPAMP_FLEET_VERSION` is set
   (fail closed, escape hatch documented — a deliberate choice over silently unknown identity);
   release workflows must fetch tags or they produce `-dev` builds (mitigated by the mandated
-  non-dev assertion);
+  assertion that the binary reports exactly `<version>+<hash>`);
   the version string is longer and contains `+`, which any consumer that
   parses it must tolerate (SemVer-conformant parsers do).
   Sibling binaries (Server later) must adopt the same `build.rs` rather than calling
   `env!("CARGO_PKG_VERSION")` directly.
-- Follow-ups: the **release pipeline ADR** (workflow trigger, build targets, artifact naming,
-  checksums, publishing, and the assert-non-dev check decided here); the **self-update ADR**
-  anticipated by ADR-0010, which will compare and stage exactly these versions and must ignore
-  build metadata for precedence per SemVer.
+- Negative / trade-offs: **every build's self-report changes** with the version source. A host that
+  reported `0.0.0-dev` from a tag-only lineage reports `0.1.0-dev` from the same commit lineage once
+  `Cargo.toml` decides, and ADR-0010's install directory is named from it. Nothing migrates: a
+  Client that updates lands in a directory named after the new version, which is what that layout
+  is for.
+- Negative / trade-offs: **drift is real** — `Cargo.toml` and the tags are two places a version
+  appears. It is caught rather than prevented: a version that was already released fails on the
+  guard, before a single target is built, instead of quietly re-releasing. A *forgotten* bump is
+  therefore a failed run, which is the outcome to prefer, but it is a failure a tag-only source
+  would not have.
+- Negative / trade-offs: **a release cannot be re-run.** Once the tag is pushed the number is spent,
+  so a run that dies in `publish` — after the tag but before the artifacts — leaves a release that
+  has to be finished by hand or a version that has to be skipped. That is the price of the guard
+  above, and it is paid rarely.
+- Negative / trade-offs: the release run needs `contents: write` to push a tag. A pipeline that
+  can write to the repository is a larger blast radius than one that only reads it, and the token is
+  the workflow's own rather than a human's.
+- Follow-ups: whether the `Cargo.lock` bump that accompanies every version change should be checked
+  in CI, so a release cannot be cut from a tree whose lockfile still names the previous version.
+  And whether the Server, published by no pipeline today, should follow the same rule when it is.
