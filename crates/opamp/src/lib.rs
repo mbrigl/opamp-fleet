@@ -16,3 +16,4 @@ pub mod proto {
 
 pub mod frame;
 pub mod uid;
+pub mod version;

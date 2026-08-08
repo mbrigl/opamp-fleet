@@ -515,17 +515,23 @@ restart.
 it holds the Client under the name the install layout gives it, so it is uploaded exactly as
 downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing repacks it.
 
-**The version in the query must be the one the binary reports** — build metadata and all, because
-`self-check` compares the two character for character and a mismatch fails the update on every host
-it reaches:
+**The version in the query is the release number** — the one in the file name
+([ADR-0029](../adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)):
 
 ```console
 $ curl -X PUT --data-binary @opamp-fleet-client-1.2.3-linux-x86_64.7z \
-       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3+a1b2c3d"
+       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3"
 ```
 
-The file name carries the base version; the full string is in the release notes, and
-`opamp-fleet-client --version` prints it on any host already running that build.
+The staged binary's `self-check` compares that against what it reports, ignoring the commit the
+build came from — `1.2.3` and `1.2.3+a1b2c3d` are the same release, and the content hash is what
+pins *which* bytes arrived. What is **not** ignored is the pre-release: a `1.2.3-dev` build offered
+as `1.2.3` is refused, because a build heading for a release is not that release.
+
+Two things follow. Passing the full string still works, but if you do, remember that a `+` in a URL
+query is decoded as a *space* — it has to be written `%2B`, which is the reason the release number
+is the better thing to type. And `opamp-fleet-client --version` prints the full string on any host,
+which is what to quote when asking which build a host runs.
 
 ## Connecting to the Server
 

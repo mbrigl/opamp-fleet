@@ -212,7 +212,16 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
-    let version = version_of(&client);
+    // Offered the way an operator uploads a release: the number on the archive, without the commit
+    // the build carries (ADR-0029). The staged binary reports the full string and must still be
+    // recognised as this release — the failure that ADR exists for.
+    let full = version_of(&client);
+    // Whether the two actually differ depends on how this build was versioned, so the guarantee
+    // itself is pinned by `selfupdate`'s own `the_probe_ignores_the_commit_a_build_came_from`;
+    // what this test adds is that the whole loop runs on the operator's spelling.
+    let version = opamp::version::identity(&full)
+        .unwrap_or_else(|| panic!("{full:?} is not a version"))
+        .to_string();
 
     // The artifact is this very binary: the only thing that will pass the staged binary's own
     // self-check, which requires it to *be* an OpAMP Fleet Client at the offered version.

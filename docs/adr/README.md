@@ -57,4 +57,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0026](0026-version-from-cargo-toml.md) | The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it | 🟡 proposed |
 | [0027](0027-interactive-install-writes-the-first-configuration.md) | The first configuration is written by an interactive install — asked once, never overwritten, validated before the service is registered | 🟢 accepted |
 | [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | 🟢 accepted |
+| [0029](0029-a-version-is-compared-and-shown-without-its-build-metadata.md) | A version is compared and shown without its build metadata — the commit is provenance, not identity | 🟡 proposed |
 

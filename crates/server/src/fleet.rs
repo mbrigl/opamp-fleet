@@ -810,12 +810,32 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
     })
 }
 
+/// The version a reader of the fleet table wants: the release, without the commit the build came
+/// from (ADR-0029).
+///
+/// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
+/// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
+/// this Server does not understand would be inventing a version rather than showing one.
+fn display_version(reported: &str) -> String {
+    opamp::version::identity(reported)
+        .unwrap_or(reported)
+        .to_string()
+}
+
 /// One Agent as the REST API and the UI see it.
 #[derive(Serialize, ToSchema)]
 pub struct AgentView {
     pub instance_uid: String,
     pub service_name: String,
+    /// The release the Agent reports — `MAJOR.MINOR.PATCH`, with the pre-release when it is not a
+    /// release build (ADR-0029). This is what belongs in a column headed "Version"; the commit the
+    /// build came from is [`service_build`](Self::service_build). A reported value that is not a
+    /// version at all is passed through unchanged, since a Foreign Agent numbers itself however it
+    /// likes.
     pub service_version: String,
+    /// Exactly what the Agent reported, commit metadata and all — the answer to "which build is on
+    /// that host", which is a question a fleet exists to answer (ADR-0029).
+    pub service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
     /// Every reported identifying attribute — what a Selector can match on (ADR-0012).
@@ -994,10 +1014,13 @@ impl AgentView {
                 status.map(|s| s.last_remote_config_hash.as_slice()) == Some(d.hash.as_slice())
             }
         };
+        // What the Agent said, and what a reader of a table wants out of it (ADR-0029).
+        let service_build = lookup(&identifying, "service.version");
         AgentView {
             instance_uid: uid.to_string(),
             service_name: lookup(&identifying, "service.name"),
-            service_version: lookup(&identifying, "service.version"),
+            service_version: display_version(&service_build),
+            service_build,
             os: match lookup(&non_identifying, "os.description") {
                 description if !description.is_empty() => description,
                 _ => lookup(&non_identifying, "os.type"),
@@ -1109,6 +1132,18 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// ADR-0029: the fleet table shows the release, and the build stays reachable beside it. A
+    /// Foreign Agent that numbers itself in its own way is shown as it reported.
+    #[test]
+    fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
+        assert_eq!(super::display_version("0.1.1+799e36a"), "0.1.1");
+        assert_eq!(super::display_version("0.1.1-dev+799e36a"), "0.1.1-dev");
+        assert_eq!(super::display_version("0.1.1"), "0.1.1");
+        // Not a version this Server understands — shown rather than trimmed into something else.
+        assert_eq!(super::display_version("v2.9-nightly"), "v2.9-nightly");
+        assert_eq!(super::display_version(""), "");
+    }
+
     use super::*;
 
     #[test]

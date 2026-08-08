@@ -15,6 +15,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed — breaking
 
+- **A version is compared and shown without its build metadata**
+  ([ADR-0029](docs/adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)). Two
+  things change, and one of them is an API break.
+
+  **Uploading a Client package now takes the release number.** `?version=1.2.3` matches a binary
+  reporting `1.2.3+a1b2c3d`, because the commit a build came from is provenance, not identity — and
+  it is the one part of the string nobody can type at upload time. (A `+` in a URL query decodes to
+  a space, so the old requirement to pass the full string could only be met as `%2B`. That trap is
+  gone.) The pre-release is **not** ignored: a `1.2.3-dev` build offered as `1.2.3` is still
+  refused. The full string keeps working where you already pass it.
+
+  **`AgentView.service_version` now holds the release, not the build.** It is
+  `MAJOR.MINOR.PATCH`, with the pre-release when there is one; what the Agent reported verbatim
+  moved to the new **`service_build`** field beside it. **If you read `service_version` from
+  `/api/v1/fleet/agents` and need the commit, read `service_build`.** The bundled UI shows the
+  release in its Version column, the build on hover, and searches both. An Agent whose reported
+  version is not a version at all — a Foreign Agent numbering itself its own way — is shown
+  unchanged in both fields.
+
+
 - **The Client ships as `opamp-fleet-client`.** The release artifact is
   `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
   (`.exe` on Windows), and the version directory beside it is
@@ -102,10 +122,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
   **Each archive is also a package artifact**: it holds the Client under the name the install layout
   gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an
-  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` must carry the
-  **full** version the binary reports — `1.2.3+a1b2c3d`, build metadata included — because the
-  staged binary's self-check compares the two exactly. The file name carries only the base version;
-  the full string is in the release notes and in `opamp-fleet-client --version`.
+  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` takes the
+  release number — the one in the file name.
 
 - **`supervisor_dir`** (optional, top-level) places the per-Supervisor directories; the default is
   `<state_dir>/supervisors`, which is where they have always been. Set it to keep the Managed

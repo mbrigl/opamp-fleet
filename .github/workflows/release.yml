@@ -230,13 +230,13 @@ jobs:
           cat > notes.md <<EOF
           Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
 
-          The full version this build reports is \`${{ needs.version.outputs.full }}\` — that exact
-          string, build metadata and all, is what a fleet needs when the artifact is handed to a
-          Server for a self-update (ADR-0020):
+          Hand the artifact to a Server under its release number for a Client self-update
+          (ADR-0020, ADR-0029) — the commit this build carries,
+          \`${{ needs.version.outputs.full }}\`, is provenance and is not compared:
 
           \`\`\`console
           curl -X PUT --data-binary @${{ env.PRODUCT }}-${{ needs.version.outputs.version }}-linux-x86_64.7z \\
-               "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.full }}"
+               "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}"
           \`\`\`
 
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
