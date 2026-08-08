@@ -23,9 +23,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   An already-installed service keeps its empty description until it is registered again — the field
   is written at install time. `service uninstall` then `service install` fills it.
 
-  A `sc.exe` call refused for want of rights is now retried through a UAC prompt. In the ordinary
-  install this never fires: registering the service needs Administrator first and fails earlier with
-  a clearer message.
+- **A Windows install without Administrator now says so before it writes anything.** `service
+  install` asks the service control manager up front whether this process may register a service at
+  all, and stops with the one thing that fixes it — open a shell with "Run as administrator" — if it
+  may not.
+
+  Before, the refusal came from `sc create` in the middle of the install, as a bare (and localised)
+  `OpenSCManager` access-denied error, and only *after* the layout had been written: `%ProgramData%`
+  lets an ordinary user create folders, so a staged version directory and a `current` junction were
+  left behind by an install that had registered nothing. Delete such a root, or just re-run the
+  install from an elevated shell.
+
+  There is no UAC prompt, on any `service` verb: a running process cannot raise its own rights, so
+  an elevated shell is the way in. The earlier, unreleased retry of a refused `sc.exe` call through
+  `Start-Process -Verb RunAs` is gone — it sat *after* the registration, which is what gets refused
+  first, so it could never fire.
 
 - **Every Agent now reports the attributes the protocol names.** Alongside `os.type` and
   `host.arch`, an Agent reports `os.name`, `os.version`, `host.name`, and `host.id` — so a Selector

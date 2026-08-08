@@ -143,10 +143,7 @@ that nothing fills on its own — a service can carry a display name and still s
 description, which is what this one did. It now reads **OpAMP Fleet Client for Windows**, the same
 on every instance: the display name beside it is what says *which* Client this is.
 
-Both are set right after the registration, with `sc.exe config` and `sc.exe description`. If either
-call is refused for want of rights, it is retried through a UAC prompt — which in practice never
-appears, because registering the service needs Administrator in the first place and fails earlier
-and more plainly.
+Both are set right after the registration, with `sc.exe config` and `sc.exe description`.
 
 The root holds versioned installs side by side, a `current` pointer the service is registered
 against, and the default state directory:
@@ -164,6 +161,26 @@ After a crash the service manager restarts the service; after an explicit stop i
 platform gaps, tracked in ADR-0010: on macOS `service status` is advisory and `install` does not
 auto-start, and on Windows the SCM discards stderr, so service logs are lost until logging to a file
 lands.
+
+### Windows needs an elevated shell, and says so before it writes
+
+Registering a machine-wide service needs Administrator, and a running process cannot raise its own
+rights — there is no UAC prompt to be had from inside a command that has already started. So
+`service install` asks the service control manager up front whether this process may register a
+service at all, and stops with a message naming the fix if it may not:
+
+```console
+C:\> opamp-fleet-client service install
+the Windows service control manager denied access: registering a machine-wide service needs
+Administrator, and a running process cannot raise its own rights. Open a shell with "Run as
+administrator" — from PowerShell, `Start-Process powershell -Verb RunAs` — and run this command
+again. Nothing has been installed or written.
+```
+
+That the check comes *before* the first write is the point of it: `%ProgramData%` lets an ordinary
+user create folders, so an install refused only at `sc create` had already staged a version directory
+and pointed `current` at it, leaving half an install behind. `uninstall`, `start`, and `stop` write
+nothing beforehand and simply report the manager's own refusal.
 
 ## Configuration reference
 

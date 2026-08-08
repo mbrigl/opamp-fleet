@@ -115,20 +115,15 @@ pub fn configure(service_name: &str, display_name: &str, description: &str) -> R
     )
 }
 
-/// `sc.exe` exits with the Win32 error code, and this is the one worth a second attempt:
-/// `ERROR_ACCESS_DENIED`. Matched on the number rather than on the message, which is localised.
-#[cfg(windows)]
-const ACCESS_DENIED: i32 = 5;
-
 /// Runs `sc.exe` with a trailing value argument — the shape both fields above are set with, so
 /// neither can be the one that forgets to check whether `sc.exe` actually accepted it.
 ///
-/// **A refusal for want of rights is retried elevated**, which is the only way to ask for them: a
-/// running process cannot raise its own token, so UAC is reached by starting a *new* process with
-/// the `runas` verb. In the ordinary install this never happens — `sc create` and the
-/// `CHANGE_CONFIG` handle above both need Administrator and fail first — so the retry is what
-/// covers a service whose registration succeeded and whose reconfiguration is nevertheless
-/// refused, rather than the everyday path.
+/// A refusal for want of rights is **not** retried through a UAC prompt here, and cannot usefully
+/// be: by the time these calls run the service is registered, which needed Administrator, so a
+/// process that got this far already has the rights — and one that does not never gets here,
+/// because [`windows_rights`](super::windows_rights) stops the install before it writes anything.
+/// Asking per `sc.exe` verb would in any case prompt twice for one install, and could not cover the
+/// `CHANGE_CONFIG` handle above, which is refused before either verb runs.
 ///
 /// `what` names the field for the error, because `sc.exe` reports failure through an exit code and
 /// a line on stdout rather than through anything a caller could tell apart.
@@ -142,97 +137,9 @@ fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    if output.status.code() == Some(ACCESS_DENIED) {
-        return sc_elevated(args, value).map_err(|e| format!("cannot set the {what}: {e}"));
-    }
     Err(format!(
         "cannot set the {what}: sc.exe exited with {} ({})",
         output.status,
         String::from_utf8_lossy(&output.stdout).trim()
     ))
-}
-
-/// The same call again, through the UAC prompt.
-///
-/// `ShellExecuteEx` with the `runas` verb is what raises that prompt, and PowerShell's
-/// `Start-Process -Verb RunAs` is that call — reachable on every Windows this Client supports and
-/// without binding a Win32 API this project has no other use for. `-Wait -PassThru` is what makes
-/// the elevated child's exit code observable at all; without it the prompt would be answered and
-/// the outcome lost.
-///
-/// A declined prompt is a terminating error under `$ErrorActionPreference = 'Stop'`, so PowerShell
-/// exits non-zero and it reads as the refusal it is rather than as a silent success.
-#[cfg(windows)]
-fn sc_elevated(args: &[&str], value: &str) -> Result<(), String> {
-    let list = args
-        .iter()
-        .copied()
-        .chain(std::iter::once(value))
-        .map(quote_for_powershell)
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $p = Start-Process -FilePath 'sc.exe' -ArgumentList {list} -Verb RunAs -Wait -PassThru; \
-         exit $p.ExitCode"
-    );
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command"])
-        .arg(&script)
-        .output()
-        .map_err(|e| format!("cannot run powershell.exe to ask for Administrator rights: {e}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "sc.exe was refused, and the elevated retry exited with {} — run this as Administrator \
-         ({})",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
-}
-
-/// One PowerShell single-quoted string. Inside those, `'` is the only character with a meaning, and
-/// it is escaped by doubling — so a display name carrying an apostrophe stays one argument instead
-/// of ending the string and becoming script.
-///
-/// Single quotes throughout are also what keeps the whole script free of `"`: it is handed to
-/// `powershell.exe` as one argument, and Rust quotes that with `"`, so a double quote inside would
-/// have to survive two levels of escaping to arrive intact.
-///
-/// Compiled into test builds everywhere, because this is the one part of the elevated path that
-/// can be checked on a machine that is not Windows.
-#[cfg(any(windows, test))]
-fn quote_for_powershell(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::quote_for_powershell;
-
-    /// The elevated retry hands `sc.exe`'s arguments to PowerShell as script text, so a value that
-    /// closes its own quote stops being an argument and becomes code. The service name follows the
-    /// ADR-0010 grammar and cannot do that, but the display name is prose and could.
-    #[test]
-    fn a_value_cannot_break_out_of_its_quotes() {
-        assert_eq!(
-            quote_for_powershell("OpAMP Fleet Client"),
-            "'OpAMP Fleet Client'"
-        );
-        assert_eq!(quote_for_powershell("displayname="), "'displayname='");
-        assert_eq!(
-            quote_for_powershell("Bob's Client"),
-            "'Bob''s Client'",
-            "an apostrophe is doubled, not left to end the string"
-        );
-        assert_eq!(
-            quote_for_powershell("'; Remove-Item C:\\ -Recurse; '"),
-            "'''; Remove-Item C:\\ -Recurse; '''",
-            "every quote is doubled, so the payload stays one string argument"
-        );
-        // Nothing needs a double quote, which is what keeps the script survivable through Rust's
-        // own argument quoting.
-        assert!(!quote_for_powershell("a\"b").contains('\\'));
-    }
 }

@@ -8,7 +8,7 @@ use client::cli::{self, Command, InstallArgs, InstanceName, ServiceAction};
 use client::config::ClientConfig;
 use client::config_init;
 use client::service::runtime::{self, RunSpec};
-use client::service::{layout, manager, ServiceControl, ServiceLevel};
+use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLevel};
 use client::{selfupdate, version};
 
 fn main() {
@@ -115,6 +115,13 @@ fn install(
     } else {
         ServiceLevel::System
     };
+
+    // Ask whether this process may register a service at all, before the first thing is written.
+    // On Windows the SCM refuses a non-elevated process and nothing here can raise its own rights,
+    // while `%ProgramData%` happily takes the layout — so without this the install staged a version
+    // and swung `current` at it and only then failed (ADR-0010: fail with a clear message).
+    windows_rights::ensure_can_register(level)?;
+
     let root = match &args.root {
         Some(root) => absolute(root)?,
         None => manager::default_root(level, &instance)?,
