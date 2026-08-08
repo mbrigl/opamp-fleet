@@ -876,6 +876,7 @@ mod tests {
         let err = resolve_program(
             "binary",
             Path::new(r"\Program Files\otelcol\otelcol.exe"),
+            None,
             &dir,
             "otelcol",
         )
