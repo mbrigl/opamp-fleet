@@ -5,9 +5,10 @@
 - **Deciders:** Markus Brigl
 
 Supersedes the **version-source** decision of
-[ADR-0009](0009-version-derivation-and-baking.md). Everything else that ADR decides — the grammar,
-the `+<hash>` build metadata, the `-dev` pre-release, the compile-time bake-in, and the single
-`version()` helper every surface reads — is untouched and still binding.
+[ADR-0009](0009-version-derivation-and-baking.md) — where the number comes from, in the pipeline and
+in `build.rs` alike. Everything else that ADR decides — the strict `MAJOR.MINOR.PATCH` grammar, the
+`+<hash>` build metadata, the `-dev` pre-release marker, resolution at compile time into the binary,
+and the single `version()` helper every surface reads — is untouched and still binding.
 
 ## Context
 
@@ -50,22 +51,29 @@ changes.
    commit being released, and pushes it with the workflow's own token — which, by GitHub's rule
    against recursive triggering, starts no second run. Only then does it build.
 
-3. **`build.rs` is not touched.** Because the tag exists on HEAD before the first `cargo build`, the
-   ADR-0009 resolution finds it exactly as it does for a hand-made tag and bakes
-   `<version>+<hash>`, with no `-dev`. The binary's identity, the install-directory names, and the
-   self-update's probe keep working unchanged and for unchanged reasons. This is what makes the
-   change small: *who decides the number* moves, *how a binary learns it* does not.
+3. **`build.rs` takes the base from the same file, and git says only what is *around* it.** The base
+   is `CARGO_PKG_VERSION`, which Cargo hands the build script from `Cargo.toml`; a `version/<base>`
+   tag on HEAD means this commit *is* that release, and its absence means the build is on the way to
+   it and gets the `-dev` pre-release. The commit short-hash is appended as before. So a development
+   build now reports `0.1.0-dev+a1b2c3d` — the version it is heading for — where ADR-0009 had it
+   report the version it descended *from*.
 
-4. **Drift is refused, never resolved.** Three guards, each failing the release rather than guessing:
+   This is the part that reaches furthest, and it is the point of the change: with the base in the
+   tag, `Cargo.toml` could say `0.1.0` while every binary built from it said `0.0.0-dev`, and the
+   file that supposedly decides the version would be one no binary reads.
+
+4. **Drift is refused, never resolved** — and the first refusal is the compiler's:
 
    | Situation | Answer |
    |---|---|
-   | `version/<v>` already exists on the commit being released | reuse it; re-running a release is not an error |
-   | `version/<v>` exists on a **different** commit | **fail** — a release tag is never moved |
+   | HEAD carries `version/<base>` | a release build: `<base>+<hash>` |
+   | HEAD carries a `version/*` tag naming **something else** | **the build fails** — the file and the tag disagree and neither wins |
+   | `version/<v>` already exists on the commit being released | the pipeline reuses it; re-running a release is not an error |
+   | `version/<v>` exists on a **different** commit | **the release fails** — a release tag is never moved |
    | the run was started by a hand-pushed `version/*` tag | the tag and `Cargo.toml` must agree, or **fail** |
 
-   And after building, the binary must report exactly `<version>+<hash>` — the check that the tag
-   the pipeline made is the one the compiler saw.
+   And after building, the pipeline checks that the binary reports exactly `<version>+<hash>` — belt
+   and braces, since `build.rs` has already refused the disagreement it would catch.
 
 5. **A dry run neither tags nor publishes.** `workflow_dispatch` takes a `dry-run` input, true by
    default: it builds and packs all targets and stops. A `-dev` version is expected there, and only
@@ -76,12 +84,11 @@ changes.
 - **Keep ADR-0009 as it stands** — the tag as the only source. It is the safer arrangement against
   drift, and it is what the decider has weighed and set aside; recording the trade rather than
   re-arguing it is what this ADR is for.
-- **Read `Cargo.toml` in `build.rs`** instead of git, which is what "the version comes from
-  `Cargo.toml`" most literally means. It would drop the `+<hash>` provenance and the `-dev` marker,
-  or force `build.rs` to re-derive them from git anyway — and ADR-0010's install directories,
-  ADR-0009's ordering rules, and the self-update's probe all read that string. A much larger change
-  for a smaller reason: what was asked for is where the *number* is decided, not what a binary
-  reports about itself.
+- **Leave `build.rs` on the tag and let `Cargo.toml` decide only what the pipeline releases.** The
+  smaller change, and the first shape this decision took. It was tried and dropped on the evidence:
+  with `Cargo.toml` at `0.1.0` and no `version/*` tag in the repository at all, `client --version`
+  answered `0.0.0-dev`, so the file said one thing and every binary built from it said another. A
+  version source no binary reads is not a version source.
 - **Have the pipeline write `Cargo.toml` from a tag** — the same coupling in the other direction. It
   needs the pipeline to commit to the branch during a release, which is a worse thing to automate
   than a tag: a tag is immutable and inspectable, a commit changes the history a release was cut
@@ -106,6 +113,14 @@ changes.
 - Positive: one number, in the file a Rust developer already looks at, changed in a reviewed commit
   rather than typed into a ref. A release is "merge the bump, run the pipeline".
 - Positive: a mistyped tag can no longer mint a wrong release, because no human types one.
+- Positive: `-dev` now reads forwards. A development build says which release it is *heading for*
+  rather than which one it descends from, which is what an operator reading a fleet view assumes it
+  means — and it retires the ordering nuance ADR-0009 had to warn about, since `0.1.0-dev` sorting
+  before `0.1.0` is now simply true rather than a trap.
+- Negative / trade-offs: **every build's self-report changes.** A host that reported `0.0.0-dev`
+  yesterday reports `0.1.0-dev` today from the same commit lineage, and ADR-0010's install directory
+  is named from it. Nothing migrates: a Client that updates lands in a directory named after the new
+  version, which is what that layout is for.
 - Negative / trade-offs: **the drift ADR-0009 designed away is now real** — `Cargo.toml` and the
   tags are two places a version appears. It is caught rather than prevented: a version that was
   already released fails on the tag guard instead of quietly re-releasing. A *forgotten* bump is

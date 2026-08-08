@@ -167,6 +167,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- **What a Client reports as its version now names the release it is heading *for*, not the one it
+  descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
+  ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)): a build with no release tag on its commit
+  reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
+  fleet view, `client --version`, and the name of the versioned install directory all shift with it,
+  so a host that has not changed will still look different after an upgrade. A commit carrying a
+  `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
+  than producing a binary that disagrees with its own tag.
+
 - A Supervisor's package downloads are staged in its own directory
   (`<supervisor_dir>/<name>/packages/`) instead of `<state_dir>/packages/`, which the Client's own
   Agent keeps using. Any `*.staged` file left in the old location by an interrupted download is
