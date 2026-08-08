@@ -184,12 +184,16 @@ every setting has a default, so they also start with no file at all. The annotat
 build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
 and the Server for Linux.
 
-**Releases** ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)): pushing a `version/*`
-tag publishes one archive per platform — `opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS
-and Windows on the architectures each ships on — plus a `SHA256SUMS` file. The version is read out
-of the binary that was built, never written by hand, and a build that lost its tags fails instead of
-publishing itself as a development version. Each archive is also a ready package artifact: the same
-file an operator downloads is the one a fleet is handed for a Client
+**Releases** ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md),
+[ADR-0026](docs/adr/0026-version-from-cargo-toml.md)): the version is
+`[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
+`version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
+nobody types a tag. Running it publishes one archive per platform,
+`opamp-client-<version>-<os>-<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+on, plus a `SHA256SUMS` file. Started with `dry_run` (the default) it builds and packs everything and
+publishes nothing. A tag that already exists on another commit fails the release rather than moving,
+and the built binary must report the version the artifacts are named after. Each archive is also a
+ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
 [self-update](docs/manual/client.md#updating-the-client-itself).
 
 ## Usage

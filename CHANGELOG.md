@@ -48,11 +48,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
-- **Released builds of the Client, one archive per platform.** Pushing a `version/*` tag publishes
+- **Released builds of the Client, one archive per platform.** A release publishes
   `opamp-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
   on `x86_64`, together with `SHA256SUMS`
   ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)). Until now there was nothing to
   install but a build of your own.
+
+  **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
+  `version/*` tag from it ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)) — so a release is
+  "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
+  a tag that already names another commit is never moved, and a binary that does not report the
+  version its artifacts are named after fails the run.
 
   **Each archive is also a package artifact**: it holds the Client under the name the install layout
   gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an

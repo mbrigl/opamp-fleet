@@ -1,18 +1,28 @@
 name: Release
 
 # Builds the Client for every target it ships on and publishes one `.7z` per target (ADR-0025).
-# A release *is* a `version/*` tag (ADR-0009): the version is not decided here, it is read out of a
-# binary this workflow built, and a build whose tags are missing fails rather than publishing a
-# development version.
+#
+# The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
+# `version/*` tag from it (ADR-0026) — *before* it builds, so ADR-0009's `build.rs` finds a tag on
+# HEAD and bakes the same number into the binary with its commit metadata. Nothing about how a
+# binary learns its own version changed; only who decides it and who types the tag.
 #
 # The artifacts are packed by this project's own `opamp-package-sign`, so each one is also a valid
 # package artifact for a fleet self-update (ADR-0018, ADR-0020) — the file an operator downloads is
 # the file they hand the Server.
 
 on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only — create no tag and no release"
+        type: boolean
+        default: true
+  # A hand-made tag still releases, for the case where someone tags deliberately. The tag this
+  # workflow pushes itself does not land here: events from the workflow's own token never start
+  # another run.
   push:
     tags: ["version/*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,36 +31,84 @@ env:
   PRODUCT: opamp-client
 
 jobs:
-  # One binary, asked what version it is. Every packing job below is named from this answer, so the
-  # five artifacts cannot disagree and no job resolves a version of its own (ADR-0009).
+  # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
+  # from this job's answer, so the artifacts cannot disagree with each other or with the binary.
   version:
     runs-on: ubuntu-latest
+    permissions:
+      # Pushing the tag (ADR-0026). Read alone would be enough for everything else here.
+      contents: write
     outputs:
       version: ${{ steps.read.outputs.version }}
-      full: ${{ steps.read.outputs.full }}
+      full: ${{ steps.baked.outputs.full }}
+      publish: ${{ steps.read.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # The version is baked from the repository's tags; a shallow clone would bake
+          # The baked version is resolved from the repository's tags; a shallow clone would bake
           # `0.0.0-dev` and publish it.
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
-      # Debug: the version is baked identically and this is only asked, never shipped.
-      - name: Build the Client
-        run: cargo build -p client --bin client --locked
-      - name: Read the baked version
+      - name: Read the version out of Cargo.toml
         id: read
         run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "client") | .version')
+          echo "Cargo.toml says $version"
+          case "$version" in
+            "" | *[!0-9.]* ) echo "::error::$version is not a release version (MAJOR.MINOR.PATCH)"; exit 1 ;;
+          esac
+
+          # A hand-pushed tag still releases, but only if the two agree — this is the drift
+          # ADR-0026 accepts and refuses to resolve silently.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tagged="${GITHUB_REF_NAME#version/}"
+            if [ "$tagged" != "$version" ]; then
+              echo "::error::the tag says $tagged and Cargo.toml says $version — bump one of them"
+              exit 1
+            fi
+            publish=true
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            publish=false
+          else
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Tag this commit
+        if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          tag="version/${{ steps.read.outputs.version }}"
+          existing=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+            echo "::error::$tag already exists on $existing — a release tag is never moved (ADR-0026)"
+            exit 1
+          fi
+          if [ -z "$existing" ]; then
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+            echo "created $tag"
+          else
+            echo "$tag is already on this commit; re-releasing it"
+          fi
+      # Debug: the version is baked identically and this build is only asked, never shipped.
+      - name: The binary agrees
+        id: baked
+        run: |
+          set -euo pipefail
+          cargo build -p client --bin client --locked
           full=$(./target/debug/client --version | awk '{print $NF}')
           echo "the binary reports $full"
-          if [ "${{ github.event_name }}" = "push" ] && [[ "$full" == *-dev* ]]; then
-            echo '::error::a release build reports a -dev version: the version/* tag is not on HEAD, or the checkout lost its tags (ADR-0009)'
+          version='${{ steps.read.outputs.version }}'
+          if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0009)"
             exit 1
           fi
           # The name carries the base version; the full string, build metadata and all, is what an
           # operator must type into `?version=` for a self-update to pass its probe.
           echo "full=$full" >> "$GITHUB_OUTPUT"
-          echo "version=${full%%+*}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -74,6 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
         with:
@@ -115,8 +174,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # A dry run over `workflow_dispatch` builds and packs everything and stops here.
-    if: github.event_name == 'push'
+    # A dry run builds and packs everything and stops here.
+    if: needs.version.outputs.publish == 'true'
     needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
@@ -152,7 +211,7 @@ jobs:
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
           the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0018).
           EOF
-          gh release create "${{ github.ref_name }}" \
+          gh release create "version/${{ needs.version.outputs.version }}" \
             --repo "${{ github.repository }}" \
             --title "${{ needs.version.outputs.version }}" \
             --notes-file notes.md \

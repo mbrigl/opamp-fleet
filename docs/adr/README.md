@@ -54,4 +54,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0023](0023-multi-file-packages.md) | A package may be a directory tree, unpacked whole beside the one it replaces | 🟢 accepted |
 | [0024](0024-client-library-target.md) | The Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
 | [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟢 accepted |
+| [0026](0026-version-from-cargo-toml.md) | The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it | 🟡 proposed |
 
