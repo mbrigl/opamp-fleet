@@ -277,12 +277,18 @@ $ client service uninstall                                   # never deletes lay
   restarts is rolled back to its predecessor, and either outcome is reported to the Server by
   whichever version came up.
 
-Real service registration cannot run in CI. The manual smoke checklist per platform: install →
-start → status → stop → start → status → uninstall, then the same with a second `--instance`;
-verify logs (`journalctl -u io.opamp-fleet.client.default` on Linux, Console/`log show` on macOS)
-and that the Agent appears in the fleet UI. Known platform gaps (tracked in the ADR): launchd
-`status` is advisory and `install` does not auto-start there; the SCM discards stderr, so Windows
-service logs are lost until a log-to-file follow-up.
+The **`Service smoke` workflow** exercises the real thing on an ephemeral runner — install, start,
+the Agent appearing in the fleet, its process killed and brought back by the manager, an explicit
+stop that stays stopped, uninstall. It runs nightly and on demand rather than per push (it installs
+a system service and waits on timers), currently on Windows, where the restart is the Client's own
+doing and nothing else asserts it. The test is `crates/client/tests/service_smoke.rs`; it is
+`#[ignore]`d, so an ordinary `cargo test` never installs anything.
+
+What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
+(`journalctl -u io.opamp-fleet.client.default` on Linux, Console/`log show` on macOS), the Agent in
+the fleet UI, and a second `--instance` beside the first. Known platform gaps (tracked in the ADR):
+launchd `status` is advisory and `install` does not auto-start there; the SCM discards stderr, so
+Windows service logs are lost until a log-to-file follow-up.
 
 ## Project Layout
 

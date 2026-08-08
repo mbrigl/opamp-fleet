@@ -99,10 +99,15 @@ impl Layout {
             }
             // A directory junction needs no symlink privilege (unlike a real symlink), which is
             // why ADR-0010 uses one. `mklink /J` is the canonical way to create it.
+            //
+            // Both paths go through `backslashed` first: `mklink` is a `cmd` builtin, and `cmd`
+            // reads `/` as the start of a switch. A root an operator wrote as `C:/fleet` — which
+            // every other Windows API here accepts — would otherwise fail as `Invalid switch`,
+            // during a self-update, with a message about switches rather than about paths.
             let status = std::process::Command::new("cmd")
                 .args(["/C", "mklink", "/J"])
-                .arg(&current)
-                .arg(version_dir)
+                .arg(backslashed(&current))
+                .arg(backslashed(version_dir))
                 .status()
                 .map_err(|e| format!("cannot run mklink: {e}"))?;
             if status.success() {
@@ -191,6 +196,18 @@ fn resolve(exe: PathBuf) -> PathBuf {
     match std::fs::canonicalize(&exe) {
         Ok(resolved) => plain(resolved),
         Err(_) => exe,
+    }
+}
+
+/// A path spelled the only way `cmd` reads as a path: `/` is a switch to it, and a separator to
+/// everything else on Windows.
+#[cfg(windows)]
+fn backslashed(path: &Path) -> std::ffi::OsString {
+    match path.to_str() {
+        Some(text) => std::ffi::OsString::from(text.replace('/', "\\")),
+        // Not UTF-8, so there is nothing safe to rewrite — hand it over as it is and let the
+        // failure, if any, come from the path rather than from this.
+        None => path.as_os_str().to_os_string(),
     }
 }
 
@@ -283,7 +300,9 @@ mod tests {
         assert!(layout.current_binary().starts_with("/opt/x/current"));
     }
 
-    #[cfg(unix)]
+    /// Runs on every platform, because the pointer is *not* the same thing on every platform: a
+    /// symlink on Unix, a junction created through `cmd` on Windows (ADR-0010). Gating this to Unix
+    /// left the mechanism with the more moving parts as the untested one.
     #[test]
     fn set_current_points_and_repoints() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -295,11 +314,39 @@ mod tests {
         std::fs::create_dir_all(&a).expect("create a");
         std::fs::create_dir_all(&b).expect("create b");
 
+        // Both sides resolved: on Windows `canonicalize` answers in the `\\?\` form, and comparing
+        // it against a path built by joining would fail on the prefix rather than on the pointer.
+        let resolved = |path: &Path| std::fs::canonicalize(path).expect("resolve");
         layout.set_current(&a).expect("point at a");
-        assert_eq!(std::fs::canonicalize(layout.current()).expect("resolve"), a);
+        assert_eq!(resolved(&layout.current()), resolved(&a));
         // Repointing replaces the pointer without a gap.
         layout.set_current(&b).expect("repoint at b");
-        assert_eq!(std::fs::canonicalize(layout.current()).expect("resolve"), b);
+        assert_eq!(resolved(&layout.current()), resolved(&b));
+    }
+
+    /// A root an operator wrote with forward slashes — `--root C:/fleet`, which every Windows API
+    /// in this Client accepts. `mklink` is a `cmd` builtin and `cmd` reads `/` as a switch, so this
+    /// used to fail with `Invalid switch` in the middle of a self-update.
+    #[cfg(windows)]
+    #[test]
+    fn a_root_written_with_forward_slashes_still_gets_its_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let layout = Layout::new(&root);
+        let version_dir = layout.version_dir("opamp-client-1.0.0-aaaaaaa");
+        std::fs::create_dir_all(&version_dir).expect("create the version directory");
+
+        layout.set_current(&version_dir).expect("point current");
+
+        assert_eq!(
+            std::fs::canonicalize(layout.current()).expect("resolve"),
+            std::fs::canonicalize(&version_dir).expect("resolve"),
+        );
     }
 
     #[cfg(unix)]

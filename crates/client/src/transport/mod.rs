@@ -103,7 +103,11 @@ pub enum RunOutcome {
 }
 
 /// Reconnect backoff: exponential from one second, capped at a minute.
-pub struct Backoff {
+///
+/// `pub(crate)` deliberately: nothing outside this crate has a use for it, and ADR-0024 widens
+/// visibility by need rather than by default. Left `pub` it would be a public type whose `new`
+/// takes no arguments, which is a `Default` this crate would then have to keep meaning something.
+pub(crate) struct Backoff {
     next: Duration,
 }
 

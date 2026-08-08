@@ -130,7 +130,13 @@ const WINDOWS_RESERVED: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
-pub(crate) fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
+/// The only way to build an [`InstanceName`]: validated against the grammar above. `pub` because
+/// the service smoke test names the instance it installs, and there is nothing else to construct
+/// one with (ADR-0024 widens visibility by need).
+///
+/// # Errors
+/// Returns an error naming the rule the value breaks.
+pub fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
     if raw.is_empty() || raw.len() > 32 {
         return Err("must be 1–32 characters".to_string());
     }
