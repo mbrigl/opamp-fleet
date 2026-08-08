@@ -84,6 +84,21 @@ fn tree_prefix(matched: &Path, program_path: &Path) -> std::path::PathBuf {
     components[..keep].iter().collect()
 }
 
+/// How a member is quoted back to the operator: the way the *archive* spells it, with `/`
+/// separators, and not the way this host would spell a path of its own.
+///
+/// [`safe_member_path`] rebuilds the path from its components, so on Windows it comes back out with
+/// backslashes — which is what a path on that host looks like and not what the artifact holds. The
+/// difference matters because these messages are read while writing `program_path`, and that value
+/// describes a place inside an archive: `bin/fluent-bit` there is `bin/fluent-bit` on every host
+/// this Client runs on, and a fleet-wide configuration must not need one spelling per platform.
+fn as_member(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Picks the one member matching `program_path` and returns the prefix to strip, or says why it
 /// cannot: nothing matched (naming what the archive holds), or several did (naming them, so the
 /// operator can write more of the path).
@@ -98,11 +113,7 @@ fn locate_program(
     match matches.as_slice() {
         [one] => Ok(tree_prefix(one, program_path)),
         [] => {
-            let mut seen: Vec<String> = members
-                .iter()
-                .take(8)
-                .map(|m| m.display().to_string())
-                .collect();
+            let mut seen: Vec<String> = members.iter().take(8).map(|m| as_member(m)).collect();
             if members.len() > seen.len() {
                 seen.push(format!("… and {} more", members.len() - seen.len()));
             }
@@ -122,7 +133,7 @@ fn locate_program(
             several.len(),
             several
                 .iter()
-                .map(|m| m.display().to_string())
+                .map(|m| as_member(m))
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
@@ -372,7 +383,7 @@ fn extract_tree_tar_gz_within(
         let mut out = File::create(&out_path)
             .map_err(|e| format!("cannot write {}: {e}", out_path.display()))?;
         let written = copy_within(&mut entry, &mut out, limit - summary.bytes)
-            .map_err(|e| format!("cannot unpack {}: {e}", relative.display()))?;
+            .map_err(|e| format!("cannot unpack {}: {e}", as_member(relative)))?;
         summary.files += 1;
         summary.bytes += written;
         // A tar carries its own modes, and a tree needs them: the program is made executable by
@@ -496,7 +507,7 @@ pub fn extract_tree_7z(
                     Ok(true)
                 }
                 Err(e) => {
-                    failure = Some(format!("cannot unpack {}: {e}", relative.display()));
+                    failure = Some(format!("cannot unpack {}: {e}", as_member(relative)));
                     Ok(false)
                 }
             }
@@ -1128,7 +1139,9 @@ mod tests {
     }
 
     /// Both ways `program_path` can fail to name one member, each answered with what the operator
-    /// needs to fix it.
+    /// needs to fix it — quoted the way the archive spells a member, `/` and all, on every platform.
+    /// The value being written from this message is one string for the whole fleet, so a Windows
+    /// host answering with backslashes would be inviting a configuration that only works there.
     #[test]
     fn no_match_and_an_ambiguous_match_are_both_refused_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");
