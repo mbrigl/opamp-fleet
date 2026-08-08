@@ -12,10 +12,10 @@
 //! takes, the Server must end up being told the new version is `Installed`. Asserting the step
 //! count instead would freeze an implementation detail that ADR-0020 deliberately leaves open.
 //!
-//! Unix only: `current` is a symlink here, and a junction on Windows (ADR-0010). The layout this
-//! builds by hand would need the other mechanism there — tracked as the Windows pass ADR-0023 also
-//! calls for.
-#![cfg(unix)]
+//! Runs on all three platforms, because the pointer is the part of ADR-0010 that differs between
+//! them — a symlink on Unix, a junction on Windows — and it is precisely what a self-update moves
+//! while the Client is running through it. A test that only ever moved the symlink would leave the
+//! platform whose mechanism is the unusual one entirely unasserted.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,10 +25,12 @@ use std::time::{Duration, Instant};
 use server::fleet::{AgentView, AppState, PackageOffering};
 use server::packages::PackageStore;
 
-/// What the Client exits with to ask its service manager for a restart (`selfupdate::
-/// EXIT_RESTART_FOR_UPDATE`). Restated rather than imported: `client` is a binary crate, so a test
-/// cannot link it — and a wrong value here fails loudly below rather than silently passing.
-const EXIT_RESTART_FOR_UPDATE: i32 = 10;
+// What the Client exits with to ask its service manager for a restart, and its file name inside a
+// version directory. Imported rather than restated since ADR-0024: both were copied here with a
+// comment saying `client` is a binary crate and a test cannot link it, and a copied constant is a
+// correctness risk that no comment can remove.
+use client::selfupdate::EXIT_RESTART_FOR_UPDATE;
+use client::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 
 async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -76,8 +78,9 @@ fn version_of(binary: &Path) -> String {
         .to_string()
 }
 
-/// Lays out `<root>/versions/<dir>/client` + `<root>/current` the way `service install` would, and
-/// returns the path the "service" runs.
+/// Lays out `<root>/versions/<dir>/<client>` + `<root>/current` the way `service install` would,
+/// and returns the path the "service" runs — through the pointer, which is how the service manager
+/// is registered and therefore the only way this is worth starting.
 ///
 /// The version directory is deliberately **not** named after the version this binary reports:
 /// installing a package resolves its target directory from the offered version, and a Client
@@ -87,14 +90,36 @@ fn version_of(binary: &Path) -> String {
 fn install_layout(root: &Path, client: &Path) -> PathBuf {
     let version_dir = root.join("versions/opamp-client-0.0.0-previous");
     std::fs::create_dir_all(&version_dir).expect("create the version directory");
-    let binary = version_dir.join("client");
+    let binary = version_dir.join(CLIENT_BINARY);
     std::fs::copy(client, &binary).expect("copy the client");
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    std::os::unix::fs::symlink(&version_dir, root.join("current")).expect("point current");
-    root.join("current/client")
+    point_current_at(root, &version_dir);
+    root.join("current").join(CLIENT_BINARY)
+}
+
+/// Creates `<root>/current` pointing at `version_dir`, by the mechanism `service install` uses on
+/// this platform (`layout::set_current`): a symbolic link on Unix, a directory junction on Windows.
+///
+/// Restated here rather than called, for the reason the exit code above is: `client` is a binary
+/// crate. Restating it is also what makes the Windows run worth having — a junction is created by
+/// `mklink /J` and needs no privilege, and if that stopped being true this test would say so.
+fn point_current_at(root: &Path, version_dir: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(version_dir, root.join("current")).expect("point current");
+    #[cfg(windows)]
+    {
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("current"))
+            .arg(version_dir)
+            .status()
+            .expect("run mklink");
+        assert!(status.success(), "mklink /J failed with {status}");
+    }
 }
 
 /// A Client under a stand-in service manager: it is restarted whenever it exits, exactly as
@@ -235,11 +260,12 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         "current still points at the version that was running before the update"
     );
     assert!(
-        current.join("client").is_file(),
+        current.join(CLIENT_BINARY).is_file(),
         "the new version is staged"
     );
     assert!(
-        root.join("versions/opamp-client-0.0.0-previous/client")
+        root.join("versions/opamp-client-0.0.0-previous")
+            .join(CLIENT_BINARY)
             .is_file(),
         "the version it replaced is kept, so a rollback has a target"
     );
