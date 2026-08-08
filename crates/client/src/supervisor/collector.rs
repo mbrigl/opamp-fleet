@@ -44,6 +44,7 @@ impl Plugin for CollectorPlugin {
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         let config_dir = ctx.config_dir;
         let binary = ctx.program;
+        let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         // The Collector states its version on `--version` — probe it once, so even a Collector
         // without the opampextension (which never self-reports) shows its own version, not
@@ -57,8 +58,8 @@ impl Plugin for CollectorPlugin {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
-            // A package (ADR-0015) swaps this Collector binary.
-            binary: Some(binary.clone()),
+            // A package (ADR-0015) swaps this Collector's program — one file, or a whole tree.
+            install: Some(install),
             archive_key: ctx.archive_key.clone(),
             events: ctx.events,
             commands: command_rx,

@@ -93,6 +93,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   option by option, plus an end-to-end [rollout walkthrough](docs/manual/rollout.md) that installs
   and configures a Foreign Agent entirely from the Server.
 
+- **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
+  ([ADR-0015](docs/adr/0015-package-delivery-for-managed-processes.md)). An executable plus the shared objects it
+  loads — Fluent Bit is the case — could not be a package before, because exactly one archive
+  member was installed. Naming where the program sits inside the package unpacks the whole archive
+  instead:
+
+  ```toml
+  [[supervisor]]
+  type = "command"
+  name = "fluent-bit"
+  command = "fluent-bit"            # unchanged: the bare name is still the consent
+  program_path = "bin/fluent-bit"   # where the program sits inside the package
+  ```
+
+  The tree lands in `<supervisor_dir>/<name>/program/tree/`, and the one it replaced is kept as
+  `program/tree.rollback` until the new one has survived `apply_grace_secs` — put back **whole** if
+  it has not. The path is matched from its end, so the version-named directory a release wraps
+  everything in needs no mention and the value stays right at the next release.
+
+  **Without `program_path` nothing changes**: one member, one file, same layout, same rollback.
+
+  Unpacking a tree means the archive names paths, so every member is checked before anything is
+  written and one bad member refuses the whole archive: a `..` or absolute path, a symbolic or hard
+  link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
+  is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
+
+### Fixed
+
+- **On macOS, a Client installed as a service could never update itself** — every offer was refused
+  with "this Client does not run from a versioned install layout", and a torn `current` pointer was
+  never repaired either. The service is registered against `<root>/current/client` (ADR-0010), and
+  asking the operating system what is running answers with that path on macOS and with the version
+  directory behind it on Linux; only the second shape says where in the layout the binary sits. The
+  path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
+  to change on a host: an affected Client picks its updates up as soon as it runs this version.
+
+- **A Client that had just updated itself reported the update as failed, and then downloaded the
+  artifact again — over and over.** After the restart the Server keeps offering the package until
+  the Agent reports a terminal status for it; the Client answered "the offered version is the one
+  already running" as an *error*, which is not terminal, so the offer came back and the whole
+  artifact was fetched again every couple of seconds for as long as both ends were up. On a fleet
+  that is a self-inflicted flood against the Server, and a successful self-update that shows as
+  `InstallFailed` in the fleet view. The version already running is now reported `Installed`, which
+  is both true and what the Baseline asks for: an Agent that already has the offered version "does
+  not need to do anything". No configuration changes; a Client that was in this state leaves it as
+  soon as it runs this version.
+
+- **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
+  field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
+  reason — which is exactly what happens when the Client's own Agent is offered a package
+  `[self_update]` did not name (ADR-0018) — so the reason was reported by the Client, stored by the
+  Server, and shown nowhere. It is now also logged.
+
 ### Changed
 
 - A Supervisor's package downloads are staged in its own directory
