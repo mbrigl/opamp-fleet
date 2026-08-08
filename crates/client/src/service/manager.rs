@@ -29,8 +29,9 @@ const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
 };
 
 /// Read by [`windows_restart`](super::windows_restart) so both platforms wait the same before a
-/// restart.
-pub(super) const RESTART_DELAY_SECS: u32 = 5;
+/// restart — and by the service smoke test, which has to outwait it before it may conclude that a
+/// killed service is not coming back (ADR-0024 widens visibility by need).
+pub const RESTART_DELAY_SECS: u32 = 5;
 
 /// The per-instance service label (reverse-DNS, per platform conventions): the systemd unit
 /// `io.opamp-fleet.client.<instance>.service`, the launchd label and plist name, the Windows

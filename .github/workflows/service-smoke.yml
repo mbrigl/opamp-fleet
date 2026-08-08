@@ -1,0 +1,45 @@
+name: Service smoke
+
+# The one thing every other test stands in for: the machine's *real* service manager (ADR-0010,
+# ADR-0020). `crates/client/tests/service_smoke.rs` installs the Client as a system service, starts
+# it, kills its process, and asserts the manager brings it back — the restart a self-update depends
+# on and that no in-process stand-in can prove.
+#
+# Deliberately not on `push` or `pull_request`. It registers a system service, needs elevation, and
+# waits on timers; a merge must not hang on it, and a flake must not read as a broken change.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly, well outside working hours in CET.
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: service smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Generous: the test waits out the restart delay several times over, and a hang should fail as
+    # a timeout rather than burn a runner hour.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows only, deliberately, and this is where the value is: `service-manager`'s `sc.exe`
+        # backend discards the restart policy, so the Client registers the SCM's recovery actions
+        # itself and reports `ServiceSpecific(10)` on exit so a self-update's exit reads as a
+        # failure rather than a clean stop. None of that is asserted anywhere else. systemd and
+        # launchd honour the policy natively and are one matrix entry each — added once this has
+        # proved itself here, and each needs `sudo -E` around the run step, which the Windows
+        # runner does not (its shell is already elevated).
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      # Built as its own step so a compile failure is not reported as a smoke-test failure.
+      - name: Build
+        run: cargo test -p client --test service_smoke --locked --no-run
+      - name: Install, start, kill, restart, stop, uninstall
+        run: cargo test -p client --test service_smoke --locked -- --ignored --nocapture --test-threads=1
