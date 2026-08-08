@@ -49,7 +49,11 @@
   },
 
   // The Server's single listener (ADR-0005): OpAMP endpoint, REST API, and UI share port 4320.
-  "forwardPorts": [4320],
+  // `appPort` publishes the port through Docker itself (`-p 0.0.0.0:4320:4320`), so the Server is
+  // reachable from the host network under the host's own IP — not just from the host via localhost.
+  // VS Code's `forwardPorts` would bind the host side to 127.0.0.1 only; do not add it back here,
+  // the two mechanisms fight over the same host port.
+  "appPort": ["0.0.0.0:4320:4320"],
   "portsAttributes": {
     "4320": { "label": "OpAMP Fleet Server (OpAMP + REST + UI)" }
   },

@@ -78,6 +78,12 @@ clap = { version = "4", features = ["derive"] }
 # Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
 # (ADR-0010). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0007) holds.
 service-manager = "0.11"
+# The interactive first configuration `service install --interactive` writes (ADR-0027). It is
+# here for one thing that must not be hand-rolled three times: reading a credential without
+# echoing it, which is terminal control (termios / SetConsoleMode) rather than string handling.
+# `password` is the only feature asked for — no editor, no fuzzy select — and it pulls no
+# TLS/crypto backend, so ADR-0007 holds.
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 # The Windows-only SCM runtime shim (ADR-0010): status reporting and the stop control handler,
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"

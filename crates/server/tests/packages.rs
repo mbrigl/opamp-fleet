@@ -55,10 +55,24 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
     ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode")
 }
 
+/// The platform the test fleet reports (see `support::full_report`), and therefore the only one
+/// an artifact may be stored under for these Agents to be offered it (ADR-0031).
+const HOST: &str = "os=linux&arch=amd64";
+
 async fn upload(server: &TestServer, name: &str, version: &str, artifact: &[u8]) {
+    upload_for(server, name, HOST, version, artifact).await;
+}
+
+async fn upload_for(
+    server: &TestServer,
+    name: &str,
+    platform: &str,
+    version: &str,
+    artifact: &[u8],
+) {
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/{name}?version={version}",
+            "http://{}/api/v1/packages/{name}?version={version}&{platform}",
             server.addr
         ))
         .body(artifact.to_vec())
@@ -78,7 +92,7 @@ async fn a_package_rolls_back_to_the_version_it_replaced() {
     let rollback = || {
         client
             .post(format!(
-                "http://{}/api/v1/packages/otelcol/rollback",
+                "http://{}/api/v1/packages/otelcol/rollback?{HOST}",
                 server.addr
             ))
             .send()
@@ -100,22 +114,26 @@ async fn a_package_rolls_back_to_the_version_it_replaced() {
         .json()
         .await
         .expect("json");
-    assert_eq!(listed[0]["version"], "0.157.0");
+    // A version belongs to one platform's artifact, not to the package: the name has as many
+    // versions as it has variants (ADR-0031).
+    assert_eq!(listed[0]["variants"][0]["os"], "linux");
+    assert_eq!(listed[0]["variants"][0]["arch"], "amd64");
+    assert_eq!(listed[0]["variants"][0]["version"], "0.157.0");
     assert_eq!(
-        listed[0]["previous_version"], "0.156.0",
+        listed[0]["variants"][0]["previous_version"], "0.156.0",
         "the list says what a rollback would put back"
     );
 
     let response = rollback().await.expect("rollback");
     assert_eq!(response.status(), 200);
     let rolled: serde_json::Value = response.json().await.expect("json");
-    assert_eq!(rolled["version"], "0.156.0");
-    assert_eq!(rolled["previous_version"], "0.157.0");
+    assert_eq!(rolled["variants"][0]["version"], "0.156.0");
+    assert_eq!(rolled["variants"][0]["previous_version"], "0.157.0");
 
     // The restored artifact is what is served — so it is what the fleet installs.
     let served = client
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file",
+            "http://{}/api/v1/packages/otelcol/file?{HOST}",
             server.addr
         ))
         .send()
@@ -129,7 +147,7 @@ async fn a_package_rolls_back_to_the_version_it_replaced() {
     assert_eq!(
         client
             .post(format!(
-                "http://{}/api/v1/packages/nothing-here/rollback",
+                "http://{}/api/v1/packages/nothing-here/rollback?{HOST}",
                 server.addr
             ))
             .send()
@@ -169,13 +187,16 @@ async fn an_uploaded_package_is_offered_downloaded_and_gated() {
     assert_eq!(available.version, "1.2.3");
     let file = available.file.as_ref().expect("a downloadable file");
     // download_base was empty, so the URL is a path the Client resolves against its endpoint.
-    assert_eq!(file.download_url, "/api/v1/packages/otelcol/file");
+    assert_eq!(
+        file.download_url, "/api/v1/packages/otelcol/file?os=linux&arch=amd64",
+        "the download names the platform, because the name alone no longer names one file"
+    );
     assert_eq!(file.content_hash, sha256(b"the-new-binary"));
 
     // The artifact downloads byte-for-byte.
     let downloaded = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file",
+            "http://{}/api/v1/packages/otelcol/file?{HOST}",
             server.addr
         ))
         .send()
@@ -240,7 +261,7 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
 
     let downloaded = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file",
+            "http://{}/api/v1/packages/otelcol/file?{HOST}",
             server.addr
         ))
         .send()
@@ -283,7 +304,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
 
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{addr}/api/v1/packages/otelcol?version=1.0.0"
+            "http://{addr}/api/v1/packages/otelcol?version=1.0.0&{HOST}"
         ))
         .body(vec![0u8; 8192])
         .send()
@@ -546,6 +567,8 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
             "url": url,
             "sha256": hex::encode(&digest),
             "version": "0.157.0",
+            "os": "linux",
+            "arch": "amd64",
             "headers": { "Authorization": "Bearer release-token" }
         }))
         .send()
@@ -576,7 +599,7 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
     // And this Server has nothing to hand out: it never downloaded the artifact.
     let local = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file",
+            "http://{}/api/v1/packages/otelcol/file?{HOST}",
             server.addr
         ))
         .send()
@@ -622,7 +645,9 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
             .json(&serde_json::json!({
                 "url": url,
                 "sha256": hex::encode(sha256(b"x")),
-                "version": "1.0.0"
+                "version": "1.0.0",
+                "os": "linux",
+                "arch": "amd64"
             }))
             .send()
             .await

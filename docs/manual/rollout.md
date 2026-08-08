@@ -136,11 +136,24 @@ installed binary.
 Either upload the artifact, or point the Server at one hosted elsewhere.
 
 **Upload** — the artifact is the body, its metadata rides the query. The Server hashes what it
-stores, so no hash is passed here:
+stores, so no hash is passed here. `os` and `arch` say which machines this artifact runs on, and are
+required: the Server offers an Agent only the artifact built for the platform it reported (ADR-0031).
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.0.0&os=linux&arch=amd64&signature=$sig"
+```
+
+Their values are what an Agent reports as `os.type` and `host.arch` — `linux`, `darwin`, `windows`
+and `amd64`, `arm64`. The tokens off an upstream release file name work too (`macos` is `darwin`,
+`x86_64` is `amd64`), and the response says which canonical pair was stored.
+
+**A fleet on several platforms is still one package.** Upload each build under the *same name* with
+its own `os`/`arch`, and every host is offered its own binary:
+
+```console
+$ curl -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
+       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.0.0&os=linux&arch=arm64"
 ```
 
 **Or reference** (ADR-0018) — the Server stores the address and *your* SHA-256, offers them
@@ -149,8 +162,8 @@ nothing else stands between the mirror and the fleet:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\",
-            \"sha256\": \"$sha\", \"version\": \"3.0.0\"}" \
+       -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\",
+            \"version\": \"3.0.0\", \"os\": \"linux\", \"arch\": \"amd64\"}" \
        http://127.0.0.1:4320/api/v1/packages/promtail/source
 ```
 
@@ -169,8 +182,9 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 ```
 
 Each pair must equal an attribute the Agent reported — `env` here comes from `[attributes]` in
-`client.toml`. Where several packages match one Agent the **most specific Selector wins**, which is
-how a rollout widens: keep the canary package narrow, add the fleet-wide one, then drop the canary.
+`client.toml`. The Selector aims **every platform** of the package at once, because the aim belongs
+to the name; the platform decides only which bytes each host gets. Where several packages match one
+Agent the **most specific Selector wins**, which is how a rollout widens: keep the canary package narrow, add the fleet-wide one, then drop the canary.
 Two *equally* specific Selectors reaching one Agent leave it with no offer at all, and its fleet row
 says so in `package_conflict`.
 
@@ -214,17 +228,19 @@ on `apply_grace_secs`** — a version that will not stay up is rolled back to it
 ## 8. Ship an update, and take it back
 
 An update is step 2 and step 4 again with a new version. The Server keeps **one** step of history
-(ADR-0019), so a bad version can be re-offered as the old one:
+per platform (ADR-0019), so a bad version can be re-offered as the old one:
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.1.0&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.1.0&os=linux&arch=amd64&signature=$sig"
 # …and if 3.1.0 turns out badly:
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/rollback
+$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/promtail/rollback?os=linux&arch=amd64"
 ```
 
-The rollback is an ordinary offer naming the older artifact; the Selector is untouched. A package
-that has replaced nothing answers `409`. This is the Server-side undo — distinct from the Client's
+The rollback is an ordinary offer naming the older artifact; the Selector is untouched. It names one
+platform and moves only that one — the point of which is exactly this case: `3.1.0` went out on
+Linux first, and taking it back must not push macOS off a version it never left. An artifact that
+has replaced nothing answers `409`. This is the Server-side undo — distinct from the Client's
 own automatic rollback in step 7, which reacts to a binary that will not stay up on one host.
 
 ## Troubleshooting
@@ -241,3 +257,5 @@ own automatic rollback in step 7, which reacts to a binary that will not stay up
 | A signed package is refused | No `verification_key` on that Client — a Client without one refuses *signed* packages, not only unsigned ones. |
 | An Agent that accepts packages is offered nothing | Two equally specific Selectors reach it; see `package_conflict` on its fleet row. |
 | The package routes answer `404` | Package delivery is not configured on the Server (`packages_dir`). |
+| An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
+| An Agent that accepts packages is offered nothing, and there is no conflict | No artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

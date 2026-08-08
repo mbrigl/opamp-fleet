@@ -4,11 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
-use client::cli::{self, Cli, Command, InstallArgs, InstanceName, ServiceAction};
+use client::cli::{self, Command, InstallArgs, InstanceName, ServiceAction};
 use client::config::ClientConfig;
+use client::config_init;
 use client::service::runtime::{self, RunSpec};
-use client::service::{layout, manager, ServiceControl, ServiceLevel};
+use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLevel};
 use client::{selfupdate, version};
 
 fn main() {
@@ -24,7 +24,7 @@ fn main() {
         .install_default()
         .expect("install the rustls ring provider");
 
-    let cli = Cli::parse();
+    let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {
         // A bare invocation defaults to `run`, preserving the pre-subcommand contract.
         None => runtime::run_foreground(RunSpec {
@@ -38,7 +38,9 @@ fn main() {
             },
             args,
         ),
-        Some(Command::Service { action }) => service_command(&cli.config, cli.instance, &action),
+        Some(Command::Service { action }) => {
+            service_command(&cli.config, config_named, cli.instance, &action)
+        }
         // Answer for this executable so a self-update can prove it before pointing at it
         // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
@@ -68,6 +70,7 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 /// Dispatch a `service` verb (ADR-0010).
 fn service_command(
     config_path: &Path,
+    config_named: bool,
     instance: InstanceName,
     action: &ServiceAction,
 ) -> Result<(), String> {
@@ -79,10 +82,13 @@ fn service_command(
         }
     };
     match action {
-        ServiceAction::Install(args) => install(config_path, instance, args),
+        ServiceAction::Install(args) => install(config_path, config_named, instance, args),
         ServiceAction::Uninstall(scope) => {
             manager::uninstall(level(scope), &instance)?;
-            println!("service io.opamp-fleet.client.{instance} uninstalled (the install layout and state remain)");
+            println!(
+                "service {} uninstalled (the install layout and state remain)",
+                manager::service_name(&instance)
+            );
             Ok(())
         }
         ServiceAction::Start(scope) => manager::NativeService::new(level(scope), instance).start(),
@@ -95,27 +101,61 @@ fn service_command(
     }
 }
 
-/// `service install`: validate the configuration, lay out the versioned install at the chosen
-/// root, and register the service against the `current` pointer (ADR-0010).
-fn install(config_path: &Path, instance: InstanceName, args: &InstallArgs) -> Result<(), String> {
+/// `service install`: write the configuration if asked to (ADR-0027), validate it, lay out the
+/// versioned install at the chosen root, and register the service against the `current` pointer
+/// (ADR-0010).
+fn install(
+    config_path: &Path,
+    config_named: bool,
+    instance: InstanceName,
+    args: &InstallArgs,
+) -> Result<(), String> {
     let level = if args.scope.user {
         ServiceLevel::User
     } else {
         ServiceLevel::System
     };
-    // Fail on a broken configuration now, not at the service's first start.
-    let config = ClientConfig::load(config_path)?;
+
+    // Ask whether this process may register a service at all, before the first thing is written.
+    // On Windows the SCM refuses a non-elevated process and nothing here can raise its own rights,
+    // while `%ProgramData%` happily takes the layout — so without this the install staged a version
+    // and swung `current` at it and only then failed (ADR-0010: fail with a clear message).
+    windows_rights::ensure_can_register(level)?;
 
     let root = match &args.root {
         Some(root) => absolute(root)?,
         None => manager::default_root(level, &instance)?,
     };
+
+    // Everything baked into the unit is absolute: a service's working directory is `/` or
+    // `System32`, so a relative path would silently point nowhere. An operator who named no path
+    // gets one inside the install root rather than one resolved against this shell's working
+    // directory, which the service manager will not share (ADR-0027).
+    let config_path = if config_named {
+        absolute(config_path)?
+    } else {
+        root.join(config_init::FILE_NAME)
+    };
+
+    if args.interactive {
+        config_init::run(&config_path)?;
+    } else if !config_path.exists() {
+        // Not an error — automation must not break — but never silent: without this file the
+        // service starts, dials the development default, and manages nothing.
+        println!(
+            "warning: no configuration at {} — the Client will run on defaults until it exists \
+             (write it, or re-run with --interactive)",
+            config_path.display()
+        );
+    }
+
+    // Fail on a broken configuration now, not at the service's first start. After the write, so
+    // that a file just answered into existence is held to the same rule as any other.
+    let config = ClientConfig::load(&config_path)?;
+
     let layout = layout::Layout::new(&root);
     let program = layout::stage_current_exe(&layout)?;
 
-    // Everything baked into the unit is absolute: a service's working directory is `/` or
-    // `System32`, so a relative path would silently point nowhere.
-    let config_path = absolute(config_path)?;
     let state_dir = if config.state_dir.is_absolute() {
         config.state_dir.clone()
     } else {
@@ -130,14 +170,14 @@ fn install(config_path: &Path, instance: InstanceName, args: &InstallArgs) -> Re
         state_dir: state_dir.clone(),
     })?;
 
-    println!("installed io.opamp-fleet.client.{instance}");
+    println!("installed {}", manager::service_name(&instance));
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
     println!("  state dir: {}", state_dir.display());
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };
-    println!("start it with: client service start{user} --instance {instance}");
+    println!("start it with: opamp-fleet-client service start{user} --instance {instance}");
     Ok(())
 }
 

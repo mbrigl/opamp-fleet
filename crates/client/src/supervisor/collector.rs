@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{probe_version, ProcessSpec, Runner};
+use crate::supervisor::process::{ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
@@ -46,14 +46,6 @@ impl Plugin for CollectorPlugin {
         let binary = ctx.program;
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
-        // The Collector states its version on `--version` — probe it once, so even a Collector
-        // without the opampextension (which never self-reports) shows its own version, not
-        // none. An extension's later self-report replaces the probed value.
-        tokio::spawn(probe_version(
-            binary.clone(),
-            vec!["--version".to_string()],
-            ctx.events.clone(),
-        ));
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -61,6 +53,14 @@ impl Plugin for CollectorPlugin {
             // A package (ADR-0015) swaps this Collector's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
+            // The Collector states its version on `--version`, so even one without the
+            // opampextension (which never self-reports) shows its own version rather than none.
+            // The Runner asks at startup and again after every swap; an extension's self-report
+            // overwrites the probed value.
+            version_probe: Some(VersionProbe {
+                program: binary.clone(),
+                args: vec!["--version".to_string()],
+            }),
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || {

@@ -89,8 +89,10 @@ Agents: itself, always, plus one per configured Supervisor. All of them share th
 connection, so the Server's fleet view has more rows than there are hosts.
 
 **Attributes.** Every Agent reports attributes — `service.name`, `service.version`,
-`service.instance.id`, `os.type`, `host.arch`, `os.description` — and an operator can add more in
-`client.toml`. These are what Selectors match on.
+`service.instance.id`, `os.type`, `os.name`, `os.version`, `os.description`, `host.name`,
+`host.arch`, `host.id` — and an operator can add more in `client.toml`, plus `service.namespace`
+where a deployment uses one. These are what Selectors match on. An attribute the host cannot answer
+is absent rather than empty.
 
 **Configuration and Selector** (ADR-0012). A *Configuration* is a named body of text held by the
 Server. Its *Selector* is a set of `key=value` pairs that an Agent's reported attributes must equal

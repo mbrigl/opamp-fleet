@@ -650,6 +650,7 @@ impl AppState {
     pub fn put_package(
         &self,
         name: String,
+        platform: crate::packages::Platform,
         version: String,
         addon: bool,
         signature: Option<Vec<u8>>,
@@ -660,26 +661,33 @@ impl AppState {
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.put_staged(name.clone(), version, addon, signature, staged)?;
+        let tag = format!("{}-{}", platform.os, platform.arch);
+        store.put_staged(name.clone(), platform, version, addon, signature, staged)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, "package stored and offered");
+        info!(package = %name, platform = %tag, "package stored and offered");
         Ok(())
     }
 
-    /// Where an upload for `name` is streamed before it becomes a package.
-    pub fn package_staging_path(&self, name: &str) -> Result<std::path::PathBuf, String> {
+    /// Where an upload for one platform of `name` is streamed before it becomes an artifact.
+    pub fn package_staging_path(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<std::path::PathBuf, String> {
         self.packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store()
-            .staging_path(name)
+            .staging_path(name, platform)
     }
 
     /// Points a package at an artifact hosted elsewhere (ADR-0018) and wakes every WebSocket loop,
     /// so a targeted Agent is offered the new address now rather than at its next poll.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_package_source(
         &self,
         name: &str,
+        platform: &crate::packages::Platform,
         version: &str,
         addon: bool,
         content_hash: Vec<u8>,
@@ -691,35 +699,74 @@ impl AppState {
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
-        store.set_source(name, version, addon, content_hash, signature, source)?;
+        store.set_source(
+            name,
+            platform,
+            version,
+            addon,
+            content_hash,
+            signature,
+            source,
+        )?;
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package now referenced from its source");
         Ok(())
     }
 
+    /// Puts one platform's artifact back to the version it replaced (ADR-0019) and wakes every
+    /// WebSocket loop, so the Agents it reaches are offered the restored version now.
+    pub fn rollback_package(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.rollback(name, platform)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, "package rolled back one step");
+        Ok(())
+    }
+
+    /// Deletes one platform's artifact; `Ok(false)` when the package holds none for it.
+    pub fn delete_package_variant(
+        &self,
+        name: &str,
+        platform: &crate::packages::Platform,
+    ) -> Result<bool, String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        let deleted = store.delete_variant(name, platform)?;
+        if deleted {
+            self.push.send_modify(|rev| *rev += 1);
+            info!(package = %name, "package artifact deleted");
+        }
+        Ok(deleted)
+    }
+
     /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
-    /// change newly targets is offered it now rather than at its next poll. Returns the package's
-    /// version, for the response.
+    /// change newly targets is offered it now rather than at its next poll. It aims every platform
+    /// of the package at once, because the aim belongs to the name (ADR-0031).
     pub fn set_package_selector(
         &self,
         name: &str,
         selector: BTreeMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let store = self
             .packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
             .store();
         store.set_selector(name, selector)?;
-        let version = store
-            .list()
-            .into_iter()
-            .find(|p| p.name == name)
-            .map(|p| p.version)
-            .unwrap_or_default();
         self.push.send_modify(|rev| *rev += 1);
         info!(package = %name, "package selector changed");
-        Ok(version)
+        Ok(())
     }
 
     /// Deletes a package; `Ok(false)` when none of that name exists.
@@ -810,12 +857,32 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
     })
 }
 
+/// The version a reader of the fleet table wants: the release, without the commit the build came
+/// from (ADR-0029).
+///
+/// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
+/// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
+/// this Server does not understand would be inventing a version rather than showing one.
+fn display_version(reported: &str) -> String {
+    opamp::version::identity(reported)
+        .unwrap_or(reported)
+        .to_string()
+}
+
 /// One Agent as the REST API and the UI see it.
 #[derive(Serialize, ToSchema)]
 pub struct AgentView {
     pub instance_uid: String,
     pub service_name: String,
+    /// The release the Agent reports — `MAJOR.MINOR.PATCH`, with the pre-release when it is not a
+    /// release build (ADR-0029). This is what belongs in a column headed "Version"; the commit the
+    /// build came from is [`service_build`](Self::service_build). A reported value that is not a
+    /// version at all is passed through unchanged, since a Foreign Agent numbers itself however it
+    /// likes.
     pub service_version: String,
+    /// Exactly what the Agent reported, commit metadata and all — the answer to "which build is on
+    /// that host", which is a question a fleet exists to answer (ADR-0029).
+    pub service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
     /// Every reported identifying attribute — what a Selector can match on (ADR-0012).
@@ -994,10 +1061,13 @@ impl AgentView {
                 status.map(|s| s.last_remote_config_hash.as_slice()) == Some(d.hash.as_slice())
             }
         };
+        // What the Agent said, and what a reader of a table wants out of it (ADR-0029).
+        let service_build = lookup(&identifying, "service.version");
         AgentView {
             instance_uid: uid.to_string(),
             service_name: lookup(&identifying, "service.name"),
-            service_version: lookup(&identifying, "service.version"),
+            service_version: display_version(&service_build),
+            service_build,
             os: match lookup(&non_identifying, "os.description") {
                 description if !description.is_empty() => description,
                 _ => lookup(&non_identifying, "os.type"),
@@ -1109,6 +1179,18 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// ADR-0029: the fleet table shows the release, and the build stays reachable beside it. A
+    /// Foreign Agent that numbers itself in its own way is shown as it reported.
+    #[test]
+    fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
+        assert_eq!(super::display_version("0.1.1+799e36a"), "0.1.1");
+        assert_eq!(super::display_version("0.1.1-dev+799e36a"), "0.1.1-dev");
+        assert_eq!(super::display_version("0.1.1"), "0.1.1");
+        // Not a version this Server understands — shown rather than trimmed into something else.
+        assert_eq!(super::display_version("v2.9-nightly"), "v2.9-nightly");
+        assert_eq!(super::display_version(""), "");
+    }
+
     use super::*;
 
     #[test]

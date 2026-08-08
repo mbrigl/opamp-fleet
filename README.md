@@ -184,6 +184,24 @@ every setting has a default, so they also start with no file at all. The annotat
 build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
 and the Server for Linux.
 
+**Releases** ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md),
+[ADR-0026](docs/adr/0026-version-from-cargo-toml.md)): the version is
+`[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
+`version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
+nobody types a tag. Running it publishes one archive per platform,
+`opamp-fleet-client_<version>_<os>_<arch>.7z` for Linux, macOS and Windows on the architectures each ships
+on, plus a `SHA256SUMS` file. The fields are separated by `_` because a name and a version both
+contain `-` ([ADR-0032](docs/adr/0032-release-artifacts-separate-their-fields-with-underscores.md)),
+and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
+`darwin_arm64`, …), so uploading a whole release under one package
+name needs no translation ([ADR-0031](docs/adr/0031-per-platform-package-variants.md)). Started with `dry_run` (the default) it builds and packs everything and
+publishes nothing. Before it builds anything at all it checks that the version is still free — a
+`version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
+forgotten bump costs seconds rather than five build jobs — and the built binary must report the
+version the artifacts are named after. Each archive is also a
+ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
+[self-update](docs/manual/client.md#updating-the-client-itself).
+
 ## Usage
 
 This section is a tour. The complete operator reference — every option and every configuration key
@@ -229,8 +247,12 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
 
-# One step back (ADR-0019): re-offer the version this package replaced. 409 when there is none.
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/otelcol/rollback
+# A package holds one artifact per platform (ADR-0031); each Agent is offered the one that fits it.
+$ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
+       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+
+# One step back (ADR-0019): re-offer the version this artifact replaced. 409 when there is none.
+$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/rollback?os=linux&arch=amd64"
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
@@ -242,19 +264,19 @@ The Client registers *itself* as a native service on Linux (systemd), macOS (lau
 (SCM) — [ADR-0010](docs/adr/0010-client-os-service-and-cli.md):
 
 ```console
-$ client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
-$ client service start
-$ client service status
-$ client service stop
-$ client service uninstall                                   # never deletes layout or state
+$ opamp-fleet-client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
+$ opamp-fleet-client service start
+$ opamp-fleet-client service status
+$ opamp-fleet-client service stop
+$ opamp-fleet-client service uninstall                                   # never deletes layout or state
 ```
 
 - **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
-  independent service (`io.opamp-fleet.client.<name>`) with its own configuration, install root,
+  independent service (`opamp-fleet-client-<name>`) with its own configuration, install root,
   and state — several differently-configured Clients coexist on one host.
 - **Install root:** `--root <dir>` overrides the per-platform default (Linux:
   `/var/lib/opamp-fleet/client/<instance>`); nothing is ever installed to a fixed path. The
-  root holds `versions/opamp-client-<version>-<commit>/`, the `current` pointer the service runs
+  root holds `versions/opamp-fleet-client-<version>-<commit>/`, the `current` pointer the service runs
   from, and the default `state/` directory.
 - **Scope:** `--user` targets the user-level manager (development); the default is a system
   service that starts at boot.
@@ -268,7 +290,7 @@ $ client service uninstall                                   # never deletes lay
 
   ```toml
   [self_update]
-  package = "opamp-client"   # only this package is ever installed over this binary
+  package = "opamp-fleet-client"   # only this package is ever installed over this binary
   ```
 
   A new version is staged beside the running one under `versions/`, run once to prove it is this
@@ -285,7 +307,7 @@ doing and nothing else asserts it. The test is `crates/client/tests/service_smok
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
-(`journalctl -u io.opamp-fleet.client.default` on Linux, Console/`log show` on macOS), the Agent in
+(`journalctl -u opamp-fleet-client` on Linux, Console/`log show` on macOS), the Agent in
 the fleet UI, and a second `--instance` beside the first. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there; the SCM discards stderr, so
 Windows service logs are lost until a log-to-file follow-up.

@@ -18,7 +18,7 @@ fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
 }
 
 fn spawn_client(config_path: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_client"))
+    Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
         .arg("--config")
         .arg(config_path)
         .stdout(Stdio::null())

@@ -1,0 +1,271 @@
+name: Release
+
+# Builds the Client for every target it ships on and publishes one `.7z` per target (ADR-0025).
+#
+# The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
+# `version/*` tag from it (ADR-0026) — *before* it builds, so ADR-0009's `build.rs` finds a tag on
+# HEAD and bakes the same number into the binary with its commit metadata. Nothing about how a
+# binary learns its own version changed; only who decides it and who types the tag.
+#
+# The artifacts are packed by this project's own `opamp-package-sign`, so each one is also a valid
+# package artifact for a fleet self-update (ADR-0018, ADR-0020) — the file an operator downloads is
+# the file they hand the Server.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only — create no tag and no release"
+        type: boolean
+        default: true
+  # A hand-made tag still releases, for the case where someone tags deliberately. The tag this
+  # workflow pushes itself does not land here: events from the workflow's own token never start
+  # another run.
+  push:
+    tags: ["version/*"]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT: opamp-fleet-client
+
+jobs:
+  # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
+  # from this job's answer, so the artifacts cannot disagree with each other or with the binary.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      # Pushing the tag (ADR-0026). Read alone would be enough for everything else here.
+      contents: write
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      full: ${{ steps.baked.outputs.full }}
+      publish: ${{ steps.read.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The baked version is resolved from the repository's tags; a shallow clone would bake
+          # `0.0.0-dev` and publish it.
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - name: Read the version out of Cargo.toml
+        id: read
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "client") | .version')
+          echo "Cargo.toml says $version"
+          case "$version" in
+            "" | *[!0-9.]* ) echo "::error::$version is not a release version (MAJOR.MINOR.PATCH)"; exit 1 ;;
+          esac
+
+          # A hand-pushed tag still releases, but only if the two agree — this is the drift
+          # ADR-0026 accepts and refuses to resolve silently.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tagged="${GITHUB_REF_NAME#version/}"
+            if [ "$tagged" != "$version" ]; then
+              echo "::error::the tag says $tagged and Cargo.toml says $version — bump one of them"
+              exit 1
+            fi
+            publish=true
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            publish=false
+          else
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Nothing is built until it is certain this number is still free. A version that already
+      # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
+      # to move a tag or replace an artifact somebody may already hold (ADR-0026). Both are asked
+      # because either can exist alone: a draft release reserves a tag name without the tag being
+      # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
+      # run — whether a version can be released does not depend on whether this run intends to.
+      - name: This version has not been released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.read.outputs.version }}'
+          tag="version/$version"
+          taken=""
+
+          on=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$on" ]; then
+            # On a push run this very tag is what started us; anywhere else it is a spent number.
+            if [ "${{ github.event_name }}" = "push" ] && [ "$on" = "$GITHUB_SHA" ]; then
+              echo "$tag is the tag that started this run"
+            else
+              echo "::error::the tag $tag already exists, on ${on:0:7}"
+              taken=yes
+            fi
+          fi
+
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::a release $tag already exists"
+            taken=yes
+          fi
+
+          if [ -n "$taken" ]; then
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0026)"
+            exit 1
+          fi
+          echo "$tag is free"
+      - name: Tag this commit
+        if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          tag="version/${{ steps.read.outputs.version }}"
+          # The guard above proved the tag is free; the push is what proves it still is, since it
+          # is refused rather than forced if a concurrent run got there first.
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          echo "created $tag"
+      # Debug: the version is baked identically and this build is only asked, never shipped.
+      - name: The binary agrees
+        id: baked
+        run: |
+          set -euo pipefail
+          # `-p client` is the package (its name is a build-time identifier); the binary it
+          # produces is the shipped name (ADR-0028).
+          cargo build -p client --bin opamp-fleet-client --locked
+          full=$(./target/debug/opamp-fleet-client --version | awk '{print $NF}')
+          echo "the binary reports $full"
+          version='${{ steps.read.outputs.version }}'
+          if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0009)"
+            exit 1
+          fi
+          # The name carries the base version; the full string, build metadata and all, is what an
+          # operator must type into `?version=` for a self-update to pass its probe.
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true }
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true }
+          # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
+          # than depending on an Intel macOS runner label (ADR-0025). Nothing here can run it, so
+          # the version assertion below is skipped for this one row.
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build the Client
+        run: cargo build --release -p client --bin opamp-fleet-client --target ${{ matrix.target }} --locked
+      # A host build: it runs here, on this runner, to pack the artifact.
+      - name: Build the packer
+        run: cargo build --release -p client --bin opamp-package-sign --locked
+      - name: The binary agrees with the name it will be given
+        if: matrix.native
+        run: |
+          reported=$(./target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }} --version | awk '{print $NF}')
+          expected='${{ needs.version.outputs.full }}'
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::this target reports $reported, the release is $expected"
+            exit 1
+          fi
+      - name: Pack
+        id: pack
+        run: |
+          # `_` between the four fields, because two of them contain `-`: the name grammar is
+          # `[a-z0-9-]` (ADR-0010) and a prerelease version spells itself with a hyphen, so a
+          # hyphen-separated name does not parse back (ADR-0032).
+          name="${PRODUCT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.7z"
+          # The packer names the single member after the program — `opamp-fleet-client`, which is
+          # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
+          sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
+            --format 7z \
+            --out "$name" \
+            "target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }}")
+          echo "$sha  $name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            ${{ steps.pack.outputs.name }}
+            ${{ steps.pack.outputs.name }}.sha256
+          if-no-files-found: error
+
+  publish:
+    # A dry run builds and packs everything and stops here.
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect the checksums
+        run: |
+          cd artifacts
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          rm -f *.sha256
+          ls -l
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          cat > notes.md <<EOF
+          Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
+
+          Hand the artifacts to a Server under its release number for a Client self-update
+          (ADR-0020, ADR-0029) — the commit this build carries,
+          \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
+
+          Upload **all** of them under the **one** package name: the Server holds one artifact per
+          platform and offers each Agent the one built for the machine it reported (ADR-0031), so a
+          mixed fleet updates from a single \`[self_update] package = "opamp-fleet-client"\`. Each
+          file is named \`<name>_<version>_<os>_<arch>.7z\` (ADR-0032), and the last two fields are
+          exactly the pair an Agent reports as \`os.type\` and \`host.arch\` — so the upload reads
+          them out of the name and needs no table:
+
+          \`\`\`console
+          for f in *_${{ needs.version.outputs.version }}_*.7z; do
+            p=\${f%.7z}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
+            curl -X PUT --data-binary @"\$f" \\
+              "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=${{ needs.version.outputs.version }}&os=\$os&arch=\$arch"
+          done
+          \`\`\`
+
+          Each archive holds the Client under the name it is installed as, so it needs no repacking:
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0018).
+
+          Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
+          executable mode, so there is no \`chmod +x\` step:
+
+          \`\`\`console
+          7z x ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.7z
+          ./opamp-fleet-client service install --interactive   # root; answers write the configuration
+          ./opamp-fleet-client service start
+          \`\`\`
+          EOF
+          gh release create "version/${{ needs.version.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ needs.version.outputs.version }}" \
+            --notes-file notes.md \
+            *.7z SHA256SUMS
