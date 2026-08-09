@@ -63,4 +63,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0032](0032-release-artifacts-separate-their-fields-with-underscores.md) | A release artifact separates its four fields with `_` — `name_version_os_arch.7z` | 🟢 accepted |
 | [0033](0033-an-agents-type-and-its-instance-name-are-two-attributes.md) | An Agent's type and its instance name are two attributes — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
 | [0034](0034-a-package-states-the-agent-type-it-is-built-for.md) | A package states the Agent type it is built for, and reaches no Agent of another | 🟢 accepted |
+| [0035](0035-mutual-tls-and-the-server-issued-client-certificate.md) | Mutual TLS with a Server-issued client certificate — the credential bootstraps it, the CSR flow renews it | 🟡 proposed |
 
