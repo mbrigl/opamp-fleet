@@ -217,6 +217,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- **The package form in the UI now asks for the Agent type instead of the name, and arms the package
+  with it.** *Upload & offer* and *Use source url* refuse to run without a type and set it in the
+  same action, so the bundled UI can no longer produce the one thing ADR-0034 made possible: an
+  artifact that is stored, looks uploaded, and is offered to nobody.
+
+  The **name** is no longer asked for: it is derived and shown beside the type —
+  `name: opamp-fleet-client` — and clicking it reveals the field. It is worked out from the most
+  specific thing the form knows, in order: the chosen artifact's file name, the last segment of a
+  source url, then the agent type. So a release file dropped in names the package it belongs to,
+  and the derivation runs again when the upload is actually sent rather than only when a field
+  changed. A name typed by hand outranks all three.
+
+  It is still a name of its own, because one agent type carries several packages (a canary beside
+  the fleet-wide one, and every addon beside the binary) and because a package name is not spelled
+  in the same grammar as a reverse-FQDN type.
+
+  Nothing about the API changed: `PUT /api/v1/packages/{name}/type` is still its own request, and a
+  package uploaded by script is still untyped until it is called. The type is never guessed from the
+  name — that is the alternative ADR-0034 weighed and rejected.
+
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
   ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).

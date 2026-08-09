@@ -112,6 +112,13 @@
       .config-fields input::placeholder { color: var(--muted); }
       /* A field whose value is a short token, so four of them fit one row. */
       .config-fields input.narrow { flex: 0 1 190px; min-width: 150px; }
+      /* A field the action refuses to run without. Marked only while it is empty — once it holds
+         a value there is nothing left to point at, and a border that kept shouting would be the
+         same noise as no marking at all. */
+      .config-fields input.required:placeholder-shown { border-color: var(--soft-amber-fg); }
+      /* The derived package name, standing where a field would otherwise ask for it: mono and
+         muted, because it shows a token the form worked out rather than one to fill in. */
+      #package-rename { font-family: var(--mono); font-weight: 500; font-size: 13px; color: var(--muted); }
       /* Selected is the second accent, not the primary: the primary is what you press, this is
          what you are looking at. */
       .chip.selected { background: var(--accent); color: var(--accent-fg); }
@@ -224,11 +231,25 @@
       <section id="packages-card" class="card config">
         <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. A package also states the <em>agent type</em> it is built for, matched against the agent's <code>service.name</code>: without one it reaches nobody, and it never reaches an agent of another type whatever its Selector says. An empty Selector then targets every agent of that type; a narrower one overrides it for the agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
-        <!-- What identifies one artifact: the package it belongs to, its version, and the machine
-             it runs on. All four are what a release file name already says, so picking the file
-             fills this row. -->
+        <!-- What kind of agent this is for is the one thing asked here: it is what arms the package
+             (ADR-0034), and the name follows from it. The name is *shown* rather than asked for —
+             the button beside the field says what it will be and reveals the input on click.
+             It stays a field of its own, because one agent type carries several packages — a canary
+             beside the fleet-wide one (ADR-0017), and every addon that rides beside the binary —
+             and because a name is 1–32 characters of the ADR-0010 grammar, which a reverse-FQDN
+             type cannot be spelled in. -->
         <div class="config-fields">
-          <input id="package-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="package-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib) — required" autocomplete="off"
+                 title="Matched for equality against the service.name an agent reports. A package with no agent type is offered to nobody; one typed for another kind of agent is never a candidate, whatever its selector says." />
+          <input id="package-name" hidden placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                 title="This server's own name for the package: 1–32 lowercase letters, digits and '-' (ADR-0010). It follows the agent type until you type a name of your own — which is what a canary package aimed at part of the fleet, or an addon beside the binary, needs." />
+          <button id="package-rename" type="button" class="btn btn-ghost"
+                  title="The package's own name, derived from the agent type — nothing to fill in for the usual one-package-per-type case. Click to name it yourself: a second package of the same type, a canary aimed at part of the fleet, or an addon beside the binary.">name: —</button>
+        </div>
+        <!-- What identifies one artifact: its version and the machine it runs on. Together with the
+             name above, they are what a release file name already says, so picking the file fills
+             them. -->
+        <div class="config-fields">
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
           <input id="package-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
                  title="The operating system this artifact is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
@@ -237,13 +258,9 @@
         </div>
         <!-- Whom it goes to, and what proves it on arrival. -->
         <div class="config-fields">
-          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent of the type below)" autocomplete="off" />
+          <input id="package-selector" placeholder="selector: key=value, key=value … (empty targets every agent of that type)" autocomplete="off" />
           <input id="package-signature" placeholder="signature: hex Ed25519 (optional)" autocomplete="off"
                  title="Hex-encoded Ed25519 signature over the artifact, checked by every agent against its configured verification key before it installs." />
-        </div>
-        <div class="config-fields">
-          <input id="package-type" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib) — required before it is offered" autocomplete="off"
-                 title="Matched for equality against the service.name an agent reports. A package with no agent type is offered to nobody; one typed for another kind of agent is never a candidate, whatever its selector says." />
         </div>
         <div class="config-fields">
           <input id="package-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
@@ -260,7 +277,8 @@
           <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
           <button id="package-source" class="btn btn-ghost">Use source url</button>
           <button id="package-target" class="btn btn-ghost">Set selector</button>
-          <button id="package-set-type" class="btn btn-ghost">Set agent type</button>
+          <button id="package-set-type" class="btn btn-ghost"
+                  title="Retype a package that is already stored — correcting a typo that left it reaching nobody, without uploading a few hundred megabytes again. An upload sets the type itself.">Set agent type</button>
           <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
           <button id="package-close" class="btn btn-ghost">Close</button>
@@ -741,6 +759,82 @@
       let packages = [];
       let selectedPackage = null;
       let selectedPlatform = null;
+      // Where the name in the field came from, which is what decides who may overwrite it:
+      //
+      //   "derived" — worked out from the artifact, the address, or the agent type, and worked out
+      //               again whenever any of the three changes;
+      //   "typed"   — the operator wrote it, and nothing overwrites it until they empty the field
+      //               again: a canary package is named for the rollout, not for the artifact;
+      //   "pinned"  — it names a package that exists, because it was selected in the list or just
+      //               created here. Correcting the agent type must not rename it out from under
+      //               the next action; choosing another artifact hands it back to the derivation.
+      let nameSource = "derived";
+
+      // A name from the agent type, in the ADR-0010 grammar: a reverse FQDN's dots — and anything
+      // else a name cannot carry — become '-', and 32 characters is the length.
+      //
+      // Only in this direction. The type is what the agents report and what arms the package
+      // (ADR-0034); the name is this server's own label, free to differ, so deriving it is a
+      // convenience that costs nothing when it is wrong. The reverse — filling the *type* in from
+      // a name or a file name — is what ADR-0034 considered and rejected: right most of the time
+      // and silently wrong for `otelcol-canary`, and a mechanism whose whole purpose is "not
+      // optional" cannot rest on a guess that is usually correct.
+      function nameFromType(type) {
+        return type
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 32)
+          .replace(/-+$/, "");
+      }
+      // Everything the form can work the name out of, most specific first:
+      //
+      //   1. the chosen artifact's file name — a release is `<name>_<version>_<os>_<arch>`
+      //      (ADR-0025, ADR-0032), so the file states the package it belongs to;
+      //   2. the last segment of a source url, which is a file name like any other (ADR-0018);
+      //   3. the agent type, for the one-package-per-type case where nothing else has been said.
+      //
+      // The artifact outranks the type because it is the more specific statement: an operator who
+      // picked `otelcol-canary_1.2.3_linux_amd64.7z` has named the package, whatever type it is
+      // for. A name the operator typed outranks all three.
+      //
+      // `prefer` is the source an action is about to send, and it goes first: with both a file and
+      // an address in the form, *Use source url* must name the package after the address it is
+      // sending, not after a file it is not.
+      function derivedName(prefer) {
+        const file = $("package-file").files[0];
+        const fromFile = file ? fromArtifactName(file.name) : null;
+        const fromUrl = fromArtifactUrl($("package-url").value.trim());
+        const [first, second] = prefer === "url" ? [fromUrl, fromFile] : [fromFile, fromUrl];
+        return (first && first.name)
+          || (second && second.name)
+          || nameFromType($("package-type").value.trim());
+      }
+      // Re-derives the name and shows it. Called wherever one of the three sources changes, and
+      // again by the actions themselves — so an artifact chosen and uploaded in one motion is
+      // named after itself even if no field was ever touched afterwards.
+      function refreshName(prefer) {
+        if (nameSource === "derived") $("package-name").value = derivedName(prefer);
+        showName();
+      }
+      // The name is shown, not asked for. The button carries it, so nothing is hidden — only left
+      // unasked, which is the difference between a form with two required fields and one.
+      function showName() {
+        $("package-rename").textContent = `name: ${$("package-name").value || "—"}`;
+      }
+      $("package-rename").addEventListener("click", () => {
+        $("package-rename").hidden = true;
+        $("package-name").hidden = false;
+        $("package-name").focus();
+      });
+      $("package-type").addEventListener("input", () => refreshName());
+      // Emptying the name hands it back to the derivation; it is not refilled on this keystroke,
+      // because clearing a field to retype it must not put the old value straight back under the
+      // cursor. The next change to a source — or pressing an action — fills it again.
+      $("package-name").addEventListener("input", () => {
+        nameSource = $("package-name").value.trim() === "" ? "derived" : "typed";
+        showName();
+      });
 
       // One chip per artifact, not per package: a name with five platforms is five different
       // binaries with five versions and five rollback histories, and a list that showed one row
@@ -777,6 +871,8 @@
         selectedPackage = name;
         selectedPlatform = variant ? `${variant.os}-${variant.arch}` : null;
         $("package-name").value = pkg.name;
+        nameSource = "pinned";
+        showName();
         // The selector is the package's; everything else belongs to the one artifact.
         $("package-selector").value = selectorText(pkg.selector);
         $("package-type").value = pkg.service_name || "";
@@ -853,9 +949,15 @@
 
       // Naming an artifact is a statement about what is being uploaded, so it fills the fields it
       // can answer — and clears none it cannot, so a name that says nothing leaves the form alone.
-      function fillFromArtifact(parsed) {
+      function fillFromArtifact(parsed, prefer) {
+        // Another artifact is another statement about what is being uploaded, so a name that only
+        // named the last one goes back to being derived — but one the operator typed stays.
+        if (nameSource === "pinned") nameSource = "derived";
+        // The name itself is not set here: it is derived from this same file name by `derivedName`,
+        // along with the two other sources it may come from, so there is one order of precedence
+        // rather than a race between whichever field was touched last.
+        refreshName(prefer);
         if (!parsed) return;
-        if (parsed.name) $("package-name").value = parsed.name;
         if (parsed.version) $("package-version").value = parsed.version;
         $("package-os").value = parsed.os;
         $("package-arch").value = parsed.arch;
@@ -863,13 +965,13 @@
       }
       $("package-file").addEventListener("change", () => {
         const file = $("package-file").files[0];
-        if (file) fillFromArtifact(fromArtifactName(file.name));
+        fillFromArtifact(file ? fromArtifactName(file.name) : null);
       });
       // On `change`, not on every keystroke: a half-typed address would otherwise rewrite the
       // fields under the operator's hands. Blurring to press a button fires it first, so what the
       // request sends is what the address said.
       $("package-url").addEventListener("change", () => {
-        fillFromArtifact(fromArtifactUrl($("package-url").value.trim()));
+        fillFromArtifact(fromArtifactUrl($("package-url").value.trim()), "url");
       });
 
       // A checksum is copied from wherever it was published — a release's `SHA256SUMS`, a registry,
@@ -900,10 +1002,50 @@
         }
         return { os, arch };
       }
+      // The agent type, and the name that follows from it when none was typed. Returns null with
+      // the reason shown when the type is missing: a package created without one is stored and
+      // offered to nobody (ADR-0034), and that is the one outcome this form must not be able to
+      // produce silently.
+      function typedName(prefer) {
+        const service_name = $("package-type").value.trim();
+        if (!service_name) {
+          $("package-error").textContent = "an agent type is required — it is the service.name its agents report, and a package without one is offered to nobody";
+          return null;
+        }
+        // An action that creates a package derives the name once more, here, rather than trusting
+        // that some field's change event fired: an artifact is chosen and uploaded in one motion,
+        // and the name the request carries has to be the one that artifact — or this address, or
+        // this type — implies at the moment it is sent. An action that changes a package which
+        // already exists passes nothing and takes the field as it stands.
+        if (prefer) refreshName(prefer);
+        const name = $("package-name").value.trim();
+        if (!name) {
+          $("package-error").textContent = `nothing here says what to call the package — name it, or give an artifact or agent type a name can be derived from (lowercase letters, digits, '-')`;
+          return null;
+        }
+        return { name, service_name };
+      }
+      // Setting the type is a request of its own: the type belongs to the *name* (ADR-0034), so it
+      // is stated once rather than repeated on each of five platform uploads, where five copies
+      // would be five chances to disagree. Returns the message to show, or "" when it went through.
+      async function putType(name, service_name) {
+        let res;
+        try {
+          res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/type`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ service_name }),
+          });
+        } catch (e) { return e.message; }
+        if (!res.ok) return (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+        return "";
+      }
       $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
       $("package-close").addEventListener("click", () => $("packages-card").classList.remove("open"));
       $("package-upload").addEventListener("click", async () => {
-        const name = $("package-name").value.trim();
+        const typed = typedName("file");
+        if (!typed) return;
+        const { name, service_name } = typed;
         const version = $("package-version").value.trim();
         const file = $("package-file").files[0];
         if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
@@ -925,9 +1067,15 @@
           $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
         }
-        $("package-error").textContent = "";
+        // Arm it in the same action. The type is a second request, but never a second decision an
+        // operator can forget: "Upload & offer" that stored an artifact offered to nobody was the
+        // whole of the trap. It runs after the upload because a type is set on a package that
+        // exists — and if it fails, the artifact is stored untyped and the chip says so.
+        $("package-error").textContent = await putType(name, service_name);
         selectedPackage = name;
         selectedPlatform = `${platform.os}-${platform.arch}`;
+        // The package exists now, so the field names something rather than proposing something.
+        nameSource = "pinned";
         $("package-file").value = "";
         await refreshPackages();
         refreshAgents();
@@ -956,27 +1104,18 @@
       // the artifact is stored and offered to nobody, which is the safe half of the bargain that
       // stops a fleet-wide package reaching an agent it was never built for.
       $("package-set-type").addEventListener("click", async () => {
-        const name = $("package-name").value.trim();
-        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
-        const service_name = $("package-type").value.trim();
-        if (!service_name) { $("package-error").textContent = "an agent type is the service.name its agents report"; return; }
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/type`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ service_name }),
-        });
-        if (!res.ok) {
-          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
-          return;
-        }
-        $("package-error").textContent = "";
+        const typed = typedName();
+        if (!typed) return;
+        $("package-error").textContent = await putType(typed.name, typed.service_name);
         await refreshPackages();
         refreshAgents();
       });
       // Point a package at an artifact hosted elsewhere (ADR-0018): nothing is uploaded, and the
       // checksum is what every agent verifies — this server never sees the bytes.
       $("package-source").addEventListener("click", async () => {
-        const name = $("package-name").value.trim();
+        const typed = typedName("url");
+        if (!typed) return;
+        const { name, service_name } = typed;
         const version = $("package-version").value.trim();
         const url = $("package-url").value.trim();
         const sha256 = $("package-sha256").value.trim();
@@ -996,9 +1135,12 @@
           $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
         }
-        $("package-error").textContent = "";
+        // Armed in the same action as the upload above, and for the same reason: a referenced
+        // artifact with no agent type is stored and reaches nobody.
+        $("package-error").textContent = await putType(name, service_name);
         selectedPackage = name;
         selectedPlatform = `${platform.os}-${platform.arch}`;
+        nameSource = "pinned";
         await refreshPackages();
         refreshAgents();
       });
