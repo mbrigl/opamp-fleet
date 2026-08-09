@@ -1,6 +1,6 @@
 # ADR-0037: Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 
