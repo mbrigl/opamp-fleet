@@ -20,6 +20,7 @@ pub mod config_init;
 pub mod connection;
 pub mod csr;
 pub mod engine;
+pub mod gateway;
 pub mod packages;
 pub mod selfupdate;
 pub mod service;
