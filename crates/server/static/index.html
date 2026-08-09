@@ -423,7 +423,7 @@
       // Everything about an agent that is a set rather than a value: reported attributes, the
       // operator's labels (ADR-0042), the per-row actions, and its package pills. Not named
       // `labels` — since ADR-0042 that word means the 🏷 chips alone, and a row headed with it
-      // read as if a package status were one.
+      // reads as if a package status were one.
       function details(a) {
         const chips = [];
         if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
@@ -539,11 +539,11 @@
               ${chips || `<span class="chip">none</span>`}
             </div></td>
           </tr>`;
-          const below = [["labels", labels(a)]];
+          const below = [["details", details(a)]];
           if (expandedCaps.has(a.instance_uid)) {
             // A copy, sorted: the list arrives in the order of the protocol's capability bitmask,
             // which is an implementation detail of the wire and not a reading order. `caps` in
-            // `labels` is searched by name, so the original must not be reordered under it.
+            // `details` is searched by name, so the original must not be reordered under it.
             below.push(["declared capabilities", [...(a.capabilities || [])].sort().map((c) => `<span class="chip">${esc(c)}</span>`).join("")]);
           }
           if (expandedComponents.has(a.instance_uid)) {

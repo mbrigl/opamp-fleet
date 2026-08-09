@@ -561,6 +561,7 @@ The Client's own Agent keeps its state in `state_dir`:
 <state_dir>/instance-uid              # this Client's Agent identity
 <state_dir>/remote-config.pb          # the last configuration it received
 <state_dir>/connection-settings.pb    # Server-offered settings, if any
+<state_dir>/installed-package.json    # the self-update it last installed, if any
 <state_dir>/packages/                 # staging for a self-update artifact
 <state_dir>/logs/                     # the service's own rotating log (ADR-0041)
 ```
@@ -680,6 +681,15 @@ to the Server by whichever version came up.
 
 Self-update therefore requires an installed service — it is the service manager that performs the
 restart.
+
+**Replacing the binary by hand does not fool it.** What the Client installed is recorded in
+`<state_dir>/installed-package.json`, and `service uninstall` deletes neither the install layout nor
+the state — so installing an older Client afterwards comes up on top of that record. A record that
+does not name the version the running binary *is* is discarded at startup, with a warning naming
+both versions. The Client then reports no package, the Server offers the published one again, and
+the host is updated back to it. To hold a host on an older Client, retract the package on the Server
+first ([`publication`](server.md#packages-distributing-software)) — retracting withdraws the offer
+and uninstalls nothing.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
 `opamp-fleet-client_<version>_<os>_<arch>.7z`

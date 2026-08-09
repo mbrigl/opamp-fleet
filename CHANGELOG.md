@@ -344,6 +344,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- **A Client that was downgraded by hand went on reporting the version it had been updated to.**
+  After a self-update, `service uninstall` followed by installing an *older* Client left the fleet
+  view showing the package pill of the newer version — beside a **Version** column that correctly
+  named the old one. The record of what the Client installed lives in
+  `<state_dir>/installed-package.json`, and `service uninstall` deliberately deletes neither the
+  install layout nor the state, so the older Client came up on top of the record its successor
+  wrote.
+
+  The wrong line in the view was the smaller half. The Server gates re-offering on the hash inside
+  that record, so the host was **silently out of the rollout for good**: it believed it already ran
+  the offered package and would never take it again.
+
+  A record that does not name the version this binary *is* is now discarded at startup, with a
+  warning in the log naming both versions. The Client then reports no package, the Server offers it
+  again, and **the host is updated back to the published version.** That is the point — the Server
+  decides what the fleet runs. To keep a host on an older Client, retract the package first
+  (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
+  [ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)); retracting uninstalls
+  nothing, so the host stays where it is.
+
+  This is the Client's own package only. A Managed Process's package record is unchanged: only the
+  program itself knows its version there, and it is reported by the version probe.
+
 - **An Agent that installed a package went on reporting the version it replaced.** The package
   itself was reported correctly — `Installed`, with the new version, in the fleet view's package
   pill — but the Agent's own `service.version`, which is the fleet table's **Version** column, still
