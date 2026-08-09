@@ -1,6 +1,6 @@
 # ADR-0034: A package states the Agent type it is built for, and reaches no Agent of another
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 
