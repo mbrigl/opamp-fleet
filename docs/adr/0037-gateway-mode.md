@@ -67,14 +67,22 @@ none**.
    Client. The downstream endpoint therefore serves a WebSocket upgrade and a plain-HTTP POST on
    `/v1/opamp`, exactly as the Server does, with the Baseline's size limits enforced per hop.
 
-3. **The downstream endpoint is served with axum, promoted to a real dependency of the Client.**
-   The Client has no HTTP server today — the Supervisor Endpoint is raw `tokio-tungstenite` and
-   WebSocket-only, and axum is presently a *dev*-dependency there, pulled in so a test can run the
-   real Server in-process. Serving a plain-HTTP POST downstream needs one, and axum is the
-   workspace's HTTP stack already (ADR-0005), which is a better answer than a second one.
+3. **The downstream endpoint is served with axum, promoted to a real dependency of the Client — in
+   the Client's own crate, behind no Cargo feature.** The Client serves no HTTP today: the
+   Supervisor Endpoint is raw `tokio-tungstenite` and WebSocket-only, and axum is presently a
+   *dev*-dependency, pulled in so a test can run the real Server in-process. Point 2 needs a server,
+   and axum is the workspace's HTTP stack already (ADR-0005) — a second one would be the worse
+   answer.
 
-   The cost, stated plainly: every Client binary then carries an HTTP server whether or not it ever
-   runs Gateway Mode. That is the price of point 2, and the alternatives are worse — see below.
+   **The cost is smaller than it first looks, and it was worth measuring before deciding.** The
+   Client already links `hyper`, `http`, `http-body`, `tower`, `tower-http`, and `hyper-util`
+   through `reqwest`, so what axum adds is a routing layer over an HTTP engine that is in the binary
+   either way — not the engine itself.
+
+   The mode lives in `crates/client/src/gateway/`, beside `supervisor/`: the same shape ADR-0011
+   already uses for a self-contained subsystem with a port boundary, and the place where the
+   configuration, TLS material, client identity, transports, and Agent state it needs all already
+   are.
 
 4. **An Agent is assigned to the least-loaded connection, and stays there.** Assignment is by
    `instance_uid` and is sticky for as long as that connection lives. Least-connections is the prior
@@ -147,6 +155,22 @@ none**.
   Client. Rejected: it is one POST route and a size limit, which sounds small until the Baseline's
   `413`, `415`, and gzip rules are counted — all of which the Server already implements against a
   framework rather than by hand.
+- **Putting Gateway Mode behind a Cargo feature**, so a Client that never gateways compiles none of
+  it. Rejected twice over. A feature only saves an operator anything if the *released* artifact has
+  it off — and the specification's "one binary covers every shape" plus goal 15 mean the release
+  must have it on, so it would save nothing where it is claimed to and only help source builds. And
+  a default-off feature is a branch that `cargo test` and `cargo clippy` never compile, which is the
+  same failure mode this project already lives with for platform-gated code: invisible locally,
+  caught in CI if at all. Buying a small binary with a permanently under-compiled branch is the
+  wrong trade.
+- **A crate of its own, `crates/gateway`.** Tempting for a subsystem this size, and it would read
+  well beside `opamp`, `server`, and `client`. Rejected: a crate is not a feature boundary, so the
+  dependency lands in the binary all the same the moment the binary uses it; the gateway needs the
+  configuration, TLS material, client identity, transports, and Agent state that live in the Client
+  crate, so it would either depend back on `client` — a layer for no gain — or force those out,
+  which is churn against ADR-0024's "the Client is a library with a thin binary on top". A separate
+  *binary* is not on the table at all: ADR-0003 rejected separate deployables outright, and that is
+  binding.
 - **Terminating nothing — a Layer-4 passthrough gateway.** It would carry client certificates end to
   end, which point 7 cannot. Rejected in ADR-0035 already, and again here: a gateway that cannot read
   OpAMP cannot fold *n* Agents onto *m* connections, so it solves reachability while giving up the
@@ -190,9 +214,10 @@ none**.
   disconnected until each reports again. With a heartbeat configured that is one interval; without
   one it is until the Agent has something to say. The blast radius of a single connection is the
   price of folding connections at all, and ADR-0003 named it when it chose to.
-- Negative / trade-offs: the Client binary grows an HTTP server it only uses in Gateway Mode
-  (point 3). Measuring that cost before release is worth doing; if it turns out to matter, a Cargo
-  feature is the lever, and that is a smaller decision than picking a second HTTP stack now.
+- Negative / trade-offs: the Client binary grows a routing layer it only uses in Gateway Mode
+  (point 3) — measured as small, since the HTTP engine under it is already linked, but not nothing.
+  If it ever does matter, the lever is a Cargo feature, and that is a smaller decision *then*, with
+  a number behind it, than a guess now.
 - Negative / trade-offs: the Client grows a second listener and a second connection manager, and the
   combination of Supervisor Mode and Gateway Mode on one host is now a real test surface rather than
   a hypothetical one — as ADR-0003 predicted.
