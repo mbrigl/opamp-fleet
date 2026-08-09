@@ -53,6 +53,25 @@ impl Shutdown {
     }
 }
 
+/// Starts Gateway Mode when `[gateway]` arms it (ADR-0037), or nothing when it does not.
+///
+/// It runs as its own task rather than inside the transport loop: the downstream endpoint's
+/// lifetime is the process's, not one upstream connection's, and an Agent behind the Gateway must
+/// not lose its endpoint because this Client's own connection dropped.
+fn spawn_gateway(
+    config: &ClientConfig,
+    shutdown: &Shutdown,
+) -> Option<tokio::task::JoinHandle<()>> {
+    config.gateway.as_ref()?;
+    let config = std::sync::Arc::new(config.clone());
+    let shutdown = shutdown.clone();
+    Some(tokio::spawn(async move {
+        if let Err(e) = crate::gateway::run(config, shutdown).await {
+            tracing::error!(error = %e, "gateway mode stopped");
+        }
+    }))
+}
+
 /// Create the pair: the sender flips shutdown on, every [`Shutdown`] clone observes it.
 #[must_use]
 pub fn shutdown_channel() -> (watch::Sender<bool>, Shutdown) {
@@ -131,6 +150,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let mut telemetry = crate::telemetry::Telemetry::new();
     let mut system = sysinfo::System::new();
     let sampling = engine.sampling_handle();
+
+    // Gateway Mode (ADR-0037), if armed: a downstream endpoint and an upstream pool, running
+    // beside everything else. It is restarted when a verified offer moves this Client's endpoint,
+    // since the pool dials that endpoint and would otherwise keep reaching for the old one.
+    let mut gateway = spawn_gateway(&config, &shutdown);
     if let Some(stored) = connection::load(&config.state_dir) {
         // A restarted Client reports the persisted settings APPLIED, so the Server does not
         // re-offer what it already runs (ADR-0014).
@@ -188,6 +212,10 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                         tracing::warn!(reason = %refused, "not reporting own telemetry");
                     }
                 }
+                if let Some(handle) = gateway.take() {
+                    handle.abort();
+                }
+                gateway = spawn_gateway(&config, &shutdown);
                 if config.heartbeat_interval_secs > 0 {
                     // An offered interval may enable what the file had disabled; the capability
                     // follows (the reverse never happens — 0 means "not offered").

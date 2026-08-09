@@ -1,6 +1,7 @@
 //! The Client's own configuration file — TOML (ADR-0008).
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -8,7 +9,7 @@ use serde::Deserialize;
 
 /// `client.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
 /// startup instead of silently applying a default.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     /// The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0007):
@@ -50,6 +51,8 @@ pub struct ClientConfig {
     /// code or the Managed Process reports win over configured ones.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
+    /// Optional Gateway Mode (ADR-0037); absent means this Client gateways for nobody.
+    pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// Optional authentication toward the Server (ADR-0013); absent means no `Authorization`
@@ -400,7 +403,7 @@ fn take_string_table(
 
 /// The `[auth]` block (ADR-0013): exactly one scheme — `bearer_token`, or `username` and
 /// `password` together. Mixing or halving them fails loudly at startup (ADR-0008).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     pub bearer_token: Option<String>,
@@ -428,7 +431,7 @@ impl AuthConfig {
 }
 
 /// The `[packages]` block (ADR-0015): how downloaded package artifacts are verified.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
     /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
@@ -448,7 +451,7 @@ pub struct PackagesConfig {
 ///
 /// Absent — the default — the Client's own Agent declares no package capability at all, and no
 /// offer can reach it. Present, it takes exactly the package named here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
     /// The name of the package that carries this Client. **Required**, and the whole of the
@@ -459,7 +462,56 @@ pub struct SelfUpdateConfig {
     pub package: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
+/// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
+/// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
+/// (ADR-0003).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayConfig {
+    /// Where the downstream OpAMP endpoint binds. No default: a Gateway that binds nothing is a
+    /// configuration error, and loopback is the Supervisor Endpoint's job.
+    pub listen: SocketAddr,
+    /// The **cap** on upstream connections, not the count. The pool grows to it as Agents appear
+    /// and never beyond, so a Gateway in front of three Agents holds three connections.
+    #[serde(default = "default_upstream_connections")]
+    pub upstream_connections: usize,
+    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0035): what this verifies is the
+    /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    pub tls: Option<GatewayTlsConfig>,
+}
+
+/// The downstream hop's TLS material (ADR-0037). Separate from the top-level `[tls]`, which is
+/// about reaching the Server: this is about being reached.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayTlsConfig {
+    /// PEM certificate chain this Gateway presents to the Agents that connect to it.
+    pub cert_file: PathBuf,
+    /// PEM private key for it.
+    pub key_file: PathBuf,
+    /// Optional PEM bundle a downstream Agent's client certificate must chain to. Absent accepts
+    /// any peer at the TLS layer, which is what a fleet still bootstrapping wants.
+    pub client_ca_file: Option<PathBuf>,
+}
+
+impl GatewayConfig {
+    /// Loud validation (ADR-0008): a pool of zero would carry nothing, and the pool is a WebSocket
+    /// pool — a polling upstream cannot carry the Server's pushes to the Agents behind it.
+    fn check(&self, endpoint: &str) -> Result<(), String> {
+        if self.upstream_connections == 0 {
+            return Err("[gateway] upstream_connections must be at least 1".to_string());
+        }
+        if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
+            return Err(format!(
+                "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} —                  a polling connection cannot carry the Server's pushes to the Agents behind a                  Gateway"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
@@ -514,6 +566,12 @@ fn default_heartbeat_interval_secs() -> u64 {
     30
 }
 
+/// The pool cap when none is configured — the OpAMP Gateway Extension's default (ADR-0037). It is
+/// a ceiling, not a cost: connections are opened as Agents appear.
+fn default_upstream_connections() -> usize {
+    10
+}
+
 fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
@@ -541,6 +599,7 @@ impl Default for ClientConfig {
             state_dir: default_state_dir(),
             supervisor_dir: None,
             attributes: BTreeMap::new(),
+            gateway: None,
             tls: None,
             auth: None,
             authorization_override: None,
@@ -572,6 +631,11 @@ impl ClientConfig {
         }
         if let Some(tls) = &config.tls {
             tls.check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(gateway) = &config.gateway {
+            gateway
+                .check(&config.endpoint)
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         // Decode the package verification key once — a malformed key must fail startup, not the

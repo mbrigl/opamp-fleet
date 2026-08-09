@@ -46,6 +46,26 @@ state_dir = "client-state"
 # [attributes]
 # env = "prod"
 
+# Optional Gateway Mode (ADR-0037): this Client stands at a network boundary, accepts OpAMP from
+# other Clients, and folds them onto a small pool of upstream connections. It composes with the
+# [[supervisor]] blocks below — a host may supervise its own processes and gateway for others.
+#
+# upstream_connections is a CAP, not a count: connections are opened as Agents appear, so a Gateway
+# in front of three Agents holds three. Each Agent sticks to its connection while that lives.
+#
+# The Gateway makes no authentication decisions — it forwards each peer's credential upstream
+# untouched. Mutual TLS is per hop: [gateway.tls] verifies the Agents connecting to *this* Client,
+# while the identity presented to the Server is the one in [tls] below. The endpoint above must be
+# ws:// or wss://, since a polling connection cannot carry the Server's pushes to the Agents behind
+# a Gateway.
+# [gateway]
+# listen = "0.0.0.0:4320"
+# upstream_connections = 10
+# [gateway.tls]
+# cert_file = "gateway.pem"
+# key_file = "gateway-key.pem"
+# client_ca_file = "client-ca.pem"
+
 # Optional TLS (ADR-0007, ADR-0035). Every key is optional on its own, so this section may carry a
 # trust override, a client identity, or both.
 # [tls]

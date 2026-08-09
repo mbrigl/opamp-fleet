@@ -10,6 +10,7 @@ Server sends them, reports back what they are doing, and can replace their binar
 - [Running it](#running-it)
 - [Running it as an OS service](#running-it-as-an-os-service)
 - [Configuration reference](#configuration-reference)
+- [Gateway Mode: carrying other Clients](#gateway-mode-carrying-other-clients)
 - [Supervisors: putting a process under management](#supervisors-putting-a-process-under-management)
 - [Which programs take updates](#which-programs-take-updates)
 - [Agents that are more than one file](#agents-that-are-more-than-one-file)
@@ -313,6 +314,52 @@ package = "opamp-fleet-client"
 
 See [Updating the Client itself](#updating-the-client-itself). Absent — the default — the Client's
 own Agent declares no package capability at all and no offer can reach it.
+
+## Gateway Mode: carrying other Clients
+
+A Client can stand at a network boundary and carry other Clients' Agents upstream over a small pool
+of connections (ADR-0037) — for a segmented network the Server cannot reach into, or simply for a
+fleet too large to give every Agent its own connection:
+
+```toml
+[gateway]
+listen = "0.0.0.0:4320"
+upstream_connections = 10          # a cap, not a count
+```
+
+Point the Clients behind it at this address instead of the Server's. Nothing else about them
+changes: the Server tells Agents apart by `instance_uid`, never by the connection that carried them,
+so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
+downstream, so a polling Client works as well as a WebSocket one.
+
+`upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
+front of three Agents holds three, and each Agent stays on its connection while that lives.
+
+This mode composes with `[[supervisor]]` blocks: one host may supervise its own processes *and*
+gateway for others.
+
+### What a Gateway does not do
+
+- **It makes no authentication decision.** Each downstream peer's credential is forwarded upstream
+  untouched, so policy stays on the Server and rotating a credential never means visiting gateways.
+- **It never speaks for an Agent.** If a downstream Client disappears without sending
+  `agent_disconnect`, the Gateway forwards nothing — inventing that message would tell the Server
+  the Agent said something it did not. Such an Agent reads as connected until someone notices; that
+  is a known gap, waiting on Server-side liveness.
+- **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop (ADR-0035):
+  `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
+  this Client's own, from the top-level `[tls]` or issued through the CSR flow.
+
+```toml
+[gateway.tls]
+cert_file = "gateway.pem"          # what this Gateway presents to its Agents
+key_file = "gateway-key.pem"
+client_ca_file = "client-ca.pem"   # optional: require a certificate from them
+```
+
+The upstream endpoint must be `ws://` or `wss://`. A polling connection cannot carry the Server's
+pushes to the Agents behind a Gateway, and the configuration refuses it at startup rather than
+leaving you to notice that configuration changes never arrive.
 
 ## Supervisors: putting a process under management
 

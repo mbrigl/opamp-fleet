@@ -7,7 +7,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | Part | Read it to |
 |---|---|
 | **[Server](server.md)** | run the control plane: the listener, Configurations and Selectors, packages, the REST API, authentication, TLS |
-| **[Client](client.md)** | run a managed host: the OS service, Supervisors for Collectors and Foreign Agents, package updates, self-update |
+| **[Client](client.md)** | run a managed host: the OS service, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
@@ -135,9 +135,6 @@ The manual documents what runs today. These are designed, or partly built, and n
 not go looking for a setting that does not exist. [`docs/CONFORMANCE.md`](../CONFORMANCE.md) is the
 authority on all of it.
 
-- **Gateway Mode** (ADR-0003) — a Client accepting other Clients' connections and folding them onto
-  a few upstream ones. Decided and specified; there is no implementation and no configuration key
-  for it. Every Client today connects to the Server directly.
 - **`tls` and `proxy` in connection settings** (ADR-0035) — a Server offering either is told, in
   its status report, that the Client dropped them. Mutual TLS itself *is* built: see
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).

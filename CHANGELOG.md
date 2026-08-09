@@ -15,6 +15,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **Gateway Mode** ([ADR-0037](docs/adr/0037-gateway-mode.md)): a Client can now stand at a network
+  boundary, accept OpAMP from other Clients, and carry them upstream over a small pool of
+  connections. This is the last of the specification's goals to be built.
+
+  ```toml
+  [gateway]
+  listen = "0.0.0.0:4320"
+  upstream_connections = 10       # a cap, not a count
+  [gateway.tls]                   # optional; the downstream hop's own TLS
+  cert_file = "gateway.pem"
+  key_file = "gateway-key.pem"
+  client_ca_file = "client-ca.pem"
+  ```
+
+  Point the Clients behind it at the Gateway's address instead of the Server's — nothing else about
+  them changes, and the Server sees them as the Agents they are. Both transports are served
+  downstream, so a polling Client works as well as a WebSocket one.
+
+  **The pool costs what it uses.** `upstream_connections` is a ceiling: connections are opened as
+  Agents appear, so a Gateway in front of three Agents holds three. Each Agent sticks to its
+  connection for as long as it lives.
+
+  **A Gateway makes no authentication decisions.** It forwards each peer's credential upstream
+  untouched. Mutual TLS is per hop: `[gateway.tls]` verifies the Agents connecting *to* it, while
+  the identity it presents *to the Server* is its own, from the top-level `[tls]` or the CSR flow.
+  The Gateway's upstream endpoint must be `ws://` or `wss://` — a polling connection could not carry
+  the Server's pushes to the Agents behind it, and the configuration says so at startup.
+
+  **Two limits to know.** An Agent whose Client vanishes without saying goodbye stays "connected" in
+  the fleet view until someone notices: the Gateway forwards no `agent_disconnect` it did not
+  receive, because that would put words in an Agent's mouth. And when a pooled connection drops, the
+  Server marks every Agent that rode it disconnected until each reports again — one heartbeat
+  interval where one is configured.
+
 - **Every Agent can now report its own telemetry** — metrics, logs, and traces — to a destination
   the **Server** names ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).
 
