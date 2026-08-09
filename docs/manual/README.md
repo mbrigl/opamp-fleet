@@ -143,5 +143,7 @@ authority on all of it.
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
 - **Certificate revocation** (ADR-0035) — there is no CRL and no OCSP. A short `validity_days` plus
   renewal is what bounds an issued certificate.
-- **The Client's own telemetry** (`ReportsOwnTraces`/`Metrics`/`Logs`) and **custom messages** —
-  planned, not implemented.
+- **Custom messages** (`CustomCapabilities` / `CustomMessage`) — planned, not implemented.
+- **Other connection settings** (`AcceptsOtherConnectionSettings`) — deliberately not implemented:
+  the protocol leaves their meaning entirely to the Agent, so honouring the capability would mean
+  inventing semantics.

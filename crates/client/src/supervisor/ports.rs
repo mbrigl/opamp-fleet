@@ -50,6 +50,11 @@ pub enum ProcessEvent {
     /// The process's own description (reported through the Supervisor Endpoint), folded into
     /// the Agent's — its identity (`service.instance.id`) stays the Supervisor's.
     Description(AgentDescription),
+    /// The pid of the running Managed Process, or `None` once it is gone (ADR-0036). It is what
+    /// lets this Client sample the process's own CPU and memory from the outside, which is the
+    /// only honest reading of "own telemetry" for a process whose configuration it must not touch
+    /// (ADR-0011).
+    Pid(Option<u32>),
     /// Health — derived from the outside (spawned, exited, spawn failed) or self-reported.
     Health(ComponentHealth),
     /// The process's self-reported effective configuration; replaces the written-files echo.

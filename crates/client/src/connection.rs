@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use opamp::proto::{AgentToServer, ConnectionSettingsOffers, OpAmpConnectionSettings};
+use opamp::proto::{
+    AgentToServer, ConnectionSettingsOffers, OpAmpConnectionSettings, TelemetryConnectionSettings,
+};
 use prost::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -49,8 +51,29 @@ pub fn merge(
     let pick = |field: fn(&OpAmpConnectionSettings) -> bool| -> Option<OpAmpConnectionSettings> {
         offered.filter(|s| field(s)).or(previous).cloned()
     };
+    // The own-telemetry destinations fold per signal (ADR-0036): an offer naming only a metrics
+    // endpoint leaves an already-offered traces endpoint alone, exactly as the OpAMP settings do.
+    let telemetry = |offered: Option<&TelemetryConnectionSettings>,
+                     previous: Option<&TelemetryConnectionSettings>| {
+        offered
+            .filter(|s| !s.destination_endpoint.is_empty())
+            .or(previous)
+            .cloned()
+    };
     ConnectionSettingsOffers {
         hash: offer.hash.clone(),
+        own_metrics: telemetry(
+            offer.own_metrics.as_ref(),
+            stored.and_then(|s| s.own_metrics.as_ref()),
+        ),
+        own_traces: telemetry(
+            offer.own_traces.as_ref(),
+            stored.and_then(|s| s.own_traces.as_ref()),
+        ),
+        own_logs: telemetry(
+            offer.own_logs.as_ref(),
+            stored.and_then(|s| s.own_logs.as_ref()),
+        ),
         opamp: Some(OpAmpConnectionSettings {
             destination_endpoint: pick(|s| !s.destination_endpoint.is_empty())
                 .map(|s| s.destination_endpoint)

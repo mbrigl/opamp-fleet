@@ -5,6 +5,8 @@
 //! reply to the owning Agent by `instance_uid` alone, never by connection. With one self-Agent
 //! it behaves exactly like the single-Agent Client did; with Supervisors it multiplexes them.
 
+use std::sync::{Arc, Mutex};
+
 use opamp::proto::{AgentToServer, ConnectionSettingsOffers, ServerToAgent};
 use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
@@ -45,6 +47,9 @@ pub struct Engine {
     /// Set once a self-update has moved the `current` pointer: the run must end for the service
     /// manager to start the new version (ADR-0020).
     restart_for_update: bool,
+    /// The sampling targets, shared with the own-telemetry sampler (ADR-0036), which runs beside
+    /// a transport that holds this Engine mutably for the whole of a connection.
+    sampling: Arc<Mutex<Vec<(String, u32)>>>,
 }
 
 /// What the Engine needs to install a new version of the Client and to close out one that is on
@@ -77,7 +82,7 @@ impl Engine {
         agents: Vec<(AgentState, Option<mpsc::Sender<ProcessCommand>>)>,
         events: mpsc::Receiver<(usize, ProcessEvent)>,
     ) -> Self {
-        Engine {
+        let engine = Engine {
             agents: agents
                 .into_iter()
                 .map(|(state, commands)| SupervisedAgent {
@@ -92,7 +97,12 @@ impl Engine {
             self_update: None,
             seen_server: false,
             restart_for_update: false,
-        }
+            sampling: Arc::new(Mutex::new(Vec::new())),
+        };
+        // The Client's own Agent samples this process, and that is true from the start — only a
+        // Managed Process's pid has to wait for the process to exist.
+        engine.refresh_sampling();
+        engine
     }
 
     /// Arms self-update (ADR-0020): where to write the marker, how to open an encrypted archive,
@@ -142,6 +152,44 @@ impl Engine {
         for agent in &mut self.agents {
             agent.state.declare_capability(capability);
         }
+    }
+
+    /// What own metrics are sampled from (ADR-0036): every Agent's `service.instance.id` paired
+    /// with the pid to sample for it — this process for the Client's own Agent, the Managed
+    /// Process for a Supervisor-backed one, and nothing while that process is not running.
+    pub fn sampling_targets(&self) -> Vec<(String, u32)> {
+        self.agents
+            .iter()
+            .filter_map(|agent| {
+                let pid = match agent.state.is_managed() {
+                    false => std::process::id(),
+                    true => agent.state.process_pid()?,
+                };
+                Some((agent.state.uid().to_string(), pid))
+            })
+            .collect()
+    }
+
+    /// A handle on [`sampling_targets`](Self::sampling_targets) the metrics sampler can read while
+    /// the transport holds the Engine mutably — which it does for the whole of a connection.
+    /// Refreshed whenever a pid changes, so a Managed Process that restarts is followed.
+    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<(String, u32)>>> {
+        self.sampling.clone()
+    }
+
+    fn refresh_sampling(&self) {
+        if let Ok(mut shared) = self.sampling.lock() {
+            *shared = self.sampling_targets();
+        }
+    }
+
+    /// The Client's own Agent's description, for the Resource its telemetry carries (ADR-0036).
+    pub fn self_description(&self) -> opamp::proto::AgentDescription {
+        self.agents
+            .iter()
+            .find(|agent| !agent.state.is_managed())
+            .map(|agent| agent.state.description())
+            .unwrap_or_default()
     }
 
     /// Asks the Server for a client certificate when it signs them and this Client needs one
@@ -461,6 +509,9 @@ impl Engine {
 
     /// Folds one process event into the owning Agent and marks it as owing a report.
     fn absorb(&mut self, index: usize, event: ProcessEvent) {
+        // Set when the event moved a pid: the shared sampling view is refreshed after the
+        // borrow of `agent` ends, since refreshing reads every Agent.
+        let mut refresh = false;
         let Some(agent) = self.agents.get_mut(index) else {
             warn!(index, "dropping an event for an unknown agent");
             return;
@@ -468,6 +519,10 @@ impl Engine {
         match event {
             ProcessEvent::Description(description) => {
                 agent.state.set_process_description(description);
+            }
+            ProcessEvent::Pid(pid) => {
+                agent.state.set_process_pid(pid);
+                refresh = true;
             }
             ProcessEvent::Health(health) => agent.state.set_process_health(health),
             ProcessEvent::EffectiveConfig(config) => {
@@ -484,6 +539,9 @@ impl Engine {
             }
         }
         agent.owes_report = true;
+        if refresh {
+            self.refresh_sampling();
+        }
     }
 
     /// Stops all Managed Processes — each adapter honours `Shutdown` within its stop budget —

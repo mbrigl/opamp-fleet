@@ -13,7 +13,7 @@ use opamp::proto::{
     ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
     OpAmpConnectionSettings, PackageStatuses, PackagesAvailable, RemoteConfigStatus,
     RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
-    ServerToAgent, ServerToAgentFlags, TlsCertificate,
+    ServerToAgent, ServerToAgentFlags, TelemetryConnectionSettings, TlsCertificate,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -109,7 +109,49 @@ pub struct Processed {
 /// `[connection_offer]` section with the hash that gates its delivery.
 pub struct ConnectionOffer {
     settings: OpAmpConnectionSettings,
-    hash: Vec<u8>,
+}
+
+/// The own-telemetry destinations this Server offers (ADR-0036), precompiled from
+/// `[telemetry_offer]`. Part of the same `ConnectionSettingsOffers` message the OpAMP settings
+/// ride, and hashed with them: one offer, one hash, one acknowledgement.
+#[derive(Default, Clone)]
+pub struct TelemetryOffer {
+    pub own_metrics: Option<TelemetryConnectionSettings>,
+    pub own_traces: Option<TelemetryConnectionSettings>,
+    pub own_logs: Option<TelemetryConnectionSettings>,
+}
+
+impl TelemetryOffer {
+    pub fn from_config(config: &crate::config::TelemetryOfferConfig) -> Self {
+        let headers = (!config.headers.is_empty()).then(|| Headers {
+            headers: config
+                .headers
+                .iter()
+                .map(|(key, value)| Header {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        });
+        let destination = |endpoint: &Option<String>| {
+            endpoint
+                .as_ref()
+                .map(|endpoint| TelemetryConnectionSettings {
+                    destination_endpoint: endpoint.clone(),
+                    headers: headers.clone(),
+                    ..Default::default()
+                })
+        };
+        TelemetryOffer {
+            own_metrics: destination(&config.metrics_endpoint),
+            own_traces: destination(&config.traces_endpoint),
+            own_logs: destination(&config.logs_endpoint),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.own_metrics.is_none() && self.own_traces.is_none() && self.own_logs.is_none()
+    }
 }
 
 impl ConnectionOffer {
@@ -125,9 +167,10 @@ impl ConnectionOffer {
             heartbeat_interval_seconds: config.heartbeat_interval_secs.unwrap_or(0),
             ..Default::default()
         };
-        // The hash identifies the offer as a whole — an Agent echoing it needs nothing again.
-        let hash = Sha256::digest(settings.encode_to_vec()).to_vec();
-        Ok(ConnectionOffer { settings, hash })
+        // No hash here any more: it is computed over the whole `ConnectionSettingsOffers` at send
+        // time, because an offer now carries telemetry destinations too (ADR-0036) and the Agent
+        // acknowledges the message rather than any one part of it.
+        Ok(ConnectionOffer { settings })
     }
 }
 
@@ -170,6 +213,8 @@ pub struct AppState {
     /// The authority that signs Agent CSRs (ADR-0035); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<ClientCa>,
+    /// Where Agents send their own telemetry (ADR-0036); empty offers no destination.
+    telemetry_offer: TelemetryOffer,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
     /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
@@ -197,6 +242,7 @@ impl AppState {
             connection_offer: None,
             packages: None,
             client_ca: None,
+            telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
         })
@@ -232,6 +278,13 @@ impl AppState {
     #[must_use]
     pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
         self.connection_offer = offer;
+        self
+    }
+
+    /// Offers the fleet somewhere to send its own telemetry (ADR-0036).
+    #[must_use]
+    pub fn with_telemetry_offer(mut self, offer: TelemetryOffer) -> Self {
+        self.telemetry_offer = offer;
         self
     }
 
@@ -668,6 +721,21 @@ impl AppState {
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
+        // The own-telemetry destinations (ADR-0036), offered only for the signals this Agent says
+        // it can report — the protocol's negotiation rule, and an offer for a capability the peer
+        // lacks is one nobody will ever act on.
+        let telemetry = TelemetryOffer {
+            own_metrics: self.telemetry_offer.own_metrics.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnMetrics as u64 != 0
+            }),
+            own_traces: self.telemetry_offer.own_traces.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnTraces as u64 != 0
+            }),
+            own_logs: self.telemetry_offer.own_logs.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnLogs as u64 != 0
+            }),
+        };
+
         if let Some(certificate) = issued {
             let mut settings = self
                 .connection_offer
@@ -675,37 +743,49 @@ impl AppState {
                 .map(|offer| offer.settings.clone())
                 .unwrap_or_default();
             settings.certificate = Some(certificate);
+            let mut offer = ConnectionSettingsOffers {
+                opamp: Some(settings),
+                own_metrics: telemetry.own_metrics,
+                own_traces: telemetry.own_traces,
+                own_logs: telemetry.own_logs,
+                ..Default::default()
+            };
             // Its own hash, over the settings as sent: the standing offer's would tell the Agent
             // nothing changed, and it would never adopt the certificate.
-            let hash = Sha256::digest(settings.encode_to_vec()).to_vec();
-            return Some(ConnectionSettingsOffers {
-                hash,
-                opamp: Some(settings),
-                ..Default::default()
-            });
+            offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
+            return Some(offer);
         }
-        let offer = self.connection_offer.as_ref()?;
-        if record.capabilities
-            & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
-            == 0
-        {
-            return None;
-        }
-        // The Baseline's gate: include the offer when the reported hash differs. An APPLYING
-        // echo of the same hash keeps the offer coming — a verification whose outcome was lost
-        // (a dropped connection mid-switch) must heal by retry, not hang.
-        if let Some(status) = &record.connection_settings_status {
-            if status.last_connection_settings_hash == offer.hash
-                && status.status != opamp::proto::ConnectionSettingsStatuses::Applying as i32
-            {
+
+        // An Agent that accepts no OpAMP settings may still report telemetry, so the two are
+        // gated separately: with only a telemetry destination to offer, that is the whole offer.
+        let Some(opamp) = self.connection_offer.as_ref().filter(|_| {
+            record.capabilities
+                & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+                != 0
+        }) else {
+            if telemetry.is_empty() {
                 return None;
             }
-        }
-        Some(ConnectionSettingsOffers {
-            hash: offer.hash.clone(),
+            let mut offer = ConnectionSettingsOffers {
+                own_metrics: telemetry.own_metrics,
+                own_traces: telemetry.own_traces,
+                own_logs: telemetry.own_logs,
+                ..Default::default()
+            };
+            offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
+            return gate(record, offer);
+        };
+        let offer = opamp;
+        let mut composed = ConnectionSettingsOffers {
             opamp: Some(offer.settings.clone()),
+            own_metrics: telemetry.own_metrics,
+            own_traces: telemetry.own_traces,
+            own_logs: telemetry.own_logs,
             ..Default::default()
-        })
+        };
+        // One hash over everything offered: the Agent acknowledges the message, not its parts.
+        composed.hash = Sha256::digest(composed.encode_to_vec()).to_vec();
+        gate(record, composed)
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a Configuration or package changes;
@@ -1244,6 +1324,20 @@ fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToAgent {
 }
 
 /// The `ServerToAgent` for a report the Server cannot make sense of.
+/// The Baseline's gate: send the offer when the Agent's reported hash differs. An APPLYING echo of
+/// the same hash keeps it coming — a verification whose outcome was lost (a dropped connection
+/// mid-switch) must heal by retry, not hang.
+fn gate(record: &AgentRecord, offer: ConnectionSettingsOffers) -> Option<ConnectionSettingsOffers> {
+    if let Some(status) = &record.connection_settings_status {
+        if status.last_connection_settings_hash == offer.hash
+            && status.status != opamp::proto::ConnectionSettingsStatuses::Applying as i32
+        {
+            return None;
+        }
+    }
+    Some(offer)
+}
+
 pub fn bad_request(message: &str) -> ServerToAgent {
     ServerToAgent {
         capabilities: SERVER_CAPABILITIES,

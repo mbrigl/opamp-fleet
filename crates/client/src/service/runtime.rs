@@ -125,22 +125,53 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         engine.report_self_update_outcome(outcome);
         crate::selfupdate::clear_outcome(&config.state_dir);
     }
+    // Own telemetry (ADR-0036) is owned here rather than by a transport loop, because the
+    // destinations outlive a connection: a reconnect must not tear the exporters down, and a
+    // verified new offer is what replaces them.
+    let mut telemetry = crate::telemetry::Telemetry::new();
+    let mut system = sysinfo::System::new();
+    let sampling = engine.sampling_handle();
     if let Some(stored) = connection::load(&config.state_dir) {
         // A restarted Client reports the persisted settings APPLIED, so the Server does not
         // re-offer what it already runs (ADR-0014).
         engine.adopt_connection_settings(&stored.hash);
+        // …and resumes reporting to the destinations it was last told about, before it has spoken
+        // to anyone: telemetry from a Client that cannot reach the Server is the useful kind.
+        for refused in telemetry.apply(&stored, &engine.self_description()) {
+            tracing::warn!(reason = %refused, "not reporting own telemetry");
+        }
     }
     for uid in engine.uids() {
         tracing::info!(agent = %uid, "starting");
     }
 
     loop {
-        let outcome = match config.transport()? {
-            TransportKind::WebSocket => {
-                transport::ws::run(&mut engine, &config, &mut shutdown).await?
-            }
-            TransportKind::Http => {
-                transport::http::run(&mut engine, &config, &mut shutdown).await?
+        // The sampler runs beside the transport, not inside it: process metrics are about the host,
+        // and a Client that has lost its connection is exactly when they are worth having.
+        let outcome = {
+            let transport = async {
+                match config.transport()? {
+                    TransportKind::WebSocket => {
+                        transport::ws::run(&mut engine, &config, &mut shutdown).await
+                    }
+                    TransportKind::Http => {
+                        transport::http::run(&mut engine, &config, &mut shutdown).await
+                    }
+                }
+            };
+            tokio::pin!(transport);
+            let mut tick = tokio::time::interval(telemetry.sample_interval());
+            tick.tick().await; // the first tick is immediate; sample on the ones after it
+            loop {
+                tokio::select! {
+                    outcome = &mut transport => break outcome?,
+                    _ = tick.tick(), if telemetry.reporting() => {
+                        let targets = sampling.lock().map(|t| t.clone()).unwrap_or_default();
+                        for (agent, pid) in targets {
+                            telemetry.sample(&mut system, pid, &agent);
+                        }
+                    }
+                }
             }
         };
         match outcome {
@@ -151,6 +182,12 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
+                // The same verified offer may have named new telemetry destinations (ADR-0036).
+                if let Some(stored) = connection::load(&config.state_dir) {
+                    for refused in telemetry.apply(&stored, &engine.self_description()) {
+                        tracing::warn!(reason = %refused, "not reporting own telemetry");
+                    }
+                }
                 if config.heartbeat_interval_secs > 0 {
                     // An offered interval may enable what the file had disabled; the capability
                     // follows (the reverse never happens — 0 means "not offered").

@@ -26,7 +26,10 @@ serde_json = "1"
 toml = "1"
 futures-util = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `registry` is what a layered subscriber composes on: the OTLP log bridge needs a reloadable slot
+# in it, because the destination cannot exist until the Server names one (ADR-0036). The `reload`
+# module itself is unconditional in 0.3.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
@@ -78,6 +81,24 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # renew (ADR-0035). rcgen parses X.509 only behind a private, test-only path, so this is the
 # public way in — and it is the very parser rcgen itself uses, already in the tree.
 x509-parser = "0.18"
+# The Agent's own telemetry (ADR-0036): the standard's own implementation, not a second copy of its
+# schema. `http-proto` is the OTLP/HTTP protobuf encoding the Baseline's destination_endpoint
+# requires; `reqwest-client` replaces the default *blocking* client, which would stall a tokio
+# worker; `grpc-tonic` is deliberately absent, since the schema permits no gRPC destination here.
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
+# Metric and attribute names from the standard rather than string literals of our own (ADR-0036).
+# `semconv_experimental` is needed because the *process* metrics the Baseline points at — CPU and
+# memory of the Agent's process — are still experimental upstream. Taking them from here anyway is
+# the point: an experimental name that moves becomes a compile error on the next version bump,
+# where a string literal would quietly keep emitting the old one.
+opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
+# The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
+opentelemetry-appender-tracing = "0.31"
+# Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
+# three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # The built-in root store, for the one case the transports' own defaults cannot cover: a Client
 # presenting a client certificate (ADR-0035) to a Server with a publicly trusted one, which needs
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.

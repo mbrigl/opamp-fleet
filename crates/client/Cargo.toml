@@ -42,6 +42,12 @@ rustls-pemfile.workspace = true
 rcgen.workspace = true
 time.workspace = true
 x509-parser.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-semantic-conventions.workspace = true
+opentelemetry-appender-tracing.workspace = true
+sysinfo.workspace = true
 webpki-roots.workspace = true
 # ADR-0018: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.

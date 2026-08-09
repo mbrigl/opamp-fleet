@@ -15,6 +15,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **Every Agent can now report its own telemetry** — metrics, logs, and traces — to a destination
+  the **Server** names ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).
+
+  Add a `[telemetry_offer]` section to `server.toml` with any of `metrics_endpoint`,
+  `traces_endpoint`, `logs_endpoint` — full OTLP/HTTP URLs **with path**, e.g.
+  `https://collector.example:4318/v1/metrics` — plus optional `[telemetry_offer.headers]` for an
+  access token. Each signal is offered independently, and only to Agents that declare it.
+
+  Nothing is configured on the Client, and that is deliberate: the capability means "report to the
+  destination the Server specifies", so a destination in `client.toml` would be a private extension
+  wearing its name. With no offer, nothing is sent and nothing is built.
+
+  **What it sends.** Process metrics every 30 seconds — CPU, memory, uptime — for the Client's own
+  process and for each Managed Process it started; the Client's own log output as OTLP records, with
+  stderr unchanged; and one span per control-loop operation that already has a lifecycle (a
+  configuration being applied, a package being installed, a self-update). The OTLP Resource carries
+  the Agent's identifying attributes, so one host's several Agents stay apart at the receiving end.
+
+  **What it does not send:** a Collector's *internal* telemetry. This Client must not touch a
+  Managed Process's configuration (ADR-0011), so what it reports is what it observes from the
+  outside. Configure the Collector for its own internals as you would without OpAMP.
+
+  **A cleartext destination is refused, not warned about.** `http://` beyond the loopback interface
+  is rejected and reported back to the Server, because the stream carries identifying attributes and
+  whatever the Client logs. The protocol explicitly permits this refusal.
+
 - **Mutual TLS, with client certificates this Server issues itself**
   ([ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)). Goal 17 is
   complete: the connection is encrypted, and the peer at each end can now be proved.
@@ -54,6 +80,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `client_ca_file` unset for as long as it takes to re-enrol.
 
 ### Changed
+
+- **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
+  now that one offer can also carry telemetry destinations
+  ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).
+
+  One consequence on upgrade: every Agent's stored hash stops matching, so the Server sends its
+  standing offer once more and each Agent verifies and re-applies it. That is one extra exchange per
+  Agent, no reconnect and no downtime, and it settles by itself.
 
 - **A connection-settings offer carrying `tls` or `proxy` is no longer acknowledged `APPLIED`.**
   The Client never implemented those two fields and dropped them silently while reporting success,

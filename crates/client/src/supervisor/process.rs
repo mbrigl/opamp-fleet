@@ -505,6 +505,8 @@ impl Runner {
         match command.spawn() {
             Ok(child) => {
                 info!(supervisor = %self.name, program = %spec.program.display(), "process started");
+                // Before the health report, so a sampler that wakes on it already has the pid.
+                self.events.send(ProcessEvent::Pid(child.id())).await;
                 self.events
                     .send(ProcessEvent::Health(ComponentHealth {
                         healthy: true,

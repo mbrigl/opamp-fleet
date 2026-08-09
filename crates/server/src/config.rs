@@ -32,6 +32,9 @@ pub struct ServerConfig {
     /// Optional certificate authority for signing Agent CSRs (ADR-0035); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
+    /// Optional destinations for the Agents' own telemetry (ADR-0036); absent means none is
+    /// offered and no Agent reports any.
+    pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Where software packages are persisted — artifact + metadata each (ADR-0015). An empty or
     /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
     #[serde(default = "default_packages_dir")]
@@ -175,6 +178,52 @@ impl AuthConfig {
     }
 }
 
+/// The `[telemetry_offer]` section (ADR-0036): where Agents send their own telemetry. Each signal
+/// is independent — offering only metrics leaves traces and logs unconfigured, and an Agent that
+/// receives no destination for a signal reports none.
+///
+/// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
+/// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
+/// telemetry disappears into a 404 nobody looks at.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryOfferConfig {
+    pub metrics_endpoint: Option<String>,
+    pub traces_endpoint: Option<String>,
+    pub logs_endpoint: Option<String>,
+    /// Headers sent with every signal — an access token for the receiving backend, typically.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl TelemetryOfferConfig {
+    /// Loud validation (ADR-0008): an empty section offers nothing and is never what an operator
+    /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
+    fn check(&self) -> Result<(), String> {
+        let endpoints = [
+            ("metrics_endpoint", &self.metrics_endpoint),
+            ("traces_endpoint", &self.traces_endpoint),
+            ("logs_endpoint", &self.logs_endpoint),
+        ];
+        if endpoints.iter().all(|(_, value)| value.is_none()) {
+            return Err(
+                "a [telemetry_offer] section needs at least one of metrics_endpoint,                  traces_endpoint, or logs_endpoint"
+                    .to_string(),
+            );
+        }
+        for (key, value) in endpoints {
+            if let Some(endpoint) = value {
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(format!(
+                        "[telemetry_offer] {key} must be a full OTLP/HTTP URL with path, e.g.                          https://collector.example:4318/v1/metrics"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -265,6 +314,7 @@ impl Default for ServerConfig {
             auth: None,
             connection_offer: None,
             client_ca: None,
+            telemetry_offer: None,
             packages_dir: default_packages_dir(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
@@ -295,6 +345,11 @@ impl ServerConfig {
         }
         if let Some(client_ca) = &config.client_ca {
             client_ca
+                .check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(telemetry) = &config.telemetry_offer {
+            telemetry
                 .check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }

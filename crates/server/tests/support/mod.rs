@@ -176,3 +176,27 @@ pub async fn distribute_with_role(
         .expect("put the configuration");
     assert_eq!(response.status(), 200, "the configuration is accepted");
 }
+
+/// The same real router with own-telemetry destinations to offer (ADR-0036).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_telemetry(offer: server::fleet::TelemetryOffer) -> TestServer {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("open the configuration store")
+            .with_telemetry_offer(offer),
+    );
+    let app = server::app(state.clone(), server::transport::Admission::open());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    TestServer {
+        addr,
+        state,
+        _dir: dir,
+    }
+}

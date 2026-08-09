@@ -93,6 +93,15 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let telemetry_offer = config
+        .telemetry_offer
+        .as_ref()
+        .map(server::fleet::TelemetryOffer::from_config)
+        .unwrap_or_default();
+    if config.telemetry_offer.is_some() {
+        // ADR-0036.
+        info!("offering the fleet somewhere to send its own telemetry");
+    }
     let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
         Ok(store) => {
             if !store.is_empty() {
@@ -114,6 +123,7 @@ async fn main() {
             state
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
+                .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
                 .with_max_package_size(config.max_package_size_bytes),

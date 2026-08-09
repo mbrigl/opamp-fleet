@@ -16,6 +16,7 @@ a service.
 - [The REST API](#the-rest-api)
 - [Authentication](#authentication)
 - [TLS](#tls)
+- [The fleet's own telemetry](#the-fleets-own-telemetry)
 - [Moving the fleet: connection settings](#moving-the-fleet-connection-settings)
 - [What the Server does not do](#what-the-server-does-not-do)
 
@@ -90,6 +91,19 @@ TLS (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 cert_file = "cert.pem"
 key_file = "key.pem"
 client_ca_file = "client-ca.pem"   # optional: require a client certificate on /v1/opamp
+```
+
+### `[telemetry_offer]`
+
+Optional. Where Agents send their own telemetry — see
+[The fleet's own telemetry](#the-fleets-own-telemetry). At least one endpoint is required if the
+section is present.
+
+```toml
+[telemetry_offer]
+metrics_endpoint = "https://collector.example:4318/v1/metrics"
+[telemetry_offer.headers]
+Authorization = "Bearer a-telemetry-token"
 ```
 
 ### `[client_ca]`
@@ -445,6 +459,43 @@ Clients trusting a private CA additionally set `ca_file` in their own `[tls]` se
 
 The Server can also **verify a client certificate**, which is the other half of the same section:
 see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection).
+
+## The fleet's own telemetry
+
+`[telemetry_offer]` (ADR-0036) is where the fleet's Clients send their own metrics, logs, and
+traces. Each signal is independent, and each is offered only to Agents that declare they can report
+it:
+
+```toml
+[telemetry_offer]
+metrics_endpoint = "https://collector.example:4318/v1/metrics"
+traces_endpoint = "https://collector.example:4318/v1/traces"
+logs_endpoint = "https://collector.example:4318/v1/logs"
+[telemetry_offer.headers]
+Authorization = "Bearer a-telemetry-token"
+```
+
+The endpoints are **full OTLP/HTTP URLs with path**. This Server appends no `/v1/metrics` for you:
+guessing a receiver's routing is how telemetry disappears into a `404` nobody looks at.
+
+**Nothing is configured on the Client.** The capability an Agent declares means "I can report to the
+destination *you* name", so this section is the only place a destination comes from — and with no
+section, no Agent sends anything.
+
+What arrives: process metrics every 30 seconds (CPU, memory, uptime) for each Client's own process
+*and* for every process it supervises; each Client's own log output as OTLP records; and one span
+per operation that already has a lifecycle here — a configuration being applied, a package being
+installed, a self-update. Each Agent's Resource carries its identifying attributes, so one host's
+several Agents stay apart at the receiving end.
+
+Two limits worth knowing before you point this somewhere:
+
+- **A cleartext destination is refused.** `http://` beyond the loopback interface is rejected by the
+  Agent and reported back, because the stream carries identifying attributes and whatever the Client
+  logs. The protocol permits exactly this refusal.
+- **A Collector's internal telemetry does not come this way.** The Client must not touch a Managed
+  Process's configuration (ADR-0011), so what it reports about a Collector is what it can see from
+  outside. Configure the Collector for its own internals as you would without OpAMP.
 
 ## Moving the fleet: connection settings
 

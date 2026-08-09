@@ -68,6 +68,24 @@ max_message_size_bytes = 67108864
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
 
+# Optional destinations for the Agents' own telemetry (ADR-0036). Each signal is independent, and
+# each is offered only to Agents that declare they can report it. The endpoints are full OTLP/HTTP
+# URLs WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing
+# is how telemetry disappears into a 404 nobody looks at.
+#
+# An Agent sends process metrics for itself and for each process it supervises, its own log output,
+# and spans over the operations that already have a lifecycle here (a configuration applied, a
+# package installed, a self-update). It refuses a cleartext http:// destination beyond loopback.
+#
+# Nothing about this is configured on the Client: the capability means "report to the destination
+# the Server specifies", so this section is the only place it comes from.
+# [telemetry_offer]
+# metrics_endpoint = "https://collector.example:4318/v1/metrics"
+# traces_endpoint = "https://collector.example:4318/v1/traces"
+# logs_endpoint = "https://collector.example:4318/v1/logs"
+# [telemetry_offer.headers]
+# Authorization = "Bearer a-telemetry-token"
+
 # Where software packages are persisted (ADR-0015): one artifact + metadata pair each. Upload a
 # package with PUT /api/v1/packages/{name}?version=<v> (artifact as the body, optional Ed25519
 # signature=<hex>) — or, instead of uploading, point it at an artifact hosted elsewhere with
