@@ -1,6 +1,6 @@
 # ADR-0035: Mutual TLS with a Server-issued client certificate — the credential bootstraps it, the CSR flow renews it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 
