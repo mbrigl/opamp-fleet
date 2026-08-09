@@ -18,6 +18,7 @@ pub mod cli;
 pub mod config;
 pub mod config_init;
 pub mod connection;
+pub mod csr;
 pub mod engine;
 pub mod packages;
 pub mod selfupdate;

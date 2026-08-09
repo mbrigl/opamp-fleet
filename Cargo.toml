@@ -34,16 +34,19 @@ uuid = { version = "1", features = ["v7"] }
 # on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0017).
 flate2 = "1"
 # Opening a `.7z` package artifact, encrypted or not (ADR-0017). Pure Rust; default features are
-# off because they pull `bzip2`, which binds to C — `aes256` is the RustCrypto AES this needs, and
-# LZMA/LZMA2 decoding is in the base. Keeps the C-free build chain of ADR-0006 and ADR-0007.
+# off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
+# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0006 and ADR-0007
+# actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
+# `ring` compiles C and assembly in its build script, so a C compiler is required either way
+# (ADR-0013).
 # `compress` adds the *writer*, which is behind that one feature in its entirety: it is what lets
 # `opamp-package-sign pack` build the artifact an operator has otherwise no supported way to
 # produce. The Client daemon never encodes, so the linker drops it — measured at +7 KB on the
 # release binary, against a build-time cost only.
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
-# Reading the tar inside a `.tar.gz` package artifact (ADR-0017). Pure Rust, no C toolchain, which
-# is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and never
-# writes a path the archive chose.
+# Reading the tar inside a `.tar.gz` package artifact (ADR-0017). Pure Rust and no system library,
+# which is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and
+# never writes a path the archive chose.
 tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0013).
 base64 = "0.22"
@@ -62,6 +65,23 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
 rustls-pemfile = "2"
+# The client-certificate CSR flow (ADR-0013): the Client produces the request, the Server signs it
+# as a local CA. Pinned to the `ring` backend — the provider ADR-0007 already installs, whose C is
+# already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
+# `x509-parser` is what reads a CSR back, and a certificate's validity for the renewal window.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+# The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
+# validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in
+# the tree as rcgen's own dependency, and preferable to hand-rolling calendar arithmetic.
+time = { version = "0.3", default-features = false, features = ["std"] }
+# Reading back the validity of the certificate the Client holds, which is what decides when to
+# renew (ADR-0013). rcgen parses X.509 only behind a private, test-only path, so this is the
+# public way in — and it is the very parser rcgen itself uses, already in the tree.
+x509-parser = "0.18"
+# The built-in root store, for the one case the transports' own defaults cannot cover: a Client
+# presenting a client certificate (ADR-0013) to a Server with a publicly trusted one, which needs
+# a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
+webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered

@@ -58,7 +58,10 @@ async fn spawn_full(
             .with_connection_offer(offer)
             .with_max_message_size(limit),
     );
-    let app = server::app(state.clone(), auth);
+    let app = server::app(
+        state.clone(),
+        server::transport::Admission::new(auth, false),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
