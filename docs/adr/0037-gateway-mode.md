@@ -220,7 +220,11 @@ none**.
   a number behind it, than a guess now.
 - Negative / trade-offs: the Client grows a second listener and a second connection manager, and the
   combination of Supervisor Mode and Gateway Mode on one host is now a real test surface rather than
-  a hypothetical one — as ADR-0003 predicted.
+  a hypothetical one — as ADR-0003 predicted. It is covered in
+  [`gateway_and_supervisor_e2e.rs`](../../crates/client/tests/gateway_and_supervisor_e2e.rs): both
+  modes armed in one process, a gateway that cannot bind leaving the host's own management intact,
+  and the interaction that only exists because they share a process — a verified offer restarting
+  the gateway task while the Supervisors run straight through it.
 - Follow-ups: re-balancing when the pool grows, if a real fleet is ever lopsided enough to warrant
   it. Server-side liveness for Agents behind a Gateway. And the Gateway's own downstream
   `[gateway.tls]` is a third place TLS material is configured on a Client — worth consolidating if a
