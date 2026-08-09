@@ -15,6 +15,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **A Client running as a service now writes its own log to disk**
+  ([ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)), at
+  `<state_dir>/logs/`, one file per day with seven days kept.
+
+  **On Windows this closes a hole**: the SCM discards a service's stderr, so a Client installed
+  there had no readable log at all — a service that would not start left nothing behind to explain
+  why. The file is written on Linux and macOS too, where it duplicates `journalctl` and
+  Console/`log show`, so that the answer to "where are the logs" is the same on every platform and
+  in a container, where neither exists.
+
+  Running the Client in the foreground writes no file; stderr is already in front of you.
+
+  It is not a replacement for `ReportsOwnLogs` (ADR-0036): that ships to a destination the Server
+  offers, over a connection that must already work, and the failures most worth reading are the ones
+  where it does not.
+
+  The new `[logging]` section moves the directory, changes the retention, or switches it off:
+
+  ```toml
+  [logging]
+  dir = "/var/log/opamp"   # default: <state_dir>/logs
+  keep = 7                 # daily files kept, then deleted
+  enabled = false          # write nothing
+  ```
+
+  **`keep = 0` is refused at startup** rather than read as "keep everything": on a fleet host the
+  unbounded setting is the one that fills a disk, so switching the log off is spelled
+  `enabled = false`. A log directory that cannot be written is reported and the Client runs anyway.
+
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 

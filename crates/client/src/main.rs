@@ -28,6 +28,14 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with(tracing_subscriber::fmt::layer())
+        // The log file (ADR-0041), which discards everything until a service run opens it — the
+        // state directory is not known until the command line is parsed, a few lines below. No
+        // colour: this one is read with a pager, not a terminal.
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(client::logging::LogFile),
+        )
         .init();
 
     // One TLS provider for the whole process (ADR-0007): ring, never a system library.
@@ -38,17 +46,20 @@ fn main() {
     let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {
         // A bare invocation defaults to `run`, preserving the pre-subcommand contract.
+        // A bare invocation is a person at a terminal, so it writes no log file (ADR-0041).
         None => runtime::run_foreground(RunSpec {
             config_path: cli.config,
             state_dir: cli.state_dir,
+            service: false,
         }),
-        Some(Command::Run(args)) => run_command(
-            RunSpec {
+        Some(Command::Run(args)) => {
+            let spec = RunSpec {
                 config_path: cli.config,
                 state_dir: cli.state_dir,
-            },
-            args,
-        ),
+                service: args.service,
+            };
+            run_command(spec, args)
+        }
         Some(Command::Service { action }) => {
             service_command(&cli.config, config_named, cli.instance, &action)
         }

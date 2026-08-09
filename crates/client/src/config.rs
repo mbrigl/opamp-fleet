@@ -68,6 +68,10 @@ pub struct ClientConfig {
     /// Consent for the Server to replace this Client's own binary (ADR-0020); absent — the
     /// default — means the Client's Agent accepts no packages at all.
     pub self_update: Option<SelfUpdateConfig>,
+    /// Where this Client's own log goes when it runs as a service (ADR-0041). Absent takes the
+    /// defaults: a rotating file in the state directory, seven days kept.
+    #[serde(default)]
+    pub logging: LoggingConfig,
     /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
@@ -462,6 +466,51 @@ pub struct SelfUpdateConfig {
     pub package: String,
 }
 
+/// The `[logging]` section (ADR-0041): this Client's own log, on disk, while it runs as a service.
+///
+/// It exists because the Windows SCM discards a service's stderr, so a Client installed there had
+/// no readable log at all — and because the OTLP own-logs bridge (ADR-0036) needs a Server that is
+/// already reachable, which is precisely what a startup failure is not. In the foreground nothing
+/// is written: somebody is reading stderr there.
+///
+/// It is the machine's, never the Server's. A Server able to redirect or silence a Client's own log
+/// could hide its own effects, so nothing here arrives over the wire.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    /// Write the file at all. `false` is for an operator whose platform already collects stderr —
+    /// systemd and launchd do — and who does not want the copy.
+    #[serde(default = "default_logging_enabled")]
+    pub enabled: bool,
+    /// Where the file goes. Absent puts it in the instance's state directory, which survives an
+    /// update and which `uninstall` deliberately does not delete (ADR-0010) — the lifetime a log
+    /// wants, since one that vanished with a failed install would be missing exactly when needed.
+    pub dir: Option<PathBuf>,
+    /// How many daily files to keep. The bound is not optional: `0` is refused at load rather than
+    /// read as "keep everything", because unbounded is the setting that fills a disk on a host
+    /// nobody is watching.
+    #[serde(default = "default_log_keep_days")]
+    pub keep: usize,
+}
+
+fn default_logging_enabled() -> bool {
+    true
+}
+
+fn default_log_keep_days() -> usize {
+    7
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        LoggingConfig {
+            enabled: default_logging_enabled(),
+            dir: None,
+            keep: default_log_keep_days(),
+        }
+    }
+}
+
 /// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
 /// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
 /// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
@@ -593,6 +642,7 @@ impl Default for ClientConfig {
         ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
+            logging: LoggingConfig::default(),
             service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
@@ -658,6 +708,16 @@ impl ClientConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        // The retention bound is not optional (ADR-0041). Elsewhere a zero often means "no limit";
+        // here that is the one setting that fills a disk on a host nobody is watching, so it fails
+        // startup instead of being reachable by typing a digit.
+        if config.logging.enabled && config.logging.keep == 0 {
+            return Err(format!(
+                "{}: [logging] keep must be at least 1 — it is a retention bound, not a switch; \
+                 set enabled = false to write no log at all",
                 path.display()
             ));
         }
@@ -823,6 +883,49 @@ mod tests {
             toml::from_str::<ClientConfig>("service_namesapce = \"telemetry\"\n").is_err(),
             "a typo fails startup rather than silently reporting no namespace"
         );
+    }
+
+    /// ADR-0041. The log is on by default with a bound that cannot be removed, and `[logging]` is
+    /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
+    /// that would have explained the next failure.
+    #[test]
+    fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
+        let defaults = ClientConfig::default().logging;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.keep, 7);
+        assert!(defaults.dir.is_none(), "the state directory decides");
+
+        let configured: ClientConfig =
+            toml::from_str("[logging]\nkeep = 3\ndir = \"/var/log/opamp\"\n").expect("parse");
+        assert_eq!(configured.logging.keep, 3);
+        assert_eq!(
+            configured.logging.dir.expect("dir"),
+            PathBuf::from("/var/log/opamp")
+        );
+
+        let off: ClientConfig = toml::from_str("[logging]\nenabled = false\n").expect("parse");
+        assert!(!off.logging.enabled);
+
+        assert!(
+            toml::from_str::<ClientConfig>("[logging]\nkep = 3\n").is_err(),
+            "a typo fails startup rather than silently taking the default"
+        );
+
+        // `keep = 0` is the one setting that fills a disk on a host nobody watches, so it is not
+        // reachable: it fails startup and the message points at the switch that does mean "off".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "[logging]\nkeep = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero retention must fail startup");
+        assert!(err.contains("keep"), "{err}");
+        assert!(
+            err.contains("enabled = false"),
+            "it names the way out: {err}"
+        );
+
+        // ...but a zero is irrelevant when no file is written at all.
+        std::fs::write(&path, "[logging]\nenabled = false\nkeep = 0\n").expect("write");
+        assert!(ClientConfig::load(&path).is_ok());
     }
 
     /// ADR-0020: self-update is off unless the file says otherwise, and saying so means naming the

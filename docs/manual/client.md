@@ -139,6 +139,43 @@ Where a platform has a second, human-readable name, it is **OpAMP Fleet Client**
 Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
 as its `Description`, and a launchd job has no name besides its label.
 
+### Where the service's logs are
+
+A Client started by the service manager writes its own log to **`<state_dir>/logs/`** on every
+platform (ADR-0041), one file per day, seven days kept:
+
+```
+<state_dir>/logs/opamp-fleet-client.2026-08-09.log
+```
+
+**On Windows this is the only copy there is** — the SCM discards a service's stderr, so `sc query`
+telling you the service will not start is all the platform itself offers. On Linux and macOS the
+same lines are also in `journalctl -u opamp-fleet-client` and Console/`log show`; the file is
+written anyway so the answer to "where are the logs" is the same everywhere, including in a
+container where neither exists.
+
+Running the Client **in the foreground writes no file** — stderr is right there in front of you.
+
+The `[logging]` section moves it, changes how many days are kept, or turns it off:
+
+```toml
+[logging]
+dir = "/var/log/opamp"   # default: <state_dir>/logs
+keep = 7                 # daily files kept, then deleted
+enabled = false          # write nothing; for a host whose platform already collects stderr
+```
+
+`keep = 0` is **refused at startup**. It is a retention bound, not a switch — on a fleet host the
+unbounded setting is the one that eventually fills a disk, so turning the log off is spelled
+`enabled = false` and cannot be reached by typing a zero. If the directory cannot be written, the
+Client says so and runs anyway: a monitoring agent that refuses to start because of its own log
+file has turned a diagnostic into an outage.
+
+This is a different thing from the Client's own telemetry (`ReportsOwnLogs`, ADR-0036), which ships
+log records to a destination the **Server** offers. That needs a Server it can already reach — which
+is exactly what a bad `client.toml`, an unusable certificate, or a refused endpoint does not give
+it. The file on disk is what explains those.
+
 The Windows services list has a **Description** column beside that name, and it is a separate field
 that nothing fills on its own — a service can carry a display name and still show an empty
 description, which is what this one did. It now reads **OpAMP Fleet Client for Windows**, the same
@@ -525,6 +562,7 @@ The Client's own Agent keeps its state in `state_dir`:
 <state_dir>/remote-config.pb          # the last configuration it received
 <state_dir>/connection-settings.pb    # Server-offered settings, if any
 <state_dir>/packages/                 # staging for a self-update artifact
+<state_dir>/logs/                     # the service's own rotating log (ADR-0041)
 ```
 
 Each Supervisor owns everything under its own directory (ADR-0021):

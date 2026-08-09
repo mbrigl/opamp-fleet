@@ -30,6 +30,18 @@ max_message_size_bytes = 67108864
 # directory needs room for one agent binary.
 state_dir = "client-state"
 
+# The Client's own log on disk (ADR-0041), written **only while it runs as a service** — in the
+# foreground it goes to stderr alone, because somebody is reading it there. It exists because the
+# Windows SCM discards a service's stderr, so a Client installed there had no readable log at all;
+# on Linux and macOS it duplicates what journalctl and `log show` already keep, so that "where are
+# the logs" has one answer on every platform. This is not the own-telemetry of ADR-0036: that needs
+# a Server it can already reach, which is exactly what a start-up failure does not have.
+# It is the machine's — nothing here ever arrives from the Server.
+# [logging]
+# enabled = true            # false writes nothing; for a host whose platform already collects stderr
+# dir = "/var/log/opamp"    # default: <state_dir>/logs, which survives updates and `uninstall`
+# keep = 7                  # daily files kept, then deleted. A bound, not a switch: 0 is refused
+
 # Where the per-Supervisor directories live (ADR-0021); the default is <state_dir>/supervisors.
 # Each Supervisor owns everything under its own directory — its identity, the received
 # configuration, its program/, and the artifact staging its updates go through:

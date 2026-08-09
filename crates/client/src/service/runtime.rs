@@ -23,6 +23,10 @@ pub struct RunSpec {
     pub config_path: PathBuf,
     /// Overrides the configuration file's `state_dir` when present.
     pub state_dir: Option<PathBuf>,
+    /// Started by the machine's service manager rather than by a person (ADR-0041). Set from the
+    /// hidden `--service` marker `service install` writes into the command line on every platform,
+    /// and the whole of the condition for writing the log file: it says no terminal is watching.
+    pub service: bool,
 }
 
 /// How a daemon run ended, which decides how the process leaves.
@@ -110,6 +114,30 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens the Client's own log file for a service run (ADR-0041).
+///
+/// **A log that cannot be written never stops the Client.** A directory the installer did not make
+/// writable, or a full disk, is reported on stderr — which the SCM discards, which is the whole
+/// problem, so it also stays visible to anyone running the same command by hand — and the run
+/// continues. A monitoring agent that refuses to start because it could not open its own log has
+/// turned a diagnostic into an outage.
+fn start_log_file(config: &crate::config::ClientConfig) {
+    if !config.logging.enabled {
+        return;
+    }
+    let dir = config
+        .logging
+        .dir
+        .clone()
+        .unwrap_or_else(|| crate::logging::default_dir(&config.state_dir));
+    match crate::logging::open(&dir, config.logging.keep) {
+        Ok(dir) => {
+            tracing::info!(dir = %dir.display(), keep = config.logging.keep, "logging to file")
+        }
+        Err(e) => tracing::warn!(error = %e, "running without a log file"),
+    }
+}
+
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
 /// none are), and run the transport the endpoint selects (ADR-0007) until `shutdown` fires.
 ///
@@ -118,6 +146,9 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
 pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result<Exit, String> {
     heal_torn_pointer();
     let mut config = load_effective_config(&spec)?;
+    if spec.service {
+        start_log_file(&config);
+    }
 
     // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
