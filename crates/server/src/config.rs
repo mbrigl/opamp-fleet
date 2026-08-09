@@ -54,6 +54,11 @@ pub struct ServerConfig {
     /// and it travels over the REST plane, never in an OpAMP message.
     #[serde(default = "default_max_package_size")]
     pub max_package_size_bytes: usize,
+    /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
+    /// it stale (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — the
+    /// period this Server asked for is a better answer than a default.
+    #[serde(default = "default_stale_after_secs")]
+    pub stale_after_secs: u64,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -296,6 +301,12 @@ fn default_max_message_size() -> usize {
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
 /// enough that a certificate is not a permanent grant (ADR-0035).
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0038): one missed beat is a
+/// lost packet, and a fleet view that flickers is one nobody trusts.
+fn default_stale_after_secs() -> u64 {
+    90
+}
+
 fn default_validity_days() -> u32 {
     90
 }
@@ -319,6 +330,7 @@ impl Default for ServerConfig {
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
+            stale_after_secs: default_stale_after_secs(),
         }
     }
 }
@@ -368,6 +380,13 @@ impl ServerConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        if config.stale_after_secs == 0 {
+            return Err(format!(
+                "{}: stale_after_secs must be greater than zero — a budget of nothing would call \
+                 every Agent stale the instant it reported",
                 path.display()
             ));
         }

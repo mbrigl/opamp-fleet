@@ -126,7 +126,8 @@ async fn main() {
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
-                .with_max_package_size(config.max_package_size_bytes),
+                .with_max_package_size(config.max_package_size_bytes)
+                .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs)),
         ),
         Err(e) => {
             eprintln!("{e}");

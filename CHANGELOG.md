@@ -15,6 +15,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **A fleet row now says when an Agent stopped talking**
+  ([ADR-0038](docs/adr/0038-an-agent-that-stops-reporting-goes-stale.md)). `AgentView` gains
+  `stale`, and the bundled UI shows it beside the connection pill.
+
+  It is a second fact, not a replacement: `connected` still means "a connection carrying this Agent
+  is open" — behind a Gateway, the *Gateway's* — and `stale` means nothing has been heard from the
+  Agent itself for longer than its budget. `connected: true, stale: true` is exactly the gatewayed
+  case, and it was invisible before.
+
+  Only an Agent declaring `ReportsHeartbeat` can go stale: that capability is the promise that makes
+  silence meaningful. The budget is the offered `heartbeat_interval_secs` times three, or
+  `stale_after_secs` in `server.toml` (default 90) when no interval is offered.
+
+  Nothing changes for a stale Agent — it keeps its configuration, its packages, and its identity,
+  and its next report clears the flag. Nothing is stored and no timer runs.
+
 - **Gateway Mode** ([ADR-0037](docs/adr/0037-gateway-mode.md)): a Client can now stand at a network
   boundary, accept OpAMP from other Clients, and carry them upstream over a small pool of
   connections. This is the last of the specification's goals to be built.

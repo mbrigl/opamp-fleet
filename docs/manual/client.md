@@ -344,8 +344,10 @@ gateway for others.
   untouched, so policy stays on the Server and rotating a credential never means visiting gateways.
 - **It never speaks for an Agent.** If a downstream Client disappears without sending
   `agent_disconnect`, the Gateway forwards nothing — inventing that message would tell the Server
-  the Agent said something it did not. Such an Agent reads as connected until someone notices; that
-  is a known gap, waiting on Server-side liveness.
+  the Agent said something it did not. What makes such an Agent visible instead is the Server's
+  staleness flag (ADR-0038): the connection stays up, because it is the Gateway's, and the row reads
+  **Connected + Stale**. It needs a heartbeat configured on the Agent to work, since staleness only
+  applies to Agents that promised to report periodically.
 - **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop (ADR-0035):
   `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
   this Client's own, from the top-level `[tls]` or issued through the CSR flow.

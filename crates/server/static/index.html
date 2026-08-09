@@ -369,9 +369,14 @@
       };
 
       function statusPill(a) {
-        return a.connected
+        // Two facts, not one (ADR-0038): the pill says whether a connection is open — behind a
+        // Gateway, the Gateway's — and "Stale" beside it says the Agent itself stopped talking.
+        const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
           : `<span class="pill gray"><span class="dot"></span>Disconnected</span>`;
+        return a.stale
+          ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
+          : base;
       }
       function configPill(a) {
         if (a.remote_config_status === "FAILED")
@@ -448,7 +453,7 @@
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.health_status, a.transport]
+        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);

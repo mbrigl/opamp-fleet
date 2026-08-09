@@ -78,6 +78,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. |
+| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale** (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 | `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset for the ordinary single-listener case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when downloads must go through a different host. |
 
 ### `[tls]`
@@ -417,6 +418,7 @@ knowing by name:
 
 | Field | Meaning |
 |---|---|
+| `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away; on plain HTTP `connected` is always false and `stale` is the useful one. |
 | `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
 | `identifying_attributes`, `non_identifying_attributes` | Everything a Selector can match on. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
