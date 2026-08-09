@@ -25,6 +25,7 @@ pub mod selfupdate;
 pub mod service;
 pub mod storage;
 pub mod supervisor;
+pub mod telemetry;
 pub mod tls;
 pub mod transport;
 pub mod version;

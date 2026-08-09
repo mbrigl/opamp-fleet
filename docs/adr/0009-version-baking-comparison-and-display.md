@@ -1,6 +1,6 @@
 # ADR-0009: The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-07-23
 - **Deciders:** Markus Brigl
 
