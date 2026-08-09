@@ -46,9 +46,24 @@ state_dir = "client-state"
 # [attributes]
 # env = "prod"
 
-# Optional TLS trust override (ADR-0007) for wss:// / https:// against a private CA:
+# Optional TLS (ADR-0007, ADR-0035). Every key is optional on its own, so this section may carry a
+# trust override, a client identity, or both.
 # [tls]
-# ca_file = "ca.pem"
+# ca_file = "ca.pem"          # replaces the built-in roots — the private-CA deployment
+# cert_file = "client.pem"    # this Client's certificate, for a Server on mutual TLS
+# key_file = "client-key.pem" # its private key; cert_file and key_file go together or not at all
+#
+# The identity above is the one an operator provisions — including the BOOTSTRAP certificate a
+# fresh host enrols with. A certificate the Server issued outranks it: the Client stores that pair
+# in <state_dir> as client-cert.pem and client-key.pem and prefers it, the same way persisted
+# connection settings outrank the endpoint written here (ADR-0014). Deleting the stored pair
+# reverts to this one.
+#
+# Enrolment needs nothing here. When the Server declares that it signs (a [client_ca] section in
+# its server.toml), a Client with no certificate generates a key — which never leaves this host —
+# sends a signing request, and gets a certificate back through the ordinary offer flow; it renews
+# the same way once the certificate is two thirds through its life. So the useful order is: let the
+# fleet enrol, then have the Server require certificates.
 
 # Optional package verification (ADR-0015). With a key set, every Server-offered package MUST
 # carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on

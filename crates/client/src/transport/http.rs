@@ -43,15 +43,9 @@ pub async fn run(
             );
         }
     }
-    if let Some(tls) = &config.tls {
-        let pem = std::fs::read(&tls.ca_file)
-            .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
-        let ca = reqwest::Certificate::from_pem(&pem)
-            .map_err(|e| format!("cannot parse {}: {e}", tls.ca_file.display()))?;
-        builder = builder
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(ca);
-    }
+    // Trust, plus this Client's own certificate when it has one — a Server on mutual TLS asks for
+    // it on every request of this transport (ADR-0035).
+    builder = crate::tls::trust_and_identity(builder, config)?;
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
@@ -85,6 +79,10 @@ pub async fn run(
                     }
                 }
             }
+            // Enrolment (ADR-0035): with the Server's capabilities now known, ask it to sign a
+            // certificate if it signs them and this Client needs one. The answer arrives as an
+            // ordinary connection-settings offer, handled just below.
+            engine.request_certificate(config);
             // A connection-settings offer (ADR-0014): verify by actually connecting. Success
             // persists the settings and leaves this loop so the runtime reconnects with them;
             // failure reports FAILED with the owed reports of the next round.
@@ -93,7 +91,24 @@ pub async fn run(
                 let probe = || engine.probe_report();
                 match crate::connection::verify(&settings, config, probe).await {
                     Ok(()) => {
-                        engine.connection_settings_outcome(&offer.hash, Ok(()));
+                        // The issued certificate is stored only now, after connecting with it
+                        // proved it works — the old one stayed in force until here (ADR-0035).
+                        if let Some(certificate) = &settings.certificate {
+                            if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert)
+                            {
+                                warn!(error = %e, "cannot store the issued certificate");
+                            } else {
+                                info!("a client certificate was issued and is now in force");
+                            }
+                        }
+                        // Applied as far as this Client honours it, and said so (ADR-0035).
+                        match crate::connection::unhonoured(&settings) {
+                            Ok(()) => engine.connection_settings_outcome(&offer.hash, Ok(())),
+                            Err(e) => {
+                                warn!(error = %e, "connection settings partly applied");
+                                engine.connection_settings_outcome(&offer.hash, Err(&e));
+                            }
+                        }
                         let merged = crate::connection::merge(
                             crate::connection::load(&config.state_dir).as_ref(),
                             &offer,

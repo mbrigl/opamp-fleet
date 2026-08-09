@@ -31,7 +31,14 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsRemoteConfig as u64
     | AgentCapabilities::ReportsHealth as u64
     | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
-    | AgentCapabilities::ReportsConnectionSettingsStatus as u64;
+    | AgentCapabilities::ReportsConnectionSettingsStatus as u64
+    // The Agent's own telemetry (ADR-0036). Declared unconditionally, unlike the capabilities that
+    // describe something this end *has*: these say the Client can report to a destination the
+    // Server names, which is true before any destination exists — and declaring them only once one
+    // is in force would mean the Server could never make the first offer.
+    | AgentCapabilities::ReportsOwnMetrics as u64
+    | AgentCapabilities::ReportsOwnTraces as u64
+    | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a handled `ServerToAgent` asks of the transport loop.
 #[derive(Debug, Default, PartialEq)]
@@ -105,6 +112,14 @@ pub struct AgentState {
     /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
     connection_settings_status: Option<ConnectionSettingsStatus>,
     send_settings_status: bool,
+    /// The pid of the Managed Process while it runs (ADR-0036) — what own metrics are sampled
+    /// from. `None` for the Client's own Agent, whose process is this one, and for a Supervisor
+    /// between restarts.
+    process_pid: Option<u32>,
+    /// A PEM certificate signing request waiting to go out (ADR-0035), sent once and then
+    /// forgotten: the answer arrives as an ordinary connection-settings offer, and asking again
+    /// is what the renewal window decides, not this field.
+    pending_csr: Option<Vec<u8>>,
     /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0015).
     /// Which package that is, is the Server's choice (ADR-0017) — this side only consents.
     accepts_packages: bool,
@@ -189,6 +204,8 @@ impl AgentState {
             send_components_full: false,
             connection_settings_status: None,
             send_settings_status: false,
+            process_pid: None,
+            pending_csr: None,
             accepts_packages: false,
             expected_package: None,
             offered_name: None,
@@ -425,6 +442,13 @@ impl AgentState {
         }
         if self.send_full || self.send_settings_status {
             msg.connection_settings_status = self.connection_settings_status.clone();
+        }
+        if let Some(csr) = self.pending_csr.take() {
+            msg.connection_settings_request = Some(opamp::proto::ConnectionSettingsRequest {
+                opamp: Some(opamp::proto::OpAmpConnectionSettingsRequest {
+                    certificate_request: Some(opamp::proto::CertificateRequest { csr }),
+                }),
+            });
         }
         if self.accepts_packages && (self.send_full || self.send_package_status) {
             msg.package_statuses = Some(self.package_statuses());
@@ -826,6 +850,42 @@ impl AgentState {
             }
         }
         self.send_status = true;
+    }
+
+    /// Whether a Managed Process stands behind this Agent — false for the Client's own Agent,
+    /// which is the one that carries what belongs to the connection rather than to a process.
+    pub fn is_managed(&self) -> bool {
+        self.managed
+    }
+
+    /// This Agent's description, for the Resource of its own telemetry (ADR-0036).
+    pub fn description(&self) -> AgentDescription {
+        self.describe()
+    }
+
+    /// The Managed Process's pid changed — it started, or it is gone (ADR-0036).
+    pub fn set_process_pid(&mut self, pid: Option<u32>) {
+        self.process_pid = pid;
+    }
+
+    /// The pid own metrics are sampled from, if this Agent has a process and it is running.
+    pub fn process_pid(&self) -> Option<u32> {
+        self.process_pid
+    }
+
+    /// Queues a certificate signing request for the next report (ADR-0035).
+    pub fn request_certificate(&mut self, csr: Vec<u8>) {
+        self.pending_csr = Some(csr);
+    }
+
+    /// Whether this Server signs certificates at all. Unlike the effective-config check below this
+    /// starts pessimistic: sending a CSR to a Server that never declared the capability would be
+    /// answered with the Baseline's `BadRequest`, and the protocol's negotiation rule says not to
+    /// exercise what the peer has not declared.
+    pub fn server_signs_certificates(&self) -> bool {
+        self.server_capabilities.is_some_and(|caps| {
+            caps & ServerCapabilities::AcceptsConnectionSettingsRequest as u64 != 0
+        })
     }
 
     fn server_accepts_effective_config(&self) -> bool {

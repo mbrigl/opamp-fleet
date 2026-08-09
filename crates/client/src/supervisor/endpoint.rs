@@ -273,6 +273,7 @@ mod tests {
             assert_eq!(index, 0);
             kinds.push(match event {
                 ProcessEvent::Description(_) => "description",
+                ProcessEvent::Pid(_) => "pid",
                 ProcessEvent::Health(_) => "health",
                 ProcessEvent::EffectiveConfig(_) => "effective",
                 ProcessEvent::AvailableComponents(_) => "components",

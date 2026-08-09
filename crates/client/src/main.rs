@@ -12,11 +12,22 @@ use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLe
 use client::{selfupdate, version};
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // stderr as always, plus an empty slot the OTLP log bridge is dropped into once the Server
+    // names a destination (ADR-0036). The slot has to exist from the start: `tracing` takes one
+    // subscriber for the process, and it is installed long before any destination is known.
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let (bridge, handle) = tracing_subscriber::reload::Layer::new(None);
+    client::telemetry::hold_log_bridge(handle);
+    // The bridge goes on first: a reloadable layer is typed for the subscriber it attaches to, and
+    // the registry is the only one of these that stays the same shape when the slot is filled.
+    tracing_subscriber::registry()
+        .with(bridge)
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with(tracing_subscriber::fmt::layer())
         .init();
 
     // One TLS provider for the whole process (ADR-0007): ring, never a system library.

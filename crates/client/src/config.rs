@@ -463,7 +463,30 @@ pub struct SelfUpdateConfig {
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
-    pub ca_file: PathBuf,
+    /// Optional, so a `[tls]` section can carry a client identity alone and keep the public roots.
+    pub ca_file: Option<PathBuf>,
+    /// PEM client certificate chain this Client presents (ADR-0035), for a fleet whose Server
+    /// demands mutual TLS. Together with [`key_file`](Self::key_file), and useless without it.
+    ///
+    /// This is the operator-provisioned identity, including the **bootstrap certificate** a host
+    /// enrols with. An identity the Server issued outranks it: the Client stores that one in its
+    /// state directory and prefers it, exactly as persisted connection settings outrank the
+    /// endpoint written here (ADR-0014). Deleting the stored pair falls back to this one.
+    pub cert_file: Option<PathBuf>,
+    /// PEM private key for [`cert_file`](Self::cert_file). Never leaves the host.
+    pub key_file: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    /// Loud validation (ADR-0008): half an identity is a configuration error, not a fallback to
+    /// none — a Server demanding mutual TLS would refuse the connection with no hint why.
+    fn check(&self) -> Result<(), String> {
+        match (&self.cert_file, &self.key_file) {
+            (Some(_), None) => Err("[tls] cert_file needs key_file beside it".to_string()),
+            (None, Some(_)) => Err("[tls] key_file needs cert_file beside it".to_string()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The transport the endpoint's scheme selects (ADR-0007).
@@ -547,6 +570,10 @@ impl ClientConfig {
             auth.authorization()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        if let Some(tls) = &config.tls {
+            tls.check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         // Decode the package verification key once — a malformed key must fail startup, not the
         // first package offer.
         if let Some(key_hex) = config
@@ -576,6 +603,28 @@ impl ClientConfig {
     /// The Ed25519 public key package signatures are verified against (ADR-0015), or `None`.
     pub fn package_key(&self) -> Option<&[u8]> {
         self.package_key.as_deref()
+    }
+
+    /// The client certificate and key this Client presents on both transports (ADR-0035), or
+    /// `None` when it has no identity to present.
+    ///
+    /// A pair the Server issued outranks the configured one, the same precedence persisted
+    /// connection settings have over `client.toml` (ADR-0014): the file stays what the operator
+    /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
+    /// certificate — it keeps standing in `client.toml`, unused, once a real one has been issued.
+    pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
+        let cert = self.state_dir.join(crate::tls::ISSUED_CERT_FILE);
+        let key = self.state_dir.join(crate::tls::ISSUED_KEY_FILE);
+        if cert.exists() && key.exists() {
+            return Some((cert, key));
+        }
+        let tls = self.tls.as_ref()?;
+        Some((tls.cert_file.clone()?, tls.key_file.clone()?))
+    }
+
+    /// The CA bundle that replaces the built-in roots, when one is configured (ADR-0007).
+    pub fn ca_file(&self) -> Option<&Path> {
+        self.tls.as_ref()?.ca_file.as_deref()
     }
 
     /// The root the per-Supervisor directories sit under (ADR-0021) — `supervisor_dir` when the

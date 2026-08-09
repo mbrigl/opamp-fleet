@@ -25,7 +25,7 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
             .expect("configs")
             .with_packages(Some(PackageOffering::new(store, String::new()))),
     );
-    let app = server::app(state.clone(), None);
+    let app = server::app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -310,7 +310,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
             .with_packages(Some(PackageOffering::new(store, String::new())))
             .with_max_package_size(4096),
     );
-    let app = server::app(state, None);
+    let app = server::app(state, server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

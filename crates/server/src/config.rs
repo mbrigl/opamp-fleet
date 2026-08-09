@@ -29,6 +29,12 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     /// Optional connection settings offered to the fleet (ADR-0014); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
+    /// Optional certificate authority for signing Agent CSRs (ADR-0035); absent means the Server
+    /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
+    pub client_ca: Option<ClientCaConfig>,
+    /// Optional destinations for the Agents' own telemetry (ADR-0036); absent means none is
+    /// offered and no Agent reports any.
+    pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Where software packages are persisted — artifact + metadata each (ADR-0015). An empty or
     /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
     #[serde(default = "default_packages_dir")]
@@ -172,6 +178,52 @@ impl AuthConfig {
     }
 }
 
+/// The `[telemetry_offer]` section (ADR-0036): where Agents send their own telemetry. Each signal
+/// is independent — offering only metrics leaves traces and logs unconfigured, and an Agent that
+/// receives no destination for a signal reports none.
+///
+/// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
+/// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
+/// telemetry disappears into a 404 nobody looks at.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryOfferConfig {
+    pub metrics_endpoint: Option<String>,
+    pub traces_endpoint: Option<String>,
+    pub logs_endpoint: Option<String>,
+    /// Headers sent with every signal — an access token for the receiving backend, typically.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl TelemetryOfferConfig {
+    /// Loud validation (ADR-0008): an empty section offers nothing and is never what an operator
+    /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
+    fn check(&self) -> Result<(), String> {
+        let endpoints = [
+            ("metrics_endpoint", &self.metrics_endpoint),
+            ("traces_endpoint", &self.traces_endpoint),
+            ("logs_endpoint", &self.logs_endpoint),
+        ];
+        if endpoints.iter().all(|(_, value)| value.is_none()) {
+            return Err(
+                "a [telemetry_offer] section needs at least one of metrics_endpoint,                  traces_endpoint, or logs_endpoint"
+                    .to_string(),
+            );
+        }
+        for (key, value) in endpoints {
+            if let Some(endpoint) = value {
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(format!(
+                        "[telemetry_offer] {key} must be a full OTLP/HTTP URL with path, e.g.                          https://collector.example:4318/v1/metrics"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -179,6 +231,51 @@ pub struct TlsConfig {
     pub cert_file: PathBuf,
     /// PEM private key.
     pub key_file: PathBuf,
+    /// Optional PEM bundle of the certificate authorities a **client** certificate must chain to
+    /// (ADR-0035). Present turns mutual TLS on for the OpAMP endpoint: every request to
+    /// `/v1/opamp` must arrive over a connection bearing a certificate this bundle verifies.
+    ///
+    /// Client authentication stays *optional at the TLS layer* — the same listener serves the
+    /// REST API and the UI (ADR-0005), and a browser presents nothing — so the requirement is
+    /// enforced on the OpAMP route rather than on the socket. A certificate that **is** presented
+    /// is always verified: rustls refuses a bad one before any route is reached.
+    pub client_ca_file: Option<PathBuf>,
+}
+
+/// The `[client_ca]` section (ADR-0035): the certificate authority this Server signs Agent CSRs
+/// with. Present is what arms the CSR flow — `AcceptsConnectionSettingsRequest` is declared only
+/// while it is, the same "declare what is actually armed" rule `[connection_offer]` follows.
+///
+/// It is deliberately *not* the listener's own certificate and key. The Baseline's own schema warns
+/// against storing a CA's private key where the server certificate lives, because compromising the
+/// Server would then mint fleet members at will.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientCaConfig {
+    /// PEM certificate of the issuing CA.
+    pub cert_file: PathBuf,
+    /// PEM private key of the issuing CA.
+    pub key_file: PathBuf,
+    /// How long an issued certificate is valid. Short is the point: this project has no revocation
+    /// story, so validity plus renewal is what bounds a certificate's reach (ADR-0035).
+    #[serde(default = "default_validity_days")]
+    pub validity_days: u32,
+}
+
+impl ClientCaConfig {
+    /// Loud validation (ADR-0008): a CA that cannot sign, or one whose certificates expire before
+    /// the Client would renew them, is a configuration error rather than a runtime surprise.
+    fn check(&self) -> Result<(), String> {
+        if self.validity_days == 0 {
+            return Err("[client_ca] validity_days must be greater than zero".to_string());
+        }
+        for path in [&self.cert_file, &self.key_file] {
+            if !path.exists() {
+                return Err(format!("[client_ca] {} does not exist", path.display()));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_listen() -> SocketAddr {
@@ -197,6 +294,12 @@ fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
 }
 
+/// Long enough that a host offline over a holiday still comes back on a valid certificate, short
+/// enough that a certificate is not a permanent grant (ADR-0035).
+fn default_validity_days() -> u32 {
+    90
+}
+
 /// Roomy enough for the real thing: an `otelcol-contrib` binary is a few hundred megabytes.
 fn default_max_package_size() -> usize {
     crate::fleet::DEFAULT_MAX_PACKAGE_SIZE
@@ -210,6 +313,8 @@ impl Default for ServerConfig {
             tls: None,
             auth: None,
             connection_offer: None,
+            client_ca: None,
+            telemetry_offer: None,
             packages_dir: default_packages_dir(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
@@ -237,6 +342,26 @@ impl ServerConfig {
             offer
                 .check(config.auth.as_ref())
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(client_ca) = &config.client_ca {
+            client_ca
+                .check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(telemetry) = &config.telemetry_offer {
+            telemetry
+                .check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
+        // this can only be a `[client_ca]` without one — issuing certificates for a channel that
+        // will never ask for them (ADR-0035).
+        if config.client_ca.is_some() && config.tls.is_none() {
+            return Err(format!(
+                "{}: [client_ca] issues client certificates, which only a TLS listener can ask \
+                 for — add a [tls] section, or remove [client_ca]",
+                path.display()
+            ));
         }
         // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
         // limit is mandatory, so a value that cannot carry a message fails startup.

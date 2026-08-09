@@ -49,7 +49,7 @@ async fn spawn_server(
             .expect("configs")
             .with_packages(Some(PackageOffering::new(store, String::new()))),
     );
-    let app = server::app(state.clone(), None);
+    let app = server::app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
