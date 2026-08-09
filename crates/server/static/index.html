@@ -116,9 +116,9 @@
          a value there is nothing left to point at, and a border that kept shouting would be the
          same noise as no marking at all. */
       .config-fields input.required:placeholder-shown { border-color: var(--soft-amber-fg); }
-      /* The derived package name, standing where a field would otherwise ask for it: mono and
-         muted, because it shows a token the form worked out rather than one to fill in. */
-      #package-rename { font-family: var(--mono); font-weight: 500; font-size: 13px; color: var(--muted); }
+      /* A field that stands alone on its line and should not stretch across it — the package name,
+         which everything on the lines below is a statement about. */
+      .config-fields input.quarter { flex: 0 1 25%; min-width: 180px; }
       /* Selected is the second accent, not the primary: the primary is what you press, this is
          what you are looking at. */
       .chip.selected { background: var(--accent); color: var(--accent-fg); }
@@ -231,25 +231,28 @@
       <section id="packages-card" class="card config">
         <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. A package also states the <em>agent type</em> it is built for, matched against the agent's <code>service.name</code>: without one it reaches nobody, and it never reaches an agent of another type whatever its Selector says. An empty Selector then targets every agent of that type; a narrower one overrides it for the agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
-        <!-- What kind of agent this is for is the one thing asked here: it is what arms the package
-             (ADR-0034), and the name follows from it. The name is *shown* rather than asked for —
-             the button beside the field says what it will be and reveals the input on click.
-             It stays a field of its own, because one agent type carries several packages — a canary
-             beside the fleet-wide one (ADR-0017), and every addon that rides beside the binary —
-             and because a name is 1–32 characters of the ADR-0010 grammar, which a reverse-FQDN
-             type cannot be spelled in. -->
+        <!-- The package this is all about, on its own line: everything below states something about
+             the name above it. It is filled in from the artifact, the source url, or the agent type
+             (see `derivedName`), so it is rarely typed — but it stays a field, because one agent
+             type carries several packages (a canary beside the fleet-wide one, ADR-0017, and every
+             addon that rides beside the binary) and because a name is 1–32 characters of the
+             ADR-0010 grammar, which a reverse-FQDN type cannot be spelled in. -->
         <div class="config-fields">
-          <input id="package-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib) — required" autocomplete="off"
-                 title="Matched for equality against the service.name an agent reports. A package with no agent type is offered to nobody; one typed for another kind of agent is never a candidate, whatever its selector says." />
-          <input id="package-name" hidden placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
-                 title="This server's own name for the package: 1–32 lowercase letters, digits and '-' (ADR-0010). It follows the agent type until you type a name of your own — which is what a canary package aimed at part of the fleet, or an addon beside the binary, needs." />
-          <button id="package-rename" type="button" class="btn btn-ghost"
-                  title="The package's own name, derived from the agent type — nothing to fill in for the usual one-package-per-type case. Click to name it yourself: a second package of the same type, a canary aimed at part of the fleet, or an addon beside the binary.">name: —</button>
+          <input id="package-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                 title="This server's own name for the package: 1–32 lowercase letters, digits and '-' (ADR-0010). Filled in from the artifact's file name, a source url, or the agent type — type one to override it, which is what a canary package or an addon beside the binary needs." />
         </div>
-        <!-- What identifies one artifact: its version and the machine it runs on. Together with the
-             name above, they are what a release file name already says, so picking the file fills
-             them. -->
+        <!-- What kind of agent it is for, and what identifies one artifact: its version and the
+             machine it runs on. The type comes first because it is what arms the package
+             (ADR-0034); the other three are what a release file name already says, so picking the
+             file fills them. -->
         <div class="config-fields">
+          <input id="package-type" class="required" list="agent-types" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib) — required" autocomplete="off"
+                 title="Matched for equality against the service.name an agent reports. A package with no agent type is offered to nobody; one typed for another kind of agent is never a candidate, whatever its selector says. The list offers the types this fleet actually reports; a type no agent has reported yet can still be typed in." />
+          <!-- The types the fleet reports, so the value that has to match one of them can be picked
+               rather than spelt. The comparison is raw and has no canonical set to fall back on
+               (ADR-0034), which makes a typo a rollout that silently never starts — this is the
+               list that has the right spellings in it. -->
+          <datalist id="agent-types"></datalist>
           <input id="package-version" placeholder="version (e.g. 1.2.3)" autocomplete="off" />
           <input id="package-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
                  title="The operating system this artifact is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
@@ -273,15 +276,21 @@
           <input id="package-file" type="file" style="color: var(--muted); font-size: 13px;" />
           <span class="sub">a file or source url named <code>&lt;name&gt;-&lt;version&gt;-&lt;os&gt;-&lt;arch&gt;.7z</code> fills the fields above (<code>-</code> or <code>_</code>)</span>
         </div>
+        <!-- One intent per button, each sending whichever of the package's sub-resources it needs.
+             The API keeps them apart on purpose — bytes name the platform they are for (ADR-0031),
+             the type and the aim belong to the name (ADR-0034, ADR-0017) — and that is a division
+             for a request to respect, not one for an operator to perform by hand. -->
         <div class="config-actions">
-          <button id="package-upload" class="btn btn-primary">Upload &amp; offer</button>
-          <button id="package-source" class="btn btn-ghost">Use source url</button>
-          <button id="package-target" class="btn btn-ghost">Set selector</button>
-          <button id="package-set-type" class="btn btn-ghost"
-                  title="Retype a package that is already stored — correcting a typo that left it reaching nobody, without uploading a few hundred megabytes again. An upload sets the type itself.">Set agent type</button>
+          <button id="package-upload" class="btn btn-primary"
+                  title="Upload the chosen file as this package's artifact for the platform below, then apply every other field to it: agent type and selector. Creates the package when no package of this name exists.">Upload</button>
+          <button id="package-update" class="btn btn-ghost"
+                  title="Apply the fields to the package without new bytes: a source url replaces the artifact with one hosted elsewhere (ADR-0018), and the agent type and selector are set either way. Creates the package when a source url is given for a name that does not exist yet.">Update</button>
+          <button id="package-offer" class="btn btn-ghost"
+                  title="Decide whom this package reaches: its agent type, which arms it (ADR-0034), and its selector, which aims it (ADR-0017). Neither touches the bytes, so correcting a rollout costs no upload.">Offer</button>
+          <button id="package-unset" class="btn btn-ghost"
+                  title="Clear the form and the selection. Nothing is sent and nothing is deleted — the packages themselves are untouched.">Unset</button>
           <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
           <button id="package-delete" class="btn btn-ghost">Delete</button>
-          <button id="package-close" class="btn btn-ghost">Close</button>
           <span id="package-error" class="err"></span>
         </div>
       </section>
@@ -411,7 +420,11 @@
         const n = a.non_identifying_attributes || {};
         return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
       }
-      function labels(a) {
+      // Everything about an agent that is a set rather than a value: reported attributes, the
+      // operator's labels (ADR-0042), the per-row actions, and its package pills. Not named
+      // `labels` — since ADR-0042 that word means the 🏷 chips alone, and a row headed with it
+      // read as if a package status were one.
+      function details(a) {
         const chips = [];
         if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
         if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
@@ -480,7 +493,11 @@
 
       function matches(a) {
         if (!filterText) return true;
+        // Labels are searched beside the reported attributes, in the same `key=value` spelling:
+        // the filter promises "or label", and a rollout ring is exactly what an operator narrows
+        // the fleet by (ADR-0042).
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
+          .concat(Object.entries(a.labels || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
         const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.transport]
@@ -815,26 +832,30 @@
       // named after itself even if no field was ever touched afterwards.
       function refreshName(prefer) {
         if (nameSource === "derived") $("package-name").value = derivedName(prefer);
-        showName();
+        syncOfferButton();
       }
-      // The name is shown, not asked for. The button carries it, so nothing is hidden — only left
-      // unasked, which is the difference between a form with two required fields and one.
-      function showName() {
-        $("package-rename").textContent = `name: ${$("package-name").value || "—"}`;
-      }
-      $("package-rename").addEventListener("click", () => {
-        $("package-rename").hidden = true;
-        $("package-name").hidden = false;
-        $("package-name").focus();
-      });
       $("package-type").addEventListener("input", () => refreshName());
       // Emptying the name hands it back to the derivation; it is not refilled on this keystroke,
       // because clearing a field to retype it must not put the old value straight back under the
       // cursor. The next change to a source — or pressing an action — fills it again.
       $("package-name").addEventListener("input", () => {
         nameSource = $("package-name").value.trim() === "" ? "derived" : "typed";
-        showName();
+        syncOfferButton();
       });
+
+      // The agent types this fleet reports, each with how many agents report it — the values a
+      // package's type is compared against, verbatim (ADR-0034). An agent that has described
+      // itself without a type contributes nothing, since that is not a type either.
+      function renderAgentTypes() {
+        const counts = new Map();
+        for (const a of agents) {
+          if (!a.service_name) continue;
+          counts.set(a.service_name, (counts.get(a.service_name) || 0) + 1);
+        }
+        $("agent-types").innerHTML = [...counts.entries()].sort().map(([type, count]) =>
+          `<option value="${esc(type)}" label="${count} agent${count === 1 ? "" : "s"}"></option>`
+        ).join("");
+      }
 
       // One chip per artifact, not per package: a name with five platforms is five different
       // binaries with five versions and five rollback histories, and a list that showed one row
@@ -844,20 +865,28 @@
       // platform fits it. Zero is the case worth seeing — a mistyped agent type, a Selector that
       // matches nobody, or artifacts for platforms this fleet does not run — none of which is an
       // upload error, so nothing else would say it.
+      // A draft counts the agents it *would* reach (ADR-0043), which is the question staging is for
+      // — so the number is read as "would reach" while the draft marker beside it carries "today,
+      // nobody". Zeroing it instead would blank the count exactly when it is being consulted.
       const reachText = (p) => {
         if (typeof p.targeted_agents !== "number") return "";
+        const agents = `${p.targeted_agents} agent${p.targeted_agents === 1 ? "" : "s"}`;
+        if (p.published === false) return p.targeted_agents === 0 ? " · would reach no agent" : ` · would reach ${agents}`;
         if (p.targeted_agents === 0) return " · ⚠ reaches no agent";
-        return ` · ${p.targeted_agents} agent${p.targeted_agents === 1 ? "" : "s"}`;
+        return ` · ${agents}`;
       };
       function renderPackageList() {
         const chips = packages.flatMap((p) =>
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
             const selected = p.name === selectedPackage && tag === selectedPlatform;
-            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.published === false ? " · ✎ draft — offered to nobody yet" : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
           })
         );
         $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;
+        // The list is the source of the publication state, so the action that changes it is
+        // relabelled here — including after a refresh that came from another operator's press.
+        syncOfferButton();
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () =>
             selectPackage(chip.dataset.name, chip.dataset.os, chip.dataset.arch));
@@ -872,7 +901,7 @@
         selectedPlatform = variant ? `${variant.os}-${variant.arch}` : null;
         $("package-name").value = pkg.name;
         nameSource = "pinned";
-        showName();
+        syncOfferButton();
         // The selector is the package's; everything else belongs to the one artifact.
         $("package-selector").value = selectorText(pkg.selector);
         $("package-type").value = pkg.service_name || "";
@@ -1025,124 +1054,168 @@
         }
         return { name, service_name };
       }
-      // Setting the type is a request of its own: the type belongs to the *name* (ADR-0034), so it
-      // is stated once rather than repeated on each of five platform uploads, where five copies
-      // would be five chances to disagree. Returns the message to show, or "" when it went through.
-      async function putType(name, service_name) {
+      // One PUT, answered with the message to show or "" when it went through — so an action is a
+      // short list of these run in order, and the first one that fails is what the operator reads.
+      async function put(path, init) {
         let res;
-        try {
-          res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/type`, {
-            method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ service_name }),
-          });
-        } catch (e) { return e.message; }
+        try { res = await fetch(path, { method: "PUT", ...init }); }
+        catch (e) { return e.message; }
         if (!res.ok) return (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
         return "";
       }
+      const putJson = (path, body) =>
+        put(path, { headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      // The package's sub-resources, which the API keeps apart on purpose: a request naming *bytes*
+      // names the platform they are for (ADR-0031), while the type and the aim belong to the name
+      // and are stated once for every platform of it (ADR-0034, ADR-0017). That is a division for a
+      // request to respect — not one for an operator to perform by hand, one button at a time.
+      const putArtifact = (name, params, bytes) =>
+        put(`/api/v1/packages/${encodeURIComponent(name)}?${params}`,
+            { headers: { "Content-Type": "application/octet-stream" }, body: bytes });
+      const putSource = (name, body) =>
+        putJson(`/api/v1/packages/${encodeURIComponent(name)}/source`, body);
+      const putType = (name, service_name) =>
+        putJson(`/api/v1/packages/${encodeURIComponent(name)}/type`, { service_name });
+      const putSelector = (name, selector) =>
+        putJson(`/api/v1/packages/${encodeURIComponent(name)}/selector`, { selector });
+
+      const putPublication = (name, published) =>
+        putJson(`/api/v1/packages/${encodeURIComponent(name)}/publication`, { published });
+
+      // Whether the package the name field points at is released (ADR-0043). Read from the list
+      // rather than remembered, so it follows what the server says on every refresh.
+      function selectedIsPublished() {
+        const pkg = packages.find((p) => p.name === $("package-name").value.trim());
+        return !!(pkg && pkg.published);
+      }
+      // The action a package's state calls for: a draft is released, a released one is withdrawn.
+      // The button says which, because "Offer" on something already offered is a dare.
+      function syncOfferButton() {
+        const published = selectedIsPublished();
+        const button = $("package-offer");
+        button.textContent = published ? "Retract" : "Offer";
+        button.title = published
+          ? "Withdraw the offer: agents that have not taken this package stop being offered it. Nothing is uninstalled — an agent keeps running what it installed, and the protocol has no revert (ADR-0017)."
+          : "Release the package to the fleet, with the agent type and selector shown here (ADR-0043): from the next exchange, every agent it fits and aims at is offered it. Uploading only stages a package; this is what starts the rollout.";
+      }
+
+      // Whom a package reaches: the agent type that arms it and the Selector that aims it. Sent
+      // together, because they are one decision — a type with no Selector reaches every agent of
+      // that type, and a Selector with no type reaches nobody at all. Not the publication: storing
+      // a package and releasing it are the two halves ADR-0043 keeps apart.
+      async function sendTargeting(name, service_name) {
+        let selector;
+        try { selector = parseSelector($("package-selector").value); }
+        catch (e) { return e.message; }
+        const typeError = await putType(name, service_name);
+        if (typeError) return typeError;
+        return putSelector(name, selector);
+      }
+      // What every action does once its requests are through: say what went wrong, or nothing, and
+      // show the fleet what changed.
+      async function afterPackageChange(message) {
+        $("package-error").textContent = message;
+        await refreshPackages();
+        refreshAgents();
+      }
       $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
-      $("package-close").addEventListener("click", () => $("packages-card").classList.remove("open"));
+      // Upload: the file becomes this package's artifact for the platform named, and every other
+      // field is applied to it in the same press — so what one action produces is a package that is
+      // complete, never one that is stored and reaching nobody. It creates the package when no
+      // package of this name exists, because a package *is* its artifacts.
       $("package-upload").addEventListener("click", async () => {
         const typed = typedName("file");
         if (!typed) return;
         const { name, service_name } = typed;
         const version = $("package-version").value.trim();
         const file = $("package-file").files[0];
-        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
+        if (!version) { $("package-error").textContent = "a version is required — it is what an agent compares against what it already has"; return; }
         if (!file) { $("package-error").textContent = "choose an artifact file to upload"; return; }
         const platform = platformParams();
         if (!platform) return;
         const params = new URLSearchParams({ version, ...platform, addon: $("package-addon").checked ? "true" : "false" });
         const signature = $("package-signature").value.trim();
         if (signature) params.set("signature", signature);
-        let res;
-        try {
-          res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}?${params}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: await file.arrayBuffer(),
-          });
-        } catch (e) { $("package-error").textContent = e.message; return; }
-        if (!res.ok) {
-          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
-          return;
-        }
-        // Arm it in the same action. The type is a second request, but never a second decision an
-        // operator can forget: "Upload & offer" that stored an artifact offered to nobody was the
-        // whole of the trap. It runs after the upload because a type is set on a package that
-        // exists — and if it fails, the artifact is stored untyped and the chip says so.
-        $("package-error").textContent = await putType(name, service_name);
+        const failed = await putArtifact(name, params, await file.arrayBuffer());
+        if (failed) { $("package-error").textContent = failed; return; }
+        // The bytes are in; whom they reach follows in the same press. It has to be a second
+        // request — a type is set on a package that exists — but never a second decision an
+        // operator can forget, which is what an artifact offered to nobody used to cost.
         selectedPackage = name;
         selectedPlatform = `${platform.os}-${platform.arch}`;
-        // The package exists now, so the field names something rather than proposing something.
         nameSource = "pinned";
         $("package-file").value = "";
-        await refreshPackages();
-        refreshAgents();
+        await afterPackageChange(await sendTargeting(name, service_name));
       });
-      // Aiming an existing package is a request of its own — re-uploading a few hundred megabytes
-      // just to change whom it targets would be absurd.
-      $("package-target").addEventListener("click", async () => {
-        const name = $("package-name").value.trim();
-        if (!name) { $("package-error").textContent = "select or name a package first"; return; }
-        let selector;
-        try { selector = parseSelector($("package-selector").value); } catch (e) { $("package-error").textContent = e.message; return; }
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/selector`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ selector }),
-        });
-        if (!res.ok) {
-          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
-          return;
-        }
-        $("package-error").textContent = "";
-        await refreshPackages();
-        refreshAgents();
-      });
-      // Saying which kind of agent a package is for is what arms it (ADR-0034): until this is set
-      // the artifact is stored and offered to nobody, which is the safe half of the bargain that
-      // stops a fleet-wide package reaching an agent it was never built for.
-      $("package-set-type").addEventListener("click", async () => {
-        const typed = typedName();
-        if (!typed) return;
-        $("package-error").textContent = await putType(typed.name, typed.service_name);
-        await refreshPackages();
-        refreshAgents();
-      });
-      // Point a package at an artifact hosted elsewhere (ADR-0018): nothing is uploaded, and the
-      // checksum is what every agent verifies — this server never sees the bytes.
-      $("package-source").addEventListener("click", async () => {
+      // Update: the same fields, without new bytes. A source url replaces the artifact with one
+      // hosted elsewhere (ADR-0018) — which is also how this creates a package that does not exist
+      // yet, since a name with no artifact is not a package; with no url it applies what is left to
+      // the package already stored. Nothing is uploaded either way: the server keeps the address
+      // and the operator's checksum, and every agent verifies the bytes it fetches.
+      $("package-update").addEventListener("click", async () => {
         const typed = typedName("url");
         if (!typed) return;
         const { name, service_name } = typed;
-        const version = $("package-version").value.trim();
         const url = $("package-url").value.trim();
         const sha256 = $("package-sha256").value.trim();
-        if (!name || !version) { $("package-error").textContent = "name and version are required"; return; }
-        if (!url || !sha256) { $("package-error").textContent = "a source needs a url and the artifact's sha256"; return; }
-        const platform = platformParams();
-        if (!platform) return;
-        const body = { url, sha256, version, ...platform, addon: $("package-addon").checked };
-        const signature = $("package-signature").value.trim();
-        if (signature) body.signature = signature;
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/source`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+        if (url || sha256) {
+          if (!url || !sha256) { $("package-error").textContent = "a source needs both a url and the artifact's sha256 — that checksum is the whole of what an agent has to verify it against"; return; }
+          const version = $("package-version").value.trim();
+          if (!version) { $("package-error").textContent = "a version is required — it is what an agent compares against what it already has"; return; }
+          const platform = platformParams();
+          if (!platform) return;
+          const body = { url, sha256, version, ...platform, addon: $("package-addon").checked };
+          const signature = $("package-signature").value.trim();
+          if (signature) body.signature = signature;
+          const failed = await putSource(name, body);
+          if (failed) { $("package-error").textContent = failed; return; }
+          selectedPackage = name;
+          selectedPlatform = `${platform.os}-${platform.arch}`;
+        }
+        nameSource = "pinned";
+        await afterPackageChange(await sendTargeting(name, service_name));
+      });
+      // Offer: the press that starts a rollout (ADR-0043). It sends whom the package reaches — the
+      // type that arms it, the Selector that aims it — and then releases it, so what goes to the
+      // fleet is what this form shows rather than what was stored before it was edited. Neither
+      // half touches the bytes, so correcting a rollout that reached nobody costs no upload.
+      //
+      // On a package that is already released the button reads *Retract* and does the one thing:
+      // withdraw the offer. It deliberately does not re-send the targeting — retracting answers
+      // "may the fleet have this", and half-edited fields must not ride along with a No.
+      $("package-offer").addEventListener("click", async () => {
+        const typed = typedName();
+        if (!typed) return;
+        if (selectedIsPublished()) {
+          await afterPackageChange(await putPublication(typed.name, false));
           return;
         }
-        // Armed in the same action as the upload above, and for the same reason: a referenced
-        // artifact with no agent type is stored and reaches nobody.
-        $("package-error").textContent = await putType(name, service_name);
-        selectedPackage = name;
-        selectedPlatform = `${platform.os}-${platform.arch}`;
-        nameSource = "pinned";
-        await refreshPackages();
-        refreshAgents();
+        const failed = await sendTargeting(typed.name, typed.service_name);
+        await afterPackageChange(failed || (await putPublication(typed.name, true)));
+      });
+      // The form back to describing no package in particular — including the name's provenance, so
+      // the next agent type typed fills the name again instead of the emptied field staying empty.
+      function clearPackageForm() {
+        const fields = ["package-name", "package-type", "package-version", "package-os", "package-arch",
+                        "package-selector", "package-signature", "package-url", "package-sha256"];
+        for (const id of fields) $(id).value = "";
+        $("package-addon").checked = false;
+        $("package-file").value = "";
+        selectedPackage = null;
+        selectedPlatform = null;
+        nameSource = "derived";
+        const rollback = $("package-rollback");
+        rollback.disabled = true;
+        rollback.textContent = "↩ Roll back";
+        rollback.title = "Select an artifact to see the version it would go back to.";
+        syncOfferButton();
+      }
+      // Unset: nothing is sent, and nothing is deleted. Standing in front of a stored package and
+      // wanting to describe a different one is otherwise nine fields emptied by hand.
+      $("package-unset").addEventListener("click", () => {
+        clearPackageForm();
+        $("package-error").textContent = "";
+        renderPackageList();
       });
       // One step back (ADR-0019): the version this package replaced becomes the current one again,
       // and the one rolled back from becomes the next step back — so this twice returns to where
@@ -1171,12 +1244,8 @@
           return;
         }
         $("package-error").textContent = "";
-        selectedPackage = null;
-        selectedPlatform = null;
-        $("package-name").value = ""; $("package-version").value = ""; $("package-signature").value = "";
-        $("package-os").value = ""; $("package-arch").value = "";
-        $("package-addon").checked = false; $("package-file").value = "";
-        $("package-rollback").disabled = true; $("package-rollback").textContent = "↩ Roll back";
+        // The package this form described is gone, so the form describes nothing.
+        clearPackageForm();
         await refreshPackages();
         refreshAgents();
       });
@@ -1192,6 +1261,7 @@
         try { agents = await (await fetch("/api/v1/agents")).json(); } catch { return; }
         render();
         renderSelectorOptions();
+        renderAgentTypes();
       }
       async function refreshConfigs() {
         try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }

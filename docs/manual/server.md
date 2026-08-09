@@ -265,6 +265,25 @@ type *and* for the machine it reported — *and* the package's Selector matches 
 accepts packages at all, which is the Client's decision, made by how it names its program
 (see [the Client](client.md#which-programs-take-updates)).
 
+**Nothing is offered before it is published** (ADR-0043). Uploading an artifact **stages** a
+package: it is a *draft*, stored and offered to no Agent however complete the rest of it is.
+Releasing it is its own request, and it is what starts the rollout:
+
+```console
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+       http://<server>:4320/api/v1/packages/otelcol/publication
+```
+
+So five platforms' artifacts can be uploaded, typed and aimed, and then released together — and the
+window in which a half-described package is already reaching the fleet does not exist. `false`
+**retracts** it: the offer stops for Agents that have not taken it, and **nothing is uninstalled** —
+an Agent keeps running what it installed, exactly as when a Selector stops matching it.
+
+Two details worth knowing. Replacing the artifact of a package that is *already* published
+distributes on upload, as it always did — that is the ordinary in-place upgrade, and staging one
+means retracting first. And a package stored before this state existed loads **published**, so an
+upgrade of this Server stops no rollout that was already in flight.
+
 **Fit is mandatory, aim is optional** — and fit runs first, in two steps (ADR-0034, ADR-0031). A
 package built for another **Agent type** is not a candidate at all: its type is matched against the
 `service.name` the Agent reports, so a Promtail artifact never reaches a Collector even with no
@@ -411,6 +430,7 @@ show.
 | `PUT /api/v1/packages/{name}/source` | Point the package at an artifact hosted elsewhere. |
 | `PUT /api/v1/packages/{name}/type` | Set the Agent type it is built for. Body: `{"service_name": "…"}`. Required before it is offered to anyone; `400` on an empty value. |
 | `PUT /api/v1/packages/{name}/selector` | Set which Agents of that type it is offered to. |
+| `PUT /api/v1/packages/{name}/publication` | Release the package to the fleet, or withdraw it. Body: `{"published": true\|false}`. An upload stages a package as a draft; this is what starts the rollout, and withdrawing uninstalls nothing. |
 | `POST /api/v1/packages/{name}/rollback` | Re-offer the version this package replaced. `409` when there is none. |
 | `DELETE /api/v1/packages/{name}` | Remove it from the store. |
 | `GET /api/v1/packages/{name}/file` | The artifact bytes — where an offered `download_url` points. |
@@ -439,6 +459,10 @@ the version never moved.
 It counts the fleet **as reported so far**, which means a package staged ahead of the hosts it is
 for legitimately reads `0`. That is why it is a number to read rather than something the Server
 refuses to store.
+
+**A draft is counted as if it were published**, because checking the aim of a rollout before
+starting it is what staging is for. So the number answers "whom *would* this reach"; whether the
+fleet may have it yet is the `published` field beside it, and the package view shows both.
 
 **What a fleet row tells you.** `GET /api/v1/agents` is what the UI renders, and the fields worth
 knowing by name:

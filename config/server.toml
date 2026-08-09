@@ -106,10 +106,18 @@ stale_after_secs = 90
 # compared raw, so spell it exactly as the Agents report it — a Client updating itself is typed
 # `opamp-fleet-client`.
 #
-# Finally aim the package with PUT /api/v1/packages/{name}/selector (ADR-0017): the Server
+# Then aim the package with PUT /api/v1/packages/{name}/selector (ADR-0017): the Server
 # offers it to the Agents its Selector matches, among those that accept packages. An empty
 # Selector targets every Agent of that type; a narrower one wins for the Agents it names, which is
-# how a rollout starts on part of the fleet. The
+# how a rollout starts on part of the fleet.
+#
+# Finally release it with PUT /api/v1/packages/{name}/publication — body {"published": true}
+# (ADR-0043). AN UPLOAD ONLY STAGES A PACKAGE: it is a draft, stored and offered to nobody until
+# this call, so five platforms' artifacts can be uploaded and released together and no half-
+# described package ever reaches the fleet. {"published": false} withdraws the offer again;
+# nothing is uninstalled, an Agent keeps running what it installed. Replacing the artifact of an
+# already published package distributes on upload, as before — stage a replacement by retracting
+# first. The
 # download endpoint sits on the unauthenticated REST plane — the content hash and signature are
 # what protect an installed binary, so sign packages and configure the key on the Client.
 packages_dir = "fleet-packages"

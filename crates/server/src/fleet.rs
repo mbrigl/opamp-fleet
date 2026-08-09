@@ -1117,6 +1117,23 @@ impl AppState {
         Ok(())
     }
 
+    /// Releases a package to the fleet, or retracts it (ADR-0043), waking every WebSocket loop.
+    ///
+    /// This is the moment a rollout starts, so the Agents it reaches should learn of it at once
+    /// rather than on their next poll — the same reason arming a package pushes. Retracting pushes
+    /// too: an Agent mid-exchange should not be handed an offer that was just withdrawn.
+    pub fn set_package_published(&self, name: &str, published: bool) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_published(name, published)?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, published, "package publication changed");
+        Ok(())
+    }
+
     /// Deletes a package; `Ok(false)` when none of that name exists.
     pub fn delete_package(&self, name: &str) -> Result<bool, String> {
         let store = self

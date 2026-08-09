@@ -18,7 +18,7 @@ use opamp::proto::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::configs::{matches, validate_name};
 
@@ -148,6 +148,14 @@ pub struct Package {
     /// refused for the platform. An untyped package is inert until
     /// [`set_service_name`](PackageStore::set_service_name) arms it.
     pub service_name: String,
+    /// Whether the fleet may have this package (ADR-0043). A package created here is a **draft**:
+    /// its artifacts are stored, its type and Selector can be set, and it is offered to nobody
+    /// until [`set_published`](PackageStore::set_published) releases it.
+    ///
+    /// It belongs to the *name*, like the Selector and the type: a package publishes as a whole,
+    /// with every platform's artifact it holds. Uploading stages; releasing is its own act, so the
+    /// window in which a half-described package is already reaching the fleet is closed.
+    pub published: bool,
     /// One artifact per Platform. A package with none offers nothing and is not kept.
     pub variants: BTreeMap<Platform, Variant>,
 }
@@ -309,6 +317,9 @@ pub struct PackageSummary {
     pub selector: BTreeMap<String, String>,
     /// The Agent type this package fits (ADR-0034); empty means it is offered to nobody.
     pub service_name: String,
+    /// Whether the fleet may have it (ADR-0043). A draft is stored and offered to nobody, however
+    /// complete the rest of it is.
+    pub published: bool,
     /// One entry per Platform, in platform order.
     pub variants: Vec<VariantSummary>,
 }
@@ -335,6 +346,7 @@ impl PackageSummary {
             name: package.name.clone(),
             selector: package.selector.clone(),
             service_name: package.service_name.clone(),
+            published: package.published,
             variants: package
                 .variants
                 .values()
@@ -369,6 +381,37 @@ struct PackageMeta {
     /// state here (unlike a missing Platform, which had no safe reading).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     service_name: String,
+    /// Whether the fleet may have it (ADR-0043).
+    ///
+    /// **Absent means published**, which is the opposite of what the missing type above means, and
+    /// the difference is what the unset state *was*. A package with no type could reach an Agent it
+    /// was not built for, so inert was the safe reading and the migration was worth an outage. A
+    /// package stored before this field existed is not unsafe — it is in flight. Reading it as a
+    /// draft would stop every rollout in a fleet at once, silently, on an upgrade.
+    #[serde(default = "published_by_default")]
+    published: bool,
+}
+
+/// What a `<name>.json` without a `published` field means (ADR-0043, point 4): a package written
+/// before the state existed was already being offered, and an upgrade must not withdraw it.
+fn published_by_default() -> bool {
+    true
+}
+
+/// What one `<name>.json` said, while a store is being loaded: everything that belongs to the name
+/// rather than to any one artifact.
+///
+/// [`Default`] is what a package whose rollout file is *missing entirely* gets — a store from
+/// before that file existed, or one an operator has edited. Not published, and no type either, so
+/// such a package is inert twice over until both are set. That is the safe reading here, and it is
+/// not in tension with `published` defaulting to `true` inside a file that exists: there, the
+/// field's absence means "written before the state existed"; here, the file's absence means
+/// nothing about this package was ever recorded.
+#[derive(Clone, Default)]
+struct Rollout {
+    selector: BTreeMap<String, String>,
+    service_name: String,
+    published: bool,
 }
 
 /// One artifact as persisted next to itself (`<name>@<os>-<arch>.json`); the artifact is
@@ -470,8 +513,9 @@ impl PackageStore {
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        // What `<name>.json` holds: the aim, and the Agent type the package fits (ADR-0034).
-        let mut rollouts: BTreeMap<String, (BTreeMap<String, String>, String)> = BTreeMap::new();
+        // What `<name>.json` holds: the aim, the Agent type the package fits (ADR-0034), and
+        // whether the fleet may have it (ADR-0043).
+        let mut rollouts: BTreeMap<String, Rollout> = BTreeMap::new();
         let mut variants: BTreeMap<String, BTreeMap<Platform, Variant>> = BTreeMap::new();
         let entries =
             std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
@@ -506,7 +550,14 @@ impl PackageStore {
                     .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
                 validate_name(&meta.name)
                     .map_err(|e| format!("invalid package name in {}: {e}", path.display()))?;
-                rollouts.insert(meta.name, (meta.selector, meta.service_name));
+                rollouts.insert(
+                    meta.name,
+                    Rollout {
+                        selector: meta.selector,
+                        service_name: meta.service_name,
+                        published: meta.published,
+                    },
+                );
                 continue;
             }
 
@@ -606,20 +657,30 @@ impl PackageStore {
             .map(|(name, variants)| {
                 // A store written before ADR-0034 has no type on file. It loads — the package is
                 // simply offered to nobody until one is set, which is the safe state, not a hole.
-                let (selector, service_name) = rollouts.get(&name).cloned().unwrap_or_default();
-                if service_name.is_empty() {
+                let rollout = rollouts.get(&name).cloned().unwrap_or_default();
+                if rollout.service_name.is_empty() {
                     warn!(
                         package = %name,
                         "no agent type set: this package is offered to no Agent until \
                          PUT /api/v1/packages/<name>/type names the type it is built for"
                     );
                 }
+                // A draft is the ordinary state of a package being prepared, not a fault — said
+                // once at startup so that "nothing is reaching the fleet" is never a mystery.
+                if !rollout.published {
+                    info!(
+                        package = %name,
+                        "draft: this package is offered to no Agent until \
+                         PUT /api/v1/packages/<name>/publication releases it"
+                    );
+                }
                 (
                     name.clone(),
                     Package {
                         name,
-                        selector,
-                        service_name,
+                        selector: rollout.selector,
+                        service_name: rollout.service_name,
+                        published: rollout.published,
                         variants,
                     },
                 )
@@ -797,13 +858,22 @@ impl PackageStore {
         let json =
             serde_json::to_vec_pretty(&variant.meta(name)).expect("variant metadata serializes");
         self.write_atomic(&format!("{stem}.json"), &json)?;
-        // A package new to the store gets its rollout file too, so its Selector and its type have
-        // somewhere to live before anyone sets either.
+        // A package new to the store gets its rollout file too, so its Selector, its type and its
+        // publication state have somewhere to live before anyone sets any of them. It is written
+        // as a **draft** (ADR-0043): storing bytes stages a package, and releasing it is its own
+        // act — so the window in which a half-described package is already reaching the fleet, the
+        // one ADR-0017 records for a Selector left too wide, is not reachable by uploading.
+        //
+        // Replacing the artifact of a package that already exists leaves its state alone, which is
+        // the ordinary in-place upgrade: a published package goes on being published. Staging a
+        // replacement is retracting first, one request, rather than a confirmation on every version
+        // bump that would soon be pressed without reading.
         if existing.is_none() {
             let meta = PackageMeta {
                 name: name.to_string(),
                 selector: selector.clone(),
                 service_name: String::new(),
+                published: false,
             };
             let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
             self.write_atomic(&format!("{name}.json"), &json)?;
@@ -814,6 +884,7 @@ impl PackageStore {
             name: name.to_string(),
             selector,
             service_name: String::new(),
+            published: false,
             variants: BTreeMap::new(),
         });
         package.variants.insert(platform.clone(), variant);
@@ -1053,7 +1124,7 @@ impl PackageStore {
         headers: Option<Headers>,
     ) -> Result<Option<PackagesAvailable>, String> {
         let packages = self.packages.read().expect("packages lock");
-        let matching = resolve(&packages, description)?;
+        let matching = resolve(&packages, description, Drafts::Excluded)?;
         if matching.is_empty() {
             return Ok(None);
         }
@@ -1071,15 +1142,20 @@ impl PackageStore {
         }))
     }
 
-    /// The names of the packages this Agent would actually be offered — fitted by Agent type and
-    /// platform, then aimed by Selector.
+    /// The names of the packages this Agent would be offered — fitted by Agent type and platform,
+    /// then aimed by Selector — **including the ones still in draft** (ADR-0043).
     ///
     /// Deliberately the same [`resolve`] the offer itself runs, so a count built from this cannot
     /// claim a reach the fleet does not get. Ambiguous targeting yields nothing, exactly as it does
     /// for the offer: the Server refuses to guess, so the Agent receives no package.
+    ///
+    /// Drafts are counted because the count answers "whom would this reach", and a rollout is
+    /// staged precisely so that question can be asked before it starts. What a draft reaches
+    /// *today* is nobody, and the package view says that with the draft marker rather than by
+    /// zeroing a number that is about the aim.
     pub fn offered_names(&self, description: Option<&AgentDescription>) -> Vec<String> {
         let packages = self.packages.read().expect("packages lock");
-        resolve(&packages, description)
+        resolve(&packages, description, Drafts::Included)
             .map(|matching| {
                 matching
                     .iter()
@@ -1094,7 +1170,7 @@ impl PackageStore {
     /// offered nothing, and has nothing to be in sync with.
     pub fn all_packages_hash_for(&self, description: Option<&AgentDescription>) -> Vec<u8> {
         let packages = self.packages.read().expect("packages lock");
-        match resolve(&packages, description) {
+        match resolve(&packages, description, Drafts::Excluded) {
             Ok(matching) if !matching.is_empty() => aggregate_hash(&matching),
             _ => Vec::new(),
         }
@@ -1116,6 +1192,7 @@ impl PackageStore {
             name: name.to_string(),
             selector: selector.clone(),
             service_name: package.service_name.clone(),
+            published: package.published,
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.json"), &json)?;
@@ -1144,10 +1221,42 @@ impl PackageStore {
             name: name.to_string(),
             selector: package.selector.clone(),
             service_name: service_name.clone(),
+            published: package.published,
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.json"), &json)?;
         package.service_name = service_name;
+        Ok(())
+    }
+
+    /// Releases a package to the fleet, or retracts it (ADR-0043) — for every platform of it at
+    /// once, for the same reason the Selector and the type are set that way: a package publishes as
+    /// a whole.
+    ///
+    /// **Releasing is the act a rollout starts with**, and the only one: a draft is offered to
+    /// nobody however complete the rest of it is, and every Agent the package fits and aims at is
+    /// offered it on its next exchange.
+    ///
+    /// **Retracting withdraws the offer and uninstalls nothing.** ADR-0017 settled that for the
+    /// Selector — an Agent keeps running what it installed, and the protocol has no revert — so
+    /// this stops the package reaching Agents that have not taken it yet. It is not a recall.
+    ///
+    /// # Errors
+    /// Returns an error when no package of that name exists.
+    pub fn set_published(&self, name: &str, published: bool) -> Result<(), String> {
+        let mut packages = self.packages.write().expect("packages lock");
+        let package = packages
+            .get_mut(name)
+            .ok_or_else(|| format!("no package {name:?}"))?;
+        let meta = PackageMeta {
+            name: name.to_string(),
+            selector: package.selector.clone(),
+            service_name: package.service_name.clone(),
+            published,
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        package.published = published;
         Ok(())
     }
 
@@ -1187,6 +1296,14 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
     Ok((size, hasher.finalize().to_vec()))
 }
 
+/// Whether an unpublished package (ADR-0043) takes part in a resolution. Never for an offer; only
+/// for the question "whom would this reach", which is what a draft is prepared to be asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drafts {
+    Excluded,
+    Included,
+}
+
 /// Which artifacts one Agent is offered — **fit, then aim** (ADR-0031).
 ///
 /// *Fit* comes first and cannot be switched off: an artifact built for another operating system or
@@ -1202,9 +1319,15 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
 /// rollout starts on, which overrides it for exactly those. A tie between two equally specific
 /// Selectors is the one case with no defensible answer, so it is refused and reported rather than
 /// guessed. Two platforms of *one* package can never tie: only one of them fits.
+///
+/// `drafts` is what separates the offer from the *question* about it. An offer never carries an
+/// unpublished package; the reach a package view shows is asked with [`Drafts::Included`], because
+/// checking the aim of a rollout before starting it is exactly what a draft is for, and a count
+/// that read zero for every one of them would be useless in the one situation it exists for.
 fn resolve<'a>(
     packages: &'a BTreeMap<String, Package>,
     description: Option<&AgentDescription>,
+    drafts: Drafts,
 ) -> Result<Vec<(&'a str, &'a Variant)>, String> {
     let Some(platform) = Platform::reported(description) else {
         return Ok(Vec::new());
@@ -1216,6 +1339,11 @@ fn resolve<'a>(
     };
     let fitting: Vec<(&Package, &Variant)> = packages
         .values()
+        // Fit, step zero (ADR-0043), and it runs before every other: a package the operator has
+        // not released is not a candidate for anyone, whatever its type, its Selector or its
+        // artifacts say. A state whose whole purpose is "not yet" cannot be one another field can
+        // override — the same shape ADR-0034 gave the type.
+        .filter(|p| p.published || drafts == Drafts::Included)
         // Fit, step one (ADR-0034): a package built for another kind of Agent is not a candidate,
         // whatever its Selector says. An untyped package fits nobody — `service_name` is empty and
         // no Agent reports an empty type, so this comparison is what makes it inert.
@@ -1325,10 +1453,19 @@ mod tests {
     /// Arms a package for the Agent type `agent()` reports (ADR-0034). A package with no type is
     /// offered to nobody, so every test that expects an offer at all has to set one — which is the
     /// point of the decision, and the reason this helper exists rather than a default.
+    /// Everything a package needs before it reaches anybody: the Agent type it is built for
+    /// (ADR-0034) and the release that lets the fleet have it (ADR-0043). The tests below are about
+    /// fit and aim, so they arm a package and then assert on the targeting — the two gates are
+    /// asserted on directly by the tests that are about them.
     fn arm(store: &PackageStore, name: &str) {
+        arm_as(store, name, "otelcol");
+    }
+
+    fn arm_as(store: &PackageStore, name: &str, service_name: &str) {
         store
-            .set_service_name(name, "otelcol".to_string())
+            .set_service_name(name, service_name.to_string())
             .expect("agent type");
+        store.set_published(name, true).expect("publish");
     }
 
     /// The reach count and the offer must never disagree — the count exists to predict what an
@@ -1515,12 +1652,8 @@ mod tests {
                 .expect("put");
         }
         // Both are fleet-wide — no Selector on either, the shape that used to send both everywhere.
-        store
-            .set_service_name("otelcol", "otelcol".to_string())
-            .expect("type");
-        store
-            .set_service_name("promtail", "promtail".to_string())
-            .expect("type");
+        arm_as(&store, "otelcol", "otelcol");
+        arm_as(&store, "promtail", "promtail");
 
         // The Agent reports `service.name = "otelcol"`, so it is not a candidate for the other.
         assert_eq!(
@@ -1566,6 +1699,167 @@ mod tests {
             "otelcol"
         );
         assert_eq!(offered(&again, &agent("linux", "amd64", &[])).len(), 1);
+    }
+
+    /// ADR-0043's point: uploading stages a package, releasing it is a separate act. A fully
+    /// described package — typed, aimed at everybody, with an artifact that fits — still reaches
+    /// nobody while it is a draft, and the release is what starts the rollout.
+    #[test]
+    fn a_package_is_a_draft_until_it_is_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        store
+            .set_service_name("otelcol", "otelcol".to_string())
+            .expect("agent type");
+
+        // Everything else about it is right, and it still reaches nobody.
+        assert!(
+            !store.summary("otelcol").expect("summary").published,
+            "an uploaded package starts as a draft"
+        );
+        assert!(
+            offered(&store, &agent("linux", "amd64", &[])).is_empty(),
+            "a draft is offered to nobody, however complete the rest of it is"
+        );
+
+        // Releasing it is what the fleet waits for, and it survives a restart like the type does.
+        store.set_published("otelcol", true).expect("publish");
+        assert_eq!(offered(&store, &agent("linux", "amd64", &[])).len(), 1);
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(reopened.summary("otelcol").expect("summary").published);
+        assert_eq!(offered(&reopened, &agent("linux", "amd64", &[])).len(), 1);
+
+        // And retracting withdraws the offer — the Agents that took it keep it (ADR-0017), which
+        // is not this store's business, but nothing new is handed out.
+        reopened.set_published("otelcol", false).expect("retract");
+        assert!(offered(&reopened, &agent("linux", "amd64", &[])).is_empty());
+        let again = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(offered(&again, &agent("linux", "amd64", &[])).is_empty());
+    }
+
+    /// Point 2: only a package that is *new* to the store is staged. Replacing the artifact of one
+    /// that is already published is the ordinary in-place upgrade, and asking for the release to be
+    /// repeated on every version bump would train an operator to press it without reading.
+    #[test]
+    fn replacing_the_artifact_of_a_published_package_keeps_it_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        let upload = |version: &str, bytes: &[u8]| {
+            store
+                .put(
+                    "otelcol".to_string(),
+                    linux(),
+                    version.to_string(),
+                    false,
+                    None,
+                    bytes.to_vec(),
+                )
+                .expect("put")
+        };
+        upload("1.0.0", b"first");
+        arm(&store, "otelcol");
+
+        upload("2.0.0", b"second");
+        assert!(
+            store.summary("otelcol").expect("summary").published,
+            "an in-place upgrade does not put a live package back into draft"
+        );
+        assert_eq!(
+            offered(&store, &agent("linux", "amd64", &[])),
+            vec![("otelcol".to_string(), "2.0.0".to_string())],
+        );
+
+        // A second platform of the same name is the same package, so it is not staged either.
+        store
+            .put(
+                "otelcol".to_string(),
+                Platform::new("darwin", "arm64").expect("platform"),
+                "2.0.0".to_string(),
+                false,
+                None,
+                b"mac".to_vec(),
+            )
+            .expect("put");
+        assert!(store.summary("otelcol").expect("summary").published);
+    }
+
+    /// Point 4: a `<name>.json` written before this field existed means *published*. The opposite
+    /// reading would stop every rollout in a fleet at once, silently, on an upgrade — and unlike a
+    /// missing Agent type, a package an operator uploaded under the old rule is not unsafe.
+    #[test]
+    fn a_package_stored_before_this_state_existed_loads_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        arm(&store, "otelcol");
+        drop(store);
+
+        // Rewrite the rollout file as the old code would have: name, selector, type, no state.
+        let path = dir.path().join("otelcol.json");
+        std::fs::write(
+            &path,
+            br#"{"name":"otelcol","service_name":"otelcol"}"#.as_slice(),
+        )
+        .expect("write");
+
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(
+            reopened.summary("otelcol").expect("summary").published,
+            "an absent field means published, so nothing already in flight stops"
+        );
+        assert_eq!(offered(&reopened, &agent("linux", "amd64", &[])).len(), 1);
+    }
+
+    /// Point 6: the count answers "whom would this reach", which is the question a rollout is
+    /// staged in order to ask. A draft that reads `0` would be useless in exactly that moment, so
+    /// the draft marker carries "today, nobody" and the number goes on describing the aim.
+    #[test]
+    fn a_draft_still_reports_the_reach_it_would_have() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        store
+            .set_service_name("otelcol", "otelcol".to_string())
+            .expect("agent type");
+
+        let host = agent("linux", "amd64", &[]);
+        assert_eq!(
+            store.offered_names(Some(&host)),
+            ["otelcol"],
+            "the aim of a draft is what an operator checks before releasing it"
+        );
+        assert!(
+            offered(&store, &host).is_empty(),
+            "and it is still offered to nobody"
+        );
     }
 
     /// The same rule the platform has (ADR-0031): reporting nothing fits nothing. An Agent with no

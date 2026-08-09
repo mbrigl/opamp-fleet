@@ -97,6 +97,23 @@ async fn upload_for(
         200,
         "setting the agent type should succeed"
     );
+    // And it is a draft until it is released (ADR-0043), so the helper releases it too. Tests about
+    // the publication gate itself upload without this helper, or retract afterwards.
+    publish(server, name, true).await;
+}
+
+/// `PUT /api/v1/packages/{name}/publication` — what starts a rollout, and what withdraws it.
+async fn publish(server: &TestServer, name: &str, published: bool) {
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/{name}/publication",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "published": published }))
+        .send()
+        .await
+        .expect("put publication");
+    assert_eq!(response.status(), 200, "publishing should succeed");
 }
 
 /// ADR-0019 through the API: the rollback is one action that says what it will do, it refuses
@@ -604,6 +621,7 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
         .await
         .expect("put agent type");
     assert_eq!(response.status(), 200);
+    publish(&server, "otelcol", true).await;
 
     // The offer names the source, carries the operator's hash, and passes the headers on.
     let uid = InstanceUid::default();
@@ -713,6 +731,9 @@ async fn a_package_is_inert_until_it_names_its_agent_type_and_then_fits_only_tha
         .await
         .expect("put package");
     assert_eq!(response.status(), 200);
+    // Released straight away, so that the only gate moving through this test is the type: what is
+    // asserted below is ADR-0034's, not ADR-0043's.
+    publish(&server, "otelcol", true).await;
 
     let offered_now = || async {
         let uid = InstanceUid::default();
@@ -907,4 +928,102 @@ async fn a_label_aims_a_package_at_part_of_the_fleet() {
             .is_none(),
         "the host outside the ring is offered nothing"
     );
+}
+
+/// ADR-0043 through the API, from the operator's side: an upload stages a package, the release is
+/// its own request, and the retraction is one too. What the fleet sees follows each of them on the
+/// next exchange, and the view says which state the package is in throughout.
+#[tokio::test]
+async fn an_uploaded_package_is_a_draft_until_it_is_published_and_can_be_retracted() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    exchange(&server, &full_report(&uid, "edge-01", 1)).await;
+
+    async fn offered_now(
+        server: &TestServer,
+        uid: &InstanceUid,
+        sequence: u64,
+    ) -> Option<opamp::proto::PackagesAvailable> {
+        let mut report = full_report(uid, "edge-01", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server, &report).await.packages_available
+    }
+    async fn view(server: &TestServer, name: &str) -> serde_json::Value {
+        reqwest::Client::new()
+            .get(format!("http://{}/api/v1/packages", server.addr))
+            .send()
+            .await
+            .expect("list")
+            .json::<serde_json::Value>()
+            .await
+            .expect("json")
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap_or_else(|| panic!("no package {name}"))
+            .clone()
+    }
+
+    // Uploaded and typed for the type this fleet reports — everything but the release.
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/otelcol?version=2.0.0&{HOST}",
+            server.addr
+        ))
+        .body(b"the-binary".to_vec())
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/otelcol/type",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
+        .send()
+        .await
+        .expect("put agent type");
+    assert_eq!(response.status(), 200);
+
+    let staged = view(&server, "otelcol").await;
+    assert_eq!(staged["published"], false, "an upload stages the package");
+    assert_eq!(
+        staged["targeted_agents"], 1,
+        "and its aim can be checked before it starts, which is what staging is for"
+    );
+    assert!(
+        offered_now(&server, &uid, 2).await.is_none(),
+        "a draft reaches nobody, however complete the rest of it is"
+    );
+
+    // The release is its own act, and the fleet has the package on the next exchange.
+    publish(&server, "otelcol", true).await;
+    assert_eq!(view(&server, "otelcol").await["published"], true);
+    let offer = offered_now(&server, &uid, 3)
+        .await
+        .expect("the released package");
+    assert!(offer.packages.contains_key("otelcol"));
+
+    // And it is reversible: retracting stops the offer. Nothing here uninstalls anything — an
+    // Agent that already took it keeps running it (ADR-0017).
+    publish(&server, "otelcol", false).await;
+    assert_eq!(view(&server, "otelcol").await["published"], false);
+    assert!(
+        offered_now(&server, &uid, 4).await.is_none(),
+        "a retracted package is not handed to an Agent that has not taken it"
+    );
+
+    // Releasing a package that does not exist is a 404, not a package conjured out of a name.
+    let missing = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/nosuch/publication",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "published": true }))
+        .send()
+        .await
+        .expect("put publication");
+    assert_eq!(missing.status(), 404);
 }

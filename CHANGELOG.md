@@ -217,24 +217,68 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
-- **The package form in the UI now asks for the Agent type instead of the name, and arms the package
-  with it.** *Upload & offer* and *Use source url* refuse to run without a type and set it in the
-  same action, so the bundled UI can no longer produce the one thing ADR-0034 made possible: an
-  artifact that is stored, looks uploaded, and is offered to nobody.
+- **A package is published before it is offered — uploading only stages it**
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)). A newly created
+  package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
+  no Agent until it is released.
 
-  The **name** is no longer asked for: it is derived and shown beside the type —
-  `name: opamp-fleet-client` — and clicking it reveals the field. It is worked out from the most
-  specific thing the form knows, in order: the chosen artifact's file name, the last segment of a
-  source url, then the agent type. So a release file dropped in names the package it belongs to,
-  and the derivation runs again when the upload is actually sent rather than only when a field
-  changed. A name typed by hand outranks all three.
+  ```console
+  $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+         http://<server>:4320/api/v1/packages/otelcol/publication
+  ```
 
-  It is still a name of its own, because one agent type carries several packages (a canary beside
-  the fleet-wide one, and every addon beside the binary) and because a package name is not spelled
-  in the same grammar as a reverse-FQDN type.
+  Uploading used to *be* the rollout: the next Agent that fitted took the artifact, even while the
+  package was still half described. Five platforms' artifacts can now be uploaded, typed and aimed,
+  and then released together — and the moment a rollout starts is one named act rather than the side
+  effect of a file transfer.
 
-  Nothing about the API changed: `PUT /api/v1/packages/{name}/type` is still its own request, and a
-  package uploaded by script is still untyped until it is called. The type is never guessed from the
+  `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the package,
+  and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
+  Selector stops matching it (ADR-0017). The protocol has no revert; this is not a recall.
+
+  **Nothing that is already running stops.** A package stored before this state existed loads as
+  published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
+  published package still distributes on upload** — that is the ordinary in-place upgrade; stage a
+  replacement by retracting first.
+
+  What changes for scripts: creating a *new* package now needs one more call. `targeted_agents`
+  keeps counting what a package would reach, drafts included, because checking the aim before
+  starting is what staging is for — `published` beside it is where "may the fleet have it" is read.
+  In the UI, *Upload* and *Update* leave a package staged and **Offer** releases it; on a released
+  package that button reads *Retract*, and the package list marks a draft.
+
+- **The package form in the UI is one intent per button, and every one of them states the Agent
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0034) —
+  the form used to make that the easiest state to produce by hand, with the type one optional-looking
+  field among several and a separate button to remember afterwards.
+
+  Four actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+
+  | | what it sends |
+  | --- | --- |
+  | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
+  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)), and the type and Selector are set either way |
+  | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
+  | **Unset** | clears the form and the selection. Nothing is sent, nothing is deleted |
+
+  None of them runs without an Agent type, so the UI can no longer create a package that reaches
+  nobody. *Close* is gone — the **Packages** button that opens the card also closes it.
+
+  The **Agent type** field now offers the types the fleet actually reports, with how many Agents
+  report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
+  is a rollout that silently never starts — picking from the list is the spelling that matches. A
+  type no Agent has reported yet can still be typed in.
+
+  The **name** now stands alone on the first line, and is filled in rather than asked for: from the
+  chosen artifact's file name, which states the package it belongs to (ADR-0025, ADR-0032), else a
+  source url's last segment, else the Agent type folded into the ADR-0010 name grammar. It is
+  derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
+  named after itself. A name typed by hand outranks all three, and one that names a package that
+  exists is not renamed by a correction to that package's type.
+
+  Nothing about the API changed: the artifact, the source, the type and the Selector are still four
+  requests over four sub-resources, and a package uploaded by script is still untyped until
+  `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
   name — that is the alternative ADR-0034 weighed and rejected.
 
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
