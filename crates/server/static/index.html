@@ -287,10 +287,8 @@
                   title="Apply the fields to the package without new bytes: a source url replaces the artifact with one hosted elsewhere (ADR-0018), and the agent type and selector are set either way. Creates the package when a source url is given for a name that does not exist yet.">Update</button>
           <button id="package-offer" class="btn btn-ghost"
                   title="Decide whom this package reaches: its agent type, which arms it (ADR-0034), and its selector, which aims it (ADR-0017). Neither touches the bytes, so correcting a rollout costs no upload.">Offer</button>
-          <button id="package-unset" class="btn btn-ghost"
-                  title="Clear the form and the selection. Nothing is sent and nothing is deleted — the packages themselves are untouched.">Unset</button>
-          <button id="package-rollback" class="btn btn-ghost" disabled>↩ Roll back</button>
-          <button id="package-delete" class="btn btn-ghost">Delete</button>
+          <button id="package-delete" class="btn btn-ghost"
+                  title="Delete this artifact: the one platform named below, and only that one. The other platforms of this package are untouched, and the package itself goes only when its last artifact does. Nothing is uninstalled — an agent keeps running what it took.">Delete</button>
           <span id="package-error" class="err"></span>
         </div>
       </section>
@@ -880,16 +878,32 @@
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
             const selected = p.name === selectedPackage && tag === selectedPlatform;
-            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.published === false ? " · ✎ draft — offered to nobody yet" : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
+            // The version this artifact replaced is what the store can put back (ADR-0019); the
+            // Server does it, `POST /api/v1/packages/{name}/rollback?os=…&arch=…`, so what the
+            // list owes an operator is the answer to "back to what" before they ask for it.
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "replaced " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") + " — what a rollback would put back" : "has never replaced another version, so there is nothing to go back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.published === false ? " · ✎ draft — offered to nobody yet" : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
           })
         );
         $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;
         // The list is the source of the publication state, so the action that changes it is
         // relabelled here — including after a refresh that came from another operator's press.
         syncOfferButton();
+        // A chip toggles: pressing the selected one again describes no package in particular
+        // instead of the same one twice. Nothing is sent and nothing is deleted — the packages are
+        // untouched; it is the form that lets go, which is otherwise nine fields emptied by hand.
+        // The selection lives in the list, so undoing it belongs there rather than in a button
+        // among the ones that write.
         document.querySelectorAll("#package-list .clickable").forEach((chip) => {
-          chip.addEventListener("click", () =>
-            selectPackage(chip.dataset.name, chip.dataset.os, chip.dataset.arch));
+          chip.addEventListener("click", () => {
+            const { name, os, arch } = chip.dataset;
+            if (name === selectedPackage && `${os}-${arch}` === selectedPlatform) {
+              clearPackageForm();
+              $("package-error").textContent = "";
+              renderPackageList();
+              return;
+            }
+            selectPackage(name, os, arch);
+          });
         });
       }
       function selectPackage(name, os, arch) {
@@ -911,16 +925,6 @@
         $("package-url").value = variant ? variant.source_url || "" : "";
         $("package-addon").checked = !!(variant && variant.addon);
         $("package-error").textContent = "";
-        // A rollback button that does not say what it will install is a dare (ADR-0019): it names
-        // the version, and stays disabled while there is nothing to go back to. It moves one
-        // platform, so it names that too.
-        const previous = variant && variant.previous_version;
-        const rollback = $("package-rollback");
-        rollback.disabled = !previous;
-        rollback.textContent = previous ? `↩ Roll back ${selectedPlatform} to ${previous}` : "↩ Roll back";
-        rollback.title = previous
-          ? `Offer ${previous} again on ${selectedPlatform}${variant.previous_source_url ? ` from ${variant.previous_source_url}` : ""}. Other platforms and the selector are untouched; agents pick it up on their next exchange.`
-          : "This artifact has never replaced another, so there is nothing to go back to.";
         renderPackageList();
       }
       // Older and foreign spellings, mirroring the server's table. The server canonicalises
@@ -1204,47 +1208,25 @@
         selectedPackage = null;
         selectedPlatform = null;
         nameSource = "derived";
-        const rollback = $("package-rollback");
-        rollback.disabled = true;
-        rollback.textContent = "↩ Roll back";
-        rollback.title = "Select an artifact to see the version it would go back to.";
         syncOfferButton();
       }
-      // Unset: nothing is sent, and nothing is deleted. Standing in front of a stored package and
-      // wanting to describe a different one is otherwise nine fields emptied by hand.
-      $("package-unset").addEventListener("click", () => {
-        clearPackageForm();
-        $("package-error").textContent = "";
-        renderPackageList();
-      });
-      // One step back (ADR-0019): the version this package replaced becomes the current one again,
-      // and the one rolled back from becomes the next step back — so this twice returns to where
-      // it started.
-      $("package-rollback").addEventListener("click", async () => {
+      // Delete one artifact, never the whole name behind it. A chip is one platform's binary with
+      // its own version (ADR-0031), so deleting the name would take four platforms an operator
+      // never looked at along with the one they did — and the press that removes a `linux-amd64`
+      // build is the same shape as the press that removed a `darwin-arm64` one. The name goes when
+      // its last artifact does, which the Server decides, so nothing is left behind either.
+      $("package-delete").addEventListener("click", async () => {
         const name = $("package-name").value.trim();
         if (!name) return;
         const platform = platformParams();
         if (!platform) return;
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}/rollback?${new URLSearchParams(platform)}`, { method: "POST" });
-        if (!res.ok) {
-          $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
-          return;
-        }
-        $("package-error").textContent = "";
-        await refreshPackages();
-        selectPackage(name, platform.os, platform.arch);
-        refreshAgents();
-      });
-      $("package-delete").addEventListener("click", async () => {
-        const name = $("package-name").value.trim();
-        if (!name) return;
-        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}`, { method: "DELETE" });
+        const res = await fetch(`/api/v1/packages/${encodeURIComponent(name)}?${new URLSearchParams(platform)}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
           $("package-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
         }
         $("package-error").textContent = "";
-        // The package this form described is gone, so the form describes nothing.
+        // The artifact this form described is gone, so the form describes nothing.
         clearPackageForm();
         await refreshPackages();
         refreshAgents();

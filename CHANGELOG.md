@@ -252,17 +252,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   the form used to make that the easiest state to produce by hand, with the type one optional-looking
   field among several and a separate button to remember afterwards.
 
-  Four actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+  Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
 
   | | what it sends |
   | --- | --- |
   | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
   | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)), and the type and Selector are set either way |
   | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
-  | **Unset** | clears the form and the selection. Nothing is sent, nothing is deleted |
 
   None of them runs without an Agent type, so the UI can no longer create a package that reaches
   nobody. *Close* is gone — the **Packages** button that opens the card also closes it.
+
+  **A package chip toggles.** Clicking one fills the form from it; clicking the selected one again
+  lets go, and the form describes no package in particular. Nothing is sent and nothing is deleted
+  either way. The selection lives in the list, so undoing it is a press in the list rather than a
+  button standing among the ones that write.
 
   The **Agent type** field now offers the types the fleet actually reports, with how many Agents
   report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
@@ -341,6 +345,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   the environment ("if it is used in the environment where the Agent runs"). It is reported as an
   *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
   unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
+
+- **Delete in the package form removes one artifact, not the whole package.** It deletes the
+  platform named in the form — the artifact the selected chip stands for — and leaves the other
+  platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
+  the `darwin-arm64` and `windows-amd64` builds with it.
+
+  The package itself goes when its last artifact does, so nothing is left behind either. Deleting
+  uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)).
+
+  `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
+  sends the `?os=…&arch=…` form of it that
+  [ADR-0031](docs/adr/0031-per-platform-package-variants.md) added.
+
+### Removed
+
+- **The ↩ Roll back button is gone from the package form.** The store still remembers the version
+  each artifact replaced ([ADR-0019](docs/adr/0019-one-step-back.md)) and
+  `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
+  removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
+  screen; asking for it is now a request rather than a press.
 
 ### Fixed
 
