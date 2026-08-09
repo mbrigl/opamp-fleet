@@ -411,6 +411,31 @@ impl AppState {
         Ok(())
     }
 
+    /// How many Agents in the fleet each stored package would actually reach today.
+    ///
+    /// A package is inert until its Agent type is set (ADR-0034), it only reaches hosts it has an
+    /// artifact for (ADR-0031), and its Selector narrows it further (ADR-0017) — three ways to
+    /// target nobody, none of which announces itself. A typo in a `service_name` is not a rejected
+    /// upload; it is a rollout that silently arrives nowhere, and there is no canonicalisation that
+    /// would catch it. Counting is what turns that into something an operator can see.
+    ///
+    /// It answers for the fleet *as reported so far*: a package aimed at hosts that have not
+    /// connected yet legitimately reaches nobody, which is why this is a count to be read rather
+    /// than an error to be raised.
+    pub fn package_reach(&self) -> BTreeMap<String, usize> {
+        let mut reach = BTreeMap::new();
+        let Some(store) = self.packages() else {
+            return reach;
+        };
+        let fleet = self.fleet.lock().expect("fleet lock");
+        for record in fleet.values() {
+            for name in store.offered_names(record.description.as_ref()) {
+                *reach.entry(name).or_insert(0) += 1;
+            }
+        }
+        reach
+    }
+
     /// Forgets everything this Server knows about one Agent (ADR-0039): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
     /// credential revoked, since a credential here proves fleet membership and never which Agent

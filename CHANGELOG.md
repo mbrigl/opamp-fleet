@@ -15,6 +15,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
+  and the package list in the UI shows `⚠ reaches no agent` when it is zero.
+
+  This closes a silent failure the follow-ups of ADR-0031, ADR-0033 and ADR-0034 all named: a
+  package can target nobody — through an Agent type that is unset or misspelled, artifacts for
+  platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
+  The package stored fine and reached no one, and nothing said so until somebody noticed the version
+  had not moved.
+
+  The count is the Server's own resolution of the offer, not a second calculation beside it, so it
+  cannot claim a reach the fleet does not get. It counts the fleet **as reported so far**: a package
+  staged ahead of the hosts it is meant for reads `0` legitimately, which is why it is a number to
+  read rather than a rejected upload.
+
 - **An Agent can be forgotten** ([ADR-0039](docs/adr/0039-forgetting-an-agent.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
   bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a

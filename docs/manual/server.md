@@ -325,7 +325,9 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 
 The value is compared **raw** against the `service.name` the Agents report — there is no canonical
 set of Agent types to normalise against, so spell it exactly as they do; a typo here is a rollout
-that never starts rather than an error. Read it off a fleet row, or off the `service_name` a
+that never starts rather than an error. **`targeted_agents` on the package is how you catch that**:
+it says how many Agents the package reaches as things stand, and the package list in the UI shows
+`⚠ reaches no agent` at zero. Read it off a fleet row, or off the `service_name` a
 `[[supervisor]]` block sets. Like the Selector it belongs to the *name*, so it covers every platform
 of the package at once.
 
@@ -403,7 +405,7 @@ show.
 | `GET /api/v1/configurations/{name}` | One Configuration. |
 | `PUT /api/v1/configurations/{name}` | Create or replace it. Body: `{"selector": {…}, "body": "…", "role": "…"}` — `selector` and `role` may be omitted. |
 | `DELETE /api/v1/configurations/{name}` | Remove it. Agents that matched it stop matching; they keep running what they last applied. |
-| `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore. |
+| `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
 | `PUT /api/v1/packages/{name}` | Upload an artifact. See above for the query parameters. |
 | `PUT /api/v1/packages/{name}/source` | Point the package at an artifact hosted elsewhere. |
 | `PUT /api/v1/packages/{name}/type` | Set the Agent type it is built for. Body: `{"service_name": "…"}`. Required before it is offered to anyone; `400` on an empty value. |
@@ -413,6 +415,29 @@ show.
 | `GET /api/v1/packages/{name}/file` | The artifact bytes — where an offered `download_url` points. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
+
+### Whom a package actually reaches
+
+Every stored package carries **`targeted_agents`**: how many Agents in the fleet it would be offered
+to right now. It is not a separate calculation — the Server resolves it exactly as it resolves the
+offer itself, fitting by Agent type and platform and then aiming by Selector, so the number cannot
+promise a reach the fleet does not get.
+
+**Zero is the number to look for.** A package targets nobody when
+
+- its **Agent type** is unset or misspelled — compared raw, with nothing to catch a typo (ADR-0034);
+- no **artifact** matches a platform any Agent reports (ADR-0031);
+- its **Selector** matches no Agent (ADR-0017); or
+- two equally specific Selectors reach the same Agents, so the Server refuses to guess and offers
+  nothing.
+
+None of those is an upload error — the package stores fine, validates fine, and reaches no one — so
+without this number a mistyped rollout looks exactly like a successful one until somebody notices
+the version never moved.
+
+It counts the fleet **as reported so far**, which means a package staged ahead of the hosts it is
+for legitimately reads `0`. That is why it is a number to read rather than something the Server
+refuses to store.
 
 **What a fleet row tells you.** `GET /api/v1/agents` is what the UI renders, and the fields worth
 knowing by name:

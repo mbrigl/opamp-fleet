@@ -330,6 +330,15 @@ struct PackageView {
     /// One artifact per platform. An Agent is offered the one built for the machine it reported,
     /// and never another (ADR-0031).
     variants: Vec<PackageVariantView>,
+    /// How many Agents in the fleet this package reaches as things stand — fitted by type and
+    /// platform, then aimed by Selector, exactly as the offer resolves it.
+    ///
+    /// **`0` is the value worth looking at.** A package targets nobody when its `service_name` is
+    /// unset or misspelled, when no artifact matches any reported platform, or when its Selector
+    /// matches no Agent — and none of those is an upload error, so nothing else would say so. It
+    /// counts the fleet *as reported so far*: a package staged for hosts that have not connected
+    /// yet is legitimately at `0`, which is why this is a number to read rather than a rejection.
+    targeted_agents: usize,
 }
 
 /// One platform's artifact of a package.
@@ -359,9 +368,10 @@ struct PackageVariantView {
     previous_source_url: Option<String>,
 }
 
-impl From<crate::packages::PackageSummary> for PackageView {
-    fn from(summary: crate::packages::PackageSummary) -> Self {
+impl PackageView {
+    fn of(summary: crate::packages::PackageSummary, targeted_agents: usize) -> Self {
         PackageView {
+            targeted_agents,
             name: summary.name,
             selector: summary.selector,
             service_name: summary.service_name,
@@ -450,7 +460,10 @@ struct PackageUpload {
 /// now is, including the version a rollback would restore.
 fn package_response(state: &AppState, name: &str) -> Response {
     match state.packages().and_then(|store| store.summary(name)) {
-        Some(summary) => Json(PackageView::from(summary)).into_response(),
+        Some(summary) => {
+            let reach = state.package_reach().get(name).copied().unwrap_or(0);
+            Json(PackageView::of(summary, reach)).into_response()
+        }
         None => error(StatusCode::NOT_FOUND, format!("no package {name:?}")),
     }
 }
@@ -467,14 +480,21 @@ fn package_response(state: &AppState, name: &str) -> Response {
 )]
 async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     match state.packages() {
-        Some(store) => Json(
-            store
-                .list()
-                .into_iter()
-                .map(PackageView::from)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
+        Some(store) => {
+            let summaries = store.list();
+            // One pass over the fleet for the whole list, rather than one per package.
+            let reach = state.package_reach();
+            Json(
+                summaries
+                    .into_iter()
+                    .map(|summary| {
+                        let targeted = reach.get(&summary.name).copied().unwrap_or(0);
+                        PackageView::of(summary, targeted)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
         None => error(
             StatusCode::NOT_FOUND,
             "package delivery is not configured on this Server",

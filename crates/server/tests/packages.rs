@@ -755,3 +755,86 @@ async fn a_package_is_inert_until_it_names_its_agent_type_and_then_fits_only_tha
     let offer = offered_now().await.expect("an offer");
     assert!(offer.packages.contains_key("otelcol"));
 }
+
+/// The silent no-op ADR-0034 named: a package can target nobody through a mistyped Agent type, a
+/// platform the fleet does not run, or a Selector that matches no one — and none of the three is an
+/// upload error, so without a count nothing says it. The number is the Server's own resolution, so
+/// it cannot claim a reach the fleet does not get.
+#[tokio::test]
+async fn a_package_says_how_many_agents_it_reaches() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    exchange(&server, &support::full_report(&uid, "one", 1)).await;
+
+    async fn list(server: &TestServer) -> serde_json::Value {
+        reqwest::Client::new()
+            .get(format!("http://{}/api/v1/packages", server.addr))
+            .send()
+            .await
+            .expect("list packages")
+            .json()
+            .await
+            .expect("json")
+    }
+
+    async fn reach(server: &TestServer, name: &str) -> i64 {
+        list(server)
+            .await
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap_or_else(|| panic!("no package {name} in the list"))["targeted_agents"]
+            .as_i64()
+            .expect("targeted_agents")
+    }
+
+    // Uploaded and armed for the type this fleet reports: it reaches the one Agent there is.
+    upload(&server, "otelcol", "1.0.0", b"binary").await;
+    assert_eq!(reach(&server, "otelcol").await, 1);
+
+    // A second Agent on the same platform doubles it.
+    exchange(
+        &server,
+        &support::full_report(&InstanceUid::default(), "two", 1),
+    )
+    .await;
+    assert_eq!(reach(&server, "otelcol").await, 2);
+
+    // A Selector that matches nobody: still stored, still valid, reaching no one — the case that
+    // was invisible before.
+    assert_eq!(
+        set_selector(&server, "otelcol", &[("env", "prod")])
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(reach(&server, "otelcol").await, 0);
+
+    // An artifact for a platform this fleet does not run reaches nobody either.
+    upload_for(
+        &server,
+        "fluentbit",
+        "os=windows&arch=amd64",
+        "2.0.0",
+        b"exe",
+    )
+    .await;
+    assert_eq!(reach(&server, "fluentbit").await, 0);
+
+    // Both packages are stored and both reach nobody — which is exactly the state an operator
+    // needs shown, because nothing about the store itself looks wrong.
+    let all = list(&server).await;
+    let counts: Vec<(&str, i64)> = all
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().expect("name"),
+                p["targeted_agents"].as_i64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(counts, [("fluentbit", 0), ("otelcol", 0)]);
+}

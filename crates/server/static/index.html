@@ -712,12 +712,22 @@
       // One chip per artifact, not per package: a name with five platforms is five different
       // binaries with five versions and five rollback histories, and a list that showed one row
       // would have to pick one of them to be honest about.
+      // How many Agents this package reaches, as the Server resolves it. The count belongs to the
+      // *name*, not to the artifact the chip shows: a package reaches an Agent through whichever
+      // platform fits it. Zero is the case worth seeing — a mistyped agent type, a Selector that
+      // matches nobody, or artifacts for platforms this fleet does not run — none of which is an
+      // upload error, so nothing else would say it.
+      const reachText = (p) => {
+        if (typeof p.targeted_agents !== "number") return "";
+        if (p.targeted_agents === 0) return " · ⚠ reaches no agent";
+        return ` · ${p.targeted_agents} agent${p.targeted_agents === 1 ? "" : "s"}`;
+      };
       function renderPackageList() {
         const chips = packages.flatMap((p) =>
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
             const selected = p.name === selectedPackage && tag === selectedPlatform;
-            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
+            return `<span class="chip clickable${selected ? " selected" : ""}" data-name="${esc(p.name)}" data-os="${esc(v.os)}" data-arch="${esc(v.arch)}" title="${v.previous_version ? "rolls back to " + esc(v.previous_version) + (v.previous_source_url ? " from " + esc(v.previous_source_url) : "") : "nothing to roll back to"}">${esc(p.name)} · ${esc(tag)}${v.version ? " · " + esc(v.version) : ""}${v.previous_version ? " ← " + esc(v.previous_version) : ""}${p.service_name ? " · " + esc(p.service_name) + reachText(p) : " · ⚠ no agent type — offered to nobody"}${Object.keys(p.selector || {}).length ? " · " + esc(selectorText(p.selector)) : " · every agent of that type"}${v.source_url ? " · ↗ source" : ""}</span>`;
           })
         );
         $("package-list").innerHTML = chips.join("") || `<span class="chip">none yet</span>`;
