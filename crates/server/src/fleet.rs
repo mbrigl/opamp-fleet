@@ -769,6 +769,21 @@ impl AppState {
         Ok(())
     }
 
+    /// Sets the Agent type a package is built for (ADR-0034), waking every WebSocket loop: this is
+    /// what arms an untyped package, so the Agents it now fits should learn of it at once rather
+    /// than on their next poll.
+    pub fn set_package_service_name(&self, name: &str, service_name: String) -> Result<(), String> {
+        let store = self
+            .packages
+            .as_ref()
+            .ok_or("package delivery is not configured on this Server")?
+            .store();
+        store.set_service_name(name, service_name.clone())?;
+        self.push.send_modify(|rev| *rev += 1);
+        info!(package = %name, service_name = %service_name, "package agent type changed");
+        Ok(())
+    }
+
     /// Deletes a package; `Ok(false)` when none of that name exists.
     pub fn delete_package(&self, name: &str) -> Result<bool, String> {
         let store = self
@@ -873,7 +888,15 @@ fn display_version(reported: &str) -> String {
 #[derive(Serialize, ToSchema)]
 pub struct AgentView {
     pub instance_uid: String,
+    /// The Agent *type* — the Baseline's "reverse FQDN that uniquely identifies the Agent type"
+    /// (ADR-0033). For a managed Collector this is the `dist.name` it was built with, so every
+    /// Collector of one distribution reports the same value. It answers "what is this", never
+    /// "which one is this": that is [`service_instance_name`](Self::service_instance_name).
     pub service_name: String,
+    /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (ADR-0033). Empty
+    /// for a foreign OpAMP client that reports no `service.instance.name`, which is why the UI
+    /// falls back through the type to the UID rather than showing a blank row.
+    pub service_instance_name: String,
     /// The release the Agent reports — `MAJOR.MINOR.PATCH`, with the pre-release when it is not a
     /// release build (ADR-0029). This is what belongs in a column headed "Version"; the commit the
     /// build came from is [`service_build`](Self::service_build). A reported value that is not a
@@ -1066,6 +1089,7 @@ impl AgentView {
         AgentView {
             instance_uid: uid.to_string(),
             service_name: lookup(&identifying, "service.name"),
+            service_instance_name: lookup(&non_identifying, "service.instance.name"),
             service_version: display_version(&service_build),
             service_build,
             os: match lookup(&non_identifying, "os.description") {

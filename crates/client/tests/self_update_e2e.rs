@@ -191,8 +191,12 @@ impl Drop for Supervised {
     }
 }
 
+/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0033). The Client's
+/// configured `name` is its *instance* name; its `service.name` is the constant type
+/// `opamp-fleet-client`, the same on every host in the fleet, which is what a Selector aiming the
+/// Client's own package matches on.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
-    agents.iter().find(|a| a.service_name == name)
+    agents.iter().find(|a| a.service_instance_name == name)
 }
 
 fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> String {
@@ -244,6 +248,11 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
             artifact,
         )
         .expect("put the package");
+    // The Client's own Agent reports the constant type `opamp-fleet-client` (ADR-0033), and a
+    // package reaches only Agents of its type (ADR-0034).
+    store
+        .set_service_name("opamp-fleet-client", "opamp-fleet-client".to_string())
+        .expect("agent type");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -267,6 +276,16 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         (package.status == "Installed" && package.version == version).then_some(())
     })
     .await;
+
+    // The configured `name` names this instance; the type is the shipped binary's name and the
+    // same for every Client in the fleet, so one Selector aims the Client's package at all of them
+    // without naming a host (ADR-0028, ADR-0033).
+    assert_eq!(
+        view(&state.snapshot(), "self-updating-client")
+            .expect("the client's own agent")
+            .service_name,
+        "opamp-fleet-client"
+    );
 
     assert!(
         service.exits.contains(&EXIT_RESTART_FOR_UPDATE),
@@ -325,6 +344,14 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
             artifact,
         )
         .expect("put the package");
+    // Typed so that it *does* reach the Client, which is the only way this test can still test what
+    // it is named for. ADR-0034 makes the Server refuse to send a package of another type, but the
+    // two guards are independent by design — so the case exercised here is the one where the
+    // Server's guard does not fire: an operator uploads a Collector artifact and mistypes its
+    // agent type as the Client's. The Client's name check (ADR-0020) is then all that is left.
+    store
+        .set_service_name("otelcol", "opamp-fleet-client".to_string())
+        .expect("agent type");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");

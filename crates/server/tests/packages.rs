@@ -80,6 +80,23 @@ async fn upload_for(
         .await
         .expect("put package");
     assert_eq!(response.status(), 200, "upload should succeed");
+    // An uploaded artifact is inert until it says which kind of Agent it is for (ADR-0034), so the
+    // helper arms it for the type the scaffolded fleet reports. Tests about the fit itself set it
+    // themselves, or deliberately leave it unset.
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/{name}/type",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
+        .send()
+        .await
+        .expect("put agent type");
+    assert_eq!(
+        response.status(),
+        200,
+        "setting the agent type should succeed"
+    );
 }
 
 /// ADR-0019 through the API: the rollback is one action that says what it will do, it refuses
@@ -457,7 +474,7 @@ async fn a_narrower_selector_overrides_the_fleet_wide_package_for_the_agents_it_
         set_selector(
             &server,
             "otelcol-canary",
-            &[("service.name", "canary-host")]
+            &[("service.instance.name", "canary-host")]
         )
         .await
         .status(),
@@ -575,6 +592,18 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
         .await
         .expect("put source");
     assert_eq!(response.status(), 200);
+    // A referenced package is armed the same way an uploaded one is (ADR-0034) — the type belongs
+    // to the name, and where the bytes live has nothing to do with which Agents they are for.
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/otelcol/type",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
+        .send()
+        .await
+        .expect("put agent type");
+    assert_eq!(response.status(), 200);
 
     // The offer names the source, carries the operator's hash, and passes the headers on.
     let uid = InstanceUid::default();
@@ -665,4 +694,64 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
     // Port 1 answers nothing at all: stored anyway, because the fleet may reach what we cannot.
     let unreachable = put_source("http://127.0.0.1:1/otelcol.tar.gz".to_string()).await;
     assert_eq!(unreachable.status(), 200);
+}
+
+/// ADR-0034 through the API: an uploaded artifact reaches nobody until it says which kind of Agent
+/// it is for, and then it reaches only that kind — whatever its Selector does or does not say.
+#[tokio::test]
+async fn a_package_is_inert_until_it_names_its_agent_type_and_then_fits_only_that_type() {
+    let (server, _scratch) = spawn_with_packages().await;
+
+    // Uploaded and nothing else. No Selector, which before ADR-0034 meant the whole fleet.
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/otelcol?version=2.0.0&{HOST}",
+            server.addr
+        ))
+        .body(b"the-binary".to_vec())
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+
+    let offered_now = || async {
+        let uid = InstanceUid::default();
+        let mut report = full_report(&uid, "edge-01", 1);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(&server, &report).await.packages_available
+    };
+    assert!(
+        offered_now().await.is_none(),
+        "an untyped package is inert, not fleet-wide"
+    );
+
+    let set_type = |service_name: &'static str| async move {
+        reqwest::Client::new()
+            .put(format!(
+                "http://{}/api/v1/packages/otelcol/type",
+                server.addr
+            ))
+            .json(&serde_json::json!({ "service_name": service_name }))
+            .send()
+            .await
+            .expect("put agent type")
+    };
+
+    // An empty type is refused where it is written, rather than silently disarming the package.
+    assert_eq!(set_type("").await.status(), 400);
+
+    // Typed for something else: still nothing, and the Selector never got a say.
+    assert_eq!(set_type("promtail").await.status(), 200);
+    assert!(
+        offered_now().await.is_none(),
+        "a package built for another type is not a candidate"
+    );
+
+    // Typed for what this fleet reports: offered, and the view says so.
+    let armed = set_type(support::AGENT_TYPE).await;
+    assert_eq!(armed.status(), 200);
+    let view: serde_json::Value = armed.json().await.expect("json");
+    assert_eq!(view["service_name"], support::AGENT_TYPE);
+    let offer = offered_now().await.expect("an offer");
+    assert!(offer.packages.contains_key("otelcol"));
 }

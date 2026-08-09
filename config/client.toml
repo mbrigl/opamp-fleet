@@ -6,7 +6,9 @@
 #   http:// or https:// → plain HTTP polling (see poll_interval_secs)
 endpoint = "ws://127.0.0.1:4320/v1/opamp"
 
-# The Agent's service.name — its human identity in the fleet UI and API.
+# The Agent's service.instance.name — the operator's name for *this* Client, shown in the fleet UI
+# and matchable by a Selector. Its service.name is the constant type `opamp-fleet-client`, the same
+# on every host, which is what a package or Configuration aimed at every Client matches (ADR-0033).
 name = "opamp-fleet-client"
 
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
@@ -69,10 +71,11 @@ state_dir = "client-state"
 # the Client's Agent declares no package capability at all and no offer can reach it.
 #
 # Unlike a [[supervisor]], which only consents while the Server picks the artifact (ADR-0017), the
-# Client must NAME its package, and that name is the whole of the protection: a package with an
-# empty Selector reaches every consenting Agent, so without a name to match, the first fleet-wide
-# Collector artifact someone uploads would be installed over the Client and take the host out of
-# reach. An offer under any other name is refused and reported, never applied.
+# Client must NAME its package: an offer under any other name is refused and reported, never
+# applied. This is one of two independent guards, and it is the one on this side of the wire — the
+# Server will not offer a package built for another Agent type either (ADR-0034), and this Client's
+# own type is the constant `opamp-fleet-client`. Neither replaces the other: an operator who typed a
+# Collector artifact as `opamp-fleet-client` gets past the Server, and this name is what is left.
 #
 # What happens on an accepted offer: the artifact is verified like any other, staged as a new
 # version *beside* the running one in the ADR-0010 install layout, and proved by running
@@ -110,6 +113,22 @@ state_dir = "client-state"
 #
 # Anything in between — ./x, bin/x — fails at startup rather than being guessed at. Note that a
 # bare name is NOT searched for in $PATH; it names a file in that one directory.
+#
+# Every block reports two names, and they answer different questions (ADR-0033):
+#
+#   name           service.instance.name — *which* Agent this is. Yours, unique per block, also the
+#                  directory name, so it follows the ADR-0010 grammar (lowercase, digits, '-').
+#                  A Managed Process can never overwrite it.
+#   service_name   service.name — *what* this Agent is, the Agent type. Optional. A Managed Process
+#                  that reports its own type wins over it (a Collector with the opampextension
+#                  states the dist.name it was built with); with neither, the program's file name
+#                  is used. Unlike `name` it may be a reverse FQDN, as the protocol recommends.
+#
+# Aim at the type to reach every Agent of a kind, at the instance name to reach exactly one:
+#
+#   curl -X PUT -H 'Content-Type: application/json' \
+#        -d '{"selector": {"service.name": "otelcol-contrib"}}' \
+#        http://<server>:4320/api/v1/packages/otelcol/selector
 
 # 1. A Collector WITH the opampextension — it reports its own description, health, and
 # effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
@@ -157,6 +176,8 @@ state_dir = "client-state"
 # type = "collector"
 # name = "otelcol"
 # binary = "otelcol"
+# service_name = "otelcol"   # without the extension nothing reports a type, so state one here;
+#                            # left out, the program's file name ("otelcol") is used anyway.
 
 # 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
 # Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
@@ -195,14 +216,20 @@ state_dir = "client-state"
 #
 # Nothing has to be put on the host first. Until a package arrives the Supervisor reports
 # "no process installed" and keeps running, so the first version and every later one take the
-# same path — build the artifact, upload it, aim it:
+# same path — build the artifact, upload it, type it, aim it:
 #
 #   opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
 #   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
 #   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
 #        "http://<server>:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig"
+#   curl -X PUT -H 'Content-Type: application/json' -d '{"service_name": "promtail"}' \
+#        http://<server>:4320/api/v1/packages/promtail/type
 #   curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "prod"}}' \
 #        http://<server>:4320/api/v1/packages/promtail/selector
+#
+# The type step is not optional (ADR-0034): a package reaches only Agents whose service.name equals
+# it, and one with no type reaches nobody. For this block that is "promtail" — the program's file
+# name, since no service_name is set above. Aiming is still the Selector's job, and still optional.
 #
 # The archive must hold the member "promtail" — the program's own file name, which is what this
 # block configures and what the Supervisor looks for. `pack` names it after the file it packs;

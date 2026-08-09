@@ -66,8 +66,11 @@ fn stub_pid(marker: &Path) -> Option<u32> {
         .find_map(|l| l.strip_prefix("pid=").and_then(|p| p.parse().ok()))
 }
 
+/// Finds an Agent by the operator's name for it — `service.instance.name`, the `[[supervisor]]`
+/// block's `name` (ADR-0033). Deliberately not `service.name`: that is the Agent *type*, and both
+/// Supervisors below run the same stub program, so it does not tell them apart.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
-    agents.iter().find(|a| a.service_name == name)
+    agents.iter().find(|a| a.service_instance_name == name)
 }
 
 /// What this Client presents: its two Supervisors, plus itself (ADR-0020).
@@ -125,6 +128,20 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(
         view(&agents, "opamp-fleet-client").is_some(),
         "the Client is its own Agent (ADR-0020)"
+    );
+    // The two Supervisors run the *same* stub program, so they report the same Agent type — which
+    // is what a type is for, and exactly why it cannot double as the name (ADR-0033). They stay
+    // apart because the operator's name is its own attribute, out of reach of the fold.
+    let otelcol_type = &view(&agents, "otelcol").expect("otelcol view").service_name;
+    let stub_type = &view(&agents, "stub").expect("stub view").service_name;
+    assert_eq!(
+        otelcol_type, stub_type,
+        "one program, one type — both blocks name the same stub binary"
+    );
+    assert!(
+        !otelcol_type.is_empty(),
+        "a type is reported even though neither block sets `service_name`: \
+         the program's file name is the fallback"
     );
     let uids: std::collections::HashSet<_> = agents.iter().map(|a| &a.instance_uid).collect();
     assert_eq!(uids.len(), AGENTS, "each Agent has its own identity");

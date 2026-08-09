@@ -18,6 +18,7 @@ use opamp::proto::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::configs::{matches, validate_name};
 
@@ -139,6 +140,14 @@ pub struct Package {
     /// attribute the Agent reported. **Empty matches every Agent.** It belongs to the package, not
     /// to one artifact of it — every variant of a name is aimed at the same Agents.
     pub selector: BTreeMap<String, String>,
+    /// The Agent type this package is built for, matched against the `service.name` an Agent
+    /// reports (ADR-0034). Like the Selector it belongs to the *name*: a type is
+    /// platform-independent, so every variant of one package fits the same Agents.
+    ///
+    /// **Empty offers to nobody.** It is not "every type" — that reading is the hole ADR-0031
+    /// refused for the platform. An untyped package is inert until
+    /// [`set_service_name`](PackageStore::set_service_name) arms it.
+    pub service_name: String,
     /// One artifact per Platform. A package with none offers nothing and is not kept.
     pub variants: BTreeMap<Platform, Variant>,
 }
@@ -298,6 +307,8 @@ impl Variant {
 pub struct PackageSummary {
     pub name: String,
     pub selector: BTreeMap<String, String>,
+    /// The Agent type this package fits (ADR-0034); empty means it is offered to nobody.
+    pub service_name: String,
     /// One entry per Platform, in platform order.
     pub variants: Vec<VariantSummary>,
 }
@@ -323,6 +334,7 @@ impl PackageSummary {
         PackageSummary {
             name: package.name.clone(),
             selector: package.selector.clone(),
+            service_name: package.service_name.clone(),
             variants: package
                 .variants
                 .values()
@@ -344,13 +356,19 @@ impl PackageSummary {
     }
 }
 
-/// A package's rollout, as persisted in `<name>.json`. It holds what belongs to the *name* — which
-/// is only the Selector — so the aim cannot drift apart between one package's artifacts.
+/// A package's rollout, as persisted in `<name>.json`. It holds what belongs to the *name* — the
+/// Selector that aims it and the Agent type it fits — so neither can drift apart between one
+/// package's artifacts.
 #[derive(Serialize, Deserialize)]
 struct PackageMeta {
     name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selector: BTreeMap<String, String>,
+    /// Absent in a file written before ADR-0034. Such a package loads and is offered to nobody
+    /// until a type is set — deliberately not a startup refusal, since unset is already the safe
+    /// state here (unlike a missing Platform, which had no safe reading).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    service_name: String,
 }
 
 /// One artifact as persisted next to itself (`<name>@<os>-<arch>.json`); the artifact is
@@ -452,7 +470,8 @@ impl PackageStore {
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let mut selectors: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        // What `<name>.json` holds: the aim, and the Agent type the package fits (ADR-0034).
+        let mut rollouts: BTreeMap<String, (BTreeMap<String, String>, String)> = BTreeMap::new();
         let mut variants: BTreeMap<String, BTreeMap<Platform, Variant>> = BTreeMap::new();
         let entries =
             std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
@@ -487,7 +506,7 @@ impl PackageStore {
                     .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
                 validate_name(&meta.name)
                     .map_err(|e| format!("invalid package name in {}: {e}", path.display()))?;
-                selectors.insert(meta.name, meta.selector);
+                rollouts.insert(meta.name, (meta.selector, meta.service_name));
                 continue;
             }
 
@@ -585,12 +604,22 @@ impl PackageStore {
         let packages = variants
             .into_iter()
             .map(|(name, variants)| {
-                let selector = selectors.get(&name).cloned().unwrap_or_default();
+                // A store written before ADR-0034 has no type on file. It loads — the package is
+                // simply offered to nobody until one is set, which is the safe state, not a hole.
+                let (selector, service_name) = rollouts.get(&name).cloned().unwrap_or_default();
+                if service_name.is_empty() {
+                    warn!(
+                        package = %name,
+                        "no agent type set: this package is offered to no Agent until \
+                         PUT /api/v1/packages/<name>/type names the type it is built for"
+                    );
+                }
                 (
                     name.clone(),
                     Package {
                         name,
                         selector,
+                        service_name,
                         variants,
                     },
                 )
@@ -768,12 +797,13 @@ impl PackageStore {
         let json =
             serde_json::to_vec_pretty(&variant.meta(name)).expect("variant metadata serializes");
         self.write_atomic(&format!("{stem}.json"), &json)?;
-        // A package new to the store gets its rollout file too, so its Selector has somewhere to
-        // live before anyone sets one.
+        // A package new to the store gets its rollout file too, so its Selector and its type have
+        // somewhere to live before anyone sets either.
         if existing.is_none() {
             let meta = PackageMeta {
                 name: name.to_string(),
                 selector: selector.clone(),
+                service_name: String::new(),
             };
             let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
             self.write_atomic(&format!("{name}.json"), &json)?;
@@ -783,6 +813,7 @@ impl PackageStore {
         let package = packages.entry(name.to_string()).or_insert_with(|| Package {
             name: name.to_string(),
             selector,
+            service_name: String::new(),
             variants: BTreeMap::new(),
         });
         package.variants.insert(platform.clone(), variant);
@@ -1066,10 +1097,39 @@ impl PackageStore {
         let meta = PackageMeta {
             name: name.to_string(),
             selector: selector.clone(),
+            service_name: package.service_name.clone(),
         };
         let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
         self.write_atomic(&format!("{name}.json"), &json)?;
         package.selector = selector;
+        Ok(())
+    }
+
+    /// Sets the Agent type this package is built for (ADR-0034) — for every platform of it at once,
+    /// for the same reason the Selector is set that way: a type is platform-independent.
+    ///
+    /// This is what arms a package. Until it is set the package is offered to no Agent, so an
+    /// artifact uploaded and forgotten reaches nobody instead of everybody.
+    pub fn set_service_name(&self, name: &str, service_name: String) -> Result<(), String> {
+        if service_name.trim().is_empty() {
+            return Err(
+                "an agent type must not be empty — it is matched against the `service.name` an \
+                 Agent reports, and no Agent reports nothing"
+                    .to_string(),
+            );
+        }
+        let mut packages = self.packages.write().expect("packages lock");
+        let package = packages
+            .get_mut(name)
+            .ok_or_else(|| format!("no package {name:?}"))?;
+        let meta = PackageMeta {
+            name: name.to_string(),
+            selector: package.selector.clone(),
+            service_name: service_name.clone(),
+        };
+        let json = serde_json::to_vec_pretty(&meta).expect("package metadata serializes");
+        self.write_atomic(&format!("{name}.json"), &json)?;
+        package.service_name = service_name;
         Ok(())
     }
 
@@ -1131,8 +1191,18 @@ fn resolve<'a>(
     let Some(platform) = Platform::reported(description) else {
         return Ok(Vec::new());
     };
+    // The Agent type this host presents (ADR-0033). Reporting none fits nothing, exactly as
+    // reporting no platform does: "unknown type, so anything goes" is the hole ADR-0031 refused.
+    let Some(service_name) = reported_service_name(description) else {
+        return Ok(Vec::new());
+    };
     let fitting: Vec<(&Package, &Variant)> = packages
         .values()
+        // Fit, step one (ADR-0034): a package built for another kind of Agent is not a candidate,
+        // whatever its Selector says. An untyped package fits nobody — `service_name` is empty and
+        // no Agent reports an empty type, so this comparison is what makes it inert.
+        .filter(|p| p.service_name == service_name)
+        // Fit, step two (ADR-0031): and not a candidate for another machine either.
         .filter(|p| matches(&p.selector, description))
         .filter_map(|p| p.variants.get(&platform).map(|variant| (p, variant)))
         .collect();
@@ -1162,6 +1232,25 @@ fn resolve<'a>(
         .chain(addons)
         .map(|(package, variant)| (package.name.as_str(), variant))
         .collect())
+}
+
+/// The Agent type an Agent reports, as `service.name` (ADR-0033) — the identifying attribute the
+/// Baseline reserves for "a reverse FQDN that uniquely identifies the Agent type".
+///
+/// `None` for an Agent that has not described itself or reports no type, which fits no package
+/// (ADR-0034). An empty value is `None` too: it is not a type, and treating it as one would let an
+/// untyped package match an Agent that reported nothing.
+fn reported_service_name(description: Option<&AgentDescription>) -> Option<&str> {
+    description?
+        .identifying_attributes
+        .iter()
+        .find(|kv| kv.key == "service.name")
+        .and_then(|kv| kv.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            opamp::proto::any_value::Value::StringValue(s) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        })
 }
 
 /// The aggregate over all offered packages — name and content — in name order.
@@ -1213,6 +1302,15 @@ mod tests {
             Ok(_) => panic!("the store should have refused to open"),
             Err(e) => e,
         }
+    }
+
+    /// Arms a package for the Agent type `agent()` reports (ADR-0034). A package with no type is
+    /// offered to nobody, so every test that expects an offer at all has to set one — which is the
+    /// point of the decision, and the reason this helper exists rather than a default.
+    fn arm(store: &PackageStore, name: &str) {
+        store
+            .set_service_name(name, "otelcol".to_string())
+            .expect("agent type");
     }
 
     fn offered(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
@@ -1292,6 +1390,7 @@ mod tests {
                 )
                 .expect("put");
         }
+        arm(&store, "otelcol");
 
         assert_eq!(
             offered(&store, &agent("linux", "amd64", &[])),
@@ -1304,6 +1403,133 @@ mod tests {
         // A platform nothing was built for is offered nothing at all, rather than whatever else
         // happened to be stored under the name.
         assert!(offered(&store, &agent("darwin", "arm64", &[])).is_empty());
+    }
+
+    /// The decision ADR-0034 exists for: a Promtail artifact must never reach a Collector, whatever
+    /// its Selector says — and an empty Selector says nothing, which used to mean "everyone".
+    #[test]
+    fn a_package_built_for_another_agent_type_is_never_offered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        for name in ["otelcol", "promtail"] {
+            store
+                .put(
+                    name.to_string(),
+                    linux(),
+                    "1.0.0".to_string(),
+                    false,
+                    None,
+                    format!("{name}-binary").into_bytes(),
+                )
+                .expect("put");
+        }
+        // Both are fleet-wide — no Selector on either, the shape that used to send both everywhere.
+        store
+            .set_service_name("otelcol", "otelcol".to_string())
+            .expect("type");
+        store
+            .set_service_name("promtail", "promtail".to_string())
+            .expect("type");
+
+        // The Agent reports `service.name = "otelcol"`, so it is not a candidate for the other.
+        assert_eq!(
+            offered(&store, &agent("linux", "amd64", &[])),
+            vec![("otelcol".to_string(), "1.0.0".to_string())],
+            "an empty Selector no longer reaches an Agent of another type"
+        );
+    }
+
+    /// Unset is inert, not permissive. This is the whole difference between ADR-0034's empty type
+    /// and the "empty means every platform" reading ADR-0031 refused: there, empty had no safe
+    /// meaning and the store is rejected; here it does, so the store opens and offers nothing.
+    #[test]
+    fn an_untyped_package_is_offered_to_nobody_and_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+
+        assert!(
+            offered(&store, &agent("linux", "amd64", &[])).is_empty(),
+            "an artifact uploaded and not typed reaches nobody, not everybody"
+        );
+
+        // A store written before this rule opens rather than refusing — the state is already safe.
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(offered(&reopened, &agent("linux", "amd64", &[])).is_empty());
+
+        // Setting the type is what arms it, and it survives a restart like the Selector does.
+        arm(&reopened, "otelcol");
+        assert_eq!(offered(&reopened, &agent("linux", "amd64", &[])).len(), 1);
+        let again = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert_eq!(
+            again.summary("otelcol").expect("summary").service_name,
+            "otelcol"
+        );
+        assert_eq!(offered(&again, &agent("linux", "amd64", &[])).len(), 1);
+    }
+
+    /// The same rule the platform has (ADR-0031): reporting nothing fits nothing. An Agent with no
+    /// type would otherwise be the one hole through which an untyped package could still travel.
+    #[test]
+    fn an_agent_that_reports_no_type_is_offered_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        arm(&store, "otelcol");
+
+        let mut typeless = agent("linux", "amd64", &[]);
+        typeless.identifying_attributes.clear();
+        assert!(offered(&store, &typeless).is_empty());
+
+        // And an empty value is not a type either — otherwise it would match an untyped package.
+        let mut empty = agent("linux", "amd64", &[]);
+        empty.identifying_attributes = vec![KeyValue {
+            key: "service.name".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(String::new())),
+            }),
+        }];
+        assert!(offered(&store, &empty).is_empty());
+    }
+
+    /// An empty type would be indistinguishable from "not set yet", so it is refused where it is
+    /// written rather than silently disarming a package that was working.
+    #[test]
+    fn an_empty_agent_type_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .put(
+                "otelcol".to_string(),
+                linux(),
+                "1.0.0".to_string(),
+                false,
+                None,
+                b"binary".to_vec(),
+            )
+            .expect("put");
+        assert!(store.set_service_name("otelcol", "  ".to_string()).is_err());
+        assert!(store
+            .set_service_name("nosuch", "otelcol".to_string())
+            .is_err());
     }
 
     /// Fit is not optional, so an Agent that reports no platform fits nothing. Guessing here would
@@ -1351,6 +1577,7 @@ mod tests {
                 b"binary".to_vec(),
             )
             .expect("put");
+        arm(&store, "otelcol");
 
         // Stored under a release file name's spelling; found by an Agent reporting the convention.
         assert_eq!(
@@ -1416,6 +1643,8 @@ mod tests {
                 b"windows".to_vec(),
             )
             .expect("put a second platform");
+        // The type belongs to the name too, so it is set once and covers both platforms.
+        arm(&store, "otelcol");
 
         // The Windows artifact was uploaded after the Selector and is aimed the same way.
         assert!(offered(&store, &agent("windows", "amd64", &[])).is_empty());
@@ -1448,6 +1677,7 @@ mod tests {
                     format!("{name}-binary").into_bytes(),
                 )
                 .expect("put");
+            arm(&store, name);
         }
         store
             .set_selector("canary", [("env".to_string(), "canary".to_string())].into())
@@ -1499,6 +1729,7 @@ mod tests {
         put(linux(), "1.0.0", b"linux-old");
         put(windows(), "1.0.0", b"windows-old");
         put(linux(), "2.0.0", b"linux-new");
+        arm(&store, "otelcol");
 
         store.rollback("otelcol", &linux()).expect("rollback");
 
@@ -1597,6 +1828,7 @@ mod tests {
                 b"windows".to_vec(),
             )
             .expect("put");
+        arm(&store, "otelcol");
 
         let on_linux = store.all_packages_hash_for(Some(&agent("linux", "amd64", &[])));
         let on_windows = store.all_packages_hash_for(Some(&agent("windows", "amd64", &[])));
@@ -1643,6 +1875,7 @@ mod tests {
                 b"binary".to_vec(),
             )
             .expect("put");
+        arm(&store, "otelcol");
 
         let offer = store
             .offer_for(Some(&agent("linux", "amd64", &[])), "https://fleet", None)

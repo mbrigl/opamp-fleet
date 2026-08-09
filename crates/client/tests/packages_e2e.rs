@@ -72,8 +72,12 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
+/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0033), which is the
+/// `[[supervisor]]` block's `name`. The block below is deliberately named something other than its
+/// program, so looking up by `service.name` would find nothing: that attribute is the Agent type,
+/// and with no `service_name` set it falls back to the program's file name.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
-    agents.iter().find(|a| a.service_name == name)
+    agents.iter().find(|a| a.service_instance_name == name)
 }
 
 #[tokio::test]
@@ -98,6 +102,12 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
             artifact.clone(),
         )
         .expect("put package");
+    // The Agent type this artifact is built for (ADR-0034): the Supervisor below names its program
+    // `managed-agent` and sets no `service_name`, so that file name is the type it reports. Without
+    // this the package is inert — which is the decision, not an accident of the test.
+    store
+        .set_service_name("myagent", "managed-agent".to_string())
+        .expect("agent type");
 
     let (addr, state, dir) = spawn_server(store).await;
 
@@ -148,6 +158,15 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
     })
     .await;
+
+    // Name and type are the two things this block states separately, and they differ here: the
+    // operator called the Supervisor `myagent`, its program is `managed-agent`, and with no
+    // `service_name` set the program's file name is what the Agent reports as its type (ADR-0033).
+    let agent = view(&state.snapshot(), "myagent")
+        .expect("the agent is found by the operator's name for it")
+        .service_name
+        .clone();
+    assert_eq!(agent, "managed-agent");
 
     // The managed process ran the swapped-in binary (the marker exists) and the persisted record
     // survives — a restart is not re-offered the same package.

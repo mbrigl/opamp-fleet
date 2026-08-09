@@ -160,16 +160,23 @@ and `in_sync`.
 ## Packages: distributing software
 
 Package delivery is armed by `packages_dir`; the Server declares the capability only while the store
-holds something. A package is offered to an Agent when the artifact **fits** the machine it reported *and* the
-package's Selector matches it, *and* the Agent accepts packages at all — which is the Client's
-decision, made by how it names its program
+holds something. A package is offered to an Agent when the package **fits** it — built for its Agent
+type *and* for the machine it reported — *and* the package's Selector matches it, *and* the Agent
+accepts packages at all, which is the Client's decision, made by how it names its program
 (see [the Client](client.md#which-programs-take-updates)).
+
+**Fit is mandatory, aim is optional** — and fit runs first, in two steps (ADR-0034, ADR-0031). A
+package built for another **Agent type** is not a candidate at all: its type is matched against the
+`service.name` the Agent reports, so a Promtail artifact never reaches a Collector even with no
+Selector on it. Then every artifact built for another **platform** is dropped. Only what survives
+both is aimed. This is why a package with **no type set reaches nobody**: unset is not "every type",
+it is inert, and the fleet view marks such a package rather than quietly offering it around.
 
 **One name, one artifact per platform** (ADR-0031). A package name carries a whole release: the
 Linux build, the macOS builds, the Windows build. The Server hands each Agent the one built for
 its `os.type` and `host.arch` and never another, so a mixed fleet is one rollout rather than one
-per platform. **The Selector aims, the platform fits** — which Agents a package is for is your
-choice, which bytes each of them gets is not.
+per platform. **The Selector aims, the type and the platform fit** — which Agents of a kind a
+package is for is your choice, what kind and which bytes are not.
 
 **Upload an artifact.** The artifact is the raw request body, its metadata rides the query:
 
@@ -207,7 +214,23 @@ refusal from the source (a `4xx`) fails the request; a source this Server cannot
 because the Server is not in the download path and its reachability says nothing about the Agents'.
 A private source can be given headers to send.
 
-**Aim it** (ADR-0017). Without a Selector a package reaches every Agent that accepts packages:
+**Type it** (ADR-0034). This is the step that arms the package — until it is taken, the package sits
+in the store and is offered to nobody:
+
+```console
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"service_name": "otelcol-contrib"}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/type
+```
+
+The value is compared **raw** against the `service.name` the Agents report — there is no canonical
+set of Agent types to normalise against, so spell it exactly as they do; a typo here is a rollout
+that never starts rather than an error. Read it off a fleet row, or off the `service_name` a
+`[[supervisor]]` block sets. Like the Selector it belongs to the *name*, so it covers every platform
+of the package at once.
+
+**Aim it** (ADR-0017). Without a Selector a package reaches every Agent **of its type** that accepts
+packages:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
@@ -223,9 +246,10 @@ reaching the same Agent leave it with no offer at all, and the fleet view says s
 `package_conflict`. Two platforms of *one* package can never collide this way: only one of them is
 ever a candidate.
 
-**An Agent that reports no `os.type` or `host.arch` is offered nothing** — there is no artifact that
-can be known to run on it, and guessing is how a fleet-wide outage starts. Every Client this project
-ships reports both.
+**An Agent that reports no `service.name`, `os.type`, or `host.arch` is offered nothing** — there is
+no artifact that can be known to be meant for it or to run on it, and guessing is how a fleet-wide
+outage starts. Every Client this project ships reports all three; a foreign OpAMP client that
+reports no type says so on its fleet row rather than leaving you with a rollout that never starts.
 
 **One step back** (ADR-0019). Replacing an artifact keeps its predecessor, and a rollback re-offers
 it — an ordinary offer naming an older artifact. The Selector is untouched. An artifact that has
@@ -281,7 +305,8 @@ show.
 | `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore. |
 | `PUT /api/v1/packages/{name}` | Upload an artifact. See above for the query parameters. |
 | `PUT /api/v1/packages/{name}/source` | Point the package at an artifact hosted elsewhere. |
-| `PUT /api/v1/packages/{name}/selector` | Set which Agents it is offered to. |
+| `PUT /api/v1/packages/{name}/type` | Set the Agent type it is built for. Body: `{"service_name": "…"}`. Required before it is offered to anyone; `400` on an empty value. |
+| `PUT /api/v1/packages/{name}/selector` | Set which Agents of that type it is offered to. |
 | `POST /api/v1/packages/{name}/rollback` | Re-offer the version this package replaced. `409` when there is none. |
 | `DELETE /api/v1/packages/{name}` | Remove it from the store. |
 | `GET /api/v1/packages/{name}/file` | The artifact bytes — where an offered `download_url` points. |
@@ -293,7 +318,7 @@ knowing by name:
 
 | Field | Meaning |
 |---|---|
-| `instance_uid`, `service_name`, `service_version`, `os` | Identity, as the Agent reports it. |
+| `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
 | `identifying_attributes`, `non_identifying_attributes` | Everything a Selector can match on. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
 | `matched_configurations`, `desired_hash` | What it should be running. |

@@ -60,10 +60,20 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     )
     .expect("json");
     assert_eq!(agents.as_array().expect("array").len(), 1);
-    assert_eq!(agents[0]["service_name"], "itest");
+    // Type and name are two columns now (ADR-0033): `service_name` is what kind of Agent this is,
+    // `service_instance_name` is which one.
+    assert_eq!(agents[0]["service_name"], support::AGENT_TYPE);
+    assert_eq!(agents[0]["service_instance_name"], "itest");
     assert_eq!(agents[0]["transport"], "http");
     assert_eq!(agents[0]["connected"], true);
-    assert_eq!(agents[0]["identifying_attributes"]["service.name"], "itest");
+    assert_eq!(
+        agents[0]["identifying_attributes"]["service.name"],
+        support::AGENT_TYPE
+    );
+    assert_eq!(
+        agents[0]["non_identifying_attributes"]["service.instance.name"],
+        "itest"
+    );
     // The OS column prefers the human-readable description over the bare os.type.
     assert_eq!(agents[0]["os"], "Testix 1.0 LTS");
     assert_eq!(agents[0]["non_identifying_attributes"]["os.type"], "linux");

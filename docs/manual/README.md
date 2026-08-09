@@ -88,11 +88,17 @@ From here, [Server](server.md) covers targeting a subset of the fleet and distri
 Agents: itself, always, plus one per configured Supervisor. All of them share the Client's single
 connection, so the Server's fleet view has more rows than there are hosts.
 
-**Attributes.** Every Agent reports attributes — `service.name`, `service.version`,
-`service.instance.id`, `os.type`, `os.name`, `os.version`, `os.description`, `host.name`,
-`host.arch`, `host.id` — and an operator can add more in `client.toml`, plus `service.namespace`
-where a deployment uses one. These are what Selectors match on. An attribute the host cannot answer
-is absent rather than empty.
+**Attributes.** Every Agent reports attributes — `service.name`, `service.instance.name`,
+`service.version`, `service.instance.id`, `os.type`, `os.name`, `os.version`, `os.description`,
+`host.name`, `host.arch`, `host.id` — and an operator can add more in `client.toml`, plus
+`service.namespace` where a deployment uses one. These are what Selectors match on. An attribute the
+host cannot answer is absent rather than empty.
+
+Two of them are easy to confuse, and telling them apart is what aims everything else (ADR-0033):
+`service.name` is the Agent **type** — `otelcol-contrib`, `promtail`, `opamp-fleet-client` — the
+same value on every host running that kind of agent, while `service.instance.name` is **your** name
+for one Agent, the `[[supervisor]]` block's `name`. Aim at the type to reach every Agent of a kind,
+at the instance name to reach exactly one.
 
 **Configuration and Selector** (ADR-0012). A *Configuration* is a named body of text held by the
 Server. Its *Selector* is a set of `key=value` pairs that an Agent's reported attributes must equal
@@ -105,10 +111,12 @@ Managed Process reads by path* — a rule file, a lookup table — rather than c
 started with. The Client writes it beside the configuration under its own name, and leaves it out of
 what the process is configured with.
 
-**Package** (ADR-0015, ADR-0017, ADR-0018). A named artifact the Server distributes to the Agents
-its Selector matches. The Server decides which artifact an Agent is offered; the Client decides
-whether it accepts packages at all. Artifacts are verified by content hash always, and by Ed25519
-signature when a verification key is configured.
+**Package** (ADR-0015, ADR-0017, ADR-0018). A named artifact the Server distributes. It states the
+Agent **type** it is built for and reaches no Agent of another, whatever its Selector says
+(ADR-0034) — a package with no type set reaches nobody at all — and within that type its Selector
+picks which Agents, and its platform which bytes each of them gets. The Server decides which
+artifact an Agent is offered; the Client decides whether it accepts packages at all. Artifacts are
+verified by content hash always, and by Ed25519 signature when a verification key is configured.
 
 **Transports** (ADR-0007). The URL scheme in the Client's `endpoint` selects the transport:
 `ws://`/`wss://` for WebSocket, where the Server pushes changes within seconds, and
