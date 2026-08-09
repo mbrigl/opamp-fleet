@@ -10,6 +10,7 @@ a service.
 - [What the Server does](#what-the-server-does)
 - [Running it](#running-it)
 - [Configuration reference](#configuration-reference)
+- [Mutual TLS: proving who is on the connection](#mutual-tls-proving-who-is-on-the-connection)
 - [Configurations: what the fleet runs](#configurations-what-the-fleet-runs)
 - [Packages: distributing software](#packages-distributing-software)
 - [The REST API](#the-rest-api)
@@ -80,13 +81,27 @@ optional and shown below with its default; an unknown key fails startup rather t
 
 ### `[tls]`
 
-Present means the listener serves HTTPS and WSS instead of plain HTTP and WS (ADR-0007). Both keys
-are required together.
+Present means the listener serves HTTPS and WSS instead of plain HTTP and WS (ADR-0007).
+`cert_file` and `key_file` are required together; `client_ca_file` is optional and turns on mutual
+TLS (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 
 ```toml
 [tls]
 cert_file = "cert.pem"
 key_file = "key.pem"
+client_ca_file = "client-ca.pem"   # optional: require a client certificate on /v1/opamp
+```
+
+### `[client_ca]`
+
+Optional. Present makes the Server a local CA that signs Agent certificate requests — see
+[Issuing certificates](#issuing-certificates-the-csr-flow).
+
+```toml
+[client_ca]
+cert_file = "client-ca.pem"
+key_file = "client-ca-key.pem"
+validity_days = 90
 ```
 
 ### `[auth]`
@@ -111,6 +126,76 @@ bearer_token = "a-long-random-token"           # or username = "…" / password 
 heartbeat_interval_secs = 30
 endpoint = "wss://fleet.example:4320/v1/opamp"
 ```
+
+## Mutual TLS: proving who is on the connection
+
+`[tls]` gains an optional `client_ca_file` (ADR-0035). With it set, every request to `/v1/opamp`
+must arrive over a connection carrying a client certificate that bundle verifies:
+
+```toml
+[tls]
+cert_file = "cert.pem"
+key_file = "key.pem"
+client_ca_file = "client-ca.pem"
+```
+
+Client authentication stays **optional at the TLS layer** and required on the OpAMP route alone.
+That is deliberate: the same listener serves the REST API and the UI, and a browser presents no
+certificate. A certificate that *is* presented is always verified — rustls refuses one it cannot
+chain before any route sees it.
+
+**Every configured proof must succeed.** `[auth]` alone behaves as it always has. `client_ca_file`
+alone makes the endpoint certificate-only. Both configured means **both** are required of every
+request, not either one — so turning mutual TLS on can never widen admission. What it can do is shut
+out a host that has no certificate yet, which is what the next section is for.
+
+A certificate proves **fleet membership, not identity**. The Server does not match its subject
+against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
+(`AgentIdentification`), and a certificate that a re-key invalidates is an outage of your own making.
+
+### Issuing certificates: the CSR flow
+
+Add a `[client_ca]` section and the Server becomes a local CA:
+
+```toml
+[client_ca]
+cert_file = "client-ca.pem"
+key_file = "client-ca-key.pem"
+validity_days = 90
+```
+
+Use a **separate** CA, not the listener's certificate and key: a CA private key stored where the
+server certificate lives means compromising the Server mints fleet members at will. Then point
+`[tls] client_ca_file` at that CA's certificate, so the certificates it issues are the ones the
+listener accepts.
+
+With the section present the Server declares `AcceptsConnectionSettingsRequest`. A Client that has
+no certificate, or holds one two thirds through its validity, generates a key **that never leaves
+its host**, sends a signing request, and receives the certificate as an ordinary connection-settings
+offer — which it proves by connecting with before it replaces the one in force. Admission is the
+approval: a request that got this far already satisfied every proof the endpoint requires. There is
+no approval queue.
+
+A request that does not parse, or one arriving at a Server with no `[client_ca]`, is answered with
+the protocol's `BadRequest` error response.
+
+### The order that does not lock anyone out
+
+1. Configure `[client_ca]` and restart. Nothing is required of anyone yet; Clients begin enrolling
+   on their next connection.
+2. Watch them come back with certificates — each Client writes `client-cert.pem` into its state
+   directory.
+3. Set `[tls] client_ca_file` and restart. Now a certificate is required.
+4. Once every host is on one, delete `[auth]` if you want the endpoint to be certificate-only.
+
+Step 4 is not for every fleet. **Keep `[auth]` if you will run Gateways**: a Gateway terminates TLS,
+so a client certificate cannot reach the Server through it, and the credential — forwarded unchanged
+— is the only per-Agent proof that survives the hop.
+
+**There is no revocation.** Short `validity_days` plus renewal is what bounds a certificate; ejecting
+a host faster than its certificate expires means rotating the CA. And an expired certificate locks a
+host out even with a valid credential: a Client switched off longer than its validity needs
+`client_ca_file` unset for as long as it takes to re-enrol.
 
 ## Configurations: what the fleet runs
 
@@ -358,8 +443,8 @@ loopback interface, but it still sends it. Pair `[auth]` with `[tls]` for anythi
 and no plaintext one left open beside it. Clients then use `wss://` or `https://` endpoints, and
 Clients trusting a private CA additionally set `ca_file` in their own `[tls]` section.
 
-The Server presents a server certificate and **verifies no client certificate**. Mutual TLS is not
-built; see [`docs/CONFORMANCE.md`](../CONFORMANCE.md).
+The Server can also **verify a client certificate**, which is the other half of the same section:
+see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection).
 
 ## Moving the fleet: connection settings
 

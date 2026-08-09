@@ -72,6 +72,27 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let client_ca = match config
+        .client_ca
+        .as_ref()
+        .map(server::ca::ClientCa::from_config)
+        .transpose()
+    {
+        Ok(ca) => {
+            if let Some(ca) = &ca {
+                // ADR-0035.
+                info!(
+                    validity_days = ca.validity_days(),
+                    "signing client certificates for Agents that ask"
+                );
+            }
+            ca
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
         Ok(store) => {
             if !store.is_empty() {
@@ -92,6 +113,7 @@ async fn main() {
         Ok(state) => Arc::new(
             state
                 .with_connection_offer(connection_offer)
+                .with_client_ca(client_ca)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
                 .with_max_package_size(config.max_package_size_bytes),
@@ -109,17 +131,32 @@ async fn main() {
         // ADR-0013.
         info!("the OpAMP endpoint requires authentication");
     }
-    let app = server::app(state, auth);
+    // Mutual TLS is on when the listener has a CA to verify client certificates against; the
+    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0035).
+    let mutual_tls = config
+        .tls
+        .as_ref()
+        .is_some_and(|tls| tls.client_ca_file.is_some());
+    if mutual_tls {
+        info!("the OpAMP endpoint requires a client certificate");
+    }
+    let app = server::app(state, server::transport::Admission::new(auth, mutual_tls));
 
     match &config.tls {
         Some(tls) => {
-            let rustls_config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_file, &tls.key_file)
-                    .await
-                    .expect("load the TLS certificate and key");
+            let rustls_config = match server::tls::server_config(tls) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            };
             info!(listen = %config.listen, "serving OpAMP, REST API, and UI over TLS");
             tokio::select! {
-                served = axum_server::bind_rustls(config.listen, rustls_config)
+                // The acceptor's own, rather than `bind_rustls`: it is what carries the
+                // handshake's peer certificate into the request the OpAMP route checks.
+                served = axum_server::bind(config.listen)
+                    .acceptor(server::tls::PeerCertAcceptor::new(rustls_config))
                     .serve(app.into_make_service()) => {
                     served.expect("serve");
                 }

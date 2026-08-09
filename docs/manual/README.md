@@ -138,8 +138,10 @@ authority on all of it.
 - **Gateway Mode** (ADR-0003) — a Client accepting other Clients' connections and folding them onto
   a few upstream ones. Decided and specified; there is no implementation and no configuration key
   for it. Every Client today connects to the Server directly.
-- **Mutual TLS** (ADR-0007, ADR-0013) — no client certificates, in either direction. A Server
-  offering `certificate`, `tls`, or `proxy` in connection settings is told they were applied while
-  nothing about them was.
+- **`tls` and `proxy` in connection settings** (ADR-0035) — a Server offering either is told, in
+  its status report, that the Client dropped them. Mutual TLS itself *is* built: see
+  [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
+- **Certificate revocation** (ADR-0035) — there is no CRL and no OCSP. A short `validity_days` plus
+  renewal is what bounds an issued certificate.
 - **The Client's own telemetry** (`ReportsOwnTraces`/`Metrics`/`Logs`) and **custom messages** —
   planned, not implemented.

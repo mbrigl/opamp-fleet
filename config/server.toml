@@ -15,9 +15,37 @@ config_dir = "fleet-configs"
 max_message_size_bytes = 67108864
 
 # Optional TLS (ADR-0007): with a certificate and key the listener serves HTTPS/WSS instead.
+# client_ca_file turns on mutual TLS (ADR-0035): every request to /v1/opamp must then arrive over a
+# connection carrying a client certificate that bundle verifies. Client authentication stays
+# optional at the TLS layer, because this listener also serves the REST API and the UI and a browser
+# presents nothing — so only the OpAMP route requires one.
 # [tls]
 # cert_file = "cert.pem"
 # key_file = "key.pem"
+# client_ca_file = "client-ca.pem"
+
+# EVERY CONFIGURED PROOF MUST SUCCEED. [auth] alone behaves as it always has; client_ca_file alone
+# makes the OpAMP endpoint certificate-only; both configured means BOTH are required of every
+# request, not either one. Turning mutual TLS on can therefore never widen admission — but it can
+# lock out a host that has no certificate yet, so let the fleet enrol first (below) and set
+# client_ca_file after.
+
+# Optional certificate authority for the CSR flow (ADR-0035). Present is what arms it: the Server
+# declares AcceptsConnectionSettingsRequest, and an Agent that has no certificate — or holds one two
+# thirds through its life — generates a key (which never leaves its host), sends a signing request,
+# and receives the certificate as an ordinary connection-settings offer.
+#
+# This is deliberately NOT the listener's own certificate and key: a CA private key sitting where
+# the server certificate lives means compromising the Server mints fleet members at will. Generate a
+# separate self-signed CA and point client_ca_file above at its certificate.
+#
+# Admission is the approval — a request that reached this Server already satisfied every proof the
+# endpoint requires. There is no approval queue, and no revocation: validity_days plus renewal is
+# what bounds a certificate, so keep it short rather than generous.
+# [client_ca]
+# cert_file = "client-ca.pem"
+# key_file = "client-ca-key.pem"
+# validity_days = 90
 
 # Optional authentication on the OpAMP endpoint (ADR-0013). When the section is present, every
 # OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching

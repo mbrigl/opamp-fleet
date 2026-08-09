@@ -56,6 +56,10 @@ pub fn merge(
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
             headers: pick(|s| s.headers.is_some()).and_then(|s| s.headers),
+            // The issued client identity (ADR-0035). Folded like every other field: a later offer
+            // that says nothing about the certificate leaves the one in force alone, which is what
+            // makes an endpoint or credential rotation safe for a fleet already on mutual TLS.
+            certificate: pick(|s| s.certificate.is_some()).and_then(|s| s.certificate),
             heartbeat_interval_seconds: pick(|s| s.heartbeat_interval_seconds != 0)
                 .map(|s| s.heartbeat_interval_seconds)
                 .unwrap_or_default(),
@@ -63,6 +67,37 @@ pub fn merge(
         }),
         ..Default::default()
     }
+}
+
+/// What to report for an offer that has been verified and applied: `Ok` when the Client honoured
+/// all of it, `Err` naming the fields it dropped (ADR-0035).
+///
+/// The Client applies what it understands and then says so. Reporting `APPLIED` for an offer whose
+/// `tls` or `proxy` it silently discarded — which is what it used to do — tells the Server the
+/// settings are in force when they are not, and the Server has no way to find out. `FAILED` with
+/// the field names is the honest answer; the hash is echoed either way, so this does not put the
+/// Server into a re-offer loop.
+///
+/// Neither field is honoured on purpose. `TLSConnectionSettings` is mostly a way to weaken
+/// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
+/// the Server — and trust here is an operator's file (ADR-0007). `ProxyConnectionSettings` has
+/// nothing on this Client to configure. Both are `[Development]` upstream.
+pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
+    let mut dropped = Vec::new();
+    if settings.tls.is_some() {
+        dropped.push("tls");
+    }
+    if settings.proxy.is_some() {
+        dropped.push("proxy");
+    }
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "applied everything else, but this Client does not implement the offered {} \
+         connection settings",
+        dropped.join(" and ")
+    ))
 }
 
 /// The `Authorization` value an offer carries, if any.
@@ -111,6 +146,14 @@ pub async fn verify(
         Some(offered) => Some(offered.to_string()),
         None => config.authorization_value()?,
     };
+    // An offered client certificate is proved the same way the endpoint and the credential are:
+    // by connecting with it (ADR-0035). Until that succeeds the one in force stays in force, so a
+    // certificate that cannot authenticate costs nothing.
+    let candidate_cert = settings
+        .certificate
+        .as_ref()
+        .map(|certificate| certificate.cert.as_slice())
+        .filter(|cert| !cert.is_empty());
 
     let scheme = endpoint.split("://").next().unwrap_or("");
     match scheme {
@@ -127,12 +170,8 @@ pub async fn verify(
                         .map_err(|e| format!("offered credentials are not a valid header: {e}"))?,
                 );
             }
-            let connector = match &config.tls {
-                Some(tls) => Some(tokio_tungstenite::Connector::Rustls(
-                    crate::tls::rustls_config_with_ca(&tls.ca_file)?,
-                )),
-                None => None,
-            };
+            let connector = crate::tls::rustls_client_config_for(config, candidate_cert)?
+                .map(tokio_tungstenite::Connector::Rustls);
             let (mut socket, _) =
                 tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
                     .await
@@ -142,18 +181,13 @@ pub async fn verify(
         }
         "http" | "https" => {
             let report = probe_report().ok_or("no agent to build a probe report from")?;
-            let mut builder = reqwest::Client::builder()
-                .use_rustls_tls()
-                .timeout(std::time::Duration::from_secs(30));
-            if let Some(tls) = &config.tls {
-                let pem = std::fs::read(&tls.ca_file)
-                    .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
-                let ca = reqwest::Certificate::from_pem(&pem)
-                    .map_err(|e| format!("cannot parse {}: {e}", tls.ca_file.display()))?;
-                builder = builder
-                    .tls_built_in_root_certs(false)
-                    .add_root_certificate(ca);
-            }
+            let builder = crate::tls::trust_and_identity_for(
+                reqwest::Client::builder()
+                    .use_rustls_tls()
+                    .timeout(std::time::Duration::from_secs(30)),
+                config,
+                candidate_cert,
+            )?;
             let client = builder
                 .build()
                 .map_err(|e| format!("cannot build the probe client: {e}"))?;

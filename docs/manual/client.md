@@ -246,12 +246,29 @@ puts it. Leave it out and nothing is reported.
 
 ```toml
 [tls]
-ca_file = "ca.pem"
+ca_file = "ca.pem"             # trust: replaces the built-in roots
+cert_file = "client.pem"       # identity: what this Client presents
+key_file = "client-key.pem"
 ```
 
-A trust override for `wss://`/`https://` endpoints whose certificate comes from a private CA
-(ADR-0007). Without it the platform's trust store applies. The Client presents **no** client
-certificate — mutual TLS is not built.
+Every key is optional on its own, so this section may carry a trust override, a client identity, or
+both.
+
+`ca_file` is the trust override for `wss://`/`https://` endpoints whose certificate comes from a
+private CA (ADR-0007). Without it the platform's trust store applies.
+
+`cert_file` and `key_file` are this Client's own certificate for a Server that requires mutual TLS
+(ADR-0035) — they go together or not at all. This is the identity an operator provisions, including
+the **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
+the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
+prefers it, the same precedence persisted connection settings have over `client.toml`. Deleting the
+stored pair reverts to what is written here.
+
+**Enrolment needs nothing in this file.** When the Server declares that it signs certificates, a
+Client without one generates a key — which never leaves the host — sends a signing request, and
+receives a certificate through the ordinary offer flow, renewing the same way once it is two thirds
+through its validity. The private key is written `0600`; on Windows the state directory's ACL is
+what protects it.
 
 ### `[auth]`
 

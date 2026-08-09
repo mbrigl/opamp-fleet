@@ -44,12 +44,9 @@ pub async fn run(
     config: &ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<RunOutcome, String> {
-    let connector = match &config.tls {
-        Some(tls) => Some(Connector::Rustls(crate::tls::rustls_config_with_ca(
-            &tls.ca_file,
-        )?)),
-        None => None,
-    };
+    // Trust and identity in one configuration: a private CA when one is configured, and this
+    // Client's client certificate when it has one (ADR-0007, ADR-0035).
+    let connector = crate::tls::rustls_client_config(config)?.map(Connector::Rustls);
 
     // The Authorization header (ADR-0013, rotated per ADR-0014) rides the upgrade request — the
     // server checks it before the WebSocket comes up.
@@ -203,6 +200,10 @@ async fn serve(
                         if send_all(&mut socket, engine.owed_reports(), limit).await.is_err() {
                             return Served::ConnectionLost;
                         }
+                        // Enrolment (ADR-0035): with the Server's capabilities now known, ask it
+                        // to sign a certificate if it signs them and this Client needs one. The
+                        // answer arrives as an ordinary connection-settings offer.
+                        engine.request_certificate(config);
                         // A connection-settings offer (ADR-0014): the APPLYING acknowledgement
                         // just went out with the owed reports; now verify by actually
                         // connecting. Success persists the settings and reconnects with them;
@@ -212,7 +213,32 @@ async fn serve(
                             let probe = || engine.probe_report();
                             match crate::connection::verify(&settings, config, probe).await {
                                 Ok(()) => {
-                                    engine.connection_settings_outcome(&offer.hash, Ok(()));
+                                    // Applied as far as this Client honours the offer, and said
+                                    // so — `FAILED` when it had to drop a field (ADR-0035).
+                                    // The issued certificate is stored only now, after connecting with it
+                                    // proved it works — the old one stayed in force until here (ADR-0035).
+                                    if let Some(certificate) = &settings.certificate {
+                                        if let Err(e) = crate::csr::accept(
+                                            &config.state_dir,
+                                            &certificate.cert,
+                                        ) {
+                                            warn!(error = %e, "cannot store the issued certificate");
+                                        } else {
+                                            info!("a client certificate was issued and is now in force");
+                                        }
+                                    }
+                                    // Applied as far as this Client honours it, and said so (ADR-0035).
+                                    match crate::connection::unhonoured(&settings) {
+                                        Ok(()) => engine
+                                            .connection_settings_outcome(&offer.hash, Ok(())),
+                                        Err(e) => {
+                                            warn!(error = %e, "connection settings partly applied");
+                                            engine.connection_settings_outcome(
+                                                &offer.hash,
+                                                Err(&e),
+                                            );
+                                        }
+                                    }
                                     let merged = crate::connection::merge(
                                         crate::connection::load(&config.state_dir).as_ref(),
                                         &offer,

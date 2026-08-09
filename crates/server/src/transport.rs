@@ -58,7 +58,42 @@ impl OpampAuth {
     }
 }
 
-pub fn router(state: Arc<AppState>, auth: Option<OpampAuth>) -> Router {
+/// What a peer must prove to reach `/v1/opamp`. **Every configured mechanism must succeed**
+/// (ADR-0035): a credential when `[auth]` is set, a client certificate when `[tls] client_ca_file`
+/// is, both when both are. Nothing configured leaves the endpoint open, as it has always been.
+///
+/// The rule is deliberately not "either one". Header authorization is what the Baseline expects an
+/// Agent to carry and client certificates are what it adds "optionally also" on top — so stacking
+/// them is the protocol's own layering, and it is the only rule under which switching mutual TLS on
+/// cannot make a fleet admit anything it did not admit before.
+#[derive(Default)]
+pub struct Admission {
+    auth: Option<OpampAuth>,
+    /// Set while the listener has a client CA: the connection must have carried a certificate.
+    /// The certificate itself is already verified — rustls refuses one it cannot chain — so this
+    /// is a presence check, never a second verification.
+    require_client_certificate: bool,
+}
+
+impl Admission {
+    /// No proof required — the default deployment, and every test that is not about admission.
+    pub fn open() -> Self {
+        Admission::default()
+    }
+
+    pub fn new(auth: Option<OpampAuth>, require_client_certificate: bool) -> Self {
+        Admission {
+            auth,
+            require_client_certificate,
+        }
+    }
+
+    fn required(&self) -> bool {
+        self.auth.is_some() || self.require_client_certificate
+    }
+}
+
+pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     // The receive limit the Baseline requires of the Server on both transports; a request body
     // past it never reaches a handler, and axum answers it with the 413 the Baseline prescribes.
     let limit = state.max_message_size();
@@ -69,28 +104,42 @@ pub fn router(state: Arc<AppState>, auth: Option<OpampAuth>) -> Router {
         .route(OPAMP_PATH, get(upgrade).post(post_exchange))
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state);
-    if let Some(auth) = auth {
+    if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
-        // WebSocket upgrade completes — answers 401 without a valid credential (ADR-0013).
-        router = router.layer(middleware::from_fn_with_state(Arc::new(auth), require_auth));
+        // WebSocket upgrade completes — answers 401 when a required proof is missing (ADR-0013,
+        // ADR-0035).
+        router = router.layer(middleware::from_fn_with_state(Arc::new(admission), admit));
     }
     router
 }
 
-async fn require_auth(
-    State(auth): State<Arc<OpampAuth>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if auth.permits(request.headers()) {
-        return next.run(request).await;
+async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: Next) -> Response {
+    // Every configured proof, not the first that happens to pass.
+    if admission.require_client_certificate {
+        let presented = request
+            .extensions()
+            .get::<crate::tls::PeerCertificate>()
+            .is_some_and(crate::tls::PeerCertificate::present);
+        if !presented {
+            debug!("refused: the OpAMP endpoint requires a client certificate");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "the OpAMP endpoint requires a client certificate",
+            )
+                .into_response();
+        }
     }
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, auth.challenge.clone())],
-        "the OpAMP endpoint requires authentication",
-    )
-        .into_response()
+    if let Some(auth) = &admission.auth {
+        if !auth.permits(request.headers()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, auth.challenge.clone())],
+                "the OpAMP endpoint requires authentication",
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 async fn upgrade(State(state): State<Arc<AppState>>, upgrade: WebSocketUpgrade) -> Response {

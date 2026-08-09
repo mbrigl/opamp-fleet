@@ -144,6 +144,26 @@ impl Engine {
         }
     }
 
+    /// Asks the Server for a client certificate when it signs them and this Client needs one
+    /// (ADR-0035). Driven by capability rather than configuration: a Server that declares nothing
+    /// is never asked, and one that does hands this host an identity before mutual TLS is switched
+    /// on, which is what makes switching it on uneventful.
+    ///
+    /// The request rides the Client's **own** Agent. The identity belongs to the connection, not to
+    /// any one Agent (n Agents share it, ADR-0003), and the self-Agent is the one every Client has.
+    pub fn request_certificate(&mut self, config: &crate::config::ClientConfig) {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.state.server_signs_certificates() && !agent.state.is_managed())
+        else {
+            return;
+        };
+        if let Some(csr) = crate::csr::request(config) {
+            agent.state.request_certificate(csr);
+        }
+    }
+
     /// The connection-settings offer the transport must verify by actually connecting, taken
     /// exactly once (ADR-0014).
     pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {

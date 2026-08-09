@@ -73,15 +73,9 @@ pub async fn download_and_verify(
         // stalled connection is what actually needs cutting.
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(60));
-    if let Some(tls) = &config.tls {
-        let pem = std::fs::read(&tls.ca_file)
-            .map_err(|e| format!("cannot read {}: {e}", tls.ca_file.display()))?;
-        let ca = reqwest::Certificate::from_pem(&pem)
-            .map_err(|e| format!("cannot parse {}: {e}", tls.ca_file.display()))?;
-        builder = builder
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(ca);
-    }
+    // Trust only, never this Client's certificate: a `download_url` may point at a mirror
+    // (ADR-0018), and an identity belongs to the Server rather than to whoever hosts an artifact.
+    builder = crate::tls::trust(builder, config)?;
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;

@@ -62,6 +62,23 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
 rustls-pemfile = "2"
+# The client-certificate CSR flow (ADR-0035): the Client produces the request, the Server signs it
+# as a local CA. Pinned to the `ring` backend — the provider ADR-0007 already installs, whose C is
+# already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
+# `x509-parser` is what reads a CSR back, and a certificate's validity for the renewal window.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+# The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
+# validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in
+# the tree as rcgen's own dependency, and preferable to hand-rolling calendar arithmetic.
+time = { version = "0.3", default-features = false, features = ["std"] }
+# Reading back the validity of the certificate the Client holds, which is what decides when to
+# renew (ADR-0035). rcgen parses X.509 only behind a private, test-only path, so this is the
+# public way in — and it is the very parser rcgen itself uses, already in the tree.
+x509-parser = "0.18"
+# The built-in root store, for the one case the transports' own defaults cannot cover: a Client
+# presenting a client certificate (ADR-0035) to a Server with a publicly trusted one, which needs
+# a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
+webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered

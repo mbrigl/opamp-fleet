@@ -13,7 +13,7 @@ use opamp::proto::{
     ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
     OpAmpConnectionSettings, PackageStatuses, PackagesAvailable, RemoteConfigStatus,
     RemoteConfigStatuses, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
-    ServerToAgent, ServerToAgentFlags,
+    ServerToAgent, ServerToAgentFlags, TlsCertificate,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -23,6 +23,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
+use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
 use crate::packages::PackageStore;
@@ -166,6 +167,9 @@ pub struct AppState {
     /// The packages offered to the fleet (ADR-0015); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
+    /// The authority that signs Agent CSRs (ADR-0035); `None` signs nothing and leaves
+    /// `AcceptsConnectionSettingsRequest` undeclared.
+    client_ca: Option<ClientCa>,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
     /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
@@ -192,6 +196,7 @@ impl AppState {
             next_conn: AtomicU64::new(1),
             connection_offer: None,
             packages: None,
+            client_ca: None,
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
         })
@@ -230,6 +235,14 @@ impl AppState {
         self
     }
 
+    /// Arms the CSR flow (ADR-0035); with it the Server declares
+    /// `AcceptsConnectionSettingsRequest` and signs the requests Agents send.
+    #[must_use]
+    pub fn with_client_ca(mut self, client_ca: Option<ClientCa>) -> Self {
+        self.client_ca = client_ca;
+        self
+    }
+
     /// Arms package delivery (ADR-0015); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
@@ -255,6 +268,9 @@ impl AppState {
         if self.packages.as_ref().is_some_and(|p| !p.store.is_empty()) {
             caps |= ServerCapabilities::OffersPackages as u64
                 | ServerCapabilities::AcceptsPackagesStatus as u64;
+        }
+        if self.client_ca.is_some() {
+            caps |= ServerCapabilities::AcceptsConnectionSettingsRequest as u64;
         }
         caps
     }
@@ -466,6 +482,49 @@ impl AppState {
             }
         }
 
+        // The Agent asked to be issued a client certificate (ADR-0035). Signing it here, on the
+        // connection it arrived over, is the whole of the approval: admission already required
+        // every proof this endpoint asks of any message, which is what the Baseline's flow means
+        // by awaiting one.
+        let issued = match msg
+            .connection_settings_request
+            .as_ref()
+            .and_then(|request| request.opamp.as_ref())
+            .and_then(|opamp| opamp.certificate_request.as_ref())
+        {
+            None => None,
+            Some(request) => {
+                let outcome = match &self.client_ca {
+                    // The Baseline's MUST when the Server cannot act on the request. An Agent
+                    // reaching here ignored the undeclared capability, so it is a client error.
+                    None => Err("this Server issues no client certificates".to_string()),
+                    Some(ca) => String::from_utf8(request.csr.clone())
+                        .map_err(|_| "the certificate signing request is not PEM".to_string())
+                        .and_then(|csr| ca.sign(&csr)),
+                };
+                match outcome {
+                    Ok(cert) => {
+                        info!(agent = %uid, "issued a client certificate");
+                        Some(TlsCertificate {
+                            cert: cert.into_bytes(),
+                            // The Agent generated its own key and keeps it — the point of the CSR
+                            // flow — so the Server has nothing to put here and must not invent it.
+                            private_key: Vec::new(),
+                            ..Default::default()
+                        })
+                    }
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "refused a certificate signing request");
+                        return Processed {
+                            reply: bad_request(&e),
+                            uid: Some(uid),
+                            disconnected: false,
+                        };
+                    }
+                }
+            }
+        };
+
         let disconnected = msg.agent_disconnect.is_some();
         if disconnected {
             info!(agent = %uid, "agent disconnected");
@@ -521,7 +580,7 @@ impl AppState {
         let connection_settings = if disconnected {
             None
         } else {
-            self.settings_offer(record)
+            self.settings_offer(record, issued)
         };
 
         // The package offer (ADR-0015), gated by capability and the reported
@@ -599,7 +658,32 @@ impl AppState {
 
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
     /// reported hash says it already runs (or refused) exactly this offer.
-    fn settings_offer(&self, record: &AgentRecord) -> Option<ConnectionSettingsOffers> {
+    ///
+    /// `issued` is a certificate just signed for this Agent (ADR-0035). It overrides the hash gate
+    /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
+    /// carries, so one message can hand over a certificate and the endpoint or credential that go
+    /// with it, exactly as the Baseline describes.
+    fn settings_offer(
+        &self,
+        record: &AgentRecord,
+        issued: Option<TlsCertificate>,
+    ) -> Option<ConnectionSettingsOffers> {
+        if let Some(certificate) = issued {
+            let mut settings = self
+                .connection_offer
+                .as_ref()
+                .map(|offer| offer.settings.clone())
+                .unwrap_or_default();
+            settings.certificate = Some(certificate);
+            // Its own hash, over the settings as sent: the standing offer's would tell the Agent
+            // nothing changed, and it would never adopt the certificate.
+            let hash = Sha256::digest(settings.encode_to_vec()).to_vec();
+            return Some(ConnectionSettingsOffers {
+                hash,
+                opamp: Some(settings),
+                ..Default::default()
+            });
+        }
         let offer = self.connection_offer.as_ref()?;
         if record.capabilities
             & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64

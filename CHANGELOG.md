@@ -15,6 +15,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **Mutual TLS, with client certificates this Server issues itself**
+  ([ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)). Goal 17 is
+  complete: the connection is encrypted, and the peer at each end can now be proved.
+
+  **On the Server**, `[tls]` gains an optional `client_ca_file`. With it set, every request to
+  `/v1/opamp` must arrive over a connection carrying a client certificate that bundle verifies.
+  Client authentication stays optional at the TLS layer, because the same listener serves the REST
+  API and the UI — a browser presents nothing and is unaffected.
+
+  **Every configured proof must succeed** — this is the rule to read twice. `[auth]` alone behaves
+  exactly as before. `client_ca_file` alone makes the endpoint certificate-only. **Both configured
+  means both required**, not either one. So switching mutual TLS on can never widen admission; what
+  it can do is lock out a host that has no certificate yet, which is why the order is: let the fleet
+  enrol first, then set `client_ca_file`.
+
+  **On the Client**, `[tls]` gains `cert_file` and `key_file` for an operator-provisioned identity —
+  including the bootstrap certificate a fresh host enrols with. `ca_file` is now optional, so a
+  `[tls]` section may carry only an identity and keep the public roots.
+
+  **The Server can issue the certificates.** A new `[client_ca]` section in `server.toml`
+  (`cert_file`, `key_file`, `validity_days`, default 90) makes the Server a local CA. A Client that
+  has no certificate — or holds one two thirds through its life — generates a key **that never
+  leaves the host**, sends a signing request, and receives the certificate as an ordinary
+  connection-settings offer, which it proves by connecting with before the old one is replaced. It
+  asks only when the Server declares that it signs, so a Server without `[client_ca]` is never
+  asked.
+
+  **Enrolling before enforcing** is therefore the migration: add `[client_ca]`, let the fleet come
+  back with certificates (they appear in each Client's state directory as `client-cert.pem`), then
+  add `client_ca_file` and, when every host is on a certificate, delete `[auth]`. A fleet that will
+  run Gateways keeps `[auth]`: a Gateway terminates TLS, so the credential is the only per-Agent
+  proof that survives the hop.
+
+  **There is no revocation.** Short validity and renewal are what bound a certificate; ejecting a
+  host faster than its certificate expires means rotating the CA. And an expired certificate locks
+  a host out even with a valid credential — a Client switched off longer than its validity needs
+  `client_ca_file` unset for as long as it takes to re-enrol.
+
+### Changed
+
+- **A connection-settings offer carrying `tls` or `proxy` is no longer acknowledged `APPLIED`.**
+  The Client never implemented those two fields and dropped them silently while reporting success,
+  so a Server offering either was told the settings were in force when they were not. It now applies
+  everything it does honour — endpoint, credential, heartbeat, certificate — and reports `FAILED`
+  with an `error_message` naming what it dropped
+  ([ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)).
+
+  Nothing to do on any host. A Server whose `[connection_offer]` never carried those fields — this
+  project's Server cannot — sees no change at all.
+
 - **The Windows services list now shows a description**: **OpAMP Fleet Client for Windows**. It is a
   field of its own beside the display name, and nothing that registers a service fills it — so the
   Client had a display name and an empty Description column. It is the same text on every instance;
