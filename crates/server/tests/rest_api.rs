@@ -391,3 +391,167 @@ async fn report(
     opamp::proto::ServerToAgent::decode(response.bytes().await.expect("body").as_ref())
         .expect("decode")
 }
+
+/// ADR-0042, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
+/// reports nothing about `rollout`, so before the label the canary Configuration cannot reach it —
+/// and moving it into the ring is one API call rather than an edit and a restart on that host.
+#[tokio::test]
+async fn a_label_moves_an_agent_into_a_rollout_ring() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+
+    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it matches nobody.
+    let put = client
+        .put(url(server.addr, "/api/v1/configurations/canary"))
+        .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status(), 200);
+    assert!(
+        matched_configurations(&client, server.addr, &uid)
+            .await
+            .is_empty(),
+        "an attribute nobody reports reaches nobody"
+    );
+
+    // One call, no host access: the Agent is in the ring.
+    let labelled = set_labels(
+        &client,
+        server.addr,
+        &uid,
+        serde_json::json!({"rollout": "canary"}),
+    )
+    .await;
+    assert_eq!(labelled.status(), 200);
+    let view: serde_json::Value = labelled.json().await.expect("json");
+    assert_eq!(view["labels"]["rollout"], "canary");
+    assert_eq!(
+        matched_configurations(&client, server.addr, &uid).await,
+        ["canary"],
+        "the label is matched exactly like a reported attribute"
+    );
+
+    // And out again: an empty map clears them.
+    assert_eq!(
+        set_labels(&client, server.addr, &uid, serde_json::json!({}))
+            .await
+            .status(),
+        200
+    );
+    assert!(matched_configurations(&client, server.addr, &uid)
+        .await
+        .is_empty());
+}
+
+/// The crux (ADR-0042 point 3): reported attributes decide which artifact fits a machine, so a
+/// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
+#[tokio::test]
+async fn a_label_may_not_restate_what_the_agent_reports() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+
+    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0031).
+    let refused = set_labels(
+        &client,
+        server.addr,
+        &uid,
+        serde_json::json!({"os.type": "windows"}),
+    )
+    .await;
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    let message = body["error"].as_str().expect("message");
+    assert!(message.contains("os.type"), "it names the key: {message}");
+
+    // An empty value is a mistake rather than an intent, and is refused where it is written.
+    assert_eq!(
+        set_labels(
+            &client,
+            server.addr,
+            &uid,
+            serde_json::json!({"rollout": ""})
+        )
+        .await
+        .status(),
+        400
+    );
+
+    // Nothing was stored by either attempt.
+    let agents = agents(&client, server.addr).await;
+    assert!(
+        agents[0]["labels"].as_object().expect("labels").is_empty(),
+        "a refused set leaves nothing behind"
+    );
+}
+
+/// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
+/// (ADR-0039) does not undo them: a host that comes back is in the ring it was put in.
+#[tokio::test]
+async fn forgetting_an_agent_keeps_its_labels() {
+    let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    assert_eq!(
+        set_labels(
+            &client,
+            server.addr,
+            &uid,
+            serde_json::json!({"rollout": "canary"})
+        )
+        .await
+        .status(),
+        200
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let forgotten = client
+        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(forgotten.status(), 204);
+    assert!(agents(&client, server.addr).await.is_empty());
+
+    // It comes back — still in its ring, without anyone re-labelling it.
+    report(&client, server.addr, &support::full_report(&uid, "host", 2)).await;
+    let agents = agents(&client, server.addr).await;
+    assert_eq!(agents[0]["labels"]["rollout"], "canary");
+}
+
+/// The Configurations currently matching one Agent, as the fleet view reports them.
+async fn matched_configurations(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    uid: &opamp::uid::InstanceUid,
+) -> Vec<String> {
+    agents(client, addr)
+        .await
+        .into_iter()
+        .find(|a| a["instance_uid"] == uid.to_string())
+        .expect("the agent is in the fleet")["matched_configurations"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|v| v.as_str().expect("name").to_string())
+        .collect()
+}
+
+async fn set_labels(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    uid: &opamp::uid::InstanceUid,
+    labels: serde_json::Value,
+) -> reqwest::Response {
+    client
+        .put(url(addr, &format!("/api/v1/agents/{uid}/labels")))
+        .json(&serde_json::json!({ "labels": labels }))
+        .send()
+        .await
+        .expect("put labels")
+}

@@ -425,6 +425,13 @@
         // forgotten is a question about silence, which this view does not carry. The Server holds
         // the rule and says no with a reason — one place to be right instead of two to drift.
         chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
+        // The operator's labels (ADR-0042): matched by Selectors exactly like a reported attribute,
+        // which is what makes a rollout ring a Server-side decision instead of an edit on the host.
+        for (const [key, value] of Object.entries(a.labels || {})) {
+          const dead = (a.shadowed_labels || []).includes(key);
+          chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
+        }
+        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused.">🏷 labels…</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
         }
@@ -529,6 +536,32 @@
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
             .then(() => refreshAgents());
+          return;
+        }
+        const label = e.target.closest(".label-btn");
+        if (label) {
+          const uid = label.dataset.uid;
+          const current = (agents.find((a) => a.instance_uid === uid) || {}).labels || {};
+          const asText = Object.entries(current).map(([k, v]) => `${k}=${v}`).join(", ");
+          const answer = prompt("Labels for this Agent — key=value, comma separated. Empty clears them.", asText);
+          if (answer === null) return;
+          const labels = {};
+          for (const pair of answer.split(",").map((p) => p.trim()).filter(Boolean)) {
+            const at = pair.indexOf("=");
+            if (at < 1) { $("fleet-error").textContent = `not a key=value pair: ${pair}`; return; }
+            labels[pair.slice(0, at).trim()] = pair.slice(at + 1).trim();
+          }
+          fetch(`/api/v1/agents/${encodeURIComponent(uid)}/labels`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ labels }),
+          }).then(async (res) => {
+            // A refusal is a normal answer — a key the Agent reports itself — so it is shown.
+            $("fleet-error").textContent = res.ok
+              ? ""
+              : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refreshAgents();
+          });
           return;
         }
         const forget = e.target.closest(".forget-btn");

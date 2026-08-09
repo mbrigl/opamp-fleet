@@ -1,6 +1,7 @@
 //! In-memory fleet state and the OpAMP control loop, keyed by Instance UID — never by the
 //! connection that carried a message (ADR-0003).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +27,7 @@ use utoipa::ToSchema;
 use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
+use crate::labels::{LabelError, LabelStore};
 use crate::packages::PackageStore;
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
@@ -87,6 +89,25 @@ pub struct AgentRecord {
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
+    /// The operator's labels for this Agent (ADR-0042), mirrored from the persisted store so that
+    /// every place a Selector is matched sees them without a second lookup. The store is the
+    /// authority; this copy is written when the labels are and when the record is created.
+    pub labels: BTreeMap<String, String>,
+}
+
+impl AgentRecord {
+    /// What a Selector is matched against: what the Agent reported, plus the labels that do not
+    /// collide with it (ADR-0042).
+    ///
+    /// Borrowed when there are no labels, which is the overwhelming majority of Agents — labelling
+    /// should cost the fleet view nothing on the hosts nobody has labelled.
+    pub fn effective_description(&self) -> Option<Cow<'_, AgentDescription>> {
+        if self.labels.is_empty() {
+            return self.description.as_ref().map(Cow::Borrowed);
+        }
+        crate::labels::effective_description(self.description.as_ref(), &self.labels)
+            .map(Cow::Owned)
+    }
 }
 
 /// Why a restart request was refused (`POST /api/v1/agents/{uid}/restart`).
@@ -214,6 +235,10 @@ impl PackageOffering {
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
     configs: ConfigStore,
+    /// The operator's labels on Agents (ADR-0042), which join what a Selector matches. Persisted
+    /// beside the Configurations, because they are the same kind of thing: intent about the fleet
+    /// that has to be there after a restart.
+    labels: LabelStore,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
@@ -243,6 +268,7 @@ impl AppState {
     /// Builds the state, restoring every persisted Configuration from `config_dir`. A store that
     /// cannot be opened (or holds an unparsable file) fails startup loudly.
     pub fn new(config_dir: PathBuf) -> Result<Self, String> {
+        let labels = LabelStore::open(config_dir.join("labels"))?;
         let configs = ConfigStore::open(config_dir)?;
         let restored = configs.list().len();
         if restored > 0 {
@@ -254,6 +280,7 @@ impl AppState {
         Ok(AppState {
             fleet: Mutex::new(HashMap::new()),
             configs,
+            labels,
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
@@ -411,6 +438,42 @@ impl AppState {
         Ok(())
     }
 
+    /// Replaces an Agent's labels (ADR-0042), which changes what Selectors match it.
+    ///
+    /// A key the Agent already reports is **refused**, not applied: `os.type` and `host.arch`
+    /// choose which artifact it is offered (ADR-0031) and `service.name` decides which packages fit
+    /// it at all (ADR-0034), so a label that outranked them would let a slip here offer this Agent
+    /// an artifact built for another machine. Labels annotate; they do not correct.
+    ///
+    /// The write is published like a Configuration edit, so an Agent moved into a ring receives the
+    /// Configuration that ring gets on the spot rather than at its next poll.
+    pub fn set_labels(
+        &self,
+        uid: &InstanceUid,
+        set: BTreeMap<String, String>,
+    ) -> Result<(), LabelError> {
+        crate::labels::check_pairs(&set).map_err(LabelError::Storage)?;
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid).ok_or(LabelError::UnknownAgent)?;
+        let reported = crate::labels::reported_keys(record.description.as_ref());
+        if let Some(clash) = set.keys().find(|key| reported.iter().any(|r| r == *key)) {
+            return Err(LabelError::RestatesReported(clash.clone()));
+        }
+        self.labels
+            .put(uid, set.clone())
+            .map_err(LabelError::Storage)?;
+        record.labels = set;
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "labels set");
+        Ok(())
+    }
+
+    /// This Agent's labels as the store holds them, for the REST view.
+    pub fn labels_of(&self, uid: &InstanceUid) -> BTreeMap<String, String> {
+        self.labels.get(uid)
+    }
+
     /// How many Agents in the fleet each stored package would actually reach today.
     ///
     /// A package is inert until its Agent type is set (ADR-0034), it only reaches hosts it has an
@@ -429,7 +492,8 @@ impl AppState {
         };
         let fleet = self.fleet.lock().expect("fleet lock");
         for record in fleet.values() {
-            for name in store.offered_names(record.description.as_ref()) {
+            let effective = record.effective_description();
+            for name in store.offered_names(effective.as_deref()) {
                 *reach.entry(name).or_insert(0) += 1;
             }
         }
@@ -549,9 +613,13 @@ impl AppState {
         }
 
         let known = fleet.contains_key(&uid);
+        // Labels outlive the record (ADR-0042): a host that was forgotten, or that this Server has
+        // only just restarted into, comes back in the ring the operator put it in.
+        let persisted_labels = self.labels.get(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
             AgentRecord {
+                labels: persisted_labels,
                 sequence_num: msg.sequence_num,
                 capabilities: 0,
                 description: None,
@@ -720,7 +788,9 @@ impl AppState {
         let remote_config = if disconnected {
             None
         } else {
-            let desired = self.configs.desired_for(record.description.as_ref());
+            let desired = self
+                .configs
+                .desired_for(record.effective_description().as_deref());
             offer(record, desired.as_ref())
         };
 
@@ -768,7 +838,8 @@ impl AppState {
         if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
             return None;
         }
-        let description = record.description.as_ref();
+        let effective = record.effective_description();
+        let description = effective.as_deref();
         let reported = record
             .package_statuses
             .as_ref()
@@ -801,7 +872,7 @@ impl AppState {
         }
         offering
             .store
-            .offer_for(record.description.as_ref(), "", None)
+            .offer_for(record.effective_description().as_deref(), "", None)
             .err()
     }
 
@@ -890,7 +961,9 @@ impl AppState {
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
-        let desired = self.configs.desired_for(record.description.as_ref());
+        let desired = self
+            .configs
+            .desired_for(record.effective_description().as_deref());
         let remote_config = offer(record, desired.as_ref());
         let packages_available = self.packages_offer(record);
         if remote_config.is_none() && packages_available.is_none() {
@@ -1081,8 +1154,11 @@ impl AppState {
         let mut agents: Vec<AgentView> = fleet
             .iter()
             .map(|(uid, record)| {
-                let desired = self.configs.desired_for(record.description.as_ref());
-                let matched = self.configs.matching_names(record.description.as_ref());
+                // One derived description for both, so a label can never mean one thing for the
+                // Configuration an Agent gets and another for the list of what matched it.
+                let effective = record.effective_description();
+                let desired = self.configs.desired_for(effective.as_deref());
+                let matched = self.configs.matching_names(effective.as_deref());
                 let package_conflict = self.package_conflict(record);
                 AgentView::from_record(
                     uid,
@@ -1219,6 +1295,17 @@ pub struct AgentView {
     /// Only an Agent declaring `ReportsHeartbeat` can be stale: that capability is the promise that
     /// makes silence mean something. Derived on read, never stored.
     pub stale: bool,
+    /// The operator's labels on this Agent (ADR-0042) — matched by Selectors exactly like a
+    /// reported attribute, but set here rather than in `client.toml` on the host, so moving a host
+    /// between rollout rings is an API call instead of an edit and a restart.
+    pub labels: BTreeMap<String, String>,
+    /// Labels this Agent's own reports shadow: set, matching nothing, and therefore doing nothing.
+    ///
+    /// Reported attributes always win (ADR-0042) — they decide which artifact fits this machine.
+    /// A collision is refused when the label is set, so this fills only when an Agent *starts*
+    /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shadowed_labels: Vec<String>,
 }
 
 /// One package's installation state as the REST API and UI see it (ADR-0015).
@@ -1422,6 +1509,8 @@ impl AgentView {
             sequence_num: record.sequence_num,
             last_seen_ms: record.last_seen_ms,
             stale: is_stale(record, stale_after),
+            shadowed_labels: crate::labels::shadowed(record.description.as_ref(), &record.labels),
+            labels: record.labels.clone(),
         }
     }
 }
@@ -1672,6 +1761,7 @@ mod tests {
             connection_settings_status: None,
             package_statuses: None,
             owner: None,
+            labels: BTreeMap::new(),
         }
     }
 

@@ -400,6 +400,7 @@ show.
 |---|---|
 | `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, matching Configurations, package installations, health, and sync state. |
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
+| `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout rings without touching the host](#labels-rollout-rings-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
 | `GET /api/v1/configurations` | Every Configuration. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
@@ -446,7 +447,8 @@ knowing by name:
 |---|---|
 | `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away. On plain HTTP there is no socket to close, so `connected` turns true on the first poll and is cleared only by the Agent's `agent_disconnect` on shutdown — a poller that dies without saying goodbye stays `connected` forever, and `stale` is the fact worth reading. |
 | `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
-| `identifying_attributes`, `non_identifying_attributes` | Everything a Selector can match on. |
+| `identifying_attributes`, `non_identifying_attributes` | Everything the Agent reports, and part of what a Selector matches. |
+| `labels`, `shadowed_labels` | The labels you set (ADR-0042), matched by Selectors like a reported attribute. `shadowed_labels` names the ones the Agent's own reports override — set, and matching nothing. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
 | `matched_configurations`, `desired_hash` | What it should be running. |
 | `remote_config_status`, `remote_config_error`, `in_sync` | What it reports about the last configuration it was sent. |
@@ -455,6 +457,49 @@ knowing by name:
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
 | `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |
+
+### Labels: rollout rings without touching the host
+
+A Selector aims a Configuration or a package at the Agents whose attributes match it — and the
+attribute a staged rollout actually wants, `rollout = "canary"`, is one you invent. Until now it
+could only be invented in `[attributes]` in `client.toml`, so moving a host between rings meant
+editing a file **on that host** and restarting it.
+
+**Labels are that attribute, set from here** (ADR-0042):
+
+```console
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"labels": {"rollout": "canary"}}' \
+       http://127.0.0.1:4320/api/v1/agents/<instance-uid>/labels
+```
+
+A label is matched exactly like a reported attribute, by **both** halves of the targeting: the
+Configuration an Agent is sent (ADR-0012) and the package it is offered (ADR-0017). So a canary
+rollout of a new collector binary is a Selector of `rollout = canary` on the package plus this call
+on the hosts that should get it first — and moving a host out again is the same call with an empty
+map.
+
+It takes effect at once: a connected Agent is pushed whatever its new ring gets, rather than waiting
+for its next poll.
+
+**A label may not restate an attribute the Agent reports** — that is refused with `409`, naming the
+key. Reported attributes are not annotations: `os.type` and `host.arch` decide which artifact fits
+the machine (ADR-0031) and `service.name` decides which packages fit it at all (ADR-0034). If a
+label could outrank them, a slip here would offer a host a binary built for another one. Where an
+Agent reports something wrong, the fix belongs in that host's `client.toml`, where the wrong value
+comes from.
+
+If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
+fleet row marks the label as shadowed — set, and matching nothing.
+
+**Labels are yours, not the Agent's.** They never travel to it; the Agent only ever experiences the
+effect, which is the configuration and the software it is offered. They are stored on the Server and
+survive a restart, and **forgetting an Agent does not clear them**: forgetting drops what the Server
+learned, while a label is something you decided, so a host that comes back is in the ring you put it
+in. Clearing them is its own call.
+
+One caveat worth knowing: labels are keyed by Instance UID. If the Server re-keys an Agent — which
+it does when two Agents report the same identity — the new identity starts with no labels.
 
 ### Forgetting an Agent
 

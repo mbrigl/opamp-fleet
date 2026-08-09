@@ -15,6 +15,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **The Server can label an Agent** ([ADR-0042](docs/adr/0042-server-set-labels.md)).
+  `PUT /api/v1/agents/{instance_uid}/labels` sets key/value pairs that join what a Selector matches,
+  and the bundled UI has a `🏷 labels…` action on every fleet row.
+
+  This removes the last per-host wiring. The attribute a staged rollout wants — `rollout = "canary"`
+  — could only live in `[attributes]` in `client.toml`, so moving a host between rings meant editing
+  a file on that host and restarting it. Now it is one API call, and it aims **both** halves of the
+  targeting: the Configuration an Agent is sent and the package it is offered. A canary rollout of a
+  new binary is a Selector of `rollout = canary` on the package plus a label on the hosts that should
+  get it first.
+
+  It takes effect immediately — a connected Agent is pushed what its new ring gets.
+
+  **A label may not restate an attribute the Agent reports**; that is refused with `409`, naming the
+  key. `os.type` and `host.arch` decide which artifact fits a machine and `service.name` decides
+  which packages fit it at all, so a label that could outrank them would let a slip offer a host a
+  binary built for another one. Fix a wrong reported value where it comes from, in that host's
+  `client.toml`.
+
+  Labels never travel to the Agent, are stored on the Server, and survive a restart. **Forgetting an
+  Agent does not clear them**, so a host that comes back is in the ring it was put in; clearing them
+  is its own call with an empty map. They are keyed by Instance UID, so an Agent the Server re-keys
+  starts with none.
+
 - **A Client running as a service now writes its own log to disk**
   ([ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)), at
   `<state_dir>/logs/`, one file per day with seven days kept.

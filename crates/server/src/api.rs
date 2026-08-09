@@ -21,6 +21,7 @@ use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec};
 use crate::fleet::{AgentView, AppState, ForgetError, RestartError};
+use crate::labels::LabelError;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -42,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
         .routes(routes!(forget_agent))
+        .routes(routes!(set_agent_labels))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
@@ -158,6 +160,67 @@ async fn restart_agent(
             StatusCode::CONFLICT,
             format!("agent {uid} does not declare AcceptsRestartCommand"),
         ),
+    }
+}
+
+/// The labels to put on an Agent (ADR-0042). The whole set, replacing what was there.
+#[derive(Deserialize, ToSchema)]
+struct LabelsBody {
+    /// Equality pairs a Selector can match, exactly like a reported attribute — `rollout: canary`
+    /// being the one this exists for. An empty map clears the Agent's labels.
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Sets an Agent's labels, which decide what Selectors match it.
+#[utoipa::path(
+    put,
+    path = "/api/v1/agents/{instance_uid}/labels",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    request_body = LabelsBody,
+    description = "Replace this Agent's labels (ADR-0042). A label is an operator's key/value pair \
+                   that joins what a Selector matches — for Configurations and for packages alike — \
+                   so a rollout ring is a Server-side decision instead of an edit to client.toml on \
+                   the host. An empty map clears them. Labels never travel to the Agent, and they \
+                   outlive it: forgetting an Agent does not clear them. A key the Agent already \
+                   reports is refused, because reported attributes decide which artifact fits the \
+                   machine and a label must never be able to overrule them.",
+    responses(
+        (status = 200, description = "The Agent, with its new labels", body = AgentView),
+        (status = 400, description = "Malformed Instance UID, or an unusable label", body = ErrorBody),
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody)
+    )
+)]
+async fn set_agent_labels(
+    State(state): State<Arc<AppState>>,
+    Path(instance_uid): Path<String>,
+    Json(body): Json<LabelsBody>,
+) -> Response {
+    let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{instance_uid:?} is not an Instance UID"),
+        );
+    };
+    match state.set_labels(&uid, body.labels) {
+        Ok(()) => match state.snapshot().into_iter().find(|a| a.instance_uid == uid.to_string()) {
+            Some(view) => Json(view).into_response(),
+            // Forgotten between the write and the read: the labels are stored, and the Agent is
+            // simply no longer in the view to return.
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(LabelError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(LabelError::RestatesReported(key)) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "agent {uid} reports {key:?} itself, and a label may not restate it — a reported \
+                 attribute decides which artifact fits this machine, so it wins. Change it where it \
+                 comes from, in that host's client.toml, or label it under another key"
+            ),
+        ),
+        Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
     }
 }
 

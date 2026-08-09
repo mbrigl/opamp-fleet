@@ -838,3 +838,73 @@ async fn a_package_says_how_many_agents_it_reaches() {
         .collect();
     assert_eq!(counts, [("fluentbit", 0), ("otelcol", 0)]);
 }
+
+/// ADR-0042 reaches packages, not just Configurations — which is the case it exists for. A binary
+/// rollout starts on the hosts an operator moved into the canary ring, and moving one in needs no
+/// access to that host.
+#[tokio::test]
+async fn a_label_aims_a_package_at_part_of_the_fleet() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let canary = InstanceUid::default();
+    let rest = InstanceUid::default();
+    exchange(&server, &full_report(&canary, "canary-host", 1)).await;
+    exchange(&server, &full_report(&rest, "other-host", 1)).await;
+
+    upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
+    assert_eq!(
+        set_selector(&server, "otelcol", &[("rollout", "canary")])
+            .await
+            .status(),
+        200
+    );
+
+    // Nobody reports `rollout`, so the aimed package reaches no one — and the count says so.
+    async fn reach(server: &TestServer) -> i64 {
+        let list: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{}/api/v1/packages", server.addr))
+            .send()
+            .await
+            .expect("list")
+            .json()
+            .await
+            .expect("json");
+        list[0]["targeted_agents"].as_i64().expect("count")
+    }
+    assert_eq!(reach(&server).await, 0);
+
+    // One call moves the first host into the ring.
+    let labelled = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/agents/{canary}/labels",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "labels": { "rollout": "canary" } }))
+        .send()
+        .await
+        .expect("put labels");
+    assert_eq!(labelled.status(), 200);
+    assert_eq!(
+        reach(&server).await,
+        1,
+        "exactly the ring, and nothing else"
+    );
+
+    // And the offer follows: the labelled Agent is given the artifact, its neighbour is not.
+    let mut report = full_report(&canary, "canary-host", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("the canary host is offered the package");
+    assert!(offer.packages.contains_key("otelcol"));
+
+    let mut report = full_report(&rest, "other-host", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    assert!(
+        exchange(&server, &report)
+            .await
+            .packages_available
+            .is_none(),
+        "the host outside the ring is offered nothing"
+    );
+}

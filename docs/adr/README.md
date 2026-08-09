@@ -70,4 +70,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0039](0039-forgetting-an-agent.md) | Forgetting an Agent — the fleet view drops a record, and reaches no host | 🟢 accepted |
 | [0040](0040-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
 | [0041](0041-the-client-logs-to-a-file-in-service-mode.md) | A Client running as a service logs to a file, on every platform | 🟢 accepted |
+| [0042](0042-server-set-labels.md) | The Server labels an Agent — rollout rings that are not a file on the host | 🟢 accepted |
 
