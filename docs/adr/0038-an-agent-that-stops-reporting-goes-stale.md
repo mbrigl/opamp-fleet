@@ -1,6 +1,6 @@
 # ADR-0038: An Agent that stops reporting goes stale — liveness beside connectedness, never instead of it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 
