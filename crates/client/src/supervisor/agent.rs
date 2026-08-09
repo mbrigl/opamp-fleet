@@ -904,14 +904,22 @@ impl AgentState {
         // cannot know either, so a value it reports under those keys is not an improvement. Its
         // `service.name` deliberately *does* win — a Collector's `dist.name` is a better type than
         // anything this file can infer.
+        //
+        // The exemption is by *key*, in both lists, and not by the list the Supervisor happens to
+        // put each one in: the Server resolves a Selector against the identifying attributes first
+        // and the non-identifying ones only after (`configs.rs`), so a process reporting either key
+        // among the other list's would win every Selector while the fleet row went on showing the
+        // Supervisor's value.
         if let Some(reported) = &self.process_description {
+            let supervisors_own =
+                |key: &str| key == "service.instance.id" || key == "service.instance.name";
             for attr in &reported.identifying_attributes {
-                if attr.key != "service.instance.id" {
+                if !supervisors_own(&attr.key) {
                     upsert_attr(&mut description.identifying_attributes, attr);
                 }
             }
             for attr in &reported.non_identifying_attributes {
-                if attr.key != "service.instance.name" {
+                if !supervisors_own(&attr.key) {
                     upsert_attr(&mut description.non_identifying_attributes, attr);
                 }
             }
@@ -1349,6 +1357,52 @@ mod tests {
             after.get("service.instance.name").map(String::as_str),
             Some("otelcol-edge-01"),
             "but it cannot rename the Supervisor the operator configured"
+        );
+    }
+
+    /// And the exemption holds by *key*, not by the list the Supervisor states each one in. A
+    /// process reporting either of them among its *identifying* attributes would otherwise win
+    /// every Selector — the Server resolves those before the non-identifying ones — while the fleet
+    /// row, which reads the other list, went on showing the operator's value.
+    #[test]
+    fn the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol-edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+        )
+        .expect("agent");
+        let uid = reported(&agent.describe())
+            .get("service.instance.id")
+            .cloned()
+            .expect("the Supervisor's uid");
+
+        // Both keys, each in the list the fold does *not* exempt it in.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.instance.name", "some-collector")],
+            non_identifying_attributes: vec![string_attr("service.instance.id", "not-the-uid")],
+        });
+
+        let description = agent.describe();
+        assert!(
+            !description
+                .identifying_attributes
+                .iter()
+                .any(|kv| kv.key == "service.instance.name"),
+            "an instance name among the identifying attributes would win every Selector"
+        );
+        let after = reported(&description);
+        assert_eq!(
+            after.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01"),
+            "the operator's name stands, wherever the process put its own"
+        );
+        assert_eq!(
+            after.get("service.instance.id"),
+            Some(&uid),
+            "and identity stays the Supervisor's uid"
         );
     }
 

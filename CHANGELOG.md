@@ -130,6 +130,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `{"service.name": "otelcol-contrib"}` reaches every Collector of that distribution, with nothing to
   configure per host.
 
+  The interactive install asks for the same value it always did, under the name it actually
+  reports now: `This Agent's name (service.instance.name)`.
+
   **`client.toml` needs no change**, and no Agent changes its identity: `instance_uid` and
   `service.instance.id` are untouched, so nothing is re-registered. A Managed Process that reports no
   type of its own now presents its program's file name as one; the new optional `service_name` key in

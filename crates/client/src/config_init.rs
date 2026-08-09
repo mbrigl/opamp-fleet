@@ -28,7 +28,9 @@ pub const FILE_NAME: &str = "client.toml";
 pub struct Answers {
     /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0007).
     pub endpoint: String,
-    /// The Agent's `service.name` — its identity in the fleet.
+    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0033) — which
+    /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
+    /// constant `opamp-fleet-client`, the same on every host and nothing to ask about.
     pub name: String,
     /// The `[auth]` block (ADR-0013), or `None` for an endpoint that needs no credential.
     pub auth: Option<Auth>,
@@ -97,7 +99,7 @@ pub fn ask() -> Result<Answers, String> {
         .map_err(prompt_failed)?;
 
     let name: String = Input::new()
-        .with_prompt("This Agent's name (service.name)")
+        .with_prompt("This Agent's name (service.instance.name)")
         .default(defaults.name.clone())
         .validate_with(|input: &String| {
             if input.trim().is_empty() {

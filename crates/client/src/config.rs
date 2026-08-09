@@ -15,7 +15,10 @@ pub struct ClientConfig {
     /// `ws://` / `wss://` is the WebSocket transport, `http://` / `https://` the polling one.
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
-    /// The Agent's `service.name`, its human identity in the fleet.
+    /// The operator's name for the Client's own Agent, reported as `service.instance.name`
+    /// (ADR-0033) — *which* Client this is. Its `service.name` is the type
+    /// [`CLIENT_SERVICE_NAME`](crate::supervisor::agent::CLIENT_SERVICE_NAME), a constant, so this
+    /// key cannot state it: every Client in a fleet is the same kind of thing.
     #[serde(default = "default_name")]
     pub name: String,
     /// The deployment's `service.namespace`. The Baseline asks for it "if it is used in the

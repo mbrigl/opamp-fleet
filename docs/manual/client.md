@@ -90,7 +90,7 @@ managing nothing. `--interactive` is the way past that:
 $ opamp-fleet-client service install --interactive        # root / Administrator
 No configuration at /var/lib/opamp-fleet/client/default/client.toml — answering these writes it …
 Server OpAMP endpoint [ws://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
-This Agent's name (service.name) [opamp-fleet-client]: host-01
+This Agent's name (service.instance.name) [opamp-fleet-client]: host-01
 Authentication toward the Server: bearer token
 Bearer token: ********
 Does the Server present a certificate from a private CA? [y/N]: n
@@ -192,7 +192,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 | Key | Default | Meaning |
 |---|---|---|
 | `endpoint` | `"ws://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport (ADR-0007): `ws://`/`wss://` for WebSocket, `http://`/`https://` for polling. |
-| `name` | `"opamp-fleet-client"` | The Agent's `service.name` — its human identity in the fleet view. |
+| `name` | `"opamp-fleet-client"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `opamp-fleet-client`, the same on every host (ADR-0033). |
 | `poll_interval_secs` | `30` | How often the plain-HTTP transport polls. Ignored on WebSocket. |
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
@@ -218,10 +218,15 @@ A `[[supervisor]]` block may add its own `[supervisor.attributes]` table, which 
 key for that Agent alone.
 
 Every Agent additionally reports, without configuration, everything the protocol names to describe
-an Agent and where it runs: `service.name`, `service.instance.id`, `os.type`, `os.name`,
-`os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus `service.version`,
-which for the Client's own Agent is the Client's baked-in version and for a Supervisor-backed Agent
-is whatever the Managed Process reports about itself.
+an Agent and where it runs: `service.name`, `service.instance.name`, `service.instance.id`,
+`os.type`, `os.name`, `os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus
+`service.version`, which for the Client's own Agent is the Client's baked-in version and for a
+Supervisor-backed Agent is whatever the Managed Process reports about itself.
+
+The first two are the pair to keep apart (ADR-0033): `service.name` is *what* this Agent is — the
+type, shared by every Agent of that kind — and `service.instance.name` is *which* one it is, the
+name you gave it. Neither is settable through `[attributes]`: a table entry under either key is
+ignored, since the Supervisor already reports both.
 
 An attribute the host cannot answer is **left out, never reported empty** — a container without
 `/etc/machine-id` reports no `host.id` at all rather than a blank one a Selector could match. So a
@@ -280,7 +285,7 @@ archive_key = "the key an encrypted .7z was packed with"
 | `archive_key` | Opens an encrypted `.7z` artifact (ADR-0018). One secret for the fleet — a single archive serves every Agent — and never the `[auth]` credential, which the Server may rotate on its own: a rotation would leave every archive unopenable. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
 
 Note what is *not* here: which artifact a Supervisor receives is the Server's decision, expressed as
-that package's Selector (ADR-0017), never a key in this file.
+the package's Agent type (ADR-0034) and its Selector (ADR-0017), never a key in this file.
 
 ### `[self_update]`
 
@@ -307,7 +312,8 @@ plugin, not a change to the core.
 | Key | Default | Meaning |
 |---|---|---|
 | `type` | — | `"collector"` or `"command"`. Required. |
-| `name` | — | This Agent's `service.name`, and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. |
+| `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
+| `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents (ADR-0033). A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
 | `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
@@ -473,8 +479,9 @@ what the file says.
 ## Package updates
 
 A Supervisor whose program is its own (a bare file name) declares that it accepts packages, and the
-Server offers it whichever artifact that package's Selector aims at it. What then happens on the
-host:
+Server offers it a package built for the Agent type it reports and aimed at it by that package's
+Selector (ADR-0034, ADR-0017) — so a Supervisor reporting `promtail` is never handed the Collector's
+binary, whatever anyone forgot to aim. What then happens on the host:
 
 1. The artifact is **streamed to disk** in that Supervisor's `packages/` directory — never held in
    memory.
@@ -552,10 +559,11 @@ the Server *replace* that version is opt-in, and the opt-in **names the package*
 package = "opamp-fleet-client"
 ```
 
-That name is the whole of the protection: a package with an empty Selector reaches every consenting
-Agent, so without a name to match, the first fleet-wide Collector artifact someone uploads would be
-installed over the Client and take the host out of reach. An offer under any other name is refused
-and reported, never applied.
+An offer under any other name is refused and reported, never applied. That is one of two independent
+guards, and it is the one on this side of the wire: the Server will not offer a package built for
+another Agent type either (ADR-0034), and this Client's type is the constant `opamp-fleet-client`.
+Neither replaces the other — an operator who types a Collector artifact as `opamp-fleet-client` gets
+past the Server, and this name is what is left.
 
 On an accepted offer the artifact is verified like any other, staged as a new version *beside* the
 running one in the install layout, and proved by running `opamp-fleet-client self-check` on it before the
@@ -586,7 +594,14 @@ platform is required with it (ADR-0031), spelled as the Agent reports it:
 ```console
 $ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
        "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"service_name": "opamp-fleet-client"}' \
+       http://<server>:4320/api/v1/packages/opamp-fleet-client/type
 ```
+
+The second call is what arms the package (ADR-0034): until a type is set it is offered to nobody, so
+an artifact uploaded and left untyped reaches no Client at all. For this one the type is the
+Client's own, `opamp-fleet-client`.
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the
 build came from — `1.2.3` and `1.2.3+a1b2c3d` are the same release, and the content hash is what
