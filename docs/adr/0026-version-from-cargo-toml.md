@@ -1,6 +1,6 @@
 # ADR-0026: The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 
