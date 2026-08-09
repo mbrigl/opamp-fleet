@@ -34,16 +34,19 @@ uuid = { version = "1", features = ["v7"] }
 # on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0018).
 flate2 = "1"
 # Opening a `.7z` package artifact, encrypted or not (ADR-0018). Pure Rust; default features are
-# off because they pull `bzip2`, which binds to C — `aes256` is the RustCrypto AES this needs, and
-# LZMA/LZMA2 decoding is in the base. Keeps the C-free build chain of ADR-0006 and ADR-0007.
+# off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
+# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0006 and ADR-0007
+# actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
+# `ring` compiles C and assembly in its build script, so a C compiler is required either way
+# (ADR-0035).
 # `compress` adds the *writer*, which is behind that one feature in its entirety: it is what lets
 # `opamp-package-sign pack` build the artifact an operator has otherwise no supported way to
 # produce. The Client daemon never encodes, so the linker drops it — measured at +7 KB on the
 # release binary, against a build-time cost only.
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
-# Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust, no C toolchain, which
-# is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and never
-# writes a path the archive chose.
+# Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust and no system library,
+# which is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and
+# never writes a path the archive chose.
 tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0013).
 base64 = "0.22"
