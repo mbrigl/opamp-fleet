@@ -56,4 +56,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0025](0025-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
 | [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
 | [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
+| [0028](0028-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | 🟢 accepted |
 

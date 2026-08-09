@@ -143,6 +143,15 @@ impl Storage {
         let json = serde_json::to_vec_pretty(package).expect("an InstalledPackage serializes");
         std::fs::write(self.dir.join(PACKAGE_FILE), json)
     }
+
+    /// Drops the record: this Agent does not have that package. No record to drop is the state
+    /// asked for, not an error.
+    pub fn forget_package(&self) -> io::Result<()> {
+        match std::fs::remove_file(self.dir.join(PACKAGE_FILE)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The entry files a Managed Process should be **configured with**, in deterministic (sorted)
@@ -232,6 +241,28 @@ mod tests {
         let first = storage.load_or_create_uid().expect("uid");
         let second = storage.load_or_create_uid().expect("uid");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_forgotten_package_is_gone_and_forgetting_nothing_is_no_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+
+        // Nothing recorded yet: the state asked for is the state there is.
+        storage.forget_package().expect("forget nothing");
+
+        storage
+            .store_package(&InstalledPackage {
+                name: "opamp-fleet-client".to_string(),
+                version: "1.2.3".to_string(),
+                hash_hex: "aabb".to_string(),
+            })
+            .expect("store");
+        assert!(storage.load_package().is_some());
+
+        storage.forget_package().expect("forget");
+        assert!(storage.load_package().is_none());
+        assert!(!dir.path().join(PACKAGE_FILE).exists());
     }
 
     #[test]
