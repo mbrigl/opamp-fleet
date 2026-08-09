@@ -11,7 +11,10 @@ file name and the spelling of them in its target table. Everything else that ADR
 by this project's own packer, the single job that reads the version, and what a release publishes —
 is untouched and still binding. It extends [ADR-0016](0016-what-a-package-is-and-how-it-is-aimed.md) rather
 than replacing it: Selector aiming and its specificity rule survive unchanged, with
-a new step in front of them.
+two mandatory fit steps in front of them — the Agent type, then the platform. The type fit builds
+directly on
+[ADR-0023](0023-what-describes-an-agent.md), which is what first
+gave every Agent a type worth matching.
 
 ## Context
 
@@ -116,6 +119,49 @@ written against one spelling stops matching.
 
 So the question is not only how a package learns its platform. It is which words this project uses
 for one, everywhere, at once.
+
+### The Agent type a package is built for
+
+Platform fit (point 8) closes one half of "is this artifact meant for this Agent": a
+variant whose Platform is not the Agent's is dropped before anything else is considered, because a
+binary that cannot run on the machine it is sent to is not a targeting mistake to be resolved by
+precedence — it is not a candidate. The Selector *can* express the platform but is opt-in, and the
+failure mode of forgetting it is the worst one this system has.
+
+**Without a type fit, the other half is exactly where the platform was.** A package's Agent type
+would be expressible only as a Selector pair, and a Selector starts empty and matches everything
+([`packages.rs:139`](../../crates/server/src/packages.rs#L139)). Offer resolution filtering on aim
+and platform and nothing else
+([`resolve()`](../../crates/server/src/packages.rs#L1127-L1138)) looks like this:
+
+```rust
+let Some(platform) = Platform::reported(description) else { return Ok(Vec::new()) };
+let fitting = packages.values()
+    .filter(|p| matches(&p.selector, description))   // aim — opt-in
+    .filter_map(|p| p.variants.get(&platform)...)    // fit — mandatory
+```
+
+So an operator who uploads a Promtail artifact for the right platform and forgets the Selector has
+it downloaded, verified, unpacked and swapped over the **Collector's** binary on every consenting
+host. The health gate catches it (ADR-0015) — the process will not stay up and is rolled back — but
+that is the fleet-wide outage window the platform fit refuses to accept, still available for the
+role. The argument that settles it for the platform settles it here: a rule that is only ever right
+when remembered is not the rule this needs.
+
+**A type fit needs something to match against.** This is why the platform fit alone cannot do both
+at once. When `service.name` carried the *instance* name, different on every host and destroyed by
+any Collector that reported its own type, "the Agent type" was not a fact the Server could read.
+ADR-0023 made it one: `service.name` is the type, resolved from what the Managed Process reports,
+else the block's `service_name`, else the program's file name — so every Agent this Client presents
+reports a type, always.
+
+**And the Client's own binary is protected by exactly one thing on the host.** ADR-0018 makes
+`[self_update] package` the whole of the protection, because "a package with an empty Selector
+reaches every consenting Agent, so without a name to match, the first fleet-wide Collector artifact
+someone uploads would be installed over the Client and take the host out of reach". That check lives
+on the host being protected and compares a *package name* — an operator who names a Collector
+package `opamp-fleet-client` defeats it. A Server-side type fit is an independent second guard on the
+one case where the blast radius is the Client itself.
 
 ## Decision
 
@@ -303,6 +349,52 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
    packages and not for old ones, which is not a guarantee an operator can rely on. Configuration
    errors are fatal and named in this project (ADR-0008); this is the same rule applied to state.
 
+### A package states the Agent type it is built for, and reaches no Agent of another
+
+We will make an **Agent type** a property of a package, and offer a package only to Agents whose
+reported `service.name` equals it.
+
+14. **The type belongs to the name, not to the bytes.** `Package.service_name`, shared by every
+   variant, exactly as the Selector is — a type is platform-independent, and a value repeated on
+   each of five artifact uploads is five chances for them to disagree. Point 7 states
+   the rule this follows: "a request naming *bytes* names the Platform they are for; a request aiming
+   the *package* does not."
+
+   It is set through its own sub-resource, `PUT /api/v1/packages/{name}/type`, beside the Selector's.
+   On disk it joins `<name>.json`, the file that already holds what belongs to the name.
+
+15. **Fit before aim, in two steps, neither optional.** Offer resolution drops every package whose
+   `service_name` is not the Agent's reported `service.name`, then every variant whose Platform is
+   not the Agent's, and only then runs ADR-0016's aiming over what is left. Type first because it is
+   the cheaper comparison and the coarser cut.
+
+   The type is compared **raw**, with no canonicalisation table. The Platform can be canonicalised
+   (point 10) because the semantic conventions enumerate operating systems and
+   architectures; there is no canonical set of Agent types and inventing one would mean this Server
+   having an opinion about every collector distribution that exists. The value an Agent reports is
+   the value to write.
+
+16. **A package with no type set is offered to nobody**, and the package view says so. This is
+   deliberately *not* the platform's "refused at startup" (point 13): there, the unset
+   state is dangerous, because a stored package without a Platform would have to mean either "every
+   platform" (the hole) or nothing at all. Here the unset state is already the safe one — no type, no
+   offer — so refusing to boot would buy no guarantee and cost every operator an outage to migrate.
+   Fail closed, stay up, and say why.
+
+   The guarantee is therefore absolute without the store ever being rejected: **a package is offered
+   only to an Agent of its type.** An untyped package is inert, not permissive.
+
+17. **An Agent that reports no `service.name` fits nothing**, the same rule point
+   8 applies to a missing platform, and for the same reason: "unknown type, so anything
+   goes" would put the mismatched-binary failure straight back. Every Client this project ships
+   reports a type since ADR-0023; a foreign OpAMP client that does not is told so on its fleet row
+   rather than left with a rollout that never starts.
+
+18. **The Client's self-update gains a second, independent guard.** The Server will not offer a
+   package typed `otelcol-contrib` to an Agent reporting `opamp-fleet-client`, whatever it is named,
+   and the ADR-0018 name check still runs on the host. Neither replaces the other: one is the
+   Server refusing to send, the other the Client refusing to install.
+
 ## Alternatives considered
 
 ### Where the bytes come from, and who unpacks them
@@ -398,6 +490,40 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
 - **One rollback per name rather than per variant.** Rejected on the canary case described in point
   7: it reverts platforms that never took the rollout.
 
+### Agent type
+
+- **Leave it to the Selector and document it.** `{"service.name": "otelcol-contrib"}` already does
+  the filtering, at zero cost. Rejected on the platform's own argument: it is opt-in, and forgetting
+  it bricks an agent on every host of every other type. This is the same alternative rejected above
+  for the platform, and nothing about the role makes the argument weaker — if anything the blast
+  radius is larger, since a wrong-platform binary fails to exec while a wrong-role binary may start,
+  run, and quietly collect nothing.
+- **Default the type to the package name.** A package named `otelcol-contrib` would be for Agents of
+  that type unless overridden, which needs no new input at all for the shape operators already use
+  and would have made this change invisible. Rejected: it is right most of the time and silently
+  wrong for `otelcol-canary`, `collector-3.1.0-rc`, or any name chosen for the rollout rather than
+  the target — and a mechanism whose entire purpose is "not optional" cannot rest on a guess that is
+  usually correct. The structurally identical "optional Platform, empty meaning every platform" is
+  rejected above.
+- **Require the type as a query parameter on the artifact upload**, as point 7 does for
+  `os`/`arch`. Fewer requests, no window in which a package exists untyped. Rejected on point
+  14: five platform uploads under one name would state the type five times and could
+  disagree, and resolving that disagreement (last writer wins? refuse a mismatch?) is a rule this
+  project would rather not have. The Selector lives off the bytes route for precisely this reason;
+  the type is the Selector's kind of thing, not the artifact's.
+- **Refuse an untyped package at startup**, mirroring point 13 exactly. The consistent
+  choice. Rejected once the asymmetry is clear: an untyped package here is already inert, so the
+  startup refusal protects nothing that point 16 does not, and it costs a Server-down
+  migration on every deployment — the second one for package fit. Consistency of mechanism is worth
+  less than not taking a fleet offline for a state that is safe.
+- **Match the type as a prefix or a pattern** (`otelcol*` covering `otelcol` and `otelcol-contrib`).
+  Rejected: those are genuinely different binaries with different components, which is the whole
+  reason the distinction exists, and a matching language is a decision that outlives its convenience.
+  Two packages, two types.
+- **Canonicalise types through an alias table**, as point 10 does for platforms. Rejected
+  in point 15: there is no authority to canonicalise against, and a table this project
+  maintained would encode its opinion of every distribution in the world.
+
 ## Sources / Prior art
 
 - [OpAMP specification § Packages (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
@@ -411,6 +537,9 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   only one top-level package": the per-Agent offer this builds on, unchanged. The protocol has no
   notion of platform, which is why the selection has to happen before the offer is composed rather
   than in it.
+  And the note that what a package contains "is Agent type-specific and is outside the concerns of
+  the OpAMP protocol". The protocol names the concept, declines to model it, and leaves the Server to
+  decide — which is the licence for deciding the type fit here.
 - [`opentelemetry-collector-releases` v0.157.0](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.157.0)
   — checked directly: assets are `.tar.gz` (44), `.deb` and `.rpm` (21 each), `.msi`, and never a
   bare binary; `opentelemetry-collector-releases_otelcol-contrib_checksums.txt` carries a SHA-256 per
@@ -432,12 +561,18 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   way this decision does — "image indexes SHOULD use, and implementations SHOULD understand, values
   listed in the Go Language document for `GOARCH`/`GOOS`" — i.e. one named canonical set that
   everything is understood *as*, rather than a free-for-all of equivalent spellings.
+  For the Agent type the same structure is the counter-example, since an image index discriminates
+  on platform alone and leaves "what is this image for" to the name. That is the design the type fit
+  declines, because a container name is chosen by whoever pulls it and a package name is chosen by
+  whoever uploads it.
 - The Baseline's own `AgentDescription`
   ([`opamp.proto:690`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L690)) — "keys/values
   are according to OpenTelemetry semantic conventions", then "the following attributes SHOULD be
   included: `os.type`, `os.version`" and "`host.*` to describe the host the Agent runs on". The
   protocol names the two attributes the platform fit reads *and* names the conventions as the
   vocabulary, which is the direct authority for points 10 and 11.
+  It also defines `service.name` as "a reverse FQDN that uniquely identifies the Agent type", which
+  is the attribute the type fit reads and the reason it is the right one to read.
 - [OpenTelemetry semantic conventions — `host.arch`](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/registry/attributes/host.md)
   (`amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86`) and
   [`os.type`](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/registry/attributes/os.md)
@@ -450,6 +585,14 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   above. Since a Managed Process's attributes are folded over the Supervisor's, this is also the
   concrete path by which a host's reported architecture would change spelling without the host
   changing.
+- [ADR-0023](0023-what-describes-an-agent.md) — what made a type
+  matchable at all, and the resolution order (`opampextension`'s `dist.name` → the block's
+  `service_name` → the program's file name) that guarantees every Agent this Client presents has one.
+- [Bindplane — Bring Your Own Collector](https://docs.bindplane.com/feature-guides/deployment-and-management/bring-your-own-collector)
+  — the comparable product models an Agent Type as a first-class object that a collector reports via
+  `dist.name`, and hangs what an agent may receive off it rather than off free-form labels. Checked
+  as evidence that type-as-a-property, not type-as-a-tag, is the shape that holds up in a shipping
+  fleet manager.
 - [ADR-0015](0015-package-delivery-for-managed-processes.md) and
   [ADR-0016](0016-what-a-package-is-and-how-it-is-aimed.md) — the delivery, verification, and targeting this
   reuses wholesale. Uploading, referencing and unpacking only change how bytes reach the store.
@@ -485,6 +628,17 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   host's reported architecture, which silently breaks Selectors otherwise.
 - Positive: per-variant history means a rollback is per platform, which is what a staged rollout
   across platforms actually needs.
+- Positive: **the worst remaining operator mistake stops being available.** A package can no longer
+  be installed over an Agent of another type, whatever its Selector says or fails to say, so the
+  fleet-wide outage window the platform fit closes for the platform is closed for the role.
+- Positive: **the Client's own binary is protected twice, on both sides of the wire** — the Server
+  will not offer it a foreign artifact and the Client will not install one. ADR-0018's single point
+  of protection stops being single.
+- Positive: an untyped package is inert rather than fleet-wide, so the failure mode of an incomplete
+  upload changes from "installed everywhere" to "installed nowhere, and the view says why".
+- Positive: the Selector goes back to being purely about *aim* — rings, environments, canaries —
+  instead of carrying the role as a pair that also perturbs the specificity count. A ladder of
+  `{}` / `{rollout: canary}` no longer has to reserve a pair for the type.
 - Negative / trade-offs: **every Agent needs egress to the source.** Without referenced packages a
   managed host needs to reach the fleet Server and nothing else, which in many fleets is the whole
   point of the fleet Server. A referenced package changes that host's network requirements, and in a
@@ -534,6 +688,21 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
 - Negative / trade-offs: the package view and the bundled UI grow a dimension. "Which version is this
   package at" no longer has one answer, and a fleet running five platforms has five, which is more
   honest and more to read.
+- Negative / trade-offs: **a fourth breaking change to the v1 package contract.** Every package needs
+  its type set before it is offered, `PackageView` grows a field, and any script that uploads and
+  expects delivery needs one more request. Existing stores load and keep working, but every package
+  in them is inert until typed — a rollout in flight at upgrade time stops.
+- Negative / trade-offs: **a mistyped type is a silent no-op.** The platform fit catches a typo by
+  canonicalising and echoing the pair back; there is no equivalent here, so `otelcol-contib` is
+  indistinguishable from a type no Agent happens to run yet. The package view showing "offered to 0
+  Agents" is the mitigation, and it is weaker than the platform's.
+- Negative / trade-offs: **an Agent's type can change under a stable configuration.** ADR-0023 notes
+  that a Collector gaining the `opampextension` switches its reported type from the program's file
+  name to `dist.name`; with the type fit that also switches which packages reach it. The change is
+  correct in both cases and surprising in both.
+- Negative / trade-offs: one more thing to get right before a first rollout works, in a system whose
+  reason for existing is that rollouts should be easy. Type, platform, Selector, consent — four
+  things, and only the last is derived rather than stated.
 - Follow-ups: distributing the archive key centrally without letting the Server read artifacts — the
   envelope sketched in the alternatives, which needs an Agent keypair. Verifying upstream sigstore
   signatures, which would replace a pasted checksum with real provenance.
@@ -547,3 +716,9 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   and belongs in its own ADR. A variant matrix in the bundled UI — which platforms a package has,
   against the platforms the fleet actually reports — is a natural next step, as is warning at upload
   time when a Platform fits no Agent currently in the fleet.
+- Follow-ups: **warn when a type fits no Agent in the fleet.** The platform equivalent is a
+  follow-up too; here it matters more, because there is no canonicalisation to catch a typo, and it
+  is the only cheap defence against the silent no-op above. Also open, and more clearly worth it with
+  the type fit: the Server-set labelling described in ADR-0023's follow-ups, since with the role
+  handled by type fit the Selector's remaining job is almost entirely rollout rings — which is
+  exactly the thing that should not live in a file on each host.
