@@ -33,8 +33,24 @@ pub async fn spawn_with_auth(auth: Option<server::transport::OpampAuth>) -> Test
 /// Baseline's size rules without moving megabytes around.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_limit(limit: usize) -> TestServer {
-    spawn_full(None, None, limit).await
+    spawn_full(None, None, limit, DEFAULT_STALE_AFTER).await
 }
+
+/// The same real router with a tightened staleness budget (ADR-0038), for the tests that need an
+/// Agent to fall silent without waiting out the real one.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
+    spawn_full(
+        None,
+        None,
+        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+        stale_after,
+    )
+    .await
+}
+
+/// The Server's own default, restated here so a scaffolded Server behaves like a real one.
+const DEFAULT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// The full shape: optional credential check (ADR-0013) and optional connection-settings offer
 /// (ADR-0014).
@@ -43,20 +59,28 @@ pub async fn spawn_with(
     auth: Option<server::transport::OpampAuth>,
     offer: Option<server::fleet::ConnectionOffer>,
 ) -> TestServer {
-    spawn_full(auth, offer, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE).await
+    spawn_full(
+        auth,
+        offer,
+        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+        DEFAULT_STALE_AFTER,
+    )
+    .await
 }
 
 async fn spawn_full(
     auth: Option<server::transport::OpampAuth>,
     offer: Option<server::fleet::ConnectionOffer>,
     limit: usize,
+    stale_after: std::time::Duration,
 ) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store")
             .with_connection_offer(offer)
-            .with_max_message_size(limit),
+            .with_max_message_size(limit)
+            .with_stale_after(stale_after),
     );
     let app = server::app(
         state.clone(),

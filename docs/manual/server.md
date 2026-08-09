@@ -398,6 +398,7 @@ show.
 |---|---|
 | `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, matching Configurations, package installations, health, and sync state. |
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
+| `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
 | `GET /api/v1/configurations` | Every Configuration. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
 | `PUT /api/v1/configurations/{name}` | Create or replace it. Body: `{"selector": {…}, "body": "…", "role": "…"}` — `selector` and `role` may be omitted. |
@@ -418,7 +419,7 @@ knowing by name:
 
 | Field | Meaning |
 |---|---|
-| `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away; on plain HTTP `connected` is always false and `stale` is the useful one. |
+| `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away. On plain HTTP there is no socket to close, so `connected` turns true on the first poll and is cleared only by the Agent's `agent_disconnect` on shutdown — a poller that dies without saying goodbye stays `connected` forever, and `stale` is the fact worth reading. |
 | `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
 | `identifying_attributes`, `non_identifying_attributes` | Everything a Selector can match on. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
@@ -429,6 +430,33 @@ knowing by name:
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
 | `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |
+
+### Forgetting an Agent
+
+A host that was decommissioned leaves a row behind, and nothing ages it out. `DELETE
+/api/v1/agents/{instance_uid}` — the `✕ forget` action on a fleet row — drops what this Server knows
+about that Agent (ADR-0039).
+
+**It does nothing on the machine.** No process is stopped, nothing is uninstalled, and no credential
+is revoked: a credential here proves *fleet membership*, never which Agent is speaking, so there is
+none belonging to one Agent to take away. A Client that is still running and still pointed at this
+Server reports again within its polling or heartbeat interval and the row comes back. Forgetting
+tidies the view; **to remove an agent for good, stop it on the host** (`opamp-fleet-client service
+uninstall`) and then forget it here.
+
+It is refused with `409` while the Agent is still reporting — connected, and heard from within the
+staleness budget. That is not caution for its own sake: the record holds the hashes that tell this
+Server not to re-offer what an Agent already has, so forgetting a live Agent has its configuration
+sent again, and a Managed Process restarts whenever a configuration arrives. Stop the agent first,
+or wait for it to fall silent. An Agent that is already disconnected can be forgotten at once.
+
+The same applies to one that comes back later: it is offered its configuration, its connection
+settings, and its packages afresh. The packages cost nothing — the Client re-installs nothing whose
+content hash it already has — but the configuration is applied again, which for a managed agent is
+one restart. That is the price of forgetting something that was not really gone.
+
+Nothing expires on its own: there is no retention sweep and no inactivity timeout, so a row stays
+until someone forgets it.
 
 ## Authentication
 

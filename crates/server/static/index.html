@@ -271,6 +271,7 @@
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+        <span id="fleet-error" class="err"></span>
       </div>
 
       <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
@@ -420,6 +421,10 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        // Offered on every row rather than pre-filtered (ADR-0039): whether an Agent may be
+        // forgotten is a question about silence, which this view does not carry. The Server holds
+        // the rule and says no with a reason — one place to be right instead of two to drift.
+        chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
         }
@@ -524,6 +529,19 @@
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
             .then(() => refreshAgents());
+          return;
+        }
+        const forget = e.target.closest(".forget-btn");
+        if (forget) {
+          fetch(`/api/v1/agents/${encodeURIComponent(forget.dataset.uid)}`, { method: "DELETE" })
+            .then(async (res) => {
+              // A refusal is a normal answer here — the Agent is still reporting — so it is shown
+              // rather than swallowed.
+              $("fleet-error").textContent = res.ok
+                ? ""
+                : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+              refreshAgents();
+            });
           return;
         }
         const comp = e.target.closest(".comp-toggle");

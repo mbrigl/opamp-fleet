@@ -67,4 +67,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0036](0036-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK | 🟢 accepted |
 | [0037](0037-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
 | [0038](0038-an-agent-that-stops-reporting-goes-stale.md) | An Agent that stops reporting goes stale — liveness beside connectedness, never instead of it | 🟢 accepted |
+| [0039](0039-forgetting-an-agent.md) | Forgetting an Agent — the fleet view drops a record, and reaches no host | 🟢 accepted |
 

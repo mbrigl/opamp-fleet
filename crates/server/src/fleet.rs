@@ -98,6 +98,16 @@ pub enum RestartError {
     NoCapability,
 }
 
+/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0039).
+pub enum ForgetError {
+    /// No Agent of that identity is known.
+    UnknownAgent,
+    /// The Agent is still reporting — connected, and not stale. Forgetting it would drop the
+    /// hashes that stop the Server re-offering, so its next exchange would re-apply its
+    /// configuration, which for a managed Agent restarts the Managed Process.
+    StillReporting,
+}
+
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
 /// what the transport layer needs to know for its own bookkeeping.
 pub struct Processed {
@@ -398,6 +408,36 @@ impl AppState {
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "restart requested");
+        Ok(())
+    }
+
+    /// Forgets everything this Server knows about one Agent (ADR-0039): the record is dropped and
+    /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
+    /// credential revoked, since a credential here proves fleet membership and never which Agent
+    /// is speaking (ADR-0013, ADR-0035). A Client still running therefore reappears on its next
+    /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
+    ///
+    /// Refused while the Agent is still reporting: the record holds the hashes that gate
+    /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
+    /// Collector plugin restarts its Managed Process when a configuration arrives. An operator who
+    /// wants a restart asks for one through [`request_restart`](Self::request_restart).
+    ///
+    /// `connected` alone would not do. Behind a Gateway the open connection is the *Gateway's*, so
+    /// a Gatewayed Agent that died still reads as connected; and plain-HTTP polling has no socket
+    /// to close, so an Agent that stops polling without saying goodbye stays connected forever.
+    /// Silence is the second half of the test — and it is [`is_silent`], not [`is_stale`]: an
+    /// Agent that declared no heartbeat is never called stale, and gating on staleness would leave
+    /// its row on a decommissioned host permanently unremovable.
+    pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get(uid).ok_or(ForgetError::UnknownAgent)?;
+        if record.connected && !is_silent(record, self.stale_after()) {
+            return Err(ForgetError::StillReporting);
+        }
+        fleet.remove(uid);
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "agent forgotten");
         Ok(())
     }
 
@@ -1369,8 +1409,18 @@ fn is_stale(record: &AgentRecord, stale_after: Duration) -> bool {
     if record.capabilities & opamp::proto::AgentCapabilities::ReportsHeartbeat as u64 == 0 {
         return false;
     }
-    let budget = stale_after.as_millis() as u64;
-    now_ms().saturating_sub(record.last_seen_ms) > budget
+    is_silent(record, stale_after)
+}
+
+/// Nothing has been heard from this Agent for longer than `budget` — the plain fact, without the
+/// promise [`is_stale`] adds on top of it.
+///
+/// The two are deliberately not the same test. Calling an Agent *stale* accuses it of being late,
+/// which is only fair when it declared `ReportsHeartbeat` and so promised to be punctual. Asking
+/// whether it is safe to forget (ADR-0039) is a question about evidence, not about promises: an
+/// Agent nobody has heard from cannot be disturbed by being forgotten, whatever it once declared.
+fn is_silent(record: &AgentRecord, budget: Duration) -> bool {
+    now_ms().saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
 }
 
 /// The Baseline's command-only message: identity, capabilities, and the restart — nothing else.
@@ -1494,6 +1544,91 @@ mod tests {
             Duration::from_secs(30),
             "three intervals"
         );
+    }
+
+    /// ADR-0039. The tidy-up case: a host that was decommissioned, its Agent gone with it.
+    #[test]
+    fn a_disconnected_agent_is_forgotten() {
+        let state = forgettable_state();
+        let uid = insert(&state, record_with(0));
+        assert!(state.forget_agent(&uid).is_ok());
+        assert!(state.snapshot().is_empty(), "the row is gone");
+    }
+
+    /// The gate: forgetting a live Agent would drop the hashes that stop the Server re-offering,
+    /// so its next exchange re-applies its configuration — and a managed process restarts with it.
+    #[test]
+    fn an_agent_that_is_still_reporting_is_refused() {
+        let state = forgettable_state();
+        let mut record = record_with(0);
+        record.connected = true;
+        record.last_seen_ms = now_ms();
+        let uid = insert(&state, record);
+        assert!(matches!(
+            state.forget_agent(&uid),
+            Err(ForgetError::StillReporting)
+        ));
+        assert_eq!(state.snapshot().len(), 1, "the row stays");
+    }
+
+    /// The gatewayed case: the connection is up because it is the *Gateway's*, and the Agent behind
+    /// it stopped talking long ago. `connected` alone would refuse this forever.
+    #[test]
+    fn a_connected_agent_that_went_quiet_is_forgotten() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
+        record.connected = true;
+        record.last_seen_ms = now_ms() - 120_000;
+        let uid = insert(&state, record);
+        assert!(state.forget_agent(&uid).is_ok());
+    }
+
+    /// The case that made the rule test silence rather than staleness (ADR-0039): an Agent that
+    /// promised no heartbeat is never *stale*, and plain-HTTP polling never clears `connected` —
+    /// so gating on the flag would have left this row on a dead host permanently unremovable.
+    #[test]
+    fn a_silent_agent_is_forgotten_although_it_can_never_be_stale() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.connected = true;
+        record.transport = Transport::Http;
+        record.last_seen_ms = now_ms() - 86_400_000;
+        let uid = insert(&state, record);
+        assert!(
+            !is_stale(&record_at(now_ms() - 86_400_000), Duration::from_secs(90)),
+            "it declares no heartbeat, so it is never stale"
+        );
+        assert!(state.forget_agent(&uid).is_ok(), "but it is forgettable");
+    }
+
+    #[test]
+    fn forgetting_an_agent_that_was_never_known_says_so() {
+        let state = forgettable_state();
+        assert!(matches!(
+            state.forget_agent(&InstanceUid::default()),
+            Err(ForgetError::UnknownAgent)
+        ));
+    }
+
+    fn forgettable_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The directory outlives the state only for the length of a test; the Configuration store
+        // is not what these exercise.
+        AppState::new(dir.keep().join("configs"))
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90))
+    }
+
+    fn insert(state: &AppState, record: AgentRecord) -> InstanceUid {
+        let uid = InstanceUid::default();
+        state.fleet.lock().expect("fleet lock").insert(uid, record);
+        uid
+    }
+
+    fn record_at(last_seen_ms: u64) -> AgentRecord {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.last_seen_ms = last_seen_ms;
+        record
     }
 
     fn record_with(capabilities: u64) -> AgentRecord {

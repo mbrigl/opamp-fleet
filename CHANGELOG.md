@@ -15,6 +15,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **An Agent can be forgotten** ([ADR-0039](docs/adr/0039-forgetting-an-agent.md)).
+  `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
+  bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
+  row forever.
+
+  **It reaches no host.** Nothing is stopped, nothing is uninstalled, and no credential is revoked —
+  a credential here proves fleet membership, not one Agent's identity, so there is none to revoke.
+  A Client that is still configured for this Server therefore reappears on its next report. To
+  remove an agent for good, stop it on the machine; forgetting only tidies the view.
+
+  It is refused with `409` while the Agent is still reporting — that is, while it is connected *and*
+  something has been heard from it within the staleness budget. Forgetting drops the hashes that stop
+  the Server re-offering, so a live Agent would be sent its configuration again, and a managed
+  process restarts when one arrives. Stop the agent, or wait for it to fall silent.
+
+  An Agent that was forgotten and comes back is offered its configuration, its connection settings,
+  and its packages again. Packages cost nothing — the Client re-installs nothing it already has —
+  but the configuration is applied again, which for a managed agent is one restart.
+
 - **A fleet row now says when an Agent stopped talking**
   ([ADR-0038](docs/adr/0038-an-agent-that-stops-reporting-goes-stale.md)). `AgentView` gains
   `stale`, and the bundled UI shows it beside the connection pill.
