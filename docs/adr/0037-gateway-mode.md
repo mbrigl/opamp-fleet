@@ -67,10 +67,14 @@ none**.
    Client. The downstream endpoint therefore serves a WebSocket upgrade and a plain-HTTP POST on
    `/v1/opamp`, exactly as the Server does, with the Baseline's size limits enforced per hop.
 
-3. **The pool grows lazily to its cap, and never beyond.** Connections are opened as Agents appear:
-   the first Agent opens the first connection, and a new one is opened only when every existing
-   connection already carries at least one Agent and the cap is not reached. A Gateway serving three
-   Agents holds three connections, not ten. Past the cap, Agents share.
+3. **The downstream endpoint is served with axum, promoted to a real dependency of the Client.**
+   The Client has no HTTP server today — the Supervisor Endpoint is raw `tokio-tungstenite` and
+   WebSocket-only, and axum is presently a *dev*-dependency there, pulled in so a test can run the
+   real Server in-process. Serving a plain-HTTP POST downstream needs one, and axum is the
+   workspace's HTTP stack already (ADR-0005), which is a better answer than a second one.
+
+   The cost, stated plainly: every Client binary then carries an HTTP server whether or not it ever
+   runs Gateway Mode. That is the price of point 2, and the alternatives are worse — see below.
 
 4. **An Agent is assigned to the least-loaded connection, and stays there.** Assignment is by
    `instance_uid` and is sticky for as long as that connection lives. Least-connections is the prior
@@ -78,7 +82,12 @@ none**.
    its `ReportFullState` exchanges coherent on a single upstream socket, which nothing in the
    protocol requires but everything in debugging wants.
 
-5. **A dropped upstream connection re-homes its Agents, and says nothing on their behalf.** The
+5. **The pool grows lazily to its cap, and never beyond.** Connections are opened as Agents appear:
+   the first Agent opens the first connection, and a new one is opened only when every existing
+   connection already carries at least one Agent and the cap is not reached. A Gateway serving three
+   Agents holds three connections, not ten. Past the cap, Agents share.
+
+6. **A dropped upstream connection re-homes its Agents, and says nothing on their behalf.** The
    Gateway reconnects with the transport's existing backoff, re-assigns the Agents that rode the lost
    connection by rule 4, and forwards their next reports over the new one. It sends no
    `agent_disconnect` for them: they never disconnected, and the Server keys state on `instance_uid`
@@ -86,14 +95,14 @@ none**.
    do — mark those Agents disconnected because the connection that owned them dropped — is corrected
    by their next report, which is the same healing the direct case already relies on.
 
-6. **A downstream Client that vanishes is reported by its absence, not by a message.** If it sends
+7. **A downstream Client that vanishes is reported by its absence, not by a message.** If it sends
    `agent_disconnect`, that is forwarded like any other message. If it simply goes away, the Gateway
    forwards **nothing**: fabricating a goodbye the Agent never said is exactly the invention ADR-0003
    and the specification's strategy forbid. Such an Agent stays "connected" in the fleet view, with a
    `last_seen_ms` that stops advancing, until the Server grows liveness of its own. That is a real
    gap, and it is named in the Consequences rather than papered over.
 
-7. **The Gateway makes no authentication decisions, and its own hop is its own.** Downstream
+8. **The Gateway makes no authentication decisions, and its own hop is its own.** Downstream
    credentials are forwarded upstream untouched (ADR-0003, ADR-0013), and the connecting peer's
    address rides along. Mutual TLS is per hop (ADR-0035): downstream peers are verified against
    `[gateway.tls] client_ca_file` if one is configured, and the Gateway presents its *own* client
@@ -101,11 +110,11 @@ none**.
    certificate is never forwarded; it cannot be, and inventing a header for it is the private side
    channel the specification forbids.
 
-8. **The Gateway is its own Agent too, and only its own.** It presents the Client's self-Agent
+9. **The Gateway is its own Agent too, and only its own.** It presents the Client's self-Agent
    upstream exactly as any Client does — reporting its own version, health, and own telemetry — and
    it never presents itself as any Agent it carries. Its own Agent rides the pool like the others.
 
-9. **Routing is by `instance_uid` alone, in both directions.** Downstream to upstream needs no
+10. **Routing is by `instance_uid` alone, in both directions.** Downstream to upstream needs no
    routing at all — a report goes out on its Agent's connection. Upstream to downstream is a lookup:
    the Gateway keeps, per `instance_uid`, the downstream connection that last carried it, and a
    `ServerToAgent` for an Agent it has never seen is dropped with a log line rather than broadcast.
@@ -130,6 +139,14 @@ none**.
   terminated. Rejected in point 6: the message would say "this Agent said goodbye" when it did not,
   and this project does not put words in an Agent's mouth. The honest fix is Server-side liveness,
   which is a decision of its own.
+- **A WebSocket-only downstream endpoint**, reusing what the Supervisor Endpoint already is. No new
+  dependency, and every Client this project ships defaults to WebSocket anyway. Rejected: the
+  Baseline lets a Client "choose either" transport, and a Gateway that silently excludes the polling
+  half is one whose failure mode is a Client that connects to nothing with no explanation.
+- **Hand-rolling the plain-HTTP endpoint** on the `hyper` already in the tree, avoiding axum on the
+  Client. Rejected: it is one POST route and a size limit, which sounds small until the Baseline's
+  `413`, `415`, and gzip rules are counted — all of which the Server already implements against a
+  framework rather than by hand.
 - **Terminating nothing — a Layer-4 passthrough gateway.** It would carry client certificates end to
   end, which point 7 cannot. Rejected in ADR-0035 already, and again here: a gateway that cannot read
   OpAMP cannot fold *n* Agents onto *m* connections, so it solves reachability while giving up the
@@ -173,6 +190,9 @@ none**.
   disconnected until each reports again. With a heartbeat configured that is one interval; without
   one it is until the Agent has something to say. The blast radius of a single connection is the
   price of folding connections at all, and ADR-0003 named it when it chose to.
+- Negative / trade-offs: the Client binary grows an HTTP server it only uses in Gateway Mode
+  (point 3). Measuring that cost before release is worth doing; if it turns out to matter, a Cargo
+  feature is the lever, and that is a smaller decision than picking a second HTTP stack now.
 - Negative / trade-offs: the Client grows a second listener and a second connection manager, and the
   combination of Supervisor Mode and Gateway Mode on one host is now a real test surface rather than
   a hypothetical one — as ADR-0003 predicted.
