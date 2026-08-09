@@ -1,6 +1,6 @@
 # ADR-0036: An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 
