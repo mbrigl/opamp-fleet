@@ -15,6 +15,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **An Agent can be forgotten** ([ADR-0026](docs/adr/0026-the-servers-agent-records.md)).
+  `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
+  bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
+  row forever.
+
+  **It reaches no host.** Nothing is stopped, nothing is uninstalled, and no credential is revoked —
+  a credential here proves fleet membership, not one Agent's identity, so there is none to revoke.
+  A Client that is still configured for this Server therefore reappears on its next report. To
+  remove an agent for good, stop it on the machine; forgetting only tidies the view.
+
+  It is refused with `409` while the Agent is still reporting — that is, while it is connected *and*
+  something has been heard from it within the staleness budget. Forgetting drops the hashes that stop
+  the Server re-offering, so a live Agent would be sent its configuration again, and a managed
+  process restarts when one arrives. Stop the agent, or wait for it to fall silent.
+
+  An Agent that was forgotten and comes back is offered its configuration, its connection settings,
+  and its packages again. Packages cost nothing — the Client re-installs nothing it already has —
+  but the configuration is applied again, which for a managed agent is one restart.
+
+- **A fleet row now says when an Agent stopped talking**
+  ([ADR-0026](docs/adr/0026-the-servers-agent-records.md)). `AgentView` gains
+  `stale`, and the bundled UI shows it beside the connection pill.
+
+  It is a second fact, not a replacement: `connected` still means "a connection carrying this Agent
+  is open" — behind a Gateway, the *Gateway's* — and `stale` means nothing has been heard from the
+  Agent itself for longer than its budget. `connected: true, stale: true` is exactly the gatewayed
+  case, and it was invisible before.
+
+  Only an Agent declaring `ReportsHeartbeat` can go stale: that capability is the promise that makes
+  silence meaningful. The budget is the offered `heartbeat_interval_secs` times three, or
+  `stale_after_secs` in `server.toml` (default 90) when no interval is offered.
+
+  Nothing changes for a stale Agent — it keeps its configuration, its packages, and its identity,
+  and its next report clears the flag. Nothing is stored and no timer runs.
+
 - **Gateway Mode** ([ADR-0025](docs/adr/0025-gateway-mode.md)): a Client can now stand at a network
   boundary, accept OpAMP from other Clients, and carry them upstream over a small pool of
   connections. This is the last of the specification's goals to be built.
