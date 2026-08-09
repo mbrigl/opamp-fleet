@@ -1,4 +1,4 @@
-# ADR-0036: An Agent reports its own telemetry over OTLP/HTTP, from protobuf this project vendors
+# ADR-0036: An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-08-09
@@ -43,38 +43,57 @@ control loop is already a set of lifecycles with phases and outcomes (`APPLYING`
 `Downloading` → `Installing` → `Installed`/`InstallFailed`, the self-update's stage-prove-switch), and
 those are spans, not an instrumentation project.
 
-**OTLP is protobuf over HTTP, and this project already speaks both.** [ADR-0006](0006-proto-vendoring-and-codegen.md)
-vendors the Baseline's schema and compiles it with prost via protox, with no system `protoc`; the
-Client carries `reqwest` for its plain-HTTP transport and its package downloads. The alternative —
-the `opentelemetry` SDK with `opentelemetry-otlp` — is the obvious choice in most projects, and it is
-a stack of four or five crates with a global provider, a pipeline, and a batching model, of which
-this Client would use a handful of counters and a log bridge.
+**OTLP has a reference implementation, and it is the standard's own.** The temptation here is to
+encode OTLP by hand: [ADR-0006](0006-proto-vendoring-and-codegen.md) already vendors the Baseline's
+schema and compiles it with prost via protox, so vendoring a second schema and POSTing the bytes
+with the `reqwest` the Client already carries would need no new crate at all. But OTLP is not this
+project's protocol to own. Its wire format, its semantic conventions, and their versioning are
+maintained upstream, and `opentelemetry-otlp` is where that maintenance lands — it depends on the
+`opentelemetry-proto` crate generated from the very schema the vendoring would copy. A copy in this
+repository would be a second protocol to keep in sync, with no Baseline discipline behind it and no
+authority to resolve a disagreement.
 
 ## Decision
 
-We will implement **all three own-telemetry capabilities**, sending **OTLP/HTTP with protobuf
-bodies** to the destinations the Server offers, encoded from **protobuf definitions this project
-vendors exactly as ADR-0006 vendors the Baseline's** — no OpenTelemetry SDK.
+We will implement **all three own-telemetry capabilities** through the **OpenTelemetry Rust SDK**,
+exporting **OTLP/HTTP with protobuf bodies** to the destinations the Server offers, and we will
+**invent nothing OTLP does not already define** — no second vendored schema, no metric names of our
+own.
 
-1. **Vendor `opentelemetry-proto`, compile it with protox.** The metrics, logs, trace, common, and
-   resource messages land under `crates/opamp/proto/otlp/<version>/` beside the Baseline's own
-   schema, pinned and recorded the same way, and `build.rs` compiles them with the same protox
-   invocation. Encoding a `ExportMetricsServiceRequest` with prost and POSTing it with reqwest is
-   the whole of the client side.
+1. **The standard's own implementation, not a copy of its schema.** `opentelemetry`,
+   `opentelemetry_sdk`, and `opentelemetry-otlp` carry the wire format; the exporter is configured
+   for OTLP over HTTP with protobuf bodies and an async reqwest client, which is what the Baseline's
+   `destination_endpoint` requires:
 
-   This is the decision most worth arguing with, so its reasoning is explicit: this project already
-   made "vendor the schema, compile it in-tree, own the bytes" its way of speaking a protocol, and
-   the SDK's value — a global instrumentation surface, sampling, batching, context propagation — is
-   value for an application that instruments *itself broadly*. This Client emits a fixed handful of
-   points on a timer. Taking five crates and a global provider to do that inverts the ratio, and it
-   would put a second, differently-shaped protobuf toolchain beside the one ADR-0006 chose.
+   ```toml
+   opentelemetry-otlp = { version = "0.31", default-features = false,
+                          features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
+   ```
 
-2. **One new dependency: `sysinfo`, for process metrics.** CPU and resident memory for a pid, on
-   Linux, macOS, and Windows, is three platform APIs (`/proc`, `task_info`, `GetProcessMemoryInfo`)
-   and is exactly the kind of thing not to hand-roll three times. Pure Rust over `libc`; no C
-   toolchain, no cmake.
+   Features are stated rather than inherited: the defaults carry `reqwest-blocking-client`, and this
+   Client is a tokio process. `grpc-tonic` is left off — the schema requires HTTP, so a gRPC stack
+   would be weight for a transport this protocol does not permit here.
 
-3. **What each signal carries.**
+   **ADR-0006's vendoring is not extended to a second protocol.** That decision exists so this
+   project owns the *OpAMP* wire contract and can diff it against upstream; OTLP is not ours to own,
+   and a hand-encoded copy would carry the maintenance of someone else's standard with none of the
+   Baseline machinery that makes the first copy safe.
+
+2. **Names come from the standard too.** Metric and attribute names are taken from
+   `opentelemetry-semantic-conventions` rather than written as string literals, so what this Client
+   emits is what a receiver already knows how to chart — and a convention that moves is a version
+   bump rather than a silent divergence.
+
+3. **`sysinfo` for the numbers themselves.** CPU and resident memory for a pid, on Linux, macOS, and
+   Windows, is three platform APIs (`/proc`, `task_info`, `GetProcessMemoryInfo`) and is exactly the
+   kind of thing not to hand-roll three times. Pure Rust over `libc`; no C toolchain, no cmake. The
+   SDK has no process instrumentation for Rust, so this is the one gap it leaves.
+
+4. **Logs bridge through `opentelemetry-appender-tracing`.** The Client already logs through
+   `tracing`; `OpenTelemetryTracingBridge` is the standard layer that turns those events into OTLP
+   log records, registered beside the existing `fmt` layer. Stderr keeps everything it prints today.
+
+5. **What each signal carries.**
 
    | Signal | What the Client sends |
    |---|---|
@@ -82,46 +101,51 @@ vendors exactly as ADR-0006 vendors the Baseline's** — no OpenTelemetry SDK.
    | Logs | The Client's own `tracing` output, bridged to OTLP log records at the level the log filter already selects. Stderr keeps everything it prints today; this adds a destination, it does not move one. |
    | Traces | One span per control-loop operation that already has a lifecycle: applying a remote configuration, installing a package, a self-update. Phases become child spans and the existing outcome becomes the span status, so a failed rollout is one trace rather than a log hunt. |
 
-4. **Every Agent's telemetry is attributed to that Agent.** The OTLP Resource carries the
+6. **Every Agent's telemetry is attributed to that Agent.** The OTLP Resource carries the
    `AgentDescription`'s identifying attributes — `service.name`, `service.instance.id`, and
    `service.namespace` where set — which is what the Baseline asks for and what makes a Supervisor's
    metrics distinguishable from the Client's own on the same host.
 
-5. **Destinations come only from the Server, and the offer flow is the one that already exists.**
+7. **Destinations come only from the Server, and the offer flow is the one that already exists.**
    `own_metrics`, `own_traces`, and `own_logs` are folded, persisted, and applied exactly as the
    `opamp` settings are ([ADR-0014](0014-server-driven-connection-settings.md)): an offer carrying
    only one of them leaves the others alone. There is no destination in `client.toml` — the whole
    point of the capability is that the Server names it. With no destination offered, the Client
    sends nothing and costs nothing.
 
-6. **`https://` or loopback, nothing else.** The Baseline's "MAY refuse" is taken: a destination on
+8. **`https://` or loopback, nothing else.** The Baseline's "MAY refuse" is taken: a destination on
    plain `http://` beyond the loopback interface is refused and reported, because the Resource
    carries identifying attributes and the records carry whatever the Client logs. This mirrors the
    warning ADR-0013 already emits for credentials in cleartext, one step firmer.
 
-7. **The three capabilities are declared unconditionally.** Unlike `OffersPackages` or
+9. **The three capabilities are declared unconditionally.** Unlike `OffersPackages` or
    `[client_ca]`, the capability here states an *ability* the Client always has — "I can report to a
    destination you name" — and the Server's offer is what arms it. Declaring it conditionally on a
    destination already being in force would mean the Server could never make the first offer.
 
-8. **`certificate`, `tls`, and `proxy` behave exactly as they do on the OpAMP settings.**
+10. **`certificate`, `tls`, and `proxy` behave exactly as they do on the OpAMP settings.**
    `TelemetryConnectionSettings` carries the same three fields; the certificate machinery of
    ADR-0035 is reused as-is, and `tls`/`proxy` are refused and *reported* rather than dropped in
    silence.
 
-9. **The Server gains a `[telemetry_offer]` section** — `metrics_endpoint`, `traces_endpoint`,
+11. **The Server gains a `[telemetry_offer]` section** — `metrics_endpoint`, `traces_endpoint`,
    `logs_endpoint`, and optional headers per signal — compiled into the same hash-gated
    `ConnectionSettingsOffers` `[connection_offer]` already produces. Without it the Server offers no
    destination, and `OffersConnectionSettings` stays what it is today.
 
 ## Alternatives considered
 
-- **Use the `opentelemetry` SDK with `opentelemetry-otlp`.** The conventional answer, and it would
-  bring batching, retry, and the semantic conventions for free; its default features are now
-  `http-proto` with a blocking reqwest client and no gRPC, so it would not drag tonic in. Rejected in
-  point 1 — five crates and a global provider for a fixed handful of points, beside a protobuf
-  toolchain this project already owns. Worth revisiting if own telemetry ever grows into general
-  instrumentation, which is a different decision from this one.
+- **Vendor `opentelemetry-proto` and encode OTLP by hand**, exactly as ADR-0006 vendors the
+  Baseline's schema. It is the cheaper build — prost, protox, and the `reqwest` this Client already
+  carries, with no new crate at all — and it was the shape of an earlier draft of this ADR.
+  Rejected: ADR-0006 exists so this project owns the *OpAMP* contract and can prove it matches
+  upstream, and none of that machinery would come along. A second copied schema is a second
+  protocol to keep in sync, its semantic conventions would be string literals nobody re-checks, and
+  the correctness of someone else's standard would become this project's to defend. Owning the bytes
+  is right where the bytes are the product; here they are the exhaust.
+- **Take the SDK but keep its default features.** Fewer lines in the manifest. Rejected: the
+  defaults select `reqwest-blocking-client`, and blocking HTTP inside a tokio runtime is how an
+  executor gets starved.
 - **Metrics and logs only, traces deferred.** Tempting, because an Agent has no request path and a
   span looks like a stretch. Rejected: the operations that fail in a fleet — a configuration that
   will not apply, a package that will not stay up — are exactly the ones this project already models
@@ -158,12 +182,15 @@ vendors exactly as ADR-0006 vendors the Baseline's** — no OpenTelemetry SDK.
   — the reference answer, which configures the Collector's own telemetry from the offer. Read as the
   alternative this decision declines, for the reason ADR-0011 states.
 - [`opentelemetry-otlp`](https://docs.rs/opentelemetry-otlp/latest/opentelemetry_otlp/) and its
-  [feature flags](https://lib.rs/crates/opentelemetry-otlp/features) — the SDK route, including that
-  `http-proto` with a blocking reqwest client is now the default and needs no gRPC stack. Evaluated
-  and declined in point 1.
-- [`opentelemetry-proto`](https://github.com/open-telemetry/opentelemetry-proto) — the schema this
-  decision vendors, the same way [ADR-0006](0006-proto-vendoring-and-codegen.md) vendors the
-  Baseline's.
+  [feature flags](https://lib.rs/crates/opentelemetry-otlp/features) — confirms the feature set point
+  1 pins: `http-proto` is the OTLP/HTTP protobuf encoding, `reqwest-client` the async client against
+  the default `reqwest-blocking-client`, and `grpc-tonic` the only thing that pulls a gRPC stack in.
+- [`opentelemetry-appender-tracing`](https://docs.rs/opentelemetry-appender-tracing/latest/opentelemetry_appender_tracing/)
+  — `OpenTelemetryTracingBridge`, the standard layer from `tracing` events to OTLP log records,
+  registered on the subscriber registry beside the existing `fmt` layer.
+- [`opentelemetry-proto`](https://github.com/open-telemetry/opentelemetry-proto) — the schema, which
+  this decision deliberately does **not** copy: `opentelemetry-otlp` already depends on the crate
+  generated from it, so it is maintained upstream rather than here.
 - [`sysinfo`](https://docs.rs/sysinfo/latest/sysinfo/) — cross-platform process CPU and memory, pure
   Rust over `libc`.
 
@@ -173,11 +200,18 @@ vendors exactly as ADR-0006 vendors the Baseline's** — no OpenTelemetry SDK.
   `AcceptsOtherConnectionSettings`, which is left undone deliberately and on the record.
 - Positive: the fleet's Clients get observable without a second agent on the host — and the Server
   decides where that telemetry goes, which is the same "one place decides" the whole project is for.
-- Positive: no second protobuf toolchain, and the vendored OTLP schema is pinned and diffable like
-  the Baseline's, so drift is detected rather than discovered.
-- Negative / trade-offs: hand-built OTLP payloads mean this project owns their correctness. A
-  receiver that rejects a malformed record is the failure mode, and the mitigation is tests that
-  decode what was sent — not the SDK's reputation.
+- Positive: the wire format and the semantic conventions stay upstream's to maintain. A convention
+  that moves arrives as a version bump in `Cargo.toml`, not as a silent divergence nobody diffs.
+- Negative / trade-offs: five crates and a second batching machinery enter a Client that already has
+  its own scheduling. They bring a *global* provider model, which sits awkwardly beside a
+  destination that arrives from the Server at runtime and can change: applying a new offer means
+  building fresh providers, installing them, and shutting the old ones down cleanly. That sequence
+  is the part of this decision most likely to be fiddly, and it needs a test that changes the
+  destination while telemetry is in flight.
+- Negative / trade-offs: the SDK's own diagnostics and this Client's `tracing` output share a
+  process, and the logs bridge exports what `tracing` emits. Exporter errors must not be bridged
+  back into the exporter — the `internal-logs` feature and the bridge need to be kept from feeding
+  each other.
 - Negative / trade-offs: writing the Resource from the `AgentDescription` means the Client's
   telemetry carries whatever the operator put in `[attributes]`. That is what the Baseline asks for,
   and it is worth saying out loud before someone tags an Agent with something they would not send to

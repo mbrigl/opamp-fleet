@@ -64,5 +64,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0033](0033-an-agents-type-and-its-instance-name-are-two-attributes.md) | An Agent's type and its instance name are two attributes — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
 | [0034](0034-a-package-states-the-agent-type-it-is-built-for.md) | A package states the Agent type it is built for, and reaches no Agent of another | 🟢 accepted |
 | [0035](0035-mutual-tls-and-the-server-issued-client-certificate.md) | Mutual TLS with a Server-issued client certificate — the credential bootstraps it, the CSR flow renews it | 🟢 accepted |
-| [0036](0036-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, from protobuf this project vendors | 🟡 proposed |
+| [0036](0036-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK | 🟡 proposed |
 
