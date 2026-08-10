@@ -38,15 +38,29 @@ async fn spawn_gateway(
     server: SocketAddr,
     cap: usize,
 ) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    spawn_gateway_with_limit(server, cap, None).await
+}
+
+/// The same, with the message size limit the tests about that limit need — pushing 64 MiB through
+/// a socket that is already refusing it tests the sender's patience, not the Gateway.
+async fn spawn_gateway_with_limit(
+    server: SocketAddr,
+    cap: usize,
+    max_message_size: Option<usize>,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let listen = listener.local_addr().expect("addr");
     drop(listener); // the Gateway binds it itself; this only reserves a free port number
 
+    let limit = max_message_size
+        .map(|bytes| format!("max_message_size_bytes = {bytes}"))
+        .unwrap_or_default();
     let toml = format!(
         r#"
         endpoint = "ws://{server}/v1/opamp"
+        {limit}
         [gateway]
         listen = "{listen}"
         upstream_connections = {cap}
@@ -237,5 +251,44 @@ async fn a_gzip_bomb_is_refused_by_the_gateway() {
     assert!(
         state.snapshot().is_empty(),
         "nothing was forwarded upstream"
+    );
+}
+
+/// An oversized message closes the downstream socket with 1009, the status the Baseline names.
+///
+/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0037), and
+/// `docs/CONFORMANCE.md` claims the `1009 Message Too Big` close as implemented. The Server's
+/// endpoint did it; this one hung up with no status at all, so a downstream Client saw its
+/// connection drop and could not tell an oversized report from a Gateway that had died.
+#[tokio::test]
+async fn an_oversized_downstream_message_closes_with_1009() {
+    let (server, _state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway_with_limit(server, 10, Some(4096)).await;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{gateway}/v1/opamp"))
+        .await
+        .expect("connect to the gateway");
+    // Past the limit the socket refuses to buffer it, which is where the close comes from.
+    socket
+        .send(Message::Binary(vec![0u8; 8192].into()))
+        .await
+        .expect("send");
+
+    let close = loop {
+        let message = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a close in time")
+            .expect("a message");
+        match message {
+            Ok(Message::Close(frame)) => break frame,
+            Ok(_) => continue,
+            Err(e) => panic!("expected a close frame, got {e}"),
+        }
+    };
+    let frame = close.expect("the Gateway named a reason rather than hanging up silently");
+    assert_eq!(
+        u16::from(frame.code),
+        1009,
+        "the Baseline names 1009 (Message Too Big)"
     );
 }

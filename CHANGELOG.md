@@ -19,6 +19,14 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **A Gateway now says why it hung up on an oversized message.** The Baseline answers a message past
+  the size limit with a WebSocket close of `1009 Message Too Big`, and
+  [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) claims it as implemented. The Server's endpoint did
+  it; the Gateway's dropped the connection with no status at all, so a downstream Client saw a reset
+  socket and could not tell an oversized report from a Gateway that had died — and retried into the
+  same wall. An oversized frame is also a close now rather than a message quietly dropped while the
+  socket read on.
+
 - **A Gateway now accepts a gzipped report.** Accepting `Content-Encoding: gzip` is a Baseline MUST
   for anything serving OpAMP, and a Client in Gateway Mode
   ([ADR-0037](docs/adr/0037-gateway-mode.md)) *is* an OpAMP server to the Agents behind it. The

@@ -16,7 +16,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{
+    close_code, CloseFrame, Message as AxumMessage, WebSocket, WebSocketUpgrade,
+};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -133,12 +135,24 @@ async fn serve_socket(
                     Some(Ok(AxumMessage::Close(_))) | None => break,
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
+                        // Past the limit a message never becomes a frame, so it surfaces here. The
+                        // Baseline's answer is the 1009 close, and a Gateway owes it downstream for
+                        // the same reason the Server owes it upstream — it *is* an OpAMP server to
+                        // the Agents behind it (ADR-0037). It used to hang up without a status.
                         debug!(%peer, error = %e, "a downstream connection failed");
+                        let _ = socket.send(too_big_close()).await;
                         break;
                     }
                 };
                 let report = match opamp::frame::decode::<AgentToServer>(&payload, state.limit) {
                     Ok(report) => report,
+                    // Oversized is malformed, and the Baseline answers it with the close rather
+                    // than by dropping the message and reading on.
+                    Err(e @ opamp::frame::FrameError::TooLarge(..)) => {
+                        warn!(%peer, error = %e, "closing a downstream connection: oversized message");
+                        let _ = socket.send(too_big_close()).await;
+                        break;
+                    }
                     Err(e) => {
                         warn!(%peer, error = %e, "dropping an unreadable downstream report");
                         continue;
@@ -258,4 +272,15 @@ async fn exchange(
             (StatusCode::GATEWAY_TIMEOUT, "no reply from the Server").into_response()
         }
     }
+}
+
+/// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
+///
+/// axum's spelling of it; the Client's other two sockets speak tungstenite and have their own in
+/// `transport`. The sentence is shared by all of them (ADR-0044).
+fn too_big_close() -> AxumMessage {
+    AxumMessage::Close(Some(CloseFrame {
+        code: close_code::SIZE,
+        reason: opamp::frame::TOO_BIG_CLOSE_REASON.into(),
+    }))
 }
