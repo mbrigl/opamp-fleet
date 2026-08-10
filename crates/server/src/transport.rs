@@ -339,7 +339,7 @@ async fn send_framed<M: prost::Message>(
 fn too_big_close() -> Message {
     Message::Close(Some(CloseFrame {
         code: close_code::SIZE,
-        reason: "message exceeds the OpAMP message size limit".into(),
+        reason: frame::TOO_BIG_CLOSE_REASON.into(),
     }))
 }
 

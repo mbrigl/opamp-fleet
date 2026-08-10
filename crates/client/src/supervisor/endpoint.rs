@@ -14,13 +14,13 @@ use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use crate::service::runtime::Shutdown;
 use crate::supervisor::ports::{EventSender, ProcessEvent};
+use crate::transport::too_big_close;
 
 /// What this endpoint declares to the connecting client: it takes status reports and effective
 /// configuration; it offers nothing (no remote config — that flows through the Supervisor).
@@ -205,14 +205,6 @@ pub fn start(
     info!(supervisor = %name, endpoint = %format!("ws://{addr}/v1/opamp"), "supervisor endpoint ready");
     tokio::spawn(endpoint.run(shutdown));
     Ok(addr)
-}
-
-/// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
-fn too_big_close() -> CloseFrame {
-    CloseFrame {
-        code: CloseCode::Size,
-        reason: "message exceeds the OpAMP message size limit".into(),
-    }
 }
 
 #[cfg(test)]

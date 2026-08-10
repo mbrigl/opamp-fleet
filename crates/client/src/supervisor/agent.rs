@@ -1048,10 +1048,7 @@ fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
 /// OpenTelemetry semantic-convention value for `os.type` (Rust says "macos", the convention
 /// "darwin").
 fn os_type() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "darwin",
-        other => other,
-    }
+    attributes::canonical_os(std::env::consts::OS)
 }
 
 /// OpenTelemetry semantic-convention value for `host.arch` — the convention says `amd64`/`arm64`
@@ -1063,11 +1060,7 @@ fn os_type() -> &'static str {
 /// a Managed Process's attributes are folded over the Supervisor's, so `amd64` overwrote `x86_64`
 /// and any Selector written against one of them stopped matching.
 fn host_arch() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => other,
-    }
+    attributes::canonical_arch(std::env::consts::ARCH)
 }
 
 /// What the operating system says about itself — the Baseline's `os.*`. Read **once** per process

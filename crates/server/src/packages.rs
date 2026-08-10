@@ -35,24 +35,6 @@ pub struct Platform {
     pub arch: String,
 }
 
-/// Spellings that mean a canonical token. Deliberately short: it exists for what this project does
-/// **not** control — an older release file name, a foreign build system, an Agent that predates the
-/// convention — not as a general vocabulary. Everything this project produces is already canonical.
-const OS_ALIASES: &[(&str, &str)] = &[
-    ("macos", "darwin"),
-    ("osx", "darwin"),
-    ("win", "windows"),
-    ("win32", "windows"),
-    ("win64", "windows"),
-];
-
-const ARCH_ALIASES: &[(&str, &str)] = &[
-    ("x86_64", "amd64"),
-    ("x86-64", "amd64"),
-    ("x64", "amd64"),
-    ("aarch64", "arm64"),
-];
-
 impl Platform {
     /// Canonicalises a spelling into a Platform.
     ///
@@ -66,8 +48,8 @@ impl Platform {
     /// but lowercase letters, digits, and `_`.
     pub fn new(os: &str, arch: &str) -> Result<Self, String> {
         Ok(Platform {
-            os: token(os, "os", OS_ALIASES)?,
-            arch: token(arch, "arch", ARCH_ALIASES)?,
+            os: token(os, "os", opamp::attributes::canonical_os)?,
+            arch: token(arch, "arch", opamp::attributes::canonical_arch)?,
         })
     }
 
@@ -99,13 +81,11 @@ impl Platform {
     }
 }
 
-fn token(raw: &str, what: &str, aliases: &[(&str, &str)]) -> Result<String, String> {
+fn token(raw: &str, what: &str, canonicalise: fn(&str) -> &str) -> Result<String, String> {
     let lowered = raw.trim().to_ascii_lowercase();
-    let canonical = aliases
-        .iter()
-        .find(|(from, _)| *from == lowered)
-        .map(|(_, to)| (*to).to_string())
-        .unwrap_or(lowered);
+    // The spelling table is the Client's too (ADR-0044): what an Agent reports and what an artifact
+    // is stored under have to fold onto the same token, or the offer misses.
+    let canonical = canonicalise(&lowered).to_string();
     if canonical.is_empty() || canonical.len() > 16 {
         return Err(format!("{what} {raw:?} must be 1–16 characters"));
     }
