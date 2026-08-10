@@ -10,6 +10,15 @@ publish.workspace = true
 [dependencies]
 prost.workspace = true
 uuid.workspace = true
+# ADR-0044: the endpoint's gzip MUST and the PEM readers, each written once for both ends. All
+# three are already workspace dependencies of both binaries, so nothing new is linked into either.
+flate2.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+
+[dev-dependencies]
+# Generating a certificate and key for the PEM tests, rather than pasting a fixture that expires.
+rcgen.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

@@ -216,7 +216,10 @@ pub async fn verify(
                 .map_err(|e| format!("cannot build the probe client: {e}"))?;
             let mut request = client
                 .post(&endpoint)
-                .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    opamp::endpoint::PROTOBUF_CONTENT_TYPE,
+                )
                 .body(report.encode_to_vec());
             if let Some(value) = &authorization {
                 request = request.header(reqwest::header::AUTHORIZATION, value);

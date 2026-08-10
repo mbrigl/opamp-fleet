@@ -19,6 +19,22 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **A Gateway now accepts a gzipped report.** Accepting `Content-Encoding: gzip` is a Baseline MUST
+  for anything serving OpAMP, and a Client in Gateway Mode
+  ([ADR-0037](docs/adr/0037-gateway-mode.md)) *is* an OpAMP server to the Agents behind it. The
+  Server's endpoint implemented the rule; the Gateway's did not, and handed the compressed bytes
+  straight to the protobuf decoder — so an Agent that compressed its reports worked against the
+  Server and was answered `400 unreadable report` the moment a Gateway was put in front of it.
+
+  The size limit applies **after** decompression, which is the other half of that MUST: a few
+  kilobytes of gzip must not buy the hop gigabytes of memory. A body that decompresses past
+  `max_message_size_bytes` is refused with `413`, and decompression stops at the limit rather than
+  running to completion first.
+
+  Both endpoints now read one implementation of the rule
+  ([ADR-0044](docs/adr/0044-what-the-shared-crate-holds.md)). Nothing to change on any host — an
+  affected Agent works through a Gateway as soon as it runs this version.
+
 - **`server --version` now names the build it is, not the release it is heading for.** It printed the
   bare number from `Cargo.toml` — `server 0.1.3` — where the Client on the same commit reported
   `0.1.3-dev+ade2775`. So a Server binary could not be told apart from the release it was on its way

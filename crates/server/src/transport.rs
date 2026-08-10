@@ -5,7 +5,6 @@
 //! describes. Both hand every decoded report to the same [`AppState::process`], so transport is
 //! carriage, never semantics.
 
-use std::io::Read;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -25,11 +24,9 @@ use tracing::{debug, warn};
 use crate::config::AuthConfig;
 use crate::fleet::{bad_request, AppState, Transport};
 
-/// The endpoint path the Baseline names as the default.
-pub const OPAMP_PATH: &str = "/v1/opamp";
-
-/// The protobuf media type the Baseline requires on the plain-HTTP transport.
-const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
+/// The endpoint path the Baseline names as the default, and the protobuf media type it requires —
+/// both from the shared crate, because the Gateway serves the same endpoint (ADR-0044).
+pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
 /// The OpAMP endpoint's credential check (ADR-0013), precomputed from the `[auth]` section.
 pub struct OpampAuth {
@@ -166,7 +163,7 @@ async fn post_exchange(
 /// protobuf `ServerToAgent` out.
 fn plain_http(state: &AppState, headers: &HeaderMap, body: Bytes) -> Response {
     let content_type = header_str(headers, header::CONTENT_TYPE);
-    if !content_type.starts_with(PROTOBUF_CONTENT_TYPE) {
+    if !opamp::endpoint::is_protobuf(content_type) {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             format!(
@@ -177,35 +174,28 @@ fn plain_http(state: &AppState, headers: &HeaderMap, body: Bytes) -> Response {
     }
 
     let limit = state.max_message_size();
-    let raw = match header_str(headers, header::CONTENT_ENCODING) {
-        "" | "identity" => body.to_vec(),
-        "gzip" => {
-            let mut decoded = Vec::new();
-            // The limit applies *after* decompression, which the Baseline spells out: a tiny gzip
-            // bomb must not buy more memory than an oversized plain body would.
-            let mut reader = flate2::read::GzDecoder::new(&body[..]).take(limit as u64 + 1);
-            match reader.read_to_end(&mut decoded) {
-                Ok(_) if decoded.len() > limit => {
-                    warn!(
-                        limit,
-                        "rejecting a request body that decompresses past the limit"
-                    );
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "the decompressed request body exceeds the message size limit",
-                    )
-                        .into_response();
-                }
-                Ok(_) => decoded,
-                Err(_) => return (StatusCode::BAD_REQUEST, "invalid gzip body").into_response(),
-            }
+    // Accepting gzip is a Baseline MUST, and the limit applying *after* decompression is the other
+    // half of it. Both live in `opamp::endpoint` (ADR-0044), so the Gateway's endpoint follows the
+    // same rule instead of a reading of its own; what stays here is the status code, which is this
+    // transport's decision.
+    let raw = match opamp::endpoint::decode_body(
+        &body,
+        header_str(headers, header::CONTENT_ENCODING),
+        limit,
+    ) {
+        Ok(raw) => raw,
+        Err(e @ opamp::endpoint::BodyError::TooLarge) => {
+            warn!(
+                limit,
+                "rejecting a request body that decompresses past the limit"
+            );
+            return (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()).into_response();
         }
-        other => {
-            return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("unsupported Content-Encoding: {other}"),
-            )
-                .into_response();
+        Err(e @ opamp::endpoint::BodyError::UndecodableGzip) => {
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
+        Err(e @ opamp::endpoint::BodyError::UnsupportedEncoding(_)) => {
+            return (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()).into_response();
         }
     };
 

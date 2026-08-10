@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use opamp::attributes;
 use opamp::proto::{
     any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
@@ -1467,16 +1468,16 @@ impl AgentView {
             }
         };
         // What the Agent said, and what a reader of a table wants out of it (ADR-0029).
-        let service_build = lookup(&identifying, "service.version");
+        let service_build = lookup(&identifying, attributes::SERVICE_VERSION);
         AgentView {
             instance_uid: uid.to_string(),
-            service_name: lookup(&identifying, "service.name"),
-            service_instance_name: lookup(&non_identifying, "service.instance.name"),
+            service_name: lookup(&identifying, attributes::SERVICE_NAME),
+            service_instance_name: lookup(&non_identifying, attributes::SERVICE_INSTANCE_NAME),
             service_version: display_version(&service_build),
             service_build,
-            os: match lookup(&non_identifying, "os.description") {
+            os: match lookup(&non_identifying, attributes::OS_DESCRIPTION) {
                 description if !description.is_empty() => description,
-                _ => lookup(&non_identifying, "os.type"),
+                _ => lookup(&non_identifying, attributes::OS_TYPE),
             },
             identifying_attributes: identifying,
             non_identifying_attributes: non_identifying,

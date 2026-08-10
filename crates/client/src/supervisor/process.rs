@@ -586,12 +586,10 @@ pub async fn probe_version(program: PathBuf, args: Vec<String>, events: EventSen
             info!(program = %program.display(), version = %version, "version probed");
             events
                 .send(ProcessEvent::Description(AgentDescription {
-                    identifying_attributes: vec![opamp::proto::KeyValue {
-                        key: "service.version".to_string(),
-                        value: Some(opamp::proto::AnyValue {
-                            value: Some(opamp::proto::any_value::Value::StringValue(version)),
-                        }),
-                    }],
+                    identifying_attributes: vec![opamp::attributes::string_attr(
+                        opamp::attributes::SERVICE_VERSION,
+                        &version,
+                    )],
                     non_identifying_attributes: Vec::new(),
                 }))
                 .await;

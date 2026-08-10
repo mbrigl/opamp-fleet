@@ -39,7 +39,6 @@ reqwest.workspace = true
 base64.workspace = true
 rustls.workspace = true
 ring.workspace = true
-rustls-pemfile.workspace = true
 rcgen.workspace = true
 time.workspace = true
 x509-parser.workspace = true

@@ -8,13 +8,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use opamp::attributes::{self, string_attr};
 use opamp::proto::{
-    any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
-    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
-    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
-    PackageDownloadDetails, PackageStatus, PackageStatusEnum, PackageStatuses, PackageType,
-    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
-    ServerToAgent, ServerToAgentFlags,
+    AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig, AgentToServer,
+    AvailableComponents, ComponentHealth, ConnectionSettingsOffers, ConnectionSettingsStatus,
+    ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageDownloadDetails, PackageStatus,
+    PackageStatusEnum, PackageStatuses, PackageType, RemoteConfigStatus, RemoteConfigStatuses,
+    ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -926,19 +926,23 @@ impl AgentState {
         // identifies the Agent type" (ADR-0033). It used to carry the instance name, which a
         // Managed Process reporting its own type then destroyed; the instance name now has its own
         // key below, out of the way of the fold.
-        let mut identifying_attributes = vec![string_attr("service.name", &self.service_name)];
+        let mut identifying_attributes =
+            vec![string_attr(attributes::SERVICE_NAME, &self.service_name)];
         // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
         // *which* deployment this service belongs to, so it belongs beside the name rather than
         // among the tags an operator hangs on it.
         if let Some(namespace) = &self.namespace {
-            identifying_attributes.push(string_attr("service.namespace", namespace));
+            identifying_attributes.push(string_attr(attributes::SERVICE_NAMESPACE, namespace));
         }
         // `service.version` is the *Agent's* version. The self-Agent is the Client, so its baked
         // version is the truth; a Supervisor-backed Agent stands for its Managed Process, whose
         // version only the process itself can report (folded in below, goal 16) — never invented
         // from the Client's.
         if !self.managed {
-            identifying_attributes.push(string_attr("service.version", opamp::version::current()));
+            identifying_attributes.push(string_attr(
+                attributes::SERVICE_VERSION,
+                opamp::version::current(),
+            ));
         }
         identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
         // The rest of what the Baseline asks for "to describe where the Agent runs": `os.*` and
@@ -952,14 +956,14 @@ impl AgentState {
             // user would like to associate with this Agent" here; identity itself stays
             // `service.instance.id`. A Selector can match it, which is how ADR-0017's "pin one
             // host" is expressed for a machine running several Supervisors.
-            string_attr("service.instance.name", &self.instance_name),
-            string_attr("os.type", os_type()),
-            string_attr("host.arch", host_arch()),
+            string_attr(attributes::SERVICE_INSTANCE_NAME, &self.instance_name),
+            string_attr(attributes::OS_TYPE, os_type()),
+            string_attr(attributes::HOST_ARCH, host_arch()),
         ];
         for (key, value) in [
             ("os.name", os.name.as_deref()),
             ("os.version", os.version.as_deref()),
-            ("os.description", os.description.as_deref()),
+            (attributes::OS_DESCRIPTION, os.description.as_deref()),
             ("host.name", host_name()),
             ("host.id", host_id()),
         ] {
@@ -996,8 +1000,9 @@ impl AgentState {
         // among the other list's would win every Selector while the fleet row went on showing the
         // Supervisor's value.
         if let Some(reported) = &self.process_description {
-            let supervisors_own =
-                |key: &str| key == "service.instance.id" || key == "service.instance.name";
+            let supervisors_own = |key: &str| {
+                key == "service.instance.id" || key == attributes::SERVICE_INSTANCE_NAME
+            };
             for attr in &reported.identifying_attributes {
                 if !supervisors_own(&attr.key) {
                     upsert_attr(&mut description.identifying_attributes, attr);
@@ -1037,15 +1042,6 @@ fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
     match attrs.iter_mut().find(|existing| existing.key == attr.key) {
         Some(existing) => existing.value = attr.value.clone(),
         None => attrs.push(attr.clone()),
-    }
-}
-
-fn string_attr(key: &str, value: &str) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        }),
     }
 }
 
@@ -1687,7 +1683,7 @@ mod tests {
                 .and_then(|kv| kv.value.clone())
                 .and_then(|v| v.value)
                 .map(|v| match v {
-                    any_value::Value::StringValue(s) => s,
+                    opamp::proto::any_value::Value::StringValue(s) => s,
                     other => format!("{other:?}"),
                 })
         };

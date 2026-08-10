@@ -14,6 +14,9 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/opamp.proto.v1.rs"));
 }
 
+pub mod attributes;
+pub mod endpoint;
 pub mod frame;
+pub mod pem;
 pub mod uid;
 pub mod version;

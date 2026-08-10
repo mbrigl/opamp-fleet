@@ -33,11 +33,7 @@ use crate::service::runtime::Shutdown;
 use pool::Pool;
 use registry::Registry;
 
-/// The endpoint path the Baseline names as the default — the same one the Server serves.
-const OPAMP_PATH: &str = "/v1/opamp";
-
-/// The protobuf media type the Baseline requires on the plain-HTTP transport.
-const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
+use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
 /// How long a plain-HTTP peer waits for its reply to come back through the pool. Beyond this the
 /// exchange fails and the peer retries, which is what its transport already does on any error.
@@ -192,10 +188,35 @@ async fn exchange(
         )
             .into_response();
     }
+    // A downstream Client may gzip its report — the Baseline says a server MUST accept it — and the
+    // size limit applies after decompression, so a small bomb buys no more memory than a large
+    // plain body would. This endpoint implemented neither until ADR-0044 put both in one place with
+    // the Server's; a Gateway that refused what the Server accepts would break the hop for exactly
+    // the Agents that compress.
+    let raw = match opamp::endpoint::decode_body(
+        &body,
+        headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
+        state.limit,
+    ) {
+        Ok(raw) => raw,
+        Err(e @ opamp::endpoint::BodyError::TooLarge) => {
+            warn!(%peer, limit = state.limit, "dropping an oversized downstream report");
+            return (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()).into_response();
+        }
+        Err(e @ opamp::endpoint::BodyError::UndecodableGzip) => {
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
+        Err(e @ opamp::endpoint::BodyError::UnsupportedEncoding(_)) => {
+            return (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()).into_response();
+        }
+    };
     // Plain HTTP carries the bare protobuf, not the varint-framed message the WebSocket transport
     // uses — the same split the Server makes, and the reason the two halves of this endpoint do not
     // share a codec.
-    let report = match AgentToServer::decode(&body[..]) {
+    let report = match AgentToServer::decode(&raw[..]) {
         Ok(report) => report,
         Err(e) => {
             warn!(%peer, error = %e, "dropping an unreadable downstream report");

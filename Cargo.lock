@@ -427,7 +427,6 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "server",
@@ -1581,10 +1580,14 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "opamp"
 version = "0.2.0"
 dependencies = [
+ "flate2",
  "git2",
  "prost",
  "prost-build",
  "protox",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
  "uuid",
 ]
 
@@ -2341,7 +2344,6 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",

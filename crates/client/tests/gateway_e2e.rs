@@ -172,3 +172,70 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
 }
+
+/// A gzipped report reaches the Server through the Gateway.
+///
+/// The regression: accepting `Content-Encoding: gzip` is a Baseline MUST for anything serving this
+/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0037). It implemented the rule
+/// nowhere — the Server's endpoint had it, this one handed the compressed bytes straight to the
+/// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
+/// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
+/// (ADR-0044).
+#[tokio::test]
+async fn a_downstream_peer_may_gzip_its_report() {
+    let (server, state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway(server, 10).await;
+
+    let uid = InstanceUid::default();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &report(&uid, 1).encode_to_vec()).expect("compress");
+    let body = encoder.finish().expect("finish gzip");
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert!(response.status().is_success(), "{:?}", response.status());
+    let reply =
+        ServerToAgent::decode(response.bytes().await.expect("body")).expect("decode the reply");
+    assert_eq!(InstanceUid::from_wire(&reply.instance_uid), Some(uid));
+
+    // Through the hop and all the way: the Server holds the Agent, not just the Gateway.
+    let agents = state.snapshot();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].instance_uid, uid.to_string());
+}
+
+/// The other half of that MUST: the size limit applies *after* decompression, so a few kilobytes
+/// of gzip cannot buy the hop gigabytes of memory. Refused rather than expanded.
+#[tokio::test]
+async fn a_gzip_bomb_is_refused_by_the_gateway() {
+    let (server, state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway(server, 10).await;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &vec![0u8; 128 << 20]).expect("compress");
+    let body = encoder.finish().expect("finish gzip");
+    assert!(
+        body.len() < 1 << 20,
+        "the compressed form must be far under the limit for this to test anything"
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        state.snapshot().is_empty(),
+        "nothing was forwarded upstream"
+    );
+}
