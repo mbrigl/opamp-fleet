@@ -21,6 +21,7 @@ use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec};
 use crate::fleet::{AgentView, AppState, ForgetError, RestartError};
+use crate::labels::LabelError;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -42,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
         .routes(routes!(forget_agent))
+        .routes(routes!(set_agent_labels))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
@@ -55,6 +57,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(put_package, delete_package).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_package_selector))
         .routes(routes!(put_package_type))
+        .routes(routes!(put_package_publication))
         .routes(routes!(rollback_package))
         .routes(routes!(put_package_source))
         .routes(routes!(download_package))
@@ -158,6 +161,67 @@ async fn restart_agent(
             StatusCode::CONFLICT,
             format!("agent {uid} does not declare AcceptsRestartCommand"),
         ),
+    }
+}
+
+/// The labels to put on an Agent (ADR-0042). The whole set, replacing what was there.
+#[derive(Deserialize, ToSchema)]
+struct LabelsBody {
+    /// Equality pairs a Selector can match, exactly like a reported attribute — `rollout: canary`
+    /// being the one this exists for. An empty map clears the Agent's labels.
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Sets an Agent's labels, which decide what Selectors match it.
+#[utoipa::path(
+    put,
+    path = "/api/v1/agents/{instance_uid}/labels",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    request_body = LabelsBody,
+    description = "Replace this Agent's labels (ADR-0042). A label is an operator's key/value pair \
+                   that joins what a Selector matches — for Configurations and for packages alike — \
+                   so a rollout ring is a Server-side decision instead of an edit to client.toml on \
+                   the host. An empty map clears them. Labels never travel to the Agent, and they \
+                   outlive it: forgetting an Agent does not clear them. A key the Agent already \
+                   reports is refused, because reported attributes decide which artifact fits the \
+                   machine and a label must never be able to overrule them.",
+    responses(
+        (status = 200, description = "The Agent, with its new labels", body = AgentView),
+        (status = 400, description = "Malformed Instance UID, or an unusable label", body = ErrorBody),
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody)
+    )
+)]
+async fn set_agent_labels(
+    State(state): State<Arc<AppState>>,
+    Path(instance_uid): Path<String>,
+    Json(body): Json<LabelsBody>,
+) -> Response {
+    let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{instance_uid:?} is not an Instance UID"),
+        );
+    };
+    match state.set_labels(&uid, body.labels) {
+        Ok(()) => match state.snapshot().into_iter().find(|a| a.instance_uid == uid.to_string()) {
+            Some(view) => Json(view).into_response(),
+            // Forgotten between the write and the read: the labels are stored, and the Agent is
+            // simply no longer in the view to return.
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(LabelError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(LabelError::RestatesReported(key)) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "agent {uid} reports {key:?} itself, and a label may not restate it — a reported \
+                 attribute decides which artifact fits this machine, so it wins. Change it where it \
+                 comes from, in that host's client.toml, or label it under another key"
+            ),
+        ),
+        Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
     }
 }
 
@@ -327,17 +391,29 @@ struct PackageView {
     /// not "every type" — so a package is inert until this is set.
     #[serde(default)]
     service_name: String,
+    /// Whether the fleet may have this package (ADR-0043). **A draft is offered to nobody**,
+    /// however complete the rest of it is: uploading an artifact stages a package, and releasing it
+    /// is its own act — `PUT /api/v1/packages/{name}/publication`.
+    ///
+    /// A package created before this field existed loads published, so nothing that was already in
+    /// flight stopped when it appeared.
+    #[serde(default)]
+    published: bool,
     /// One artifact per platform. An Agent is offered the one built for the machine it reported,
     /// and never another (ADR-0031).
     variants: Vec<PackageVariantView>,
-    /// How many Agents in the fleet this package reaches as things stand — fitted by type and
-    /// platform, then aimed by Selector, exactly as the offer resolves it.
+    /// How many Agents in the fleet this package **would** reach — fitted by type and platform,
+    /// then aimed by Selector, exactly as the offer resolves it.
     ///
     /// **`0` is the value worth looking at.** A package targets nobody when its `service_name` is
     /// unset or misspelled, when no artifact matches any reported platform, or when its Selector
     /// matches no Agent — and none of those is an upload error, so nothing else would say so. It
     /// counts the fleet *as reported so far*: a package staged for hosts that have not connected
     /// yet is legitimately at `0`, which is why this is a number to read rather than a rejection.
+    ///
+    /// A **draft** is counted as if it were published, because staging a rollout is how its aim is
+    /// checked before it starts. What a draft reaches today is nobody, and `published` above is
+    /// where that is read — not from a number that answers a different question.
     targeted_agents: usize,
 }
 
@@ -375,6 +451,7 @@ impl PackageView {
             name: summary.name,
             selector: summary.selector,
             service_name: summary.service_name,
+            published: summary.published,
             variants: summary
                 .variants
                 .into_iter()
@@ -434,6 +511,15 @@ struct PackageTypeSpec {
     /// `opamp-fleet-client`. Compared raw: there is no canonical set of Agent types to normalise
     /// against, so this must be spelled exactly as the Agent reports it.
     service_name: String,
+}
+
+/// Whether the fleet may have a package (ADR-0043).
+#[derive(Deserialize, ToSchema)]
+struct PackagePublicationSpec {
+    /// `true` releases the package: every Agent it fits and aims at is offered it from now on.
+    /// `false` retracts it — the offer stops, and **nothing is uninstalled**; an Agent keeps
+    /// running what it already installed, exactly as when a Selector stops matching it (ADR-0017).
+    published: bool,
 }
 
 /// The query parameters of a package upload: everything but the artifact, which is the body.
@@ -901,6 +987,50 @@ async fn put_package_type(
             error(StatusCode::NOT_FOUND, e)
         }
         Err(e) if e.starts_with("an agent type") => error(StatusCode::BAD_REQUEST, e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Releases a package to the fleet, or retracts it (ADR-0043) — for every platform of it at once,
+/// because a package publishes as a whole, exactly as its type and its Selector apply to all of it.
+///
+/// **This is the moment a rollout starts.** Storing an artifact stages a package: it is a draft,
+/// offered to no Agent however complete the rest of it is, so the window in which a half-described
+/// package is already reaching the fleet does not exist. Releasing is a separate, logged act, and
+/// it is reversible — `{"published": false}` withdraws the offer.
+///
+/// **Retracting uninstalls nothing.** Agents that already took the package keep running it; the
+/// protocol has no revert, and ADR-0017 settled the same question for a Selector that stops
+/// matching. What stops is the package reaching Agents that have not taken it yet.
+#[utoipa::path(
+    put,
+    path = "/api/v1/packages/{name}/publication",
+    tag = "packages",
+    params(("name" = String, Path, description = "The package name")),
+    request_body = PackagePublicationSpec,
+    responses(
+        (status = 200, description = "The package, with its publication state", body = PackageView),
+        (status = 404, description = "No such package, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The publication state could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_publication(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<PackagePublicationSpec>,
+) -> Response {
+    match state.set_package_published(&name, spec.published) {
+        Ok(_) => {
+            info!(
+                package = %name,
+                published = spec.published,
+                "package publication set"
+            );
+            package_response(&state, &name)
+        }
+        Err(e) if e.contains("not configured") || e.starts_with("no package") => {
+            error(StatusCode::NOT_FOUND, e)
+        }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

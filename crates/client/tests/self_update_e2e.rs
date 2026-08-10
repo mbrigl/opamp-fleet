@@ -253,6 +253,10 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     store
         .set_service_name("opamp-fleet-client", "opamp-fleet-client".to_string())
         .expect("agent type");
+    // And released, or it is a draft the fleet never sees (ADR-0043).
+    store
+        .set_published("opamp-fleet-client", true)
+        .expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -352,6 +356,7 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     store
         .set_service_name("otelcol", "opamp-fleet-client".to_string())
         .expect("agent type");
+    store.set_published("otelcol", true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");

@@ -108,6 +108,9 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     store
         .set_service_name("myagent", "managed-agent".to_string())
         .expect("agent type");
+    // And released (ADR-0043): storing the artifact stages the package, so without this it is a
+    // draft and reaches nobody — which is the decision, not an accident of the test.
+    store.set_published("myagent", true).expect("publish");
 
     let (addr, state, dir) = spawn_server(store).await;
 

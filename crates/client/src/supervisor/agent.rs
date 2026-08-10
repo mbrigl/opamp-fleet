@@ -242,8 +242,33 @@ impl AgentState {
     /// and is rolled back. The Client has no such safety net: a package with an empty Selector
     /// reaches every consenting Agent, and one written over this binary takes the host out of
     /// reach for good. So this side matches the name and refuses everything else.
+    ///
+    /// The restored record is held against the version this binary *is*, and dropped when the two
+    /// are not the same release. `service uninstall` deliberately keeps the install layout and the
+    /// state (ADR-0010), so an operator who reinstalls an older Client comes up on top of the
+    /// record its successor wrote — and reporting that record would tell the Server this host runs
+    /// a version it does not have. Worse than the wrong line in the fleet view: the offer is gated
+    /// on the hash inside it, so the Server would never offer this host the package again. A
+    /// record that does not name the running binary is a record about a binary that is gone.
     pub fn accept_packages_named(&mut self, name: String) {
         self.accept_packages();
+        let running = crate::version::version();
+        if let Some(installed) = &self.installed_package {
+            // Not string equality: the record holds the version the operator uploaded (`1.2.3`)
+            // and this binary calls itself `1.2.3+a1b2c3d`. The same comparison the self-update
+            // probe makes before a version is ever pointed at (ADR-0029).
+            if !opamp::version::same_release(&installed.version, running) {
+                warn!(
+                    recorded = %installed.version, running = %running,
+                    "the installed package record does not name the version this Client runs; \
+                     discarding it, so the Server can offer the package again"
+                );
+                self.installed_package = None;
+                if let Err(e) = self.storage.forget_package() {
+                    warn!(error = %e, "cannot drop the stale installed package record");
+                }
+            }
+        }
         self.expected_package = Some(name);
     }
 
@@ -1810,6 +1835,117 @@ mod tests {
             .package_download
             .expect("the named package is taken");
         assert_eq!(download.name, "opamp-client");
+    }
+
+    /// One offer of a package, by name and hash — the shape both restore tests below hand to the
+    /// Agent to ask "would you take this again?".
+    fn package_offer(name: &str, version: &str, hash: &[u8]) -> opamp::proto::PackagesAvailable {
+        use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+        PackagesAvailable {
+            packages: [(
+                name.to_string(),
+                PackageAvailable {
+                    version: version.to_string(),
+                    file: Some(DownloadableFile {
+                        download_url: "/x".to_string(),
+                        content_hash: b"chash".to_vec(),
+                        ..Default::default()
+                    }),
+                    hash: hash.to_vec(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            all_packages_hash: b"agg-1".to_vec(),
+        }
+    }
+
+    /// A record naming a version this binary is not is a record about a binary that is gone:
+    /// `service uninstall` keeps the state, so reinstalling an older Client lands on top of what
+    /// its successor wrote. Reported, it would tell the Server a version this host does not run —
+    /// and the hash gate inside it would stop the package ever being offered here again.
+    #[test]
+    fn a_package_record_from_another_version_is_discarded_on_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                version: "9.9.9".to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store the record a successor left behind");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        // Nothing is claimed: no package name, so nothing to be in sync about.
+        let statuses = agent
+            .next_report()
+            .package_statuses
+            .expect("a package status");
+        assert!(
+            statuses.packages.is_empty(),
+            "a version this Client does not run must not be reported as installed: {:?}",
+            statuses.packages
+        );
+        assert!(
+            !dir.path().join("installed-package.json").exists(),
+            "the stale record is dropped from disk, not only from memory"
+        );
+
+        // And the very bytes the record named are taken again, rather than echoed as in sync.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", "9.9.9", b"pkg-hash")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("the package is offered to this Client again");
+        assert_eq!(download.name, "opamp-client");
+    }
+
+    /// The other half, and the one that matters more: an ordinary restart must keep its record.
+    /// A Client that discarded it would reinstall the version it already runs on every start.
+    #[test]
+    fn a_package_record_for_the_running_version_survives_a_restart() {
+        use opamp::proto::PackageStatusEnum;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                // What the Server was told to offer: the release, without the build metadata this
+                // binary carries (ADR-0029).
+                version: opamp::version::parse(crate::version::version())
+                    .expect("this build's version parses")
+                    .identity()
+                    .to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        let statuses = agent
+            .next_report()
+            .package_statuses
+            .expect("a package status");
+        let status = statuses.packages.get("opamp-client").expect("the package");
+        assert_eq!(status.status, PackageStatusEnum::Installed as i32);
+        assert!(dir.path().join("installed-package.json").exists());
+
+        // Offered the same bytes, this Client is in sync and downloads nothing.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", "1.0.0", b"pkg-hash")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_none(),
+            "a restarted Client must not reinstall the version it already runs"
+        );
     }
 
     #[test]

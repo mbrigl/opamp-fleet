@@ -8,6 +8,7 @@ pub mod ca;
 pub mod config;
 pub mod configs;
 pub mod fleet;
+pub mod labels;
 pub mod packages;
 pub mod tls;
 pub mod transport;

@@ -15,6 +15,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **The Server can label an Agent** ([ADR-0042](docs/adr/0042-server-set-labels.md)).
+  `PUT /api/v1/agents/{instance_uid}/labels` sets key/value pairs that join what a Selector matches,
+  and the bundled UI has a `🏷 labels…` action on every fleet row.
+
+  This removes the last per-host wiring. The attribute a staged rollout wants — `rollout = "canary"`
+  — could only live in `[attributes]` in `client.toml`, so moving a host between rings meant editing
+  a file on that host and restarting it. Now it is one API call, and it aims **both** halves of the
+  targeting: the Configuration an Agent is sent and the package it is offered. A canary rollout of a
+  new binary is a Selector of `rollout = canary` on the package plus a label on the hosts that should
+  get it first.
+
+  It takes effect immediately — a connected Agent is pushed what its new ring gets.
+
+  **A label may not restate an attribute the Agent reports**; that is refused with `409`, naming the
+  key. `os.type` and `host.arch` decide which artifact fits a machine and `service.name` decides
+  which packages fit it at all, so a label that could outrank them would let a slip offer a host a
+  binary built for another one. Fix a wrong reported value where it comes from, in that host's
+  `client.toml`.
+
+  Labels never travel to the Agent, are stored on the Server, and survive a restart. **Forgetting an
+  Agent does not clear them**, so a host that comes back is in the ring it was put in; clearing them
+  is its own call with an empty map. They are keyed by Instance UID, so an Agent the Server re-keys
+  starts with none.
+
 - **A Client running as a service now writes its own log to disk**
   ([ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)), at
   `<state_dir>/logs/`, one file per day with seven days kept.
@@ -193,6 +217,74 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- **A package is published before it is offered — uploading only stages it**
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)). A newly created
+  package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
+  no Agent until it is released.
+
+  ```console
+  $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+         http://<server>:4320/api/v1/packages/otelcol/publication
+  ```
+
+  Uploading used to *be* the rollout: the next Agent that fitted took the artifact, even while the
+  package was still half described. Five platforms' artifacts can now be uploaded, typed and aimed,
+  and then released together — and the moment a rollout starts is one named act rather than the side
+  effect of a file transfer.
+
+  `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the package,
+  and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
+  Selector stops matching it (ADR-0017). The protocol has no revert; this is not a recall.
+
+  **Nothing that is already running stops.** A package stored before this state existed loads as
+  published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
+  published package still distributes on upload** — that is the ordinary in-place upgrade; stage a
+  replacement by retracting first.
+
+  What changes for scripts: creating a *new* package now needs one more call. `targeted_agents`
+  keeps counting what a package would reach, drafts included, because checking the aim before
+  starting is what staging is for — `published` beside it is where "may the fleet have it" is read.
+  In the UI, *Upload* and *Update* leave a package staged and **Offer** releases it; on a released
+  package that button reads *Retract*, and the package list marks a draft.
+
+- **The package form in the UI is one intent per button, and every one of them states the Agent
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0034) —
+  the form used to make that the easiest state to produce by hand, with the type one optional-looking
+  field among several and a separate button to remember afterwards.
+
+  Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+
+  | | what it sends |
+  | --- | --- |
+  | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
+  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)), and the type and Selector are set either way |
+  | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
+
+  None of them runs without an Agent type, so the UI can no longer create a package that reaches
+  nobody. *Close* is gone — the **Packages** button that opens the card also closes it.
+
+  **A package chip toggles.** Clicking one fills the form from it; clicking the selected one again
+  lets go, and the form describes no package in particular. Nothing is sent and nothing is deleted
+  either way. The selection lives in the list, so undoing it is a press in the list rather than a
+  button standing among the ones that write.
+
+  The **Agent type** field now offers the types the fleet actually reports, with how many Agents
+  report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
+  is a rollout that silently never starts — picking from the list is the spelling that matches. A
+  type no Agent has reported yet can still be typed in.
+
+  The **name** now stands alone on the first line, and is filled in rather than asked for: from the
+  chosen artifact's file name, which states the package it belongs to (ADR-0025, ADR-0032), else a
+  source url's last segment, else the Agent type folded into the ADR-0010 name grammar. It is
+  derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
+  named after itself. A name typed by hand outranks all three, and one that names a package that
+  exists is not renamed by a correction to that package's type.
+
+  Nothing about the API changed: the artifact, the source, the type and the Selector are still four
+  requests over four sub-resources, and a package uploaded by script is still untyped until
+  `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
+  name — that is the alternative ADR-0034 weighed and rejected.
+
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
   ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)).
@@ -254,7 +346,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
   unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
 
+- **Delete in the package form removes one artifact, not the whole package.** It deletes the
+  platform named in the form — the artifact the selected chip stands for — and leaves the other
+  platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
+  the `darwin-arm64` and `windows-amd64` builds with it.
+
+  The package itself goes when its last artifact does, so nothing is left behind either. Deleting
+  uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)).
+
+  `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
+  sends the `?os=…&arch=…` form of it that
+  [ADR-0031](docs/adr/0031-per-platform-package-variants.md) added.
+
+### Removed
+
+- **The ↩ Roll back button is gone from the package form.** The store still remembers the version
+  each artifact replaced ([ADR-0019](docs/adr/0019-one-step-back.md)) and
+  `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
+  removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
+  screen; asking for it is now a request rather than a press.
+
 ### Fixed
+
+- **A Client that was downgraded by hand went on reporting the version it had been updated to.**
+  After a self-update, `service uninstall` followed by installing an *older* Client left the fleet
+  view showing the package pill of the newer version — beside a **Version** column that correctly
+  named the old one. The record of what the Client installed lives in
+  `<state_dir>/installed-package.json`, and `service uninstall` deliberately deletes neither the
+  install layout nor the state, so the older Client came up on top of the record its successor
+  wrote.
+
+  The wrong line in the view was the smaller half. The Server gates re-offering on the hash inside
+  that record, so the host was **silently out of the rollout for good**: it believed it already ran
+  the offered package and would never take it again.
+
+  A record that does not name the version this binary *is* is now discarded at startup, with a
+  warning in the log naming both versions. The Client then reports no package, the Server offers it
+  again, and **the host is updated back to the published version.** That is the point — the Server
+  decides what the fleet runs. To keep a host on an older Client, retract the package first
+  (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
+  [ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)); retracting uninstalls
+  nothing, so the host stays where it is.
+
+  This is the Client's own package only. A Managed Process's package record is unchanged: only the
+  program itself knows its version there, and it is reported by the version probe.
 
 - **An Agent that installed a package went on reporting the version it replaced.** The package
   itself was reported correctly — `Installed`, with the new version, in the fleet view's package
