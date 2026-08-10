@@ -14,6 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::install;
 use crate::service::runtime::Shutdown;
 use crate::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent};
 use crate::transport::Backoff;
@@ -460,25 +461,20 @@ impl Runner {
     /// Spawns the Managed Process, keeping the reason when it fails.
     ///
     /// Right after a package swap the reason matters: exec of a freshly written binary can fail
-    /// with `ETXTBSY` — "Text file busy" — when another thread of this Client forked for its own
-    /// spawn while this one still held the new file open for writing. The forked child inherits
-    /// that descriptor until it execs, and the kernel refuses to exec a file anyone holds open for
-    /// writing. It is transient and says nothing about the artifact, so the swap retries briefly
-    /// rather than rolling back a binary that is perfectly good.
+    /// with `ETXTBSY`, which is transient and says nothing about the artifact
+    /// ([`install::is_text_file_busy`] states why). So the swap retries briefly rather than rolling
+    /// back a binary that is perfectly good.
     async fn try_spawn(&self) -> Result<Child, String> {
-        const BUSY_RETRIES: u32 = 10;
-        const BUSY_DELAY: Duration = Duration::from_millis(50);
-
         let mut attempt = 0;
         loop {
             match self.spawn_once().await {
-                Err(e) if is_text_file_busy(&e) && attempt < BUSY_RETRIES => {
+                Err(e) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
                     attempt += 1;
                     warn!(
                         supervisor = %self.name, attempt,
                         "the new binary is momentarily busy (another spawn holds it); retrying"
                     );
-                    tokio::time::sleep(BUSY_DELAY).await;
+                    tokio::time::sleep(install::BUSY_DELAY).await;
                 }
                 other => return other.map_err(|e| e.to_string()),
             }
@@ -538,19 +534,6 @@ impl Runner {
                 Err(e)
             }
         }
-    }
-}
-
-/// `ETXTBSY`: the file cannot be executed because someone holds it open for writing.
-fn is_text_file_busy(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(libc::ETXTBSY)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
     }
 }
 
@@ -703,42 +686,21 @@ fn install_executable(
     archive_key: Option<&str>,
 ) -> Result<(), String> {
     let temp = path.with_extension("staged");
-    let kind = crate::archive::detect(artifact)?;
-    if kind == crate::archive::Kind::Raw && std::fs::rename(artifact, &temp).is_ok() {
-        info!(artifact = %artifact.display(), "moved the package artifact into place");
-    } else {
-        let mut target = std::fs::File::create(&temp)
-            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-        match kind {
-            crate::archive::Kind::Raw => {
-                let mut source = std::fs::File::open(artifact)
-                    .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-                std::io::copy(&mut source, &mut target)
-                    .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-            }
-            kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
-                let member = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
-                let written = match kind {
-                    crate::archive::Kind::SevenZ => {
-                        crate::archive::extract_7z(artifact, &member, &mut target, archive_key)?
-                    }
-                    _ => crate::archive::extract_tar_gz(artifact, &member, &mut target)?,
-                };
-                info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the package archive");
-            }
-        }
-        drop(target);
-    }
-    // Whatever put the bytes there, the mode is ours to set: a moved artifact carries the
-    // download's permissions, and a written one the process umask.
-    #[cfg(unix)]
+    // A raw artifact is already the program, and it was downloaded into this Supervisor's own
+    // directory — so it can be renamed into place instead of copied, which the staging path below
+    // cannot assume and the Client's own update (whose artifact is not next to its destination)
+    // has no equivalent for.
+    if crate::archive::detect(artifact)? == crate::archive::Kind::Raw
+        && std::fs::rename(artifact, &temp).is_ok()
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot make {} executable: {e}", temp.display()))?;
+        info!(artifact = %artifact.display(), "moved the package artifact into place");
+        install::make_executable(&temp)?;
+    } else {
+        let member = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
+        install::write_program(artifact, &temp, &member, archive_key)?;
     }
     std::fs::rename(&temp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
@@ -810,12 +772,7 @@ fn install_tree(
     }
     // The tree carries its own modes where the archive had them, but whether the *program* can be
     // executed is not something to inherit from how someone built an archive.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot make {} executable: {e}", program.display()))?;
-    }
+    install::make_executable(&program)?;
 
     let live = root.join(crate::config::TREE_DIR);
     std::fs::rename(&staging, &live).map_err(|e| {
