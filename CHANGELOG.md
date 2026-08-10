@@ -4,14 +4,57 @@ Operator-facing changes to the Server and the Client — what a running deployme
 about, in particular anything that must be edited or moved before an upgrade. The reasoning behind
 each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says only what to do.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are the ones
-[ADR-0009](docs/adr/0009-version-derivation-and-baking.md) derives from `version/*` tags.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
+`[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
+`version/*` tag from ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md), superseding the
+version-source decision of [ADR-0009](docs/adr/0009-version-derivation-and-baking.md)). A section
+carries a date once its tag exists.
 
-> **Where this file starts.** Entries begin with ADR-0021. The work between `version/0.1.0` and
-> that point — package delivery, Selector-targeted packages and Configurations, the Client's own
-> self-update, and the rest — is not backfilled here; it is in the git log and in the ADRs.
+> **Where this file starts.** Entries begin with ADR-0021. The work before that point — package
+> delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
+> rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
+> all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.2.0] — unreleased
+
+### Fixed
+
+- **The fleet view shows an Agent's Instance UID again.** It had been the line under the agent name
+  until [ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md) gave a
+  row both the operator's name for an Agent and the type it reports, and the UID moved into the name
+  link's tooltip — where nothing on a printed, screenshotted or scrolled-past row carried it. It is a
+  third line in the name cell now, below the type, and one click selects the whole of it.
+
+  That UID is what every REST call names an Agent by (`/api/v1/agents/{instance_uid}/…`), so reading
+  a row in order to act on it needed the value in front of you rather than under the pointer. Nothing
+  else changed: the fleet filter already searched the UID, and the row actions already carried it.
+
+## [0.1.3] - 2026-08-09
+
+### Changed
+
+- **Delete in the package form removes one artifact, not the whole package.** It deletes the
+  platform named in the form — the artifact the selected chip stands for — and leaves the other
+  platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
+  the `darwin-arm64` and `windows-amd64` builds with it.
+
+  The package itself goes when its last artifact does, so nothing is left behind either. Deleting
+  uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)).
+
+  `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
+  sends the `?os=…&arch=…` form of it that
+  [ADR-0031](docs/adr/0031-per-platform-package-variants.md) added.
+
+### Removed
+
+- **The ↩ Roll back button is gone from the package form.** The store still remembers the version
+  each artifact replaced ([ADR-0019](docs/adr/0019-one-step-back.md)) and
+  `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
+  removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
+  screen; asking for it is now a request rather than a press.
+
+## [0.1.2] - 2026-08-09
 
 ### Added
 
@@ -38,6 +81,105 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Agent does not clear them**, so a host that comes back is in the ring it was put in; clearing them
   is its own call with an empty map. They are keyed by Instance UID, so an Agent the Server re-keys
   starts with none.
+
+### Changed
+
+- **A package is published before it is offered — uploading only stages it**
+  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)). A newly created
+  package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
+  no Agent until it is released.
+
+  ```console
+  $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+         http://<server>:4320/api/v1/packages/otelcol/publication
+  ```
+
+  Uploading used to *be* the rollout: the next Agent that fitted took the artifact, even while the
+  package was still half described. Five platforms' artifacts can now be uploaded, typed and aimed,
+  and then released together — and the moment a rollout starts is one named act rather than the side
+  effect of a file transfer.
+
+  `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the package,
+  and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
+  Selector stops matching it (ADR-0017). The protocol has no revert; this is not a recall.
+
+  **Nothing that is already running stops.** A package stored before this state existed loads as
+  published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
+  published package still distributes on upload** — that is the ordinary in-place upgrade; stage a
+  replacement by retracting first.
+
+  What changes for scripts: creating a *new* package now needs one more call. `targeted_agents`
+  keeps counting what a package would reach, drafts included, because checking the aim before
+  starting is what staging is for — `published` beside it is where "may the fleet have it" is read.
+  In the UI, *Upload* and *Update* leave a package staged and **Offer** releases it; on a released
+  package that button reads *Retract*, and the package list marks a draft.
+
+- **The package form in the UI is one intent per button, and every one of them states the Agent
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0034) —
+  the form used to make that the easiest state to produce by hand, with the type one optional-looking
+  field among several and a separate button to remember afterwards.
+
+  Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+
+  | | what it sends |
+  | --- | --- |
+  | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
+  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)), and the type and Selector are set either way |
+  | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
+
+  None of them runs without an Agent type, so the UI can no longer create a package that reaches
+  nobody. *Close* is gone — the **Packages** button that opens the card also closes it.
+
+  **A package chip toggles.** Clicking one fills the form from it; clicking the selected one again
+  lets go, and the form describes no package in particular. Nothing is sent and nothing is deleted
+  either way. The selection lives in the list, so undoing it is a press in the list rather than a
+  button standing among the ones that write.
+
+  The **Agent type** field now offers the types the fleet actually reports, with how many Agents
+  report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
+  is a rollout that silently never starts — picking from the list is the spelling that matches. A
+  type no Agent has reported yet can still be typed in.
+
+  The **name** now stands alone on the first line, and is filled in rather than asked for: from the
+  chosen artifact's file name, which states the package it belongs to (ADR-0025, ADR-0032), else a
+  source url's last segment, else the Agent type folded into the ADR-0010 name grammar. It is
+  derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
+  named after itself. A name typed by hand outranks all three, and one that names a package that
+  exists is not renamed by a correction to that package's type.
+
+  Nothing about the API changed: the artifact, the source, the type and the Selector are still four
+  requests over four sub-resources, and a package uploaded by script is still untyped until
+  `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
+  name — that is the alternative ADR-0034 weighed and rejected.
+
+### Fixed
+
+- **A Client that was downgraded by hand went on reporting the version it had been updated to.**
+  After a self-update, `service uninstall` followed by installing an *older* Client left the fleet
+  view showing the package pill of the newer version — beside a **Version** column that correctly
+  named the old one. The record of what the Client installed lives in
+  `<state_dir>/installed-package.json`, and `service uninstall` deliberately deletes neither the
+  install layout nor the state, so the older Client came up on top of the record its successor
+  wrote.
+
+  The wrong line in the view was the smaller half. The Server gates re-offering on the hash inside
+  that record, so the host was **silently out of the rollout for good**: it believed it already ran
+  the offered package and would never take it again.
+
+  A record that does not name the version this binary *is* is now discarded at startup, with a
+  warning in the log naming both versions. The Client then reports no package, the Server offers it
+  again, and **the host is updated back to the published version.** That is the point — the Server
+  decides what the fleet runs. To keep a host on an older Client, retract the package first
+  (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
+  [ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)); retracting uninstalls
+  nothing, so the host stays where it is.
+
+  This is the Client's own package only. A Managed Process's package record is unchanged: only the
+  program itself knows its version there, and it is reported by the version probe.
+
+## [0.1.1] - 2026-08-09
+
+### Added
 
 - **A Client running as a service now writes its own log to disk**
   ([ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)), at
@@ -81,6 +223,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   cannot claim a reach the fleet does not get. It counts the fleet **as reported so far**: a package
   staged ahead of the hosts it is meant for reads `0` legitimately, which is why it is a number to
   read rather than a rejected upload.
+
+## [0.1.0] - 2026-08-09
+
+### Added
 
 - **An Agent can be forgotten** ([ADR-0039](docs/adr/0039-forgetting-an-agent.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
@@ -215,75 +361,117 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   a host out even with a valid credential — a Client switched off longer than its validity needs
   `client_ca_file` unset for as long as it takes to re-enrol.
 
-### Changed
+- **A released `.7z` unpacks as an executable on Linux and macOS.** The member is packed with a
+  Unix mode of `0755` (7-Zip's Unix-attribute convention), so `7z x` yields a binary that runs
+  instead of one that needs a `chmod +x` nobody wrote down. `--format tar.gz` already did this in
+  its tar header; the two containers now agree. Nothing changes for a package the Server delivers —
+  the Client sets the mode itself when it installs one — and nothing changes for the Windows
+  artifact, where the bit means something else and 7-Zip does not write it either.
 
-- **A package is published before it is offered — uploading only stages it**
-  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)). A newly created
-  package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
-  no Agent until it is released.
+- **`opamp-fleet-client service install --interactive` writes the first configuration.** A freshly downloaded
+  Client has no `client.toml` — the release artifact is the bare binary — and installing without one
+  produced a service that started, dialled `127.0.0.1`, and managed nothing. The flag asks for what
+  a fresh host cannot guess (endpoint, Agent name, credential, a private CA when the endpoint is
+  `wss://`/`https://`, and last, defaulting to *no*, consent for the Server to update this Client's
+  own binary), writes the file, and validates it before registering the service
+  ([ADR-0027](docs/adr/0027-interactive-install-writes-the-first-configuration.md)).
 
-  ```console
-  $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-         http://<server>:4320/api/v1/packages/otelcol/publication
+  Nothing about existing invocations changes: the flag is opt-in, an existing file is kept rather
+  than overwritten, and `--interactive` without a terminal on stdin fails instead of blocking a
+  provisioning run. The credential is typed into a hidden prompt, so it stays out of the shell
+  history and the process list, and on Unix the file is created mode `0600`. Installing *without*
+  the flag now prints a warning when the configured path holds no file — the silence was the bug.
+
+- **Released builds of the Client, one archive per platform.** A release publishes
+  `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
+  on `x86_64`, together with `SHA256SUMS`
+  ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)). Until now there was nothing to
+  install but a build of your own.
+
+  **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
+  `version/*` tag from it ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)) — so a release is
+  "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
+  a version that already has a tag or a release is spent, and the run says so before it builds
+  anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
+  that does not report the version its artifacts are named after fails the run.
+
+  **Each archive is also a package artifact**: it holds the Client under the name the install layout
+  gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an
+  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` takes the
+  release number — the one in the file name.
+
+- **`supervisor_dir`** (optional, top-level) places the per-Supervisor directories; the default is
+  `<state_dir>/supervisors`, which is where they have always been. Set it to keep the Managed
+  Processes' programs off a `noexec` mount, or off a volume sized for state rather than for a few
+  hundred megabytes of Collector. Moving it on a running host leaves the old tree behind —
+  `instance-uid` included — so each Supervisor re-registers as a **new** Agent on the Server;
+  nothing migrates automatically.
+
+- **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
+  `env` values** ([ADR-0022](docs/adr/0022-supervisor-path-placeholders-in-process-arguments.md)),
+  so a Foreign Agent's command line is derived from the same place the Client derives it from:
+
+  ```toml
+  args = ["-c", "${config_dir}/fluent-bit-conf"]
   ```
 
-  Uploading used to *be* the rollout: the next Agent that fitted took the artifact, even while the
-  package was still half described. Five platforms' artifacts can now be uploaded, typed and aimed,
-  and then released together — and the moment a rollout starts is one named act rather than the side
-  effect of a file transfer.
+  An absolute path still works and is still wrong the moment `supervisor_dir` moves or the
+  Supervisor is renamed — the process then starts happily on a file nobody writes to, with nothing
+  reporting a problem. The shipped example carried exactly that mistake and now uses the
+  placeholder. Any other `${…}` is passed to the process untouched, so an agent's own variable
+  syntax keeps working; the flip side is that a misspelled placeholder is handed over rather than
+  refused. The program itself (`binary`, `command`) is never substituted.
 
-  `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the package,
-  and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
-  Selector stops matching it (ADR-0017). The protocol has no revert; this is not a recall.
+- **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
+  SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
+  `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
+  ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)). Until now the project could open the
+  two container formats but gave an operator no supported way to produce one, and an encrypted
+  `.7z` in particular had no answer at all.
 
-  **Nothing that is already running stops.** A package stored before this state existed loads as
-  published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
-  published package still distributes on upload** — that is the ordinary in-place upgrade; stage a
-  replacement by retracting first.
+  ```console
+  $ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail
+  $ opamp-package-sign pack --format 7z --archive-key "$KEY" --out promtail-3.0.0.7z ./promtail
+  ```
 
-  What changes for scripts: creating a *new* package now needs one more call. `targeted_agents`
-  keeps counting what a package would reach, drafts included, because checking the aim before
-  starting is what staging is for — `published` beside it is where "may the fleet have it" is read.
-  In the UI, *Upload* and *Update* leave a package staged and **Offer** releases it; on a released
-  package that button reads *Retract*, and the package list marks a draft.
+  The member inside the archive is named after the packed file, which is what a Supervisor looks
+  for; `--program-name` covers an upstream build whose file name differs. A `.tar.gz` is
+  reproducible — modification time, owner, and group are zeroed — so repacking the same program
+  does not produce a new hash and therefore no rollout. **There is no `zip`, and adding one is not
+  a matter of a flag:** an artifact that is neither gzip nor 7z is taken to *be* the program, so a
+  `.zip` would be installed over the binary unopened.
 
-- **The package form in the UI is one intent per button, and every one of them states the Agent
-  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0034) —
-  the form used to make that the easiest state to produce by hand, with the type one optional-looking
-  field among several and a separate button to remember afterwards.
+- **A user manual** at [`docs/manual/`](docs/manual/README.md) — Server and Client documented
+  option by option, plus an end-to-end [rollout walkthrough](docs/manual/rollout.md) that installs
+  and configures a Foreign Agent entirely from the Server.
 
-  Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
+- **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
+  ([ADR-0023](docs/adr/0023-multi-file-packages.md)). An executable plus the shared objects it
+  loads — Fluent Bit is the case — could not be a package before, because exactly one archive
+  member was installed. Naming where the program sits inside the package unpacks the whole archive
+  instead:
 
-  | | what it sends |
-  | --- | --- |
-  | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
-  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)), and the type and Selector are set either way |
-  | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
+  ```toml
+  [[supervisor]]
+  type = "command"
+  name = "fluent-bit"
+  command = "fluent-bit"            # unchanged: the bare name is still the consent
+  program_path = "bin/fluent-bit"   # where the program sits inside the package
+  ```
 
-  None of them runs without an Agent type, so the UI can no longer create a package that reaches
-  nobody. *Close* is gone — the **Packages** button that opens the card also closes it.
+  The tree lands in `<supervisor_dir>/<name>/program/tree/`, and the one it replaced is kept as
+  `program/tree.rollback` until the new one has survived `apply_grace_secs` — put back **whole** if
+  it has not. The path is matched from its end, so the version-named directory a release wraps
+  everything in needs no mention and the value stays right at the next release.
 
-  **A package chip toggles.** Clicking one fills the form from it; clicking the selected one again
-  lets go, and the form describes no package in particular. Nothing is sent and nothing is deleted
-  either way. The selection lives in the list, so undoing it is a press in the list rather than a
-  button standing among the ones that write.
+  **Without `program_path` nothing changes**: one member, one file, same layout, same rollback.
 
-  The **Agent type** field now offers the types the fleet actually reports, with how many Agents
-  report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
-  is a rollout that silently never starts — picking from the list is the spelling that matches. A
-  type no Agent has reported yet can still be typed in.
+  Unpacking a tree means the archive names paths, so every member is checked before anything is
+  written and one bad member refuses the whole archive: a `..` or absolute path, a symbolic or hard
+  link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
+  is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
 
-  The **name** now stands alone on the first line, and is filled in rather than asked for: from the
-  chosen artifact's file name, which states the package it belongs to (ADR-0025, ADR-0032), else a
-  source url's last segment, else the Agent type folded into the ADR-0010 name grammar. It is
-  derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
-  named after itself. A name typed by hand outranks all three, and one that names a package that
-  exists is not renamed by a correction to that package's type.
-
-  Nothing about the API changed: the artifact, the source, the type and the Selector are still four
-  requests over four sub-resources, and a package uploaded by script is still untyped until
-  `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
-  name — that is the alternative ADR-0034 weighed and rejected.
+### Changed
 
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
@@ -346,51 +534,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   *identifying* attribute of every Agent this Client presents, which is where the protocol puts it —
   unlike `[attributes]`, which tags an Agent. Optional; absent reports nothing.
 
-- **Delete in the package form removes one artifact, not the whole package.** It deletes the
-  platform named in the form — the artifact the selected chip stands for — and leaves the other
-  platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
-  the `darwin-arm64` and `windows-amd64` builds with it.
+- **`opamp-fleet-client service install` without `--config` now bakes `<root>/client.toml` into the unit**,
+  inside the install root, instead of `client.toml` resolved against whatever the working directory
+  happened to be
+  ([ADR-0027](docs/adr/0027-interactive-install-writes-the-first-configuration.md)). A service
+  manager's working directory is `/` or `System32`, so the old default pointed at a file the
+  service could not have been relying on unless the install was run from exactly the right
+  directory. **If you installed by running `install` from the directory holding your
+  `client.toml`,** name it explicitly —
+  `opamp-fleet-client service install --config /etc/opamp/client.toml` —
+  or move the file to `<root>/client.toml`; the install prints the path it registered either way.
 
-  The package itself goes when its last artifact does, so nothing is left behind either. Deleting
-  uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
-  ([ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)).
+- **What a Client reports as its version now names the release it is heading *for*, not the one it
+  descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
+  ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)): a build with no release tag on its commit
+  reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
+  fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
+  shift with it,
+  so a host that has not changed will still look different after an upgrade. A commit carrying a
+  `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
+  than producing a binary that disagrees with its own tag.
 
-  `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
-  sends the `?os=…&arch=…` form of it that
-  [ADR-0031](docs/adr/0031-per-platform-package-variants.md) added.
-
-### Removed
-
-- **The ↩ Roll back button is gone from the package form.** The store still remembers the version
-  each artifact replaced ([ADR-0019](docs/adr/0019-one-step-back.md)) and
-  `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
-  removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
-  screen; asking for it is now a request rather than a press.
+- A Supervisor's package downloads are staged in its own directory
+  (`<supervisor_dir>/<name>/packages/`) instead of `<state_dir>/packages/`, which the Client's own
+  Agent keeps using. Any `*.staged` file left in the old location by an interrupted download is
+  orphaned and can be deleted.
+- A package artifact that is a bare program is now **moved** into place rather than copied, saving a
+  second full write of it. An artifact that is an archive is still unpacked, so an upstream
+  Collector release (`.tar.gz`) is unaffected.
 
 ### Fixed
-
-- **A Client that was downgraded by hand went on reporting the version it had been updated to.**
-  After a self-update, `service uninstall` followed by installing an *older* Client left the fleet
-  view showing the package pill of the newer version — beside a **Version** column that correctly
-  named the old one. The record of what the Client installed lives in
-  `<state_dir>/installed-package.json`, and `service uninstall` deliberately deletes neither the
-  install layout nor the state, so the older Client came up on top of the record its successor
-  wrote.
-
-  The wrong line in the view was the smaller half. The Server gates re-offering on the hash inside
-  that record, so the host was **silently out of the rollout for good**: it believed it already ran
-  the offered package and would never take it again.
-
-  A record that does not name the version this binary *is* is now discarded at startup, with a
-  warning in the log naming both versions. The Client then reports no package, the Server offers it
-  again, and **the host is updated back to the published version.** That is the point — the Server
-  decides what the fleet runs. To keep a host on an older Client, retract the package first
-  (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
-  [ADR-0043](docs/adr/0043-a-package-is-published-before-it-is-offered.md)); retracting uninstalls
-  nothing, so the host stays where it is.
-
-  This is the Client's own package only. A Managed Process's package record is unchanged: only the
-  program itself knows its version there, and it is reported by the version probe.
 
 - **An Agent that installed a package went on reporting the version it replaced.** The package
   itself was reported correctly — `Installed`, with the new version, in the fleet view's package
@@ -410,6 +583,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   the extension's self-report — are merged per attribute instead of each replacing the other.
   Nothing to change on a host: an affected Agent reports its version within seconds of the next
   install, and a Client restart still fixes an Agent that installed before this version.
+
+- **On macOS, a Client installed as a service could never update itself** — every offer was refused
+  with "this Client does not run from a versioned install layout", and a torn `current` pointer was
+  never repaired either. The service is registered against `<root>/current/client` (ADR-0010), and
+  asking the operating system what is running answers with that path on macOS and with the version
+  directory behind it on Linux; only the second shape says where in the layout the binary sits. The
+  path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
+  to change on a host: an affected Client picks its updates up as soon as it runs this version.
+
+- **A Client that had just updated itself reported the update as failed, and then downloaded the
+  artifact again — over and over.** After the restart the Server keeps offering the package until
+  the Agent reports a terminal status for it; the Client answered "the offered version is the one
+  already running" as an *error*, which is not terminal, so the offer came back and the whole
+  artifact was fetched again every couple of seconds for as long as both ends were up. On a fleet
+  that is a self-inflicted flood against the Server, and a successful self-update that shows as
+  `InstallFailed` in the fleet view. The version already running is now reported `Installed`, which
+  is both true and what the Baseline asks for: an Agent that already has the offered version "does
+  not need to do anything". No configuration changes; a Client that was in this state leaves it as
+  soon as it runs this version.
+
+- **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
+  field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
+  reason — which is exactly what happens when the Client's own Agent is offered a package
+  `[self_update]` did not name (ADR-0020) — so the reason was reported by the Client, stored by the
+  Server, and shown nowhere. It is now also logged.
 
 ### Changed — breaking
 
@@ -545,7 +743,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0010
   promised and never actually set.
 
-
 - **A version is compared and shown without its build metadata**
   ([ADR-0029](docs/adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)). Two
   things change, and one of them is an API break.
@@ -565,7 +762,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   version is not a version at all — a Foreign Agent numbering itself its own way — is shown
   unchanged in both fields.
 
-
 - **The Client ships as `opamp-fleet-client`.** The release artifact is
   `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
   (`.exe` on Windows), and the version directory beside it is
@@ -582,7 +778,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   The Cargo package stays `client`, so `cargo run -p client` and `cargo build -p client` are
   unchanged — only the binary they produce is renamed. The service label
   (`io.opamp-fleet.client.<instance>`) is unchanged too.
-
 
 - **`accepts_packages` is no longer a `[[supervisor]]` key** and a configuration still carrying it
   **fails at startup**. Whether a Managed Process takes Server-offered package updates is now
@@ -614,173 +809,3 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   silent — the process starts from a different path rather than erroring — so check any block whose
   program is not an absolute path. The startup log states, per Supervisor, which program it resolved
   to and whether packages are accepted.
-
-### Added
-
-- **A released `.7z` unpacks as an executable on Linux and macOS.** The member is packed with a
-  Unix mode of `0755` (7-Zip's Unix-attribute convention), so `7z x` yields a binary that runs
-  instead of one that needs a `chmod +x` nobody wrote down. `--format tar.gz` already did this in
-  its tar header; the two containers now agree. Nothing changes for a package the Server delivers —
-  the Client sets the mode itself when it installs one — and nothing changes for the Windows
-  artifact, where the bit means something else and 7-Zip does not write it either.
-
-- **`opamp-fleet-client service install --interactive` writes the first configuration.** A freshly downloaded
-  Client has no `client.toml` — the release artifact is the bare binary — and installing without one
-  produced a service that started, dialled `127.0.0.1`, and managed nothing. The flag asks for what
-  a fresh host cannot guess (endpoint, Agent name, credential, a private CA when the endpoint is
-  `wss://`/`https://`, and last, defaulting to *no*, consent for the Server to update this Client's
-  own binary), writes the file, and validates it before registering the service
-  ([ADR-0027](docs/adr/0027-interactive-install-writes-the-first-configuration.md)).
-
-  Nothing about existing invocations changes: the flag is opt-in, an existing file is kept rather
-  than overwritten, and `--interactive` without a terminal on stdin fails instead of blocking a
-  provisioning run. The credential is typed into a hidden prompt, so it stays out of the shell
-  history and the process list, and on Unix the file is created mode `0600`. Installing *without*
-  the flag now prints a warning when the configured path holds no file — the silence was the bug.
-
-- **Released builds of the Client, one archive per platform.** A release publishes
-  `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
-  on `x86_64`, together with `SHA256SUMS`
-  ([ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md)). Until now there was nothing to
-  install but a build of your own.
-
-  **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
-  `version/*` tag from it ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)) — so a release is
-  "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
-  a version that already has a tag or a release is spent, and the run says so before it builds
-  anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
-  that does not report the version its artifacts are named after fails the run.
-
-  **Each archive is also a package artifact**: it holds the Client under the name the install layout
-  gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an
-  Agent verifies. When you hand one to a Server for a Client self-update, `?version=` takes the
-  release number — the one in the file name.
-
-- **`supervisor_dir`** (optional, top-level) places the per-Supervisor directories; the default is
-  `<state_dir>/supervisors`, which is where they have always been. Set it to keep the Managed
-  Processes' programs off a `noexec` mount, or off a volume sized for state rather than for a few
-  hundred megabytes of Collector. Moving it on a running host leaves the old tree behind —
-  `instance-uid` included — so each Supervisor re-registers as a **new** Agent on the Server;
-  nothing migrates automatically.
-
-- **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
-  `env` values** ([ADR-0022](docs/adr/0022-supervisor-path-placeholders-in-process-arguments.md)),
-  so a Foreign Agent's command line is derived from the same place the Client derives it from:
-
-  ```toml
-  args = ["-c", "${config_dir}/fluent-bit-conf"]
-  ```
-
-  An absolute path still works and is still wrong the moment `supervisor_dir` moves or the
-  Supervisor is renamed — the process then starts happily on a file nobody writes to, with nothing
-  reporting a problem. The shipped example carried exactly that mistake and now uses the
-  placeholder. Any other `${…}` is passed to the process untouched, so an agent's own variable
-  syntax keeps working; the flip side is that a misspelled placeholder is handed over rather than
-  refused. The program itself (`binary`, `command`) is never substituted.
-
-- **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
-  SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
-  `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
-  ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)). Until now the project could open the
-  two container formats but gave an operator no supported way to produce one, and an encrypted
-  `.7z` in particular had no answer at all.
-
-  ```console
-  $ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail
-  $ opamp-package-sign pack --format 7z --archive-key "$KEY" --out promtail-3.0.0.7z ./promtail
-  ```
-
-  The member inside the archive is named after the packed file, which is what a Supervisor looks
-  for; `--program-name` covers an upstream build whose file name differs. A `.tar.gz` is
-  reproducible — modification time, owner, and group are zeroed — so repacking the same program
-  does not produce a new hash and therefore no rollout. **There is no `zip`, and adding one is not
-  a matter of a flag:** an artifact that is neither gzip nor 7z is taken to *be* the program, so a
-  `.zip` would be installed over the binary unopened.
-
-- **A user manual** at [`docs/manual/`](docs/manual/README.md) — Server and Client documented
-  option by option, plus an end-to-end [rollout walkthrough](docs/manual/rollout.md) that installs
-  and configures a Foreign Agent entirely from the Server.
-
-- **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
-  ([ADR-0023](docs/adr/0023-multi-file-packages.md)). An executable plus the shared objects it
-  loads — Fluent Bit is the case — could not be a package before, because exactly one archive
-  member was installed. Naming where the program sits inside the package unpacks the whole archive
-  instead:
-
-  ```toml
-  [[supervisor]]
-  type = "command"
-  name = "fluent-bit"
-  command = "fluent-bit"            # unchanged: the bare name is still the consent
-  program_path = "bin/fluent-bit"   # where the program sits inside the package
-  ```
-
-  The tree lands in `<supervisor_dir>/<name>/program/tree/`, and the one it replaced is kept as
-  `program/tree.rollback` until the new one has survived `apply_grace_secs` — put back **whole** if
-  it has not. The path is matched from its end, so the version-named directory a release wraps
-  everything in needs no mention and the value stays right at the next release.
-
-  **Without `program_path` nothing changes**: one member, one file, same layout, same rollback.
-
-  Unpacking a tree means the archive names paths, so every member is checked before anything is
-  written and one bad member refuses the whole archive: a `..` or absolute path, a symbolic or hard
-  link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
-  is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
-
-### Fixed
-
-- **On macOS, a Client installed as a service could never update itself** — every offer was refused
-  with "this Client does not run from a versioned install layout", and a torn `current` pointer was
-  never repaired either. The service is registered against `<root>/current/client` (ADR-0010), and
-  asking the operating system what is running answers with that path on macOS and with the version
-  directory behind it on Linux; only the second shape says where in the layout the binary sits. The
-  path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
-  to change on a host: an affected Client picks its updates up as soon as it runs this version.
-
-- **A Client that had just updated itself reported the update as failed, and then downloaded the
-  artifact again — over and over.** After the restart the Server keeps offering the package until
-  the Agent reports a terminal status for it; the Client answered "the offered version is the one
-  already running" as an *error*, which is not terminal, so the offer came back and the whole
-  artifact was fetched again every couple of seconds for as long as both ends were up. On a fleet
-  that is a self-inflicted flood against the Server, and a successful self-update that shows as
-  `InstallFailed` in the fleet view. The version already running is now reported `Installed`, which
-  is both true and what the Baseline asks for: an Agent that already has the offered version "does
-  not need to do anything". No configuration changes; a Client that was in this state leaves it as
-  soon as it runs this version.
-
-- **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
-  field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
-  reason — which is exactly what happens when the Client's own Agent is offered a package
-  `[self_update]` did not name (ADR-0020) — so the reason was reported by the Client, stored by the
-  Server, and shown nowhere. It is now also logged.
-
-### Changed
-
-- **`opamp-fleet-client service install` without `--config` now bakes `<root>/client.toml` into the unit**,
-  inside the install root, instead of `client.toml` resolved against whatever the working directory
-  happened to be
-  ([ADR-0027](docs/adr/0027-interactive-install-writes-the-first-configuration.md)). A service
-  manager's working directory is `/` or `System32`, so the old default pointed at a file the
-  service could not have been relying on unless the install was run from exactly the right
-  directory. **If you installed by running `install` from the directory holding your
-  `client.toml`,** name it explicitly —
-  `opamp-fleet-client service install --config /etc/opamp/client.toml` —
-  or move the file to `<root>/client.toml`; the install prints the path it registered either way.
-
-- **What a Client reports as its version now names the release it is heading *for*, not the one it
-  descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
-  ([ADR-0026](docs/adr/0026-version-from-cargo-toml.md)): a build with no release tag on its commit
-  reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
-  fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
-  shift with it,
-  so a host that has not changed will still look different after an upgrade. A commit carrying a
-  `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
-  than producing a binary that disagrees with its own tag.
-
-- A Supervisor's package downloads are staged in its own directory
-  (`<supervisor_dir>/<name>/packages/`) instead of `<state_dir>/packages/`, which the Client's own
-  Agent keeps using. Any `*.staged` file left in the old location by an interrupted download is
-  orphaned and can be deleted.
-- A package artifact that is a bare program is now **moved** into place rather than copied, saving a
-  second full write of it. An artifact that is an archive is still unpacked, so an upstream
-  Collector release (`.tar.gz`) is unaffected.
