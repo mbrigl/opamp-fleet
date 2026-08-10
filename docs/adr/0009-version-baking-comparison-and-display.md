@@ -100,10 +100,41 @@ hash on every download, and its Ed25519 signature when a key is configured. The 
 narrower questions ADR-0018 states plainly: *does this binary run at all on this host*, and *is it
 this program rather than something else offered under the same name*. Neither needs a commit hash.
 
+### Where the helper lives
+
+Every surface reporting a version reads one helper, never `CARGO_PKG_VERSION`, which knows nothing
+of tags or commits. The Server did not read it: `crates/server/src/main.rs` printed
+`env!("CARGO_PKG_VERSION")`, so on the same commit the two binaries of one workspace disagreed about
+what they were:
+
+```console
+$ server --version
+server 0.1.3
+$ opamp-fleet-client --version
+opamp-fleet-client 0.1.3-dev+ade2775
+```
+
+The number in `Cargo.toml` is the release a build is *heading for* (point 3), so the
+Server's output claimed to be a release it was not, and named no commit. That is the exact failure
+the `-dev` marker exists to prevent — "a build heading for a release is unmistakably not it" —
+reported by the one binary that had opted out of the mechanism.
+
+The obstacle is mechanical rather than architectural: `cargo:rustc-env` reaches only the crate whose
+build script emitted it, so `env!("OPAMP_BUILD_VERSION")` can only be read from inside the crate
+that resolved it. Adopting "the same `build.rs`" in the Server, taken literally, means a second
+copy of some 120 lines — the tag glob, the strict component grammar, the three failure modes — in a
+second build script, free to drift from the first. That is the shape
+[ADR-0020](0020-what-lives-in-which-crate.md) measures against.
+
+Both ends depend on `crates/opamp`, and that crate owns version *handling* for both of them:
+`opamp::version::parse`, `identity`, and `same_release` (point 9) are there precisely
+because "the Client writes these strings and the Server displays them". What was missing was the
+string itself.
+
 ## Decision
 
 We will compute the full version string in
-the binary crate's **`build.rs`**
+a **`build.rs`**
 at compile time, from git, and bake it into the binary; every build — release or not — is stamped
 with its provenance.
 
@@ -113,6 +144,9 @@ changes.
 
 We will treat a version's **build metadata as provenance** — recorded and reported everywhere,
 compared nowhere, and shown only where someone asked for detail.
+
+We will resolve the baked version in **`crates/opamp/build.rs`** and expose it as
+**`opamp::version::current()`** — the one helper both binaries read.
 
 ### The number and the release
 
@@ -190,17 +224,17 @@ compared nowhere, and shown only where someone asked for detail.
    `cargo:rerun-if-changed=.git/refs` and `cargo:rerun-if-env-changed=OPAMP_FLEET_VERSION`. If the
    override is unset and no repository is found, the build fails with a message naming the
    override.
-   The binary reads the result through one helper — `crates/client/src/version.rs`,
-   `pub fn version() -> &'static str { env!("OPAMP_BUILD_VERSION") }`.
+   The binaries read the result through **one** helper —
+   `pub fn current() -> &'static str { env!("OPAMP_BUILD_VERSION") }` — and that helper is the
+   single version implementation for the whole workspace. That it exists exactly once is the
+   decision; points 16–19 say where it lives.
 
-8. **One version everywhere — the CLI included from the start.** Every surface that states a
-   version calls `version()` and therefore always agrees: the OpAMP `service.version` identifying
-   attribute, the **CLI `--version` output** — today's hand-rolled flag switches to `version()`
-   immediately, and the subcommand CLI proposed in [ADR-0010](0010-client-os-service.md)
-   must wire clap's version explicitly to `version()` (clap's built-in default would silently
-   report `CARGO_PKG_VERSION` and undo this decision) — and the version part of ADR-0010's
+8. **One version everywhere.** Every surface that states a version calls
+   `opamp::version::current()` and therefore always agrees: the OpAMP `service.version` identifying
+   attribute, the **CLI `--version` output** of both binaries — a clap-based CLI wires clap's
+   version explicitly to the helper, because clap's built-in default would silently report
+   `CARGO_PKG_VERSION` and undo this decision — and the version part of ADR-0010's
    install-directory names (`+` and `.` are legal filename characters on ext4, APFS, and NTFS).
-   The Server adopts the same `build.rs` and helper when its builds need it.
 
 ### How it is compared and shown
 
@@ -237,6 +271,24 @@ compared nowhere, and shown only where someone asked for detail.
    the self-update marker, `--version` output. Those are the internal record this decision relies on
    existing.
 
+### Where the helper lives
+
+16. The resolution logic runs in the shared crate's existing build script, beside the
+   protobuf codegen — the code that ran in `crates/client/build.rs`, unchanged. Its inputs, its
+   grammar, its three failure modes and its `OPAMP_FLEET_VERSION` override are the same code, not a
+   reimplementation.
+
+17. `current()` joins `parse`/`identity`/`same_release` in `opamp::version`, which is where this
+   project answers questions about a version string. No new module.
+
+18. There is no `crates/client/build.rs` and no `crates/client/src/version.rs`, and every call site on
+   both ends — the OpAMP `service.version` attribute, both CLIs' `--version`, the ADR-0010 install
+   layout, the self-check token — reads `opamp::version::current()`.
+
+19. `opamp` has `git2` as a **build**-dependency. It is linked into no artifact.
+
+This preserves the Client's reported string, and the Server's string names the build it is.
+
 ## Alternatives considered
 
 - **The tag as the only source of the version** — `build.rs` resolves the base from a `version/*`
@@ -270,6 +322,8 @@ compared nowhere, and shown only where someone asked for detail.
   images, build containers, or Windows build boxes) and on parsing its localized CLI output; a
   library keeps the build hermetic. Rejected per maintainer direction in favour of the Rust
   library.
+  It would also remove the build dependency from both ends of the shared crate; that is worth its
+  own decision if the build dependency ever hurts, not a side effect of moving the helper.
 - **The `vergen` family (`vergen-git2`/`vergen-gix`)** — implements exactly this kind of
   `build.rs` stamping, but knows nothing of the `version/*` tag contract, which would still need
   custom code on top of a framework-shaped dependency; using `git2` directly keeps the few queries
@@ -310,6 +364,22 @@ compared nowhere, and shown only where someone asked for detail.
 - **Compare with a full SemVer precedence implementation** (a `semver` dependency) — the correct
   answer if versions were ever *ordered* here. They are not: the probe asks "is this the one I was
   offered", an equality question over a string this project itself produces.
+- **A second `build.rs` in `crates/server`** — the literal reading of "the Server adopts the same
+  `build.rs`". Rejected: it duplicates the tag grammar and the three failure modes into a place that
+  can drift, to avoid a build dependency the workspace already resolves. A rule implemented twice is
+  the failure ADR-0020 measures; a version that disagrees between two binaries of one workspace is
+  exactly how it shows.
+- **Leave the Server on `CARGO_PKG_VERSION`** — rejected; that is the defect, and it is not
+  cosmetic. A support question that starts "which build is this?" cannot be answered from a
+  Server's own output, and a release build and a development build of the same number are
+  indistinguishable.
+- **A fourth crate holding only build support** — rejected by
+  [ADR-0005](0005-workspace-and-server-runtime.md)'s standing rule that more crates are premature
+  until a concrete need appears. One function shared by two build scripts is not that need when a
+  shared crate already sits between the two ends.
+- **`include!` a shared build-script fragment from both scripts** — rejected. It leaves two build
+  scripts, needs `git2` in both manifests anyway, and hides a compiled file from the crate graph, so
+  a reader of either manifest cannot see where the code comes from.
 
 ## Sources / Prior art
 
@@ -324,6 +394,10 @@ compared nowhere, and shown only where someone asked for detail.
   strings follow says the hash is not part of the identity.
 - Cargo build scripts — `cargo:rustc-env`, `rerun-if-changed`, `rerun-if-env-changed`:
   <https://doc.rust-lang.org/cargo/reference/build-scripts.html>.
+  [Outputs of the build script](https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script)
+  — `cargo::rustc-env` sets an environment variable "for the compilation of the crate being built",
+  which is the constraint that makes the helper's home a decision about *where* the resolution runs
+  rather than a free choice of module.
 - `git2` — Rust bindings to libgit2, with vendored static builds via `libgit2-sys`:
   <https://docs.rs/git2/> and <https://libgit2.org/>. (`gix`/gitoxide, the considered pure-Rust
   alternative: <https://github.com/GitoxideLabs/gitoxide>.)
@@ -349,6 +423,11 @@ compared nowhere, and shown only where someone asked for detail.
   the full string cannot be typed into a URL unencoded.
 - [ADR-0010](0010-client-os-service.md)'s version-directory naming — the same
   base/provenance split, already decided once in this codebase.
+- [ADR-0020](0020-what-lives-in-which-crate.md) — the measurement the helper's home follows: the
+  shared crate holds what both ends implement identically. One version rule needed by both ends is
+  that case; the Client's two transports, measured the same way, are not.
+- [ADR-0005](0005-workspace-and-server-runtime.md) — one workspace, one lockfile, and the standing
+  rejection of further crates, which rules out the build-support-crate alternative above.
 - Specification goals #10/#11 ([`docs/SPECIFICATION.md`](../SPECIFICATION.md)) — package delivery
   and self-update, both of which identify builds by version;
   [ADR-0010](0010-client-os-service.md), whose install layout consumes this version.
@@ -372,6 +451,12 @@ compared nowhere, and shown only where someone asked for detail.
   table is scannable and still answers the provenance question on hover. The probe keeps the two
   checks it exists for and loses the one it never needed. `-dev` has a place where it is actually
   enforced rather than merely displayed.
+- Positive: `server --version` reports `0.2.0-dev+<hash>` — the build it is, with the commit it came
+  from. An operator can tell a release from a build heading for one, on both binaries, by the same
+  rule.
+- Positive: the tag grammar, the release/development distinction and the "a tag that disagrees with
+  the file fails the build" rule exist once. A future third surface adopts them by calling a
+  function.
 - Negative / trade-offs: `git2` enters as a build-dependency and compiles vendored libgit2 (C) for
   the build script, lengthening cold builds and requiring a C compiler on build hosts — which
   `ring` (ADR-0007) already requires, so no new host prerequisite;
@@ -381,8 +466,6 @@ compared nowhere, and shown only where someone asked for detail.
   assertion that the binary reports exactly `<version>+<hash>`);
   the version string is longer and contains `+`, which any consumer that
   parses it must tolerate (SemVer-conformant parsers do).
-  Sibling binaries (Server later) must adopt the same `build.rs` rather than calling
-  `env!("CARGO_PKG_VERSION")` directly.
 - Negative / trade-offs: **every build's self-report changes** with the version source. A host that
   reported `0.0.0-dev` from a tag-only lineage reports `0.1.0-dev` from the same commit lineage once
   `Cargo.toml` decides, and ADR-0010's install directory is named from it. Nothing migrates: a
@@ -405,9 +488,20 @@ compared nowhere, and shown only where someone asked for detail.
   commit. Two versions that differ only by commit are indistinguishable to the probe, so
   re-offering a rebuilt artifact of the same release is accepted rather than refused; the content
   hash is what distinguishes those bytes, and it already did.
+- Negative / trade-offs: `opamp` has `git2` as a build dependency, so `cargo build -p server`
+  alone compiles `libgit2`. A whole-workspace build does anyway — the Client pulls it in — so CI's
+  cost is unchanged and only a Server-only build pays.
+- Negative / trade-offs: every commit changes the version, and the version is baked by the crate
+  both ends depend on, so a new commit rebuilds `opamp` and therefore both binaries. It rebuilt the
+  Client and everything downstream of it anyway, which is both binaries in a workspace build; what
+  is new is a Server-only build no longer being able to skip it.
+- Nothing of `git2` reaches an artifact. A build dependency is compiled into the build script alone:
+  `cargo tree -e normal -p server` names no `git2`, and neither binary carries a libgit2 symbol.
+- Relation to ADR-0020: its three modules are a finding under its rule, not a ceiling, so a fourth
+  thing entering the shared crate — this helper — is ordinary work under that ADR rather than a
+  conflict with it. Its trade-off list carries the `git2` build dependency this adds.
 - Follow-ups: whether the `Cargo.lock` bump that accompanies every version change should be checked
   in CI, so a release cannot be cut from a tree whose lockfile still names the previous version.
-  And whether the Server, published by no pipeline today, should follow the same rule when it is.
   The operator manual's self-update walkthrough and the release notes template tell an operator to
   type the release number, not the full version. Whether the *package* version of a Managed Process
   (free-form by contract, an upstream project's own numbering) should be parsed at all is

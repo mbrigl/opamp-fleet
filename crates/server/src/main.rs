@@ -22,7 +22,10 @@ fn parse_args() -> PathBuf {
                 None => usage(),
             },
             "--version" => {
-                println!("server {}", env!("CARGO_PKG_VERSION"));
+                // The baked version, not `CARGO_PKG_VERSION` (ADR-0009): the number in the file is
+                // the release this build is *heading for*, and only `opamp::version::current` knows
+                // whether this is it.
+                println!("server {}", opamp::version::current());
                 std::process::exit(0);
             }
             _ => usage(),

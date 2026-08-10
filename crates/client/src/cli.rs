@@ -17,7 +17,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
     name = "opamp-fleet-client",
     // The git-derived version baked in at build time (ADR-0009) — never clap's default, which
     // would silently report the static crate version.
-    version = crate::version::version(),
+    version = opamp::version::current(),
     about = "OpAMP Fleet Client — runs standalone or as a native OS service"
 )]
 pub struct Cli {
@@ -396,6 +396,6 @@ mod tests {
     #[test]
     fn the_version_flag_reports_the_baked_in_version() {
         let err = Cli::try_parse_from(["client", "--version"]).unwrap_err();
-        assert!(err.to_string().contains(crate::version::version()));
+        assert!(err.to_string().contains(opamp::version::current()));
     }
 }

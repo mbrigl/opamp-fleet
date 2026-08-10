@@ -11,8 +11,6 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::StatusCode;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{
@@ -23,7 +21,7 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::{Backoff, RunOutcome};
+use crate::transport::{too_big_close, Backoff, RunOutcome};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -340,14 +338,6 @@ struct FrameSink<'a> {
 impl crate::transport::ReportSink for FrameSink<'_> {
     async fn send(&mut self, reports: Vec<AgentToServer>) -> Result<(), ()> {
         send_all(self.socket, reports, self.limit).await
-    }
-}
-
-/// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
-fn too_big_close() -> CloseFrame {
-    CloseFrame {
-        code: CloseCode::Size,
-        reason: "message exceeds the OpAMP message size limit".into(),
     }
 }
 

@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-use opamp::proto::{any_value, AgentDescription, KeyValue};
+use opamp::attributes;
+use opamp::proto::AgentDescription;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
@@ -117,22 +118,10 @@ pub fn matches(
         return false;
     };
     selector.iter().all(|(key, value)| {
-        attr_value(&description.identifying_attributes, key)
-            .or_else(|| attr_value(&description.non_identifying_attributes, key))
+        attributes::string_value(&description.identifying_attributes, key)
+            .or_else(|| attributes::string_value(&description.non_identifying_attributes, key))
             .is_some_and(|reported| reported == *value)
     })
-}
-
-fn attr_value<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find(|kv| kv.key == key)
-        .and_then(|kv| kv.value.as_ref())
-        .and_then(|v| v.value.as_ref())
-        .and_then(|v| match v {
-            any_value::Value::StringValue(s) => Some(s.as_str()),
-            _ => None,
-        })
 }
 
 /// The persistent Configuration store: one JSON file per Configuration under `config_dir`,
@@ -285,18 +274,12 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::AnyValue;
 
     fn description(pairs: &[(&str, &str)]) -> AgentDescription {
         AgentDescription {
             identifying_attributes: pairs
                 .iter()
-                .map(|(k, v)| KeyValue {
-                    key: k.to_string(),
-                    value: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue(v.to_string())),
-                    }),
-                })
+                .map(|(k, v)| attributes::string_attr(k, v))
                 .collect(),
             non_identifying_attributes: vec![],
         }
