@@ -14,3 +14,7 @@ uuid.workspace = true
 [build-dependencies]
 prost-build.workspace = true
 protox.workspace = true
+# Resolving the baked version from the repository's tags (ADR-0009). A build dependency only: it is
+# linked into no artifact, and it sits here rather than in each binary so that both ends report a
+# version computed by one implementation.
+git2.workspace = true

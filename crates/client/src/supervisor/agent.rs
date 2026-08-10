@@ -252,7 +252,7 @@ impl AgentState {
     /// record that does not name the running binary is a record about a binary that is gone.
     pub fn accept_packages_named(&mut self, name: String) {
         self.accept_packages();
-        let running = crate::version::version();
+        let running = opamp::version::current();
         if let Some(installed) = &self.installed_package {
             // Not string equality: the record holds the version the operator uploaded (`1.2.3`)
             // and this binary calls itself `1.2.3+a1b2c3d`. The same comparison the self-update
@@ -938,7 +938,7 @@ impl AgentState {
         // version only the process itself can report (folded in below, goal 16) — never invented
         // from the Client's.
         if !self.managed {
-            identifying_attributes.push(string_attr("service.version", crate::version::version()));
+            identifying_attributes.push(string_attr("service.version", opamp::version::current()));
         }
         identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
         // The rest of what the Baseline asks for "to describe where the Agent runs": `os.*` and
@@ -1639,7 +1639,7 @@ mod tests {
         let this = make_agent(&dir.path().join("self"));
         assert_eq!(
             version_of(&this).as_deref(),
-            Some(crate::version::version())
+            Some(opamp::version::current())
         );
 
         // A Supervisor-backed Agent reports no version until its Managed Process states one.
@@ -1918,7 +1918,7 @@ mod tests {
                 name: "opamp-client".to_string(),
                 // What the Server was told to offer: the release, without the build metadata this
                 // binary carries (ADR-0029).
-                version: opamp::version::parse(crate::version::version())
+                version: opamp::version::parse(opamp::version::current())
                     .expect("this build's version parses")
                     .identity()
                     .to_string(),

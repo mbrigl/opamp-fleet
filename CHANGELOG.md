@@ -19,6 +19,20 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **`server --version` now names the build it is, not the release it is heading for.** It printed the
+  bare number from `Cargo.toml` — `server 0.1.3` — where the Client on the same commit reported
+  `0.1.3-dev+ade2775`. So a Server binary could not be told apart from the release it was on its way
+  to, and named no commit; two binaries of one workspace disagreed about their own version.
+
+  Both ends now read the same helper, `opamp::version::current()`, which
+  [ADR-0009](docs/adr/0009-version-derivation-and-baking.md) always required and the Server had
+  opted out of ([ADR-0045](docs/adr/0045-the-version-helper-lives-in-the-shared-crate.md)). A
+  development build reports `0.2.0-dev+<commit>` and a released one `0.2.0+<commit>`.
+
+  **Anything matching the Server's `--version` output exactly has to be relaxed** — a check for
+  `server 0.2.0` no longer matches a development build. Nothing else changes: the Client's string is
+  what it always was, and no Agent, configuration or stored file is touched.
+
 - **The fleet view shows an Agent's Instance UID again.** It had been the line under the agent name
   until [ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md) gave a
   row both the operator's name for an Agent and the type it reports, and the UID moved into the name

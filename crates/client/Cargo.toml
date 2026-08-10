@@ -79,7 +79,3 @@ tempfile = "3"
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.
 server = { path = "../server" }
-
-# ADR-0009: build.rs derives the version from git tags and bakes it in at compile time.
-[build-dependencies]
-git2.workspace = true

@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use client::cli::{self, Command, InstallArgs, InstanceName, ServiceAction};
 use client::config::ClientConfig;
 use client::config_init;
+use client::selfupdate;
 use client::service::runtime::{self, RunSpec};
 use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLevel};
-use client::{selfupdate, version};
 
 fn main() {
     // stderr as always, plus an empty slot the OTLP log bridge is dropped into once the Server
@@ -67,7 +67,11 @@ fn main() {
         // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
         Some(Command::SelfCheck) => {
-            println!("{}{}", selfupdate::SELF_CHECK_TOKEN, version::version());
+            println!(
+                "{}{}",
+                selfupdate::SELF_CHECK_TOKEN,
+                opamp::version::current()
+            );
             Ok(())
         }
     };

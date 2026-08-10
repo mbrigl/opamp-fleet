@@ -16,6 +16,23 @@
 //!
 //! This lives in the shared crate rather than in either end: the Client writes these strings and
 //! the Server displays them, and ADR-0005 put this crate between them so the two cannot drift.
+//!
+//! [`current`] is the other half of that: the version *this build* reports. `build.rs` computes it
+//! and bakes it in, and every surface on either end reads it here rather than `CARGO_PKG_VERSION`,
+//! which knows nothing of tags or commits.
+
+/// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
+///
+/// The one place either binary states its version (ADR-0009): the OpAMP `service.version`
+/// attribute, both CLIs' `--version` output, and the install layout of ADR-0010 all call this.
+///
+/// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
+/// (ADR-0026), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// answer rather than looking for a repository that is not there when it runs.
+#[must_use]
+pub fn current() -> &'static str {
+    env!("OPAMP_BUILD_VERSION")
+}
 
 /// A version string taken apart. Borrowed from the input — nothing here allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +191,23 @@ mod tests {
         // And a comparison against one is false rather than an accident.
         assert!(!same_release("0.1.1", "0.1.1 799e36a"));
         assert!(!same_release("latest", "latest"));
+    }
+
+    /// The baked string has the shape ADR-0009 prescribes — and, now that both live here, it is
+    /// checked with the parser the rest of the project judges it by rather than a second grammar.
+    #[test]
+    fn the_baked_version_has_the_adr_0009_shape() {
+        let full = current();
+        let parsed = parse(full).unwrap_or_else(|| panic!("{full:?} is not a version"));
+        assert!(
+            matches!(parsed.prerelease, None | Some("dev")),
+            "{full:?}: an unexpected pre-release"
+        );
+        // Builds inside a repository (all local and CI builds) carry the commit short-hash.
+        if let Some(metadata) = parsed.build {
+            assert_eq!(metadata.len(), 7, "{full:?}: metadata is not a short hash");
+            assert!(metadata.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
     }
 
     /// SemVer rejects leading zeros, and so does the version `build.rs` produces.

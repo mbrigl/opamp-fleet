@@ -414,7 +414,6 @@ dependencies = [
  "dialoguer",
  "flate2",
  "futures-util",
- "git2",
  "hex",
  "libc",
  "opamp",
@@ -1582,6 +1581,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "opamp"
 version = "0.2.0"
 dependencies = [
+ "git2",
  "prost",
  "prost-build",
  "protox",

@@ -73,4 +73,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0042](0042-server-set-labels.md) | The Server labels an Agent — rollout rings that are not a file on the host | 🟢 accepted |
 | [0043](0043-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | 🟢 accepted |
 | [0044](0044-what-the-shared-crate-holds.md) | The shared crate holds what both ends implement *identically* — measured, not by category | 🟡 proposed |
+| [0045](0045-the-version-helper-lives-in-the-shared-crate.md) | The single version helper lives in `crates/opamp`, so both ends report one number | 🟡 proposed |
 

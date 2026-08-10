@@ -249,7 +249,7 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
     let bytes = std::fs::read(&exe).map_err(|e| format!("cannot read {}: {e}", exe.display()))?;
     let sha256 = hex::encode(Sha256::digest(&bytes));
 
-    let version = crate::version::version();
+    let version = opamp::version::current();
     let dir = layout.version_dir(&version_dir_name(version));
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
@@ -364,7 +364,7 @@ mod tests {
         let program = stage_current_exe(&layout).expect("stage");
         assert_eq!(program, layout.current_binary());
 
-        let version_dir = layout.version_dir(&version_dir_name(crate::version::version()));
+        let version_dir = layout.version_dir(&version_dir_name(opamp::version::current()));
         let staged = version_dir.join(BINARY_FILENAME);
         assert!(staged.is_file());
         let mode = staged.metadata().expect("metadata").permissions().mode();
@@ -372,7 +372,7 @@ mod tests {
 
         let manifest =
             std::fs::read_to_string(version_dir.join(MANIFEST_FILENAME)).expect("manifest");
-        assert!(manifest.contains(&format!("version = \"{}\"", crate::version::version())));
+        assert!(manifest.contains(&format!("version = \"{}\"", opamp::version::current())));
         let sha = manifest
             .lines()
             .find_map(|l| l.strip_prefix("sha256 = \""))
