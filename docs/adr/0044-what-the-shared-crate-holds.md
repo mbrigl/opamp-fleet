@@ -1,6 +1,6 @@
 # ADR-0044: The shared crate holds what both ends implement *identically* — measured, not by category
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 

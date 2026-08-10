@@ -1,6 +1,6 @@
 # ADR-0045: The single version helper lives in `crates/opamp`, so both ends report one number
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-10
 - **Deciders:** Markus Brigl
 
