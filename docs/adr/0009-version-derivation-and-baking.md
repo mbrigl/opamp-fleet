@@ -90,8 +90,10 @@ git, and bake it into the binary; every build — release or not — is stamped 
   `cargo:rustc-env=OPAMP_BUILD_VERSION=<full string>` plus `cargo:rerun-if-changed=.git/HEAD`,
   `cargo:rerun-if-changed=.git/refs` and `cargo:rerun-if-env-changed=OPAMP_FLEET_VERSION`. If the
   override is unset and no repository is found, the build fails with a message naming the
-  override. The binary reads the result through one helper — `crates/client/src/version.rs`,
-  `pub fn version() -> &'static str { env!("OPAMP_BUILD_VERSION") }`.
+  override. The binary reads the result through **one** helper —
+  `pub fn version() -> &'static str { env!("OPAMP_BUILD_VERSION") }` — and that helper is the single
+  version implementation for the whole workspace. Where it lives is an implementation question this
+  ADR deliberately does not answer; that it exists exactly once is the decision.
 - **One version everywhere — the CLI included from the start.** Every surface that states a
   version calls `version()` and therefore always agrees: the OpAMP `service.version` identifying
   attribute, the **CLI `--version` output** — today's hand-rolled flag switches to `version()`
