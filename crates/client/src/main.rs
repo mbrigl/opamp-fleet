@@ -165,6 +165,10 @@ fn install(
 
     if args.interactive {
         config_init::run(&config_path)?;
+    } else if let Some(endpoint) = &args.endpoint {
+        // The same file, from an answer given rather than asked for (ADR-0046): this is the branch
+        // the MSI's custom action and a `%post` script take.
+        config_init::run_with_endpoint(&config_path, endpoint)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service starts, dials the development default, and manages nothing.

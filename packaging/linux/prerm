@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-removal for the `.deb` and the `.rpm` alike (ADR-0046 clause 2).
+#
+# The mirror of the post-install: what `service install` registered, `service uninstall` removes.
+# It deliberately leaves the install root and the state directory behind — `service uninstall`
+# already does (ADR-0010), and a package that deleted a configuration holding a credential the
+# operator typed would be the overwrite ADR-0027 refused, one step later.
+#
+# An **upgrade** must fall straight through. dpkg calls `prerm upgrade <new>` and rpm `%preun 1`
+# before installing the replacement, whose post-install re-runs `service install`; unregistering
+# here would stop a managed host's Client in the middle of an `apt upgrade` and, because the
+# post-install never starts what it did not find running, leave it stopped.
+set -e
+
+case "${1-}" in
+# dpkg: everything that is not a real removal.
+upgrade | failed-upgrade | deconfigure) exit 0 ;;
+# rpm: "$1" is the number of instances that will remain — 1 means a replacement is coming.
+1) exit 0 ;;
+esac
+
+if command -v systemctl >/dev/null 2>&1; then
+	systemctl stop opamp-fleet-client.service >/dev/null 2>&1 || true
+fi
+
+# Best-effort: a host whose service was never registered, or already unregistered by hand, must
+# still be able to remove the package.
+/usr/bin/opamp-fleet-client service uninstall || true

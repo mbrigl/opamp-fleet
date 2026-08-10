@@ -199,12 +199,104 @@ jobs:
             "target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }}")
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          # Every artifact of this row shares these four fields; only the extension differs
+          # (ADR-0046 clause 4).
+          echo "STEM=${name%.7z}" >> "$GITHUB_ENV"
+
+      # ---- ADR-0046: the native installers, beside the archive and never instead of it. ----
+      #
+      # All of them package the binary built above rather than building their own, so the bytes an
+      # operator installs from a `.deb` are the bytes the `.7z` carries and the checksum published
+      # for one is provable against the other.
+
+      - name: Install the Linux packaging tools
+        if: matrix.os == 'linux'
+        # Cached by rust-cache along with the rest of `~/.cargo/bin`, so this compiles once per
+        # runner image rather than once per release.
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      - name: Build the Debian and RPM packages
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          # `--no-build`: the release binary is already built, and building it again here would
+          # make "the same bytes" a claim rather than a fact. `--no-strip` for the same reason —
+          # cargo-deb strips by default, which would leave the `.deb` holding a *different*
+          # binary from its sibling archive.
+          cargo deb -p client --no-build --no-strip \
+            --target ${{ matrix.target }} \
+            -o "$STEM.deb"
+          cargo generate-rpm -p crates/client \
+            --target ${{ matrix.target }} \
+            -o "$STEM.rpm"
+
+      - name: The RPM carries its scriptlets, not their file names
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm
+          # cargo-generate-rpm takes `post_install_script` as a path *if it resolves* and as the
+          # script body itself if it does not — so a moved or mistyped path yields a package that
+          # builds, installs, and does nothing. That failure is silent by construction; this is
+          # what makes it loud.
+          scripts=$(rpm -qp --scripts "$STEM.rpm")
+          echo "$scripts"
+          grep -q 'service install' <<<"$scripts"
+          grep -q 'service uninstall' <<<"$scripts"
+          # And the arch inside the package is the ecosystem's, not the file name's (ADR-0046).
+          test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
+
+      - name: Install the WiX Toolset
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          dotnet tool install --global wix --version 6.0.1
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Build the MSI
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          # The stock dialogs (WelcomeDlg, InstallDirDlg, VerifyReadyDlg) and their localization
+          # come from this extension; the inserted endpoint page and the re-pointed sequence are
+          # ours (packaging/windows/).
+          wix extension add --global WixToolset.UI.wixext/6.0.1
+          wix build \
+            -arch x64 \
+            -d Version=${{ needs.version.outputs.version }} \
+            -d BinaryPath="target/${{ matrix.target }}/release/opamp-fleet-client.exe" \
+            -ext WixToolset.UI.wixext \
+            -o "$STEM.msi" \
+            packaging/windows/opamp-fleet-client.wxs \
+            packaging/windows/WixUI_OpampInstallDir.wxs \
+            packaging/windows/EndpointDlg.wxs
+
+      - name: Checksum the installers
+        run: |
+          set -euo pipefail
+          # The archive already has its checksum, from the packer's own stdout — that one is the
+          # content hash an Agent verifies (ADR-0018) and is not recomputed here.
+          for f in "$STEM".deb "$STEM".rpm "$STEM".msi; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -l "$STEM"*
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pack.outputs.name }}
           path: |
-            ${{ steps.pack.outputs.name }}
-            ${{ steps.pack.outputs.name }}.sha256
+            ${{ env.STEM }}.7z
+            ${{ env.STEM }}.7z.sha256
+            ${{ env.STEM }}.deb
+            ${{ env.STEM }}.deb.sha256
+            ${{ env.STEM }}.rpm
+            ${{ env.STEM }}.rpm.sha256
+            ${{ env.STEM }}.msi
+            ${{ env.STEM }}.msi.sha256
+          # Every row produces the archive; only some produce installers. The archive is what
+          # `error` is guarding here.
           if-no-files-found: error
 
   publish:
@@ -233,7 +325,50 @@ jobs:
           cat > notes.md <<EOF
           Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
 
-          Hand the artifacts to a Server under its release number for a Client self-update
+          The assets come in two kinds, and picking the wrong one is the only way to get this wrong
+          (ADR-0046):
+
+          | you want to | take |
+          |---|---|
+          | install this on a host | the \`.deb\`, \`.rpm\` or \`.msi\` |
+          | update a fleet from its Server | the \`.7z\` |
+
+          ## Installing on a host
+
+          The installers deliver the binary and then run \`opamp-fleet-client service install\`
+          themselves — the same install every platform gets, not a second one. **They register the
+          service and leave it stopped**: a Client with no configuration would dial the development
+          default and manage nothing (ADR-0027), so starting it is the last step and it is yours.
+
+          \`\`\`console
+          # Debian, Ubuntu
+          sudo apt install ./${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.deb
+          # RHEL, Fedora, openSUSE
+          sudo dnf install ./${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.rpm
+
+          sudo opamp-fleet-client service install --endpoint wss://<server>/v1/opamp
+          sudo systemctl start opamp-fleet-client
+          \`\`\`
+
+          Use \`service install --interactive\` in place of \`--endpoint\` to be asked for the
+          credential and the private CA as well; both refuse to overwrite a configuration that is
+          already there.
+
+          On Windows the \`.msi\` asks for the installation folder and the endpoint. The same file
+          installs unattended, which is how Intune, Group Policy and SCCM deploy it:
+
+          \`\`\`console
+          msiexec /i ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_windows_amd64.msi /qn ^
+            INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
+            ENDPOINT="wss://<server>/v1/opamp"
+          \`\`\`
+
+          Removing the package stops and unregisters the service and leaves the configuration and
+          state behind, deliberately — a credential you typed is not deleted by an uninstall.
+
+          ## Updating a fleet
+
+          Hand the \`.7z\` artifacts to a Server under its release number for a Client self-update
           (ADR-0020, ADR-0029) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
@@ -256,16 +391,20 @@ jobs:
           the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0018).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
-          executable mode, so there is no \`chmod +x\` step:
+          executable mode, so there is no \`chmod +x\` step. This is also the install path on macOS,
+          which has no native installer here:
 
           \`\`\`console
           7z x ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.7z
           ./opamp-fleet-client service install --interactive   # root; answers write the configuration
           ./opamp-fleet-client service start
           \`\`\`
+
+          Nothing is signed yet: Windows will show an unknown publisher, and \`rpm\` reports no
+          signature. \`SHA256SUMS\` covers every asset above.
           EOF
           gh release create "version/${{ needs.version.outputs.version }}" \
             --repo "${{ github.repository }}" \
             --title "${{ needs.version.outputs.version }}" \
             --notes-file notes.md \
-            *.7z SHA256SUMS
+            *.7z *.deb *.rpm *.msi SHA256SUMS

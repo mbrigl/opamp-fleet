@@ -1,4 +1,4 @@
-//! The first configuration file, written by `service install --interactive` (ADR-0027).
+//! The first configuration file, written by `service install` (ADR-0027, ADR-0046).
 //!
 //! A release artifact is the bare binary (ADR-0025), so a fresh host has nothing to copy from, and
 //! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
@@ -8,7 +8,8 @@
 //!
 //! The split here is deliberate. [`ask`] is the only part that touches a terminal; [`render`] is a
 //! pure function from answers to TOML, and [`write_new`] is the one that refuses to overwrite. The
-//! two that decide what lands on disk are therefore testable without a tty.
+//! two that decide what lands on disk are therefore testable without a tty — and they are what
+//! [`run_with_endpoint`] reuses to serve a packaged install, which has an answer but no terminal.
 
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -62,8 +63,7 @@ pub enum Auth {
 /// Returns an error when stdin is not a terminal, when a prompt fails, or when the file cannot be
 /// created.
 pub fn run(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        println!("keeping the configuration already at {}", path.display());
+    if keeping_existing(path) {
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
@@ -82,6 +82,52 @@ pub fn run(path: &Path) -> Result<(), String> {
     write_new(path, &render(&answers))?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+/// Write the first configuration from an endpoint *given* rather than asked for — the whole of
+/// `--endpoint` (ADR-0046 clause 7).
+///
+/// This is the half of ADR-0027 a packaged install can reach. An MSI dialog and a `%post` script
+/// both have an answer and no terminal, and [`run`] is deliberately an error without one; the file
+/// they need is the same file, rendered by the same [`render`] and created by the same
+/// [`write_new`], so the never-overwrite rule and the `0600` mode are not restated here.
+///
+/// Only the endpoint is taken. ADR-0027 put the credential behind a hidden prompt so that it never
+/// reaches a process list, and an MSI property is written to the installer log — so the rest of the
+/// questionnaire has no non-interactive twin on purpose.
+///
+/// # Errors
+/// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
+/// created.
+pub fn run_with_endpoint(path: &Path, endpoint: &str) -> Result<(), String> {
+    if keeping_existing(path) {
+        return Ok(());
+    }
+    // Before the file is created, not after: an install that wrote an unusable file and then failed
+    // to load it would leave the operator correcting a file they never typed.
+    validate_endpoint(endpoint)?;
+    let answers = Answers {
+        endpoint: endpoint.trim().to_string(),
+        name: ClientConfig::default().name,
+        auth: None,
+        ca_file: None,
+        self_update_package: None,
+    };
+    write_new(path, &render(&answers))?;
+    println!("wrote {} for {}", path.display(), answers.endpoint);
+    Ok(())
+}
+
+/// Whether a configuration is already there — in which case it is kept, whichever path asked.
+///
+/// ADR-0027's rule is that a file holding a credential somebody typed once is never overwritten by
+/// a later install, and a packaged re-install is exactly the later install it had in mind.
+fn keeping_existing(path: &Path) -> bool {
+    if path.exists() {
+        println!("keeping the configuration already at {}", path.display());
+        return true;
+    }
+    false
 }
 
 /// Put the questions to the operator. The only function here that reads a terminal.
@@ -211,8 +257,8 @@ pub fn render(answers: &Answers) -> String {
     let mut out = String::new();
     out.push_str(
         "# OpAMP Fleet Client configuration (ADR-0008), written by\n\
-         # `opamp-fleet-client service install --interactive` (ADR-0027). It is an ordinary file\n\
-         # from here on: edit it by hand, and restart the service to apply.\n\n",
+         # `opamp-fleet-client service install` (ADR-0027). It is an ordinary file from here on:\n\
+         # edit it by hand, and restart the service to apply.\n\n",
     );
     out.push_str(&format!("endpoint = {}\n", toml_string(&answers.endpoint)));
     out.push_str(&format!("name = {}\n", toml_string(&answers.name)));
@@ -392,6 +438,49 @@ mod tests {
             loaded.authorization_value().expect("authorization"),
             Some("Basic ZmxlZXQ6YS1zdHJvbmctcGFzc3dvcmQ=".to_string())
         );
+    }
+
+    /// ADR-0046 clause 7: the packaged path has to produce a file the loader accepts, carrying the
+    /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
+    #[test]
+    fn an_endpoint_given_is_written_and_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp").expect("write");
+
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
+        // Nothing beyond the endpoint is invented: no credential is accepted on a command line, and
+        // consent to self-update is never a default (ADR-0027 point 4).
+        assert_eq!(loaded.authorization_value().expect("authorization"), None);
+        assert!(loaded.self_update.is_none());
+    }
+
+    /// The file is validated *before* it exists, not after. An install that wrote an unusable file
+    /// and then failed to load it would leave the operator fixing a file they never typed.
+    #[test]
+    fn a_bad_endpoint_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        let err = run_with_endpoint(&path, "fleet.example.com").expect_err("no scheme");
+        assert!(!err.is_empty());
+        assert!(!path.exists(), "nothing may be left behind");
+    }
+
+    /// ADR-0027 point 2 holds on the packaged path too: a `.deb` reinstalled over a configured host
+    /// must not eat the credential somebody typed into the first install.
+    #[test]
+    fn an_endpoint_given_never_overwrites_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, "endpoint = \"ws://kept/v1/opamp\"\n").expect("first write");
+
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp").expect("kept, not an error");
+
+        let loaded = ClientConfig::load(&path).expect("load");
+        assert_eq!(loaded.endpoint, "ws://kept/v1/opamp");
     }
 
     /// A password is not a well-behaved identifier. Rendering it into `"{}"` would produce a file

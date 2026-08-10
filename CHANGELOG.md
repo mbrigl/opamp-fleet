@@ -17,6 +17,42 @@ carries a date once its tag exists.
 
 ## [0.2.0] — unreleased
 
+### Added
+
+- **A release now ships native installers: `.deb`, `.rpm` and `.msi`**
+  ([ADR-0046](docs/adr/0046-a-release-ships-native-installers.md)). They sit *beside* the five `.7z`
+  archives, which are unchanged and are still the artifact a Server offers for a Client self-update —
+  the Client cannot open a `.deb`. Which to take: the installer to put the Client on a host, the
+  archive to update a fleet.
+
+  Each installer delivers the binary and then runs `opamp-fleet-client service install` itself, so
+  the layout, the systemd unit and the SCM entry are the ones the Client has always made. No package
+  ships a unit file of its own.
+
+  Two behaviours to expect, both deliberate:
+
+  - **`apt install` leaves the service registered and stopped.** This departs from the usual Debian
+    enable-and-start. A Client with no configuration dials the development default and manages
+    nothing, and a package must not manufacture that state on every host it touches. The post-install
+    prints the two remaining steps: `service install --endpoint …`, then `systemctl start`.
+  - **After a fleet self-update, `dpkg -l` reports the version the *package* delivered, not the one
+    running.** The service runs the binary under `<root>/current/`, which no package manager owns —
+    which is exactly what keeps the next `apt upgrade` from reverting a Server-driven update.
+    `opamp-fleet-client --version` and the fleet view are the truth.
+
+  The `.msi` asks for the installation folder and the Server endpoint, and takes the same two as
+  properties for an unattended install:
+  `msiexec /i … /qn INSTALLFOLDER="…" ENDPOINT="wss://…/v1/opamp"`. Nothing is signed yet, so Windows
+  shows an unknown publisher and `rpm` reports no signature. macOS keeps the archive only.
+
+- **`service install --endpoint <url>`** writes the first configuration file without asking
+  (ADR-0046, extending [ADR-0027](docs/adr/0027-interactive-install-writes-the-first-configuration.md)).
+  It is what the installers above use, and what a provisioning run that has an endpoint but no
+  terminal needs — `--interactive` is an error without one, on purpose. It writes the same file, is
+  mutually exclusive with `--interactive`, and keeps an existing configuration rather than
+  overwriting it. It takes **no** credential: a flag would stand in the shell history and the process
+  list, which is why `--interactive` hides that prompt in the first place.
+
 ### Fixed
 
 - **A Gateway now says why it hung up on an oversized message.** The Baseline answers a message past

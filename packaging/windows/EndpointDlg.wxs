@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one dialog this installer adds to the stock set (ADR-0046 clause 5): where the Server is.
+
+  Geometry, control ids and button positions are InstallDirDlg's, so the page it follows and this
+  one are the same page with a different field. The `!(loc.…)` strings resolve out of the WiX UI
+  extension's own localization, which is already in the build.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <UI>
+      <Dialog Id="EndpointDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Server endpoint" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Which Server this Client reports to." />
+
+        <Control Id="EndpointLabel" Type="Text" X="20" Y="60" Width="320" Height="30" NoPrefix="yes"
+                 Text="OpAMP endpoint, for example wss://fleet.example.com/v1/opamp — the scheme selects the transport. Leave it empty to configure the Client after the install." />
+        <Control Id="EndpointEdit" Type="Edit" X="20" Y="95" Width="320" Height="18" Property="ENDPOINT" />
+
+        <Control Id="CredentialNote" Type="Text" X="20" Y="130" Width="320" Height="60" NoPrefix="yes"
+                 Text="A credential is deliberately not asked for here: what is typed into an installer is written to the Windows Installer log. If the Server needs one, add it to client.toml in the installation folder afterwards, or run &quot;opamp-fleet-client service install --interactive&quot; from an elevated prompt." />
+
+        <Control Id="StartNote" Type="Text" X="20" Y="195" Width="320" Height="30" NoPrefix="yes"
+                 Text="The service is registered but not started, so that a Client which is not yet fully configured never runs against the wrong Server." />
+      </Dialog>
+    </UI>
+  </Fragment>
+</Wix>

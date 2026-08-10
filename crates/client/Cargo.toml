@@ -69,6 +69,47 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
 
+# ADR-0046: the native installers. Both tools read the fields above rather than restating them, and
+# both package the binary the release job already built (`--no-build` / a plain `--target`), so the
+# bytes in a `.deb` are the bytes in its sibling `.7z`.
+#
+# Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
+# a second registration knowing nothing of ADR-0030's service name or ADR-0020's restart policy; the
+# maintainer scripts call `service install` instead, which is the one install path (ADR-0010).
+[package.metadata.deb]
+name = "opamp-fleet-client"
+maintainer = "Markus Brigl <markus.brigl@gmail.com>"
+copyright = "Copyright the OpAMP Fleet contributors. Licensed under the Apache License 2.0."
+license-file = ["../../LICENSE", "0"]
+section = "admin"
+priority = "optional"
+extended-description = """\
+The process an operator installs to place a machine under OpAMP management: it connects to a \
+Server, supervises the Agents configured for this host, and can update itself and them from \
+packages the Server offers.
+
+The package delivers the binary only. `opamp-fleet-client service install`, which the post-install \
+runs, lays out the versioned install root and registers the systemd service."""
+# Derived from what the binary actually links, rather than a floor somebody typed.
+depends = "$auto"
+# Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
+# prefix itself for a cross build, and a hand-adjusted path defeats that.
+assets = [["target/release/opamp-fleet-client", "usr/bin/", "755"]]
+maintainer-scripts = "../../packaging/linux"
+
+[package.metadata.generate-rpm]
+name = "opamp-fleet-client"
+# One `Release`, forever: ADR-0026 releases a version once, so there is never a second build of one.
+release = "1"
+assets = [
+    { source = "target/release/opamp-fleet-client", dest = "/usr/bin/opamp-fleet-client", mode = "755" },
+]
+# These two resolve against this manifest's directory. A path that does *not* resolve is silently
+# taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
+# landed in the package is the script and not its file name.
+post_install_script = "../../packaging/linux/postinst"
+pre_uninstall_script = "../../packaging/linux/prerm"
+
 [dev-dependencies]
 tempfile = "3"
 # Tests build the `.7z` fixtures they then open. The encoder used to ride here alone, because the

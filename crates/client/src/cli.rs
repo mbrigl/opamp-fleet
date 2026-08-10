@@ -162,6 +162,17 @@ pub struct InstallArgs {
     /// on stdin this fails rather than waiting for an answer that cannot come.
     #[arg(long)]
     pub interactive: bool,
+    // ADR-0046.
+    /// Write the configuration file with this Server endpoint instead of asking for it.
+    ///
+    /// The non-interactive half of `--interactive`, for an install driven by a packaged installer:
+    /// the MSI's endpoint dialog and a `.deb`/`.rpm` post-install both have an answer and no
+    /// terminal. An existing file is kept, never overwritten, exactly as with `--interactive`.
+    ///
+    /// Only the endpoint. A credential is not accepted here — it would stand in the process list
+    /// and in the installer log; write it into the file afterwards, or use `--interactive`.
+    #[arg(long, value_name = "URL", conflicts_with = "interactive")]
+    pub endpoint: Option<String>,
 }
 
 /// Whether an action targets the system service or the current user's service.
@@ -321,6 +332,47 @@ mod tests {
             panic!("expected service install");
         };
         assert!(args.interactive);
+        assert_eq!(args.endpoint, None);
+    }
+
+    /// ADR-0046 clause 7: a packaged install passes the answer it collected. The endpoint is not
+    /// validated here — the loader's own rule does that, once, in `config_init`.
+    #[test]
+    fn install_takes_an_endpoint_without_a_terminal() {
+        let told = parse(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "wss://fleet.example.com/v1/opamp",
+        ]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = told.command
+        else {
+            panic!("expected service install");
+        };
+        assert!(!args.interactive);
+        assert_eq!(
+            args.endpoint.as_deref(),
+            Some("wss://fleet.example.com/v1/opamp")
+        );
+    }
+
+    /// The two ways of writing the first configuration cannot both be asked for: one blocks on a
+    /// terminal and the other exists precisely because there is none.
+    #[test]
+    fn an_endpoint_and_interactive_are_refused_together() {
+        let err = Cli::try_parse_from([
+            "client",
+            "service",
+            "install",
+            "--interactive",
+            "--endpoint",
+            "wss://fleet.example.com/v1/opamp",
+        ])
+        .expect_err("mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// The default value of `--config` must not be mistaken for a path someone chose: it decides
