@@ -84,8 +84,14 @@ splits in two.
 ## Decision
 
 We will treat `crates/opamp` as holding **what both ends implement identically** — established by
-measurement, not by whether a thing is conceptually "protocol" — and we will therefore add exactly
-three modules to it and move nothing else.
+measurement, not by whether a thing is conceptually "protocol".
+
+The rule is the decision; the list below is what today's measurement yields under it. Three modules
+follow from it now, and they are a **finding, not a ceiling**: further code belongs in the crate
+whenever the same measurement supports it — something both ends implement identically, or would
+have to. Adding it is then ordinary work under this ADR rather than a decision that has to overturn
+it. What the rule does refuse is the other move: putting something in the shared crate because it
+is conceptually "protocol", or to make the crate look less small.
 
 1. **`opamp::attributes`** — no new dependencies.
    - Constants for the keys the Baseline fixes and this project matches on: `SERVICE_NAME`,
@@ -120,9 +126,11 @@ three modules to it and move nothing else.
    - The path-based wrappers and their error wording stay in each end, where what the file *means* —
      a trust anchor, a listener's key, a client CA — is known.
 
-**What stays where it is, recorded here so the question does not have to be re-asked:** the Client's
-two transports, the Server's router and its `Admission`, `server::ca::ClientCa`, `client::csr`,
-`server::tls::PeerCertAcceptor`, and `client::connection`. Each exists exactly once.
+**What stays where it is on this measurement:** the Client's two transports, the Server's router and
+its `Admission`, `server::ca::ClientCa`, `client::csr`, `server::tls::PeerCertAcceptor`, and
+`client::connection`. Each exists exactly once, so none of them is duplication to remove. Recorded
+so the question is not re-asked from the category alone — but a later measurement that finds one of
+them genuinely written twice moves it, without needing to supersede this ADR.
 
 The extraction is **behaviour-preserving**. No existing test changes; a suite that needs editing
 means something moved that should not have.
@@ -195,6 +203,12 @@ means something moved that should not have.
 - Negative / trade-offs: `opamp` gains `flate2`, `rustls-pemfile` and `rustls`, so a bump to any of
   those recompiles both ends. Accepted: all three are already workspace dependencies of both
   binaries, so nothing new is linked into either artifact — only the rebuild graph widens.
+- Negative / trade-offs: the same widening applies to what the crate gains later under this rule,
+  and a **build** dependency is the cheaper case — it is compiled into the build script and linked
+  into no artifact. The version helper is the first instance
+  ([ADR-0045](0045-the-version-helper-lives-in-the-shared-crate.md)): it puts `git2` in this crate's
+  `[build-dependencies]`, which nothing ships. Judge each addition by what it costs the two ends,
+  not by the count of modules.
 - Negative / trade-offs: `opamp::endpoint` being framework-free means each caller still writes its
   own `match` from `BodyError` to a status code, so the two endpoints can still answer the same fault
   differently. Accepted deliberately — the Server answers `413`/`415`, and the Gateway is a hop whose
