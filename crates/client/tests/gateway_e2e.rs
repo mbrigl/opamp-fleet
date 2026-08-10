@@ -38,15 +38,29 @@ async fn spawn_gateway(
     server: SocketAddr,
     cap: usize,
 ) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    spawn_gateway_with_limit(server, cap, None).await
+}
+
+/// The same, with the message size limit the tests about that limit need — pushing 64 MiB through
+/// a socket that is already refusing it tests the sender's patience, not the Gateway.
+async fn spawn_gateway_with_limit(
+    server: SocketAddr,
+    cap: usize,
+    max_message_size: Option<usize>,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let listen = listener.local_addr().expect("addr");
     drop(listener); // the Gateway binds it itself; this only reserves a free port number
 
+    let limit = max_message_size
+        .map(|bytes| format!("max_message_size_bytes = {bytes}"))
+        .unwrap_or_default();
     let toml = format!(
         r#"
         endpoint = "ws://{server}/v1/opamp"
+        {limit}
         [gateway]
         listen = "{listen}"
         upstream_connections = {cap}
@@ -170,5 +184,111 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
     assert_eq!(
         response.status(),
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+}
+
+/// A gzipped report reaches the Server through the Gateway.
+///
+/// The regression: accepting `Content-Encoding: gzip` is a Baseline MUST for anything serving this
+/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0037). It implemented the rule
+/// nowhere — the Server's endpoint had it, this one handed the compressed bytes straight to the
+/// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
+/// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
+/// (ADR-0044).
+#[tokio::test]
+async fn a_downstream_peer_may_gzip_its_report() {
+    let (server, state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway(server, 10).await;
+
+    let uid = InstanceUid::default();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &report(&uid, 1).encode_to_vec()).expect("compress");
+    let body = encoder.finish().expect("finish gzip");
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert!(response.status().is_success(), "{:?}", response.status());
+    let reply =
+        ServerToAgent::decode(response.bytes().await.expect("body")).expect("decode the reply");
+    assert_eq!(InstanceUid::from_wire(&reply.instance_uid), Some(uid));
+
+    // Through the hop and all the way: the Server holds the Agent, not just the Gateway.
+    let agents = state.snapshot();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].instance_uid, uid.to_string());
+}
+
+/// The other half of that MUST: the size limit applies *after* decompression, so a few kilobytes
+/// of gzip cannot buy the hop gigabytes of memory. Refused rather than expanded.
+#[tokio::test]
+async fn a_gzip_bomb_is_refused_by_the_gateway() {
+    let (server, state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway(server, 10).await;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &vec![0u8; 128 << 20]).expect("compress");
+    let body = encoder.finish().expect("finish gzip");
+    assert!(
+        body.len() < 1 << 20,
+        "the compressed form must be far under the limit for this to test anything"
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        state.snapshot().is_empty(),
+        "nothing was forwarded upstream"
+    );
+}
+
+/// An oversized message closes the downstream socket with 1009, the status the Baseline names.
+///
+/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0037), and
+/// `docs/CONFORMANCE.md` claims the `1009 Message Too Big` close as implemented. The Server's
+/// endpoint did it; this one hung up with no status at all, so a downstream Client saw its
+/// connection drop and could not tell an oversized report from a Gateway that had died.
+#[tokio::test]
+async fn an_oversized_downstream_message_closes_with_1009() {
+    let (server, _state, _dir) = spawn_server().await;
+    let (gateway, _stop) = spawn_gateway_with_limit(server, 10, Some(4096)).await;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{gateway}/v1/opamp"))
+        .await
+        .expect("connect to the gateway");
+    // Past the limit the socket refuses to buffer it, which is where the close comes from.
+    socket
+        .send(Message::Binary(vec![0u8; 8192].into()))
+        .await
+        .expect("send");
+
+    let close = loop {
+        let message = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a close in time")
+            .expect("a message");
+        match message {
+            Ok(Message::Close(frame)) => break frame,
+            Ok(_) => continue,
+            Err(e) => panic!("expected a close frame, got {e}"),
+        }
+    };
+    let frame = close.expect("the Gateway named a reason rather than hanging up silently");
+    assert_eq!(
+        u16::from(frame.code),
+        1009,
+        "the Baseline names 1009 (Message Too Big)"
     );
 }

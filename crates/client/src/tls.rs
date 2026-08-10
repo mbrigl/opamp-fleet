@@ -7,7 +7,6 @@
 //! resolution of "which identity is in force" — the one the Server issued, else the one the
 //! operator configured.
 
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -56,7 +55,7 @@ pub fn rustls_client_config_for(
     let config = match identity {
         None => builder.with_no_client_auth(),
         Some((cert_pem, key_file)) => builder
-            .with_client_auth_cert(certs_from(&cert_pem)?, read_key(&key_file)?)
+            .with_client_auth_cert(opamp::pem::certificates(&cert_pem)?, read_key(&key_file)?)
             .map_err(|e| format!("cannot present the client certificate: {e}"))?,
     };
     Ok(Some(Arc::new(config)))
@@ -182,22 +181,10 @@ fn root_store(ca_file: &Path) -> Result<rustls::RootCertStore, String> {
 
 fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     let pem = std::fs::read(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    certs_from(&pem).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn certs_from(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut BufReader::new(pem)).collect();
-    let certs = certs.map_err(|e| format!("cannot parse a certificate: {e}"))?;
-    if certs.is_empty() {
-        return Err("no certificates".to_string());
-    }
-    Ok(certs)
+    opamp::pem::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn read_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    rustls_pemfile::private_key(&mut BufReader::new(file))
-        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?
-        .ok_or_else(|| format!("{} contains no private key", path.display()))
+    let pem = std::fs::read(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    opamp::pem::private_key(&pem).map_err(|_| format!("{} contains no private key", path.display()))
 }

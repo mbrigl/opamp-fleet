@@ -8,13 +8,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use opamp::attributes::{self, string_attr};
 use opamp::proto::{
-    any_value, AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig,
-    AgentToServer, AnyValue, AvailableComponents, ComponentHealth, ConnectionSettingsOffers,
-    ConnectionSettingsStatus, ConnectionSettingsStatuses, EffectiveConfig, KeyValue,
-    PackageDownloadDetails, PackageStatus, PackageStatusEnum, PackageStatuses, PackageType,
-    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
-    ServerToAgent, ServerToAgentFlags,
+    AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig, AgentToServer,
+    AvailableComponents, ComponentHealth, ConnectionSettingsOffers, ConnectionSettingsStatus,
+    ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageDownloadDetails, PackageStatus,
+    PackageStatusEnum, PackageStatuses, PackageType, RemoteConfigStatus, RemoteConfigStatuses,
+    ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -252,7 +252,7 @@ impl AgentState {
     /// record that does not name the running binary is a record about a binary that is gone.
     pub fn accept_packages_named(&mut self, name: String) {
         self.accept_packages();
-        let running = crate::version::version();
+        let running = opamp::version::current();
         if let Some(installed) = &self.installed_package {
             // Not string equality: the record holds the version the operator uploaded (`1.2.3`)
             // and this binary calls itself `1.2.3+a1b2c3d`. The same comparison the self-update
@@ -926,19 +926,23 @@ impl AgentState {
         // identifies the Agent type" (ADR-0033). It used to carry the instance name, which a
         // Managed Process reporting its own type then destroyed; the instance name now has its own
         // key below, out of the way of the fold.
-        let mut identifying_attributes = vec![string_attr("service.name", &self.service_name)];
+        let mut identifying_attributes =
+            vec![string_attr(attributes::SERVICE_NAME, &self.service_name)];
         // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
         // *which* deployment this service belongs to, so it belongs beside the name rather than
         // among the tags an operator hangs on it.
         if let Some(namespace) = &self.namespace {
-            identifying_attributes.push(string_attr("service.namespace", namespace));
+            identifying_attributes.push(string_attr(attributes::SERVICE_NAMESPACE, namespace));
         }
         // `service.version` is the *Agent's* version. The self-Agent is the Client, so its baked
         // version is the truth; a Supervisor-backed Agent stands for its Managed Process, whose
         // version only the process itself can report (folded in below, goal 16) — never invented
         // from the Client's.
         if !self.managed {
-            identifying_attributes.push(string_attr("service.version", crate::version::version()));
+            identifying_attributes.push(string_attr(
+                attributes::SERVICE_VERSION,
+                opamp::version::current(),
+            ));
         }
         identifying_attributes.push(string_attr("service.instance.id", &self.uid.to_string()));
         // The rest of what the Baseline asks for "to describe where the Agent runs": `os.*` and
@@ -952,14 +956,14 @@ impl AgentState {
             // user would like to associate with this Agent" here; identity itself stays
             // `service.instance.id`. A Selector can match it, which is how ADR-0017's "pin one
             // host" is expressed for a machine running several Supervisors.
-            string_attr("service.instance.name", &self.instance_name),
-            string_attr("os.type", os_type()),
-            string_attr("host.arch", host_arch()),
+            string_attr(attributes::SERVICE_INSTANCE_NAME, &self.instance_name),
+            string_attr(attributes::OS_TYPE, os_type()),
+            string_attr(attributes::HOST_ARCH, host_arch()),
         ];
         for (key, value) in [
             ("os.name", os.name.as_deref()),
             ("os.version", os.version.as_deref()),
-            ("os.description", os.description.as_deref()),
+            (attributes::OS_DESCRIPTION, os.description.as_deref()),
             ("host.name", host_name()),
             ("host.id", host_id()),
         ] {
@@ -996,8 +1000,9 @@ impl AgentState {
         // among the other list's would win every Selector while the fleet row went on showing the
         // Supervisor's value.
         if let Some(reported) = &self.process_description {
-            let supervisors_own =
-                |key: &str| key == "service.instance.id" || key == "service.instance.name";
+            let supervisors_own = |key: &str| {
+                key == "service.instance.id" || key == attributes::SERVICE_INSTANCE_NAME
+            };
             for attr in &reported.identifying_attributes {
                 if !supervisors_own(&attr.key) {
                     upsert_attr(&mut description.identifying_attributes, attr);
@@ -1040,22 +1045,10 @@ fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
     }
 }
 
-fn string_attr(key: &str, value: &str) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        }),
-    }
-}
-
 /// OpenTelemetry semantic-convention value for `os.type` (Rust says "macos", the convention
 /// "darwin").
 fn os_type() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "darwin",
-        other => other,
-    }
+    attributes::canonical_os(std::env::consts::OS)
 }
 
 /// OpenTelemetry semantic-convention value for `host.arch` — the convention says `amd64`/`arm64`
@@ -1067,11 +1060,7 @@ fn os_type() -> &'static str {
 /// a Managed Process's attributes are folded over the Supervisor's, so `amd64` overwrote `x86_64`
 /// and any Selector written against one of them stopped matching.
 fn host_arch() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => other,
-    }
+    attributes::canonical_arch(std::env::consts::ARCH)
 }
 
 /// What the operating system says about itself — the Baseline's `os.*`. Read **once** per process
@@ -1639,7 +1628,7 @@ mod tests {
         let this = make_agent(&dir.path().join("self"));
         assert_eq!(
             version_of(&this).as_deref(),
-            Some(crate::version::version())
+            Some(opamp::version::current())
         );
 
         // A Supervisor-backed Agent reports no version until its Managed Process states one.
@@ -1687,7 +1676,7 @@ mod tests {
                 .and_then(|kv| kv.value.clone())
                 .and_then(|v| v.value)
                 .map(|v| match v {
-                    any_value::Value::StringValue(s) => s,
+                    opamp::proto::any_value::Value::StringValue(s) => s,
                     other => format!("{other:?}"),
                 })
         };
@@ -1918,7 +1907,7 @@ mod tests {
                 name: "opamp-client".to_string(),
                 // What the Server was told to offer: the release, without the build metadata this
                 // binary carries (ADR-0029).
-                version: opamp::version::parse(crate::version::version())
+                version: opamp::version::parse(opamp::version::current())
                     .expect("this build's version parses")
                     .identity()
                     .to_string(),

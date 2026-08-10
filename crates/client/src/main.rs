@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use client::cli::{self, Command, InstallArgs, InstanceName, ServiceAction};
 use client::config::ClientConfig;
 use client::config_init;
+use client::selfupdate;
 use client::service::runtime::{self, RunSpec};
 use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLevel};
-use client::{selfupdate, version};
 
 fn main() {
     // stderr as always, plus an empty slot the OTLP log bridge is dropped into once the Server
@@ -67,7 +67,11 @@ fn main() {
         // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
         Some(Command::SelfCheck) => {
-            println!("{}{}", selfupdate::SELF_CHECK_TOKEN, version::version());
+            println!(
+                "{}{}",
+                selfupdate::SELF_CHECK_TOKEN,
+                opamp::version::current()
+            );
             Ok(())
         }
     };
@@ -161,6 +165,10 @@ fn install(
 
     if args.interactive {
         config_init::run(&config_path)?;
+    } else if let Some(endpoint) = &args.endpoint {
+        // The same file, from an answer given rather than asked for (ADR-0046): this is the branch
+        // the MSI's custom action and a `%post` script take.
+        config_init::run_with_endpoint(&config_path, endpoint)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service starts, dials the development default, and manages nothing.

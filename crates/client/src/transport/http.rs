@@ -17,8 +17,7 @@ use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
 use crate::transport::{ReportSink, RunOutcome};
 
-/// The media type the Baseline requires the Client to set.
-const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
+use opamp::endpoint::PROTOBUF_CONTENT_TYPE;
 
 pub async fn run(
     engine: &mut Engine,

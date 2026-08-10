@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use crate::install;
 use crate::service::layout::{self, Layout, BINARY_FILENAME};
 
 /// The file [`install`] leaves for the next process to find, in the Client's state directory —
@@ -189,36 +190,9 @@ fn stage(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let binary = dir.join(BINARY_FILENAME);
-    let mut out = std::fs::File::create(&binary)
-        .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;
-
     // The artifact is the program or an archive holding it (ADR-0018) — the same shapes a Managed
-    // Process's package comes in, decided by the leading bytes rather than a file name.
-    match crate::archive::detect(artifact)? {
-        crate::archive::Kind::Raw => {
-            let mut source = std::fs::File::open(artifact)
-                .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-            std::io::copy(&mut source, &mut out)
-                .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;
-        }
-        kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
-            let written = match kind {
-                crate::archive::Kind::SevenZ => {
-                    crate::archive::extract_7z(artifact, BINARY_FILENAME, &mut out, archive_key)?
-                }
-                _ => crate::archive::extract_tar_gz(artifact, BINARY_FILENAME, &mut out)?,
-            };
-            info!(archive = %artifact.display(), bytes = written, "unpacked the Client archive");
-        }
-    }
-    drop(out);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot make {} executable: {e}", binary.display()))?;
-    }
+    // Process's package comes in, which is why the unpacking is shared with the Supervisor's swap.
+    install::write_program(artifact, &binary, BINARY_FILENAME, archive_key)?;
 
     let bytes =
         std::fs::read(&binary).map_err(|e| format!("cannot read {}: {e}", binary.display()))?;
@@ -230,46 +204,30 @@ fn stage(
         .map_err(|e| format!("cannot write the manifest: {e}"))
 }
 
-/// Runs `<binary> self-check`, retrying briefly past `ETXTBSY`.
+/// Runs `<binary> self-check`, retrying briefly past `ETXTBSY`
+/// ([`install::is_text_file_busy`] states why).
 ///
-/// The binary was written moments ago, and exec of a freshly written file fails with "Text file
-/// busy" while any process still holds it open for writing — including a child another thread of
-/// this Client forked for its own spawn, which inherits the descriptor until it execs. The same
-/// race the Supervisor already handles after a package swap, and it says nothing about the
-/// artifact: failing the update over it would refuse a binary that is perfectly good.
+/// The loop stays here rather than being shared with the Supervisor's: that one drives a
+/// `tokio::process` spawn and this one a blocking `std::process` run, and the only thing they would
+/// have in common after being generalised over both is the predicate and the two constants they
+/// already share.
 fn run_self_check(binary: &Path) -> std::io::Result<std::process::Output> {
-    const BUSY_RETRIES: u32 = 10;
-    const BUSY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-
     let mut attempt = 0;
     loop {
         match std::process::Command::new(binary)
             .arg("self-check")
             .output()
         {
-            Err(e) if is_text_file_busy(&e) && attempt < BUSY_RETRIES => {
+            Err(e) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
                 attempt += 1;
                 warn!(
                     binary = %binary.display(), attempt,
                     "the staged binary is momentarily busy; retrying the self-check"
                 );
-                std::thread::sleep(BUSY_DELAY);
+                std::thread::sleep(install::BUSY_DELAY);
             }
             other => return other,
         }
-    }
-}
-
-/// `ETXTBSY`: the file cannot be executed because someone holds it open for writing.
-fn is_text_file_busy(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(libc::ETXTBSY)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
     }
 }
 

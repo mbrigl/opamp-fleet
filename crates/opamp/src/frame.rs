@@ -21,6 +21,15 @@ use prost::Message;
 /// carry a `max_message_size_bytes` key for deployments that want a tighter one.
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20; // 64 MiB
 
+/// What a WebSocket peer is told when its message is past the limit, alongside the close status the
+/// Baseline names for it — 1009, Message Too Big.
+///
+/// The status has a name in every WebSocket stack, so each caller uses its own; the sentence does
+/// not, and it was written out at all three places that close a socket for this reason — the
+/// Server's endpoint, the Client's upstream socket, and the Supervisor Endpoint. One string, so a
+/// peer reading a log sees the same words whichever of the three hung up (ADR-0044).
+pub const TOO_BIG_CLOSE_REASON: &str = "message exceeds the OpAMP message size limit";
+
 /// The header value this protocol version mandates. A non-zero header is reserved for future
 /// versions; receiving one means the peer speaks a protocol we do not.
 const HEADER: u64 = 0;

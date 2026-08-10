@@ -1,0 +1,47 @@
+#!/bin/sh
+# Post-install for the `.deb` and the `.rpm` alike (ADR-0046 clauses 2 and 3).
+#
+# The package delivered `/usr/bin/opamp-fleet-client` and nothing else. The install itself — the
+# versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
+# `service install` (ADR-0010), which is all this calls. No package ships a unit file: one that did
+# would know nothing of ADR-0030's service name or ADR-0020's restart policy, and there would be two
+# registrations disagreeing about which is the real one.
+#
+# dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
+# conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
+# paths — everything else is idempotent by ADR-0010 and safe on either.
+set -e
+
+case "${1-}" in
+abort-upgrade | abort-remove | abort-deconfigure) exit 0 ;;
+esac
+
+# Asked *before* `service install` runs, because install swings the `current` pointer and stops
+# nothing: a host that was already running is one under management being upgraded, and its process
+# still holds the previous binary while the pointer now names the new one.
+running=no
+if command -v systemctl >/dev/null 2>&1 &&
+	systemctl is-active --quiet opamp-fleet-client.service; then
+	running=yes
+fi
+
+/usr/bin/opamp-fleet-client service install
+
+if [ "$running" = yes ]; then
+	# Restart, never start. A service that was running was configured by somebody, and it has to
+	# finish this upgrade on the binary the package just delivered rather than on the one it still
+	# has mapped.
+	systemctl restart opamp-fleet-client.service
+	exit 0
+fi
+
+cat <<'EOF'
+
+The service is registered and stopped. Not starting it is deliberate: a Client with no
+configuration dials the development default and manages nothing (ADR-0027). Two steps remain:
+
+  opamp-fleet-client service install --endpoint wss://<server>/v1/opamp
+  systemctl start opamp-fleet-client
+
+Run `opamp-fleet-client service install --interactive` instead to be asked for the credential too.
+EOF

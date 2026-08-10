@@ -6,8 +6,23 @@ pub mod ws;
 
 use std::time::Duration;
 
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
 use crate::config::ClientConfig;
 use crate::engine::Engine;
+
+/// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
+///
+/// Both sockets this Client owns send it — the upstream one it dials and the Supervisor Endpoint it
+/// serves — and they sent identical copies of it until ADR-0044. The sentence itself is the
+/// Server's too, and lives in `opamp::frame`.
+pub(crate) fn too_big_close() -> CloseFrame {
+    CloseFrame {
+        code: CloseCode::Size,
+        reason: opamp::frame::TOO_BIG_CLOSE_REASON.into(),
+    }
+}
 
 /// How often a download in flight is reported as `Downloading` with its details. The Baseline
 /// leaves the cadence open; this is slow enough to stay a rounding error next to the transfer and

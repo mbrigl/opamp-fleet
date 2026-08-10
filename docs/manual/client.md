@@ -80,6 +80,7 @@ $ opamp-fleet-client service uninstall      # deregisters; never deletes the ins
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
 | `--root <dir>` | `service install` | The install root. Defaults to the platform's data directory for the scope and instance — Linux `/var/lib/opamp-fleet/client/<instance>`, macOS `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`. No path is ever fixed. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service (ADR-0027). See below. |
+| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it (ADR-0046) — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
 
 ### The first configuration, on a host that has none
 
@@ -120,6 +121,63 @@ Four rules worth knowing before you script around it:
   versions and the state directory already use. The file is validated by the ordinary loader before
   the service is registered; a file that does not parse fails the install and stays on disk for you
   to correct.
+
+Where there is an answer but no terminal — a provisioning run, an MSI dialog, a `%post` script —
+`--endpoint` writes the same file without asking:
+
+```console
+$ opamp-fleet-client service install --endpoint wss://fleet.example.com/v1/opamp
+wrote /var/lib/opamp-fleet/client/default/client.toml for wss://fleet.example.com/v1/opamp
+installed opamp-fleet-client
+```
+
+It writes only the endpoint; everything else keeps its default, and the credential goes into the
+file afterwards. All four rules above hold unchanged — in particular, an existing file is kept.
+
+### Installing from a native package
+
+A release also ships a `.deb`, an `.rpm` and an `.msi` (ADR-0046). They deliver the binary to
+`/usr/bin/opamp-fleet-client` (Windows: the folder you choose) and then run `service install`
+themselves — the layout, the unit and the SCM entry are the same ones this page describes, because
+they are made by the same command. No package ships a unit file of its own.
+
+```console
+$ sudo apt install ./opamp-fleet-client_1.2.3_linux_amd64.deb
+$ sudo dnf install ./opamp-fleet-client_1.2.3_linux_amd64.rpm
+```
+
+**The service is registered and left stopped.** That is deliberate: a Client with no configuration
+would dial the development default and manage nothing, and a package must not manufacture that state
+on every host it touches. Two steps remain, and the post-install prints them:
+
+```console
+$ sudo opamp-fleet-client service install --endpoint wss://fleet.example.com/v1/opamp
+$ sudo systemctl start opamp-fleet-client
+```
+
+On Windows the `.msi` asks for the installation folder and the endpoint. The folder is the install
+root — the `.exe`, `client.toml`, `versions/`, `current` and `state/` all live under it. The same
+file installs unattended with the same two answers, which is how Intune, Group Policy and SCCM
+deploy it:
+
+```console
+C:\> msiexec /i opamp-fleet-client_1.2.3_windows_amd64.msi /qn ^
+       INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
+       ENDPOINT="wss://fleet.example.com/v1/opamp"
+```
+
+Two things to know about living with a packaged install:
+
+- **`dpkg -l` reports the version it *delivered*, not the one that is running.** After a fleet
+  self-update ([Updating the Client itself](#updating-the-client-itself)) the service runs the binary
+  under `<root>/current/`, which no package manager owns — that separation is what keeps the next
+  `apt upgrade` from silently reverting the Server's decision. `opamp-fleet-client --version` and the
+  fleet view are the truth.
+- **Removing the package stops and unregisters the service, and deletes nothing else.** The install
+  root, the state directory and `client.toml` stay, for the same reason an install never overwrites
+  a configuration: it may hold a credential you typed.
+
+macOS has no native installer; there, unpack the `.7z` and run `service install` yourself.
 
 ### What the service is called
 

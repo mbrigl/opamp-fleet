@@ -79,19 +79,19 @@ pub fn server_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>, String> {
 
 fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut pem.as_slice()).collect();
-    let certs = certs.map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-    if certs.is_empty() {
-        return Err(format!("{} contains no certificates", path.display()));
-    }
-    Ok(certs)
+    opamp::pem::certificates(&pem).map_err(|e| {
+        // What the file *means* is known here and nowhere else, so the wording stays (ADR-0044).
+        if e == "no certificates" {
+            format!("{} contains no certificates", path.display())
+        } else {
+            format!("cannot parse {}: {e}", path.display())
+        }
+    })
 }
 
 fn read_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
     let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    rustls_pemfile::private_key(&mut pem.as_slice())
-        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?
-        .ok_or_else(|| format!("{} contains no private key", path.display()))
+    opamp::pem::private_key(&pem).map_err(|_| format!("{} contains no private key", path.display()))
 }
 
 /// Wraps the rustls acceptor to put the handshake's [`PeerCertificate`] into every request on the
