@@ -1,6 +1,6 @@
 # ADR-0021: A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install
 
-- **Status:** 🟢 accepted
+- **Status:** 🟡 proposed
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 
@@ -135,6 +135,41 @@ installed on a thousand hosts must not manufacture that state a thousand times.
 as a caller and left it no way to pass an endpoint. An MSI dialog is not a terminal, and the answer
 it collects has to reach the configuration through a flag.
 
+### The CLI on `PATH` and the binary the service runs
+
+Point 14 has `service install` stage a *copy* of the delivered binary into the versioned
+layout (ADR-0010) that the service is registered against — `<root>/current/opamp-fleet-client`,
+never a version directory directly. The two ownerships staying disjoint is what keeps `dpkg -V`
+quiet and keeps an `apt upgrade` from silently reverting a fleet decision, and the Consequences
+record the cost: after a self-update, the delivered binary and the running binary drift apart.
+
+A support incident showed where that cost actually lands. A host was fleet-updated 0.2.0 → 0.2.1,
+then had its package manually reinstalled at 0.2.0. Every question the operator asked the host —
+`dpkg -l`, and crucially `opamp-fleet-client --version` — answered 0.2.0, while the service ran what
+`current` named. The manual says "`opamp-fleet-client --version` and the fleet view are the truth"
+([`client.md`](../manual/client.md)), but that sentence is only true when the *service's* binary
+answers — and with the binary delivered to `/usr/bin`, the shell resolves `opamp-fleet-client`
+through `PATH` to the package-delivered file, which is precisely the binary that drifts. The
+operator's first diagnostic command is the one place the drift is guaranteed to mislead.
+
+The install layout already has the answer for the service: nothing invokes a version binary
+directly, everything goes through the `current` pointer, so a version switch never re-registers
+anything. A CLI on `PATH` that names the delivered file is the one entry point that would violate
+that rule.
+
+### Who faces the MSI's endpoint dialog
+
+The MSI's endpoint dialog accepts an empty answer as "configure later", the deferred-configuration
+install that only warns. Its rationale leans on ADR-0010's finding that a Client with no
+configuration dials the development default (`ws://127.0.0.1:4320/v1/opamp`) forever — "a defect,
+not a default" — and concludes that "a package installed on a thousand hosts must not manufacture
+that state a thousand times."
+
+The thousand-hosts case never sees the dialog: fleet deployments run `msiexec /qn` through Intune,
+Group Policy or SCCM, where the endpoint arrives as `ENDPOINT=` on the command line. The person the
+dialog *does* face is evaluating or developing against a local Server, and an empty field greets
+them with a question whose one likely answer is the development default the Client already knows.
+
 ## Decision
 
 We will publish a release from a **`version/*` tag**, built for **five targets**, packed as **`.7z`
@@ -267,8 +302,11 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
 
     | | delivered to | post-install runs | pre-removal runs |
     |---|---|---|---|
-    | `.deb` / `.rpm` | `/usr/bin/opamp-fleet-client` | `opamp-fleet-client service install` | `service stop`, then `service uninstall` |
+    | `.deb` / `.rpm` | `/usr/libexec/opamp-fleet-client`, with `/usr/bin/opamp-fleet-client` a symlink through `current` | `/usr/libexec/opamp-fleet-client service install` | `service stop`, then `service uninstall` |
     | `.msi` | `INSTALLFOLDER\opamp-fleet-client.exe` | `… service install --root <INSTALLFOLDER> --endpoint <ENDPOINT>` | `service stop`, then `service uninstall` |
+
+    The symlink and what a real removal deletes are decided under "The packaged CLI on `PATH`"
+    below.
 
     No package ships a systemd unit, a `LaunchDaemon`, or an MSI `ServiceInstall` element.
     `cargo-deb`'s `systemd-units` integration and WiX's `ServiceInstall`/`ServiceControl` elements
@@ -276,12 +314,13 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
     ADR-0022's name, ADR-0018's recovery actions, or ADR-0010's `current` pointer. There is one
     install path on four operating systems, and it stays the one that already exists.
 
-    The two ownerships stay disjoint by construction. `dpkg` owns `/usr/bin/opamp-fleet-client` and
-    never anything under the root; `service install` stages a *copy* into
-    `<root>/versions/opamp-client-<version>-<hash>/`, which is what the service actually runs and
-    what a self-update replaces. A fleet update therefore never touches a package-owned file, and
-    `dpkg -V` stays quiet. The delivered binary and the running binary drift apart after a
-    self-update — that is correct, and the Consequences record it as the cost it is.
+    The two ownerships stay disjoint by construction. `dpkg` owns `/usr/libexec/opamp-fleet-client`
+    and the constant link at `/usr/bin/opamp-fleet-client`, and never anything under the root;
+    `service install` stages a *copy* into `<root>/versions/opamp-client-<version>-<hash>/`, which is
+    what the service actually runs and what a self-update replaces. A fleet update therefore never
+    touches a package-owned file, and `dpkg -V` stays quiet. The delivered binary and the running
+    binary drift apart after a self-update — that is correct, and the Consequences record it as the
+    cost it is.
 
 15. **The Linux packages register the service and do not start it.** `postinst` / `%post` runs
     `service install` and stops. It does not `systemctl enable --now`.
@@ -374,6 +413,8 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
     actions under opposite conditions rather than one with an empty flag, because `--endpoint ""`
     would be *rejected* by the loader's endpoint rule while no flag at all is the ordinary
     deferred-configuration install.
+    In the dialog the field starts prefilled with the development Server, as decided under "The
+    MSI's endpoint prefill" below; clearing it remains the empty answer.
 
     The sequence is `WelcomeDlg → InstallDirDlg → EndpointDlg → VerifyReadyDlg`: **no licence
     page.** Apache-2.0 requires no click-through, and `LicenseAgreementDlg` wants the licence as RTF
@@ -438,6 +479,77 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
     in a process list or a shell history, and an MSI property is written to `%WINDIR%\Installer`
     logs. The endpoint alone gets a fresh host to the point where it is visibly aimed at the right
     Server, which is the half a packaged install can honestly automate.
+
+### The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it
+
+We will make the CLI on `PATH` resolve through the layout's `current` pointer, never to a delivered
+version binary: the `.deb` and `.rpm` deliver the payload to **`/usr/libexec/opamp-fleet-client`**
+(off `PATH`; FHS 3.0 sanctions `/usr/libexec` for internal binaries), and
+**`/usr/bin/opamp-fleet-client` is a symlink** to the default system layout's `current` binary —
+`/var/lib/opamp-fleet/client/default/current/opamp-fleet-client` — maintained by the maintainer
+scriptlets:
+
+| hook | runs | does |
+|---|---|---|
+| `postinst` / `%post` | after files land | `/usr/libexec/… service install`, then `ln -sfn` the symlink |
+| `%posttrans` (rpm only) | end of the transaction | `ln -sfn` again — see below |
+| `postrm` / `%postun` | after a real removal (never an upgrade) | remove the symlink (only if it is one), `versions/` and `current`; on dpkg **purge**, the instance directory itself |
+
+`%posttrans` exists because rpm's upgrade ordering erases the *old* package's files (a regular file a
+previous release delivered at `/usr/bin/opamp-fleet-client`) **after** the new package's `%post` has
+run — deleting the symlink `%post` just created. The transaction scriptlet runs after that erasure,
+so the link it lays is the one that survives. On dpkg the obsolete file is removed during unpack,
+before `postinst configure`, so no equivalent is needed.
+
+Two consequences inside the Client itself:
+
+- **Staging is rewrite-free when the bytes are identical.** `service install` invoked through the
+  symlink *runs from* `<root>/versions/…/opamp-fleet-client`; re-staging would write over the very
+  file it executes, which Linux refuses (`ETXTBSY`). `stage_current_exe` compares hashes and skips
+  the write when the staged binary already holds the running bytes — an idempotent re-install stays
+  idempotent, and the documented post-install step (`opamp-fleet-client service install --endpoint
+  …`) keeps working when it arrives through the link.
+- The maintainer scripts call the payload at its `/usr/libexec` path, never the symlink: it is the
+  file the package guarantees to exist at that moment.
+
+**A real package removal also uninstalls every staged version.** `service uninstall` itself keeps
+deleting nothing — ADR-0010's rule protects the manual flows, where the layout is the operator's.
+But the support incident's second half was a removal that only *looked* complete: the package went,
+the layout stayed, and the next install came up on the surviving `current` pointer running a version
+the operator believed uninstalled. So the package's `postrm` finishes what a removal means on a
+package-managed host:
+
+- **remove** deletes `versions/` and the `current` pointer. The state directory and `client.toml`
+  stay — an instance identity and a credential the operator typed are not binaries, and a reinstall
+  picks them back up (a stale `installed-package.json` is already discarded at startup when it does
+  not name the running release).
+- **purge** (dpkg only; rpm has no equivalent) deletes the instance directory whole — state, logs
+  and configuration included. Purge is dpkg's word for "leave nothing".
+
+The packaged symlink and the removal both target the **default system root and default instance** —
+the only root a packaged install ever uses, because `postinst` calls plain `service install`. An
+operator who chooses `--root` or `--instance` is doing a manual install (`.7z`), where no package
+writes to `/usr/bin` or deletes a layout at all.
+
+For the Linux packages everything else of point 14 holds: one delivered file,
+`service install` as the only install path, no shipped unit.
+
+### The MSI's endpoint prefill: the development default, interactively only
+
+We will prefill the `ENDPOINT` property with the development Server in its HTTP form,
+`http://localhost:4320/v1/opamp`, **in the UI sequence only** (a `SetProperty` with
+`Sequence="ui"`, conditioned on the property being unset and the product not yet installed).
+
+- A silent install that names no `ENDPOINT` behaves exactly as point 17 has it: no
+  configuration is written, the install warns and defers — unattended fleet deployment cannot
+  acquire the development default by omission.
+- A value given on the `msiexec` command line wins over the prefill; clearing the field remains
+  the "configure later" answer.
+- The prefilled value names the same host, port and path as the loader's `default_endpoint()`,
+  but with the `http://` scheme — the scheme selects the transport (ADR-0008), and HTTP polling
+  is the operator's explicit choice for the click-through install.
+  `crates/client/tests/msi_exe_command.rs` holds the value to the loader's endpoint rule and to
+  this string.
 
 ## Alternatives considered
 
@@ -531,6 +643,34 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   key, which host, which retention). The files have to exist before a repository can carry them; this
   is that step.
 
+### The packaged CLI on `PATH`
+
+- **Ship the symlink as a packaged file instead of creating it in scriptlets.** `cargo-deb` can
+  (asset tables with `preserve-symlinks`); `cargo-generate-rpm` does not document symlink assets at
+  all. Two tools, two mechanisms, one of them undocumented — the scriptlets are one mechanism that
+  both formats honour, and the removal guard (`only if it is a symlink`) keeps them polite.
+- **A launcher shim at `/usr/bin` that execs `current`.** A second code path with its own failure
+  modes (root discovery, exec error reporting), permanently delivered, to do what one symlink does.
+- **Teach `service install` to write `/usr/bin` itself.** It knows the root, but a user-scope or
+  custom-root install must not touch `/usr/bin`, and writing into the package manager's directory
+  from the application crosses exactly the ownership boundary point 14 draws. The
+  scriptlets are the package's side of the line; the layout stays the Client's.
+- **Documentation only.** The manual already carried the warning, and the incident happened anyway.
+  The first diagnostic command has to answer for the running service, not for a footnote.
+
+### The MSI's endpoint prefill
+
+- **Keep the field empty** — safest, but the interactive install then asks a question whose most
+  common answer for the audience actually facing the dialog is a string the product already knows;
+  explicitly requested away by the operator.
+- **A static `Property` default (both sequences)** — one line, but it changes silent-install
+  semantics: `/qn` without `ENDPOINT=` would pin every unattended host to localhost, precisely the
+  state the installers refuse to manufacture.
+- **Prefill the loader's `default_endpoint()` (`ws://127.0.0.1:4320/v1/opamp`) verbatim** — one
+  value defined once, and the transport an unconfigured Client picks anyway. Rejected by the
+  operator in favour of the `http://` form; the divergence (two development defaults, a scheme
+  apart) is accepted and pinned by test rather than left to drift.
+
 ## Sources / Prior art
 
 - **This project's ADR-0009**, which specifies what a release is, what the pipeline may and may not
@@ -580,8 +720,19 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   [systemd integration notes](https://github.com/kornelski/cargo-deb/blob/main/systemd.md), which
   document the `systemd-units` + `maintainer-scripts` + `#DEBHELPER#` mechanism point
   14 deliberately declines.
+- [cargo-deb](https://github.com/kornelski/cargo-deb) — maintainer-scripts pickup
+  (`preinst`/`postinst`/`prerm`/`postrm`), symlink asset support.
 - [`cargo-generate-rpm`](https://crates.io/crates/cargo-generate-rpm) — 0.21.0, 2026-05-04, MIT;
   builds through the `rpm` crate, so no `rpmbuild` is needed on the runner.
+- [cargo-generate-rpm](https://github.com/cat-in-136/cargo-generate-rpm) — scriptlet options
+  (`post_install_script`, `post_uninstall_script`, `post_trans_script`); symlink assets
+  undocumented.
+- [rpm scriptlet ordering](https://docs.fedoraproject.org/en-US/packaging-guidelines/Scriptlets/) —
+  new `%post` runs before the old package's files are erased; `%posttrans` runs last.
+- [FHS 3.0 `/usr/libexec`](https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch04s07.html) —
+  binaries run by other programs rather than by users, off `PATH`.
+- The `alternatives`-style indirection every Debian-managed toolchain uses: what users invoke on
+  `PATH` is a link that is repointed, never the binary that moves.
 - [`cargo-wix`](https://crates.io/crates/cargo-wix) — 0.3.9, 2025-03-13; the rejected in-ecosystem
   alternative.
 - [WiX Toolset](https://github.com/wixtoolset/wix) and the
@@ -613,8 +764,12 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
 - [Debian Policy, system run levels and `init.d` scripts](https://www.debian.org/doc/debian-policy/ch-opersys.html#system-run-levels-and-init-d-scripts)
   — the enable-and-start convention point 15 knowingly departs from, and the reason it is
   stated rather than quietly skipped.
-- **This project's ADR-0010, ADR-0018, ADR-0022 and ADR-0017** — the install layout, the
-  self-update this must not collide with, the configuration rule the MSI must obey, the service
+- Windows Installer: type 51 (set-property) custom actions scheduled in `InstallUISequence` do not
+  run under `/qn`; `Secure` public properties cross the UAC elevation boundary — the standard
+  mechanism for UI-only defaults.
+- **This project's ADR-0008, ADR-0010, ADR-0018, ADR-0022 and ADR-0017** — the scheme
+  that selects the transport, the install layout, the self-update this must not collide with, the
+  configuration rule the MSI must obey and the development-default half-state, the service
   registration no package may duplicate, and the platform vocabulary.
 
 ## Consequences
@@ -640,6 +795,18 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   can be fixed. The packages are wrappers, not a second implementation.
 - **Positive:** a self-update never fights the package manager, because no package-owned file is
   under the install root.
+- Positive: `opamp-fleet-client --version` — and every other CLI invocation on `PATH` — answers for
+  the binary the service actually runs, in both drift directions (fleet updated the host, or an
+  operator hand-reinstalled an older package). The manual's "`--version` is the truth" sentence is
+  unconditionally true on Linux.
+- Positive: the ownership boundary sharpens rather than blurs — the package owns a payload off
+  `PATH` and a constant link; the layout owns everything the link resolves to; `dpkg -V` and
+  `rpm -V` stay quiet through every fleet update.
+- Positive: a package removal followed by an install of an older release comes up on that older
+  release — no surviving `current` pointer outranking the operator's decision, which is the drift
+  the Context describes.
+- Positive: the local-evaluation install is a click-through; the interactive and unattended paths
+  keep their distinct semantics; a test holds the MSI's value to the loader's endpoint rule.
 - Negative / trade-offs: the name carries the base version, so two builds of the same version are
   indistinguishable by name. A release is a tag, so this can only happen by re-tagging — but it
   means the file name is not a unique build identifier, and the notes carry the full string for
@@ -654,12 +821,21 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   hyphenated shape exist under it forever, so both must stay readable; an operator's glob or download
   script pinned to `…-linux-amd64.7z` breaks and has to be updated once. The rejoin rule of point
   9 is a wart that the rejected `name_version_os-arch.7z` would not have needed.
-- **Negative / trade-offs:** the delivered binary at `/usr/bin/opamp-fleet-client` and the running
-  binary under `<root>/current/` diverge after the first fleet self-update. That is the price of the
-  disjoint ownership of point 14, and it means `dpkg -l` reports the *delivered* version,
-  not the running one — `opamp-fleet-client --version` and the fleet view remain the truth.
-  Documenting it is mandatory; an operator who reads `dpkg -l` and concludes the update failed has
-  been misled.
+- **Negative / trade-offs:** the delivered payload at `/usr/libexec/opamp-fleet-client` and the
+  running binary under `<root>/current/` diverge after the first fleet self-update. That is the price
+  of the disjoint ownership of point 14, and it means `dpkg -l` reports the *delivered*
+  version, not the running one — that is inherent to a package manager and stays documented;
+  `opamp-fleet-client --version` on `PATH` and the fleet view remain the truth. An operator who reads
+  `dpkg -l` and concludes the update failed has been misled.
+- Negative / trade-offs: until `service install` has run once (which `postinst` does), the symlink
+  dangles; a broken-by-hand layout makes the CLI fail loudly rather than answer for the wrong binary,
+  which is the better failure.
+- Negative: `apt remove && apt install` no longer preserves the running version across the gap —
+  the reinstalled package's own binary is what comes up, staged fresh. That is the point, but it
+  means a package removal deletes the staged versions rather than leaving the layout alone.
+- Negative: the symlink assumes the default system root and instance; a packaged install combined
+  with a hand-moved root leaves a dangling link. That combination is already unsupported — the
+  packages know only the default install.
 - **Negative / trade-offs:** `apt install` leaves a stopped service, which is not what a Debian user
   expects and will be reported as a bug until the release notes say why. Point 15 accepts
   that in exchange for never manufacturing a Client pointed at `127.0.0.1`.
@@ -672,6 +848,11 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   `rpm` reports no signature. That one deferred signing decision now has a second reason to be made.
 - **Negative / trade-offs:** a permanent `UpgradeCode` GUID is a decision that cannot be revisited
   without stranding installed hosts.
+- Negative / trade-offs: an operator interactively installing on a production host and clicking
+  through without reading gets a `client.toml` pinned to localhost rather than a warning — the
+  narrow slice of the no-configuration concern this decision consciously accepts. And a click-through
+  install runs HTTP polling where an unconfigured Client would have chosen WebSocket — two
+  development defaults, a scheme apart.
 - Follow-ups (file name): none required. If a platform token this project *publishes* ever carries
   `_`, the right-to-left rejoin rule is the one place that has to be revisited; and if a future
   release ever ships something other than one binary per platform, the field set — not the
@@ -684,3 +865,8 @@ MSI collects the **install root** and the **Server endpoint** and passes both to
   on Windows. A macOS `.pkg`, which waits on notarization. And whether the Server binary deserves the
   same treatment — it is deployed by an operator, not by the fleet, which is why this decision
   covers the Client alone.
+- Follow-ups (CLI on `PATH`): Windows has the same drift (`INSTALLFOLDER\opamp-fleet-client.exe` is
+  the delivered binary and nothing on `PATH` goes through `current`); whether the MSI should lay a
+  junction-based equivalent is its own decision. macOS remains a manual install and is untouched.
+- Follow-ups (endpoint prefill): none. The Linux packages have no interactive channel to mirror this
+  in (the Alternatives record endpoint preseeding there as rejected for now).

@@ -15,7 +15,53 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.2.1]
+## [0.2.2]
+
+### Added
+
+- **Agents report the host's network addresses, CPU model, and OS build.** Every Agent a Client
+  presents now carries the OpenTelemetry `host.ip` and `host.mac` attributes — loopback excluded,
+  deduplicated, IPv6 in RFC 5952 form, MACs hyphen-separated uppercase — plus
+  `host.cpu.model.name` and, where the platform stamps one, `os.build_id`. The fleet table gains a
+  **Network** column — the first address of each kind at a glance, the full lists in the tooltip
+  and the attribute chips — and everything stays searchable like any other reported attribute
+  ([ADR-0023](docs/adr/0023-what-describes-an-agent.md)). Addresses are re-read on
+  each description, so a DHCP move shows up. No operator action required; note that host addresses
+  are now visible to anyone who can read the fleet API.
+
+### Changed
+
+- **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
+  version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
+  `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer
+  ([ADR-0021](docs/adr/0021-release-pipeline-and-artifacts.md)), so
+  `opamp-fleet-client --version` — and every other CLI call — answers for the binary the service
+  actually runs, even after a fleet self-update or a hand-reinstalled older package. A real removal
+  (`apt remove`, `dnf remove`) now also deletes the staged `versions/` and the `current` pointer,
+  so a later install comes up on its own binary instead of a surviving newer one; the state
+  directory and `client.toml` stay. `apt purge` deletes those too — the instance directory whole.
+  **What to do:** nothing on upgrade — the package lays the link itself. Only automation that
+  depended on the *delivered* file sitting at `/usr/bin/opamp-fleet-client` must switch to
+  `/usr/libexec/opamp-fleet-client`.
+
+- **The MSI's endpoint page comes prefilled with the development default**
+  (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
+  click-through (ADR-0021). Interactive installs only: clearing the field still means "configure
+  later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
+  install (`/qn`) without one still writes no configuration — unattended deployments are
+  unaffected.
+
+### Fixed
+
+- **The Windows MSI installs.** Every install from the `.msi` failed at the end of the progress
+  bar with "A program run as part of the setup did not finish as expected" (error 1722) and rolled
+  back. The custom action running `service install` quoted `[INSTALLFOLDER]` directly, and a
+  directory property always resolves with a trailing backslash — which the C runtime reads as
+  escaping the closing quote, so the root argument swallowed the rest of the command line and the
+  install staged into an impossible path. The failed installs rolled back cleanly and left nothing
+  behind; no cleanup is needed — install this version's `.msi`.
+
+## [0.2.1] - 2026-08-11
 
 ### Fixed
 
