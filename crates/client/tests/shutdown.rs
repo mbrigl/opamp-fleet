@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn sigterm_shuts_the_client_down_cleanly() {
     let dir = tempfile::tempdir().expect("create a tempdir");
+    let config = dir.path().join("supervisor.toml");
     // Port 9 (discard) refuses immediately: the client sits in its poll backoff when the signal
     // arrives — exactly where a service stop usually catches it.
     std::fs::write(
@@ -21,6 +22,7 @@ fn sigterm_shuts_the_client_down_cleanly() {
     )
     .expect("write the config");
 
+    let mut child = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(&config)
         .spawn()

@@ -3,12 +3,14 @@
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
 
+pub mod agent_store;
 pub mod api;
 pub mod ca;
 pub mod config;
 pub mod configs;
 pub mod credentials;
 pub mod fleet;
+pub mod labels;
 pub mod listen;
 pub mod packages;
 pub mod tls;
