@@ -54,6 +54,12 @@ pub struct ServerConfig {
     /// and it travels over the REST plane, never in an OpAMP message.
     #[serde(default = "default_max_package_size")]
     pub max_package_size_bytes: usize,
+    /// The total size of all stored package artifacts the REST API keeps before it refuses a new
+    /// upload (ADR-0015). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
+    /// store — so a caller cannot fill the disk by uploading many artifacts under distinct names.
+    /// `0` is refused at load.
+    #[serde(default = "default_max_total_package_size")]
+    pub max_total_package_bytes: u64,
     /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
     /// it stale (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — the
     /// period this Server asked for is a better answer than a default.
@@ -316,6 +322,12 @@ fn default_max_package_size() -> usize {
     crate::fleet::DEFAULT_MAX_PACKAGE_SIZE
 }
 
+/// Roomy for a real package set — a handful of packages across a few platforms, each with a
+/// rollback copy — while still bounding the store a caller can grow.
+fn default_max_total_package_size() -> u64 {
+    crate::fleet::DEFAULT_MAX_TOTAL_PACKAGE_SIZE
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -330,6 +342,7 @@ impl Default for ServerConfig {
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
+            max_total_package_bytes: default_max_total_package_size(),
             stale_after_secs: default_stale_after_secs(),
         }
     }
@@ -396,6 +409,13 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        if config.max_total_package_bytes == 0 {
+            return Err(format!(
+                "{}: max_total_package_bytes must be greater than zero — it bounds the store, not a \
+                 switch",
+                path.display()
+            ));
+        }
         Ok(config)
     }
 }
@@ -442,6 +462,21 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    #[test]
+    fn the_total_package_store_ceiling_defaults_is_configurable_and_rejects_zero() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.max_total_package_bytes, 16 * 1024 * 1024 * 1024);
+        let tightened: ServerConfig =
+            toml::from_str("max_total_package_bytes = 1048576").expect("parse");
+        assert_eq!(tightened.max_total_package_bytes, 1_048_576);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "max_total_package_bytes = 0\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_total_package_bytes"), "{err}");
     }
 
     #[test]

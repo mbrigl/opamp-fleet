@@ -19,6 +19,31 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **The package-source probe can no longer be aimed at internal addresses (SSRF).** `PUT
+  /api/v1/packages/{name}/source` probes the operator-supplied URL once; that URL and its headers
+  are entirely caller-supplied, so the probe could be pointed at the cloud metadata endpoint
+  (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
+  refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
+  no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0018)
+  legitimately lives on an internal network. No operator action required unless a source URL
+  deliberately used a link-local or CGNAT host.
+
+- **The body-less state-changing `POST` routes reject cross-site browser requests (CSRF).**
+  `POST …/restart` and `POST …/rollback` are CORS "simple requests" a cross-origin page could fire
+  at a logged-in operator's browser without a preflight. They now require Fetch Metadata to mark the
+  request same-origin — a browser stamps `Sec-Fetch-Site` and forbids page scripts from forging it,
+  so a cross-site call is refused with `403`. Non-browser clients (`curl`, a portal) send no such
+  header and are unaffected; no API client or token changes. This is not operator authentication,
+  which remains a separate decision (ADR-0013).
+
+- **The package store has a whole-store size ceiling.** The upload route bounded a single artifact
+  by `max_package_size_bytes` but nothing bounded the *store*, so a caller could fill the disk by
+  uploading artifact after artifact under distinct names. Uploads are now also refused (`507`) once
+  the stored artifacts reach the new `max_total_package_bytes` (default 16 GiB). **What to do:**
+  nothing, unless a fleet's package set legitimately exceeds 16 GiB — then raise
+  `max_total_package_bytes` in `server.toml`.
+
 - **A Gateway now serves its downstream hop over TLS, and `[gateway.tls] client_ca_file` gates who
   may connect.** The `[gateway.tls]` section ([ADR-0037](docs/adr/0037-gateway-mode.md),
   [ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)) was read and

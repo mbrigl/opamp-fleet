@@ -35,6 +35,11 @@ use crate::packages::PackageStore;
 /// binary is (see `server.toml`, `max_package_size_bytes`).
 pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
+/// The whole-store limit in force when nothing configures one: sixteen per-artifact budgets, room
+/// for a real package set across platforms with rollback copies, while still bounding the disk a
+/// caller can fill by uploading under many names (see `server.toml`, `max_total_package_bytes`).
+pub const DEFAULT_MAX_TOTAL_PACKAGE_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+
 /// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0038).
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 
@@ -259,6 +264,10 @@ pub struct AppState {
     /// The largest package artifact the REST API accepts on upload (ADR-0015) — a program, not a
     /// message, so it is bounded separately and far more generously.
     max_package_size: usize,
+    /// The total size of all stored artifacts the REST API keeps before it refuses a new upload
+    /// (ADR-0015): what bounds the store — and so the disk — against many uploads under distinct
+    /// names, where `max_package_size` bounds only one.
+    max_total_package_bytes: u64,
     /// How long an Agent that promised to report periodically may be silent before the fleet view
     /// calls it stale (ADR-0038). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
@@ -290,6 +299,7 @@ impl AppState {
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
+            max_total_package_bytes: DEFAULT_MAX_TOTAL_PACKAGE_SIZE,
             stale_after: DEFAULT_STALE_AFTER,
         })
     }
@@ -317,6 +327,27 @@ impl AppState {
     /// The package upload limit in force, for the REST API's package route.
     pub fn max_package_size(&self) -> usize {
         self.max_package_size
+    }
+
+    /// Sets the whole-store size limit the REST API enforces before accepting a new upload
+    /// (ADR-0015).
+    #[must_use]
+    pub fn with_max_total_package_bytes(mut self, limit: u64) -> Self {
+        self.max_total_package_bytes = limit;
+        self
+    }
+
+    /// The whole-store size limit in force, for the REST API's upload route.
+    pub fn max_total_package_bytes(&self) -> u64 {
+        self.max_total_package_bytes
+    }
+
+    /// The total bytes of stored package artifacts right now, or `0` when package delivery is not
+    /// configured. What the upload route checks against [`max_total_package_bytes`](Self::max_total_package_bytes).
+    pub fn stored_package_bytes(&self) -> u64 {
+        self.packages
+            .as_ref()
+            .map_or(0, |p| p.store().total_bytes())
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares

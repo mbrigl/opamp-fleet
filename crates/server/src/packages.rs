@@ -703,6 +703,28 @@ impl PackageStore {
         self.packages.read().expect("packages lock").is_empty()
     }
 
+    /// The total bytes of stored artifacts: every `.bin`, the current and the rollback copy alike.
+    /// The in-flight `.upload` staging file is deliberately not counted — it is not yet an
+    /// artifact, and the per-upload limit already bounds it.
+    ///
+    /// A best-effort walk of the directory: a file racing deletion simply is not counted, which is
+    /// the safe direction for a ceiling that gates *new* uploads.
+    pub fn total_bytes(&self) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".bin"))
+            })
+            .filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
+            .sum()
+    }
+
     /// Where an upload is streamed to before it becomes an artifact. In the store's own directory,
     /// so [`put_staged`](Self::put_staged) can move it into place with a rename — and named per
     /// Platform, so uploading a release's five artifacts at once cannot have them overwrite each

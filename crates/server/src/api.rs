@@ -118,6 +118,39 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// A CSRF guard for the body-less `POST` routes (`restart`, `rollback`). Those are CORS "simple
+/// requests": a cross-origin page can fire them without the preflight the Server would have to
+/// answer, so nothing else stops a victim operator's browser from being made to send one.
+///
+/// Fetch Metadata closes it. A browser sends `Sec-Fetch-Site` on every request and forbids page
+/// scripts from setting it, so a value other than `same-origin` (the bundled UI) or `none` (a
+/// user-initiated load) marks a cross-site caller, which is refused. A non-browser client — `curl`,
+/// a portal — sends no such header and is unaffected, which is why this needs no token and no change
+/// to any API client. It is not authentication (that is a separate decision, ADR-0013); it only
+/// keeps a browser from being turned into a confused deputy.
+struct SameOrigin;
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SameOrigin {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match parts
+            .headers
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+        {
+            Some(site) if site != "same-origin" && site != "none" => Err(error(
+                StatusCode::FORBIDDEN,
+                format!("cross-site request refused (Sec-Fetch-Site: {site})"),
+            )),
+            _ => Ok(SameOrigin),
+        }
+    }
+}
+
 /// The fleet: every Agent the Server knows, its reported attributes, and the Configurations
 /// currently matching it.
 #[utoipa::path(
@@ -140,12 +173,14 @@ async fn agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentView>> {
     responses(
         (status = 202, description = "Restart queued"),
         (status = 400, description = "Malformed Instance UID", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
         (status = 409, description = "The Agent does not declare AcceptsRestartCommand", body = ErrorBody)
     )
 )]
 async fn restart_agent(
     State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
     Path(instance_uid): Path<String>,
 ) -> Response {
     let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
@@ -603,7 +638,9 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
         (status = 200, description = "The stored package", body = PackageView),
         (status = 400, description = "Invalid name, empty artifact, or bad signature", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The package could not be persisted", body = ErrorBody)
+        (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
+        (status = 500, description = "The package could not be persisted", body = ErrorBody),
+        (status = 507, description = "Storing it would exceed max_total_package_bytes", body = ErrorBody)
     )
 )]
 async fn put_package(
@@ -638,6 +675,17 @@ async fn put_package(
         Ok(path) => path,
         Err(e) => return error(StatusCode::NOT_FOUND, e),
     };
+    // Refuse before streaming a gibibyte we would only reject: a store already at its ceiling takes
+    // nothing more. This — with the whole-store check after the stream — is what stops a caller
+    // filling the disk by uploading artifact after artifact under distinct names (ADR-0015).
+    let quota = state.max_total_package_bytes();
+    let stored = state.stored_package_bytes();
+    if stored >= quota {
+        return error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!("the package store is at its {quota}-byte limit (max_total_package_bytes)"),
+        );
+    }
     // The artifact is streamed to the store's own directory and bounded as it arrives: taking it
     // as `Bytes` would mean holding a whole program in memory — twice — before writing it out.
     let written = match stream_to_file(body, &staged, state.max_package_size()).await {
@@ -657,6 +705,18 @@ async fn put_package(
             );
         }
     };
+    // Now the size is known: refuse if committing it would take the store past its ceiling. The
+    // staging file is not itself an artifact yet, so `stored_package_bytes` does not count it.
+    if state.stored_package_bytes() + written > quota {
+        let _ = tokio::fs::remove_file(&staged).await;
+        return error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "storing this {written}-byte artifact would take the package store past its \
+                 {quota}-byte limit (max_total_package_bytes)"
+            ),
+        );
+    }
     match state.put_package(
         name.clone(),
         platform,
@@ -694,6 +754,7 @@ async fn put_package(
     responses(
         (status = 200, description = "The package, now back at its previous version", body = PackageView),
         (status = 400, description = "Missing or invalid platform", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such package or platform, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "That platform's artifact has no previous version to go back to", body = ErrorBody),
         (status = 500, description = "The rollback could not be persisted", body = ErrorBody)
@@ -701,6 +762,7 @@ async fn put_package(
 )]
 async fn rollback_package(
     State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
     Path(name): Path<String>,
     Query(query): Query<PlatformQuery>,
 ) -> Response {
@@ -882,8 +944,17 @@ async fn probe(
     url: &str,
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
+    // Refuse to aim the probe at an internal address on the caller's behalf (SSRF): the source URL
+    // and its headers are entirely client-supplied, so without this a caller could read the cloud
+    // metadata endpoint or map internal services by the answers this probe reflects back.
+    if let Some(reason) = ssrf_blocked(url).await {
+        return Err(reason);
+    }
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        // Never chase a redirect: a public URL that 3xx-bounces to `169.254.169.254` or an internal
+        // host would otherwise walk the probe straight past the check above.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
@@ -915,6 +986,74 @@ async fn probe(
             Ok(())
         }
     }
+}
+
+/// Whether probing `url` would make the Server reach a non-routable address on the caller's behalf,
+/// and the reason to refuse if so. `None` clears the probe to proceed: a public host, or one this
+/// Server cannot resolve (left to the probe, which treats unreachable as "not an error" — the
+/// Server is not in the download path).
+///
+/// A resolve-then-probe still leaves a DNS-rebinding window in theory; it closes the URLs that
+/// matter (literal internal IPs, the metadata address, internal hostnames) without a custom
+/// resolver, which is proportionate for a probe the Server itself never downloads through.
+async fn ssrf_blocked(url: &str) -> Option<String> {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        // Unparsable here is not this check's error to raise — `set_package_source` validates the
+        // scheme and the store rejects a bad URL with its own message.
+        return None;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Some(format!(
+            "the source url must be http:// or https://, not {}://",
+            parsed.scheme()
+        ));
+    }
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host, port)).await.ok()?;
+    for addr in resolved {
+        if is_internal(addr.ip()) {
+            return Some(format!(
+                "the source url resolves to the non-routable address {} — refusing to probe an \
+                 internal endpoint",
+                addr.ip()
+            ));
+        }
+    }
+    None
+}
+
+/// Whether an address is one a client-supplied URL must never steer the Server at.
+///
+/// The line is deliberate. This blocks the cloud-metadata address and the ranges that are never a
+/// legitimate artifact source — link-local (where `169.254.169.254` lives), the shared/CGNAT range
+/// (Alibaba's `100.100.100.200` among it), the unspecified address, broadcast, documentation, and
+/// `0.0.0.0/8`. It does **not** block loopback or the RFC 1918 / unique-local private ranges: an
+/// operator's mirror (ADR-0018) legitimately lives on an internal network, and the URL here is the
+/// operator's, not a stranger's. Redirects are disabled separately, so a public URL cannot bounce
+/// the probe onto a blocked address behind this check.
+fn is_internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_v4_internal(v4),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_v4_internal(mapped);
+            }
+            // link-local fe80::/10, and the unspecified address.
+            v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn is_v4_internal(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_link_local() // 169.254.0.0/16 — the cloud metadata endpoint
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        // 0.0.0.0/8 "this network"
+        || v4.octets()[0] == 0
+        // 100.64.0.0/10 shared / carrier-grade NAT — Alibaba's metadata address among it
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
 /// Sets which Agents a package is offered to (ADR-0017). An empty Selector targets the whole

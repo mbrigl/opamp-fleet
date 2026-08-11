@@ -130,6 +130,7 @@ async fn main() {
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
                 .with_max_package_size(config.max_package_size_bytes)
+                .with_max_total_package_bytes(config.max_total_package_bytes)
                 .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs)),
         ),
         Err(e) => {
