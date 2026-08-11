@@ -33,9 +33,19 @@ config_dir = "fleet-configs"
 # closes the connection with 1009.
 max_message_size_bytes = 67108864
 
+# How long an Agent that declares ReportsHeartbeat may be silent before the fleet view calls it
+# stale (ADR-0013). It is an observation, never a state change: nothing is torn down, and the next
+# report clears it. Ignored when [connection_offer] names a heartbeat interval — the period this
+# Server actually asked for is a better answer than a default. Three times the protocol's own
+# default heartbeat of 30 s, because one missed beat is a lost packet.
+stale_after_secs = 90
+
 #
 #
 #
+#
+# The download endpoint sits on the unauthenticated REST plane — the content hash and signature
+# are what protect an installed binary, so sign packages and configure the key on the Client.
 packages_dir = "fleet-packages"
 
 # The largest package artifact the REST API accepts on upload. A package is a program, not a
@@ -113,6 +123,14 @@ max_package_size_bytes = 1073741824
 # WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing is
 # how telemetry disappears into a 404 nobody looks at.
 #
+# An Agent sends process metrics for itself and for each process it supervises, its own log output,
+# and spans over the operations that already have a lifecycle here (a configuration applied, a
+# package installed, a self-update). It refuses a cleartext http:// destination outside the private
+# address space — loopback, 10/8, 172.16/12, 192.168/16, fc00::/7 — and by address, not by name.
+#
+# Nothing about this is configured on the Client: the capability means "report to the destination
+# the Server specifies", so this section is the only place it comes from.
+#
 # Five things worth knowing before you fill this in:
 #
 #  - The destinations are FLEET-WIDE. There is no Selector here as there is on Configurations
@@ -129,17 +147,54 @@ max_package_size_bytes = 1073741824
 #    of them — each carrying process metrics for the Agent and for every process it supervises.
 #  - Offer only what you can receive. A signal you leave unset is simply not offered, and the Agent
 #    reports nothing for it — which costs less than a destination that answers 404 forever.
+#  - What this section says, it says about ALL THREE signals (ADR-0022). An Agent already reporting
+#    traces STOPS when you remove traces_endpoint from here: the offer is the whole truth about own
+#    telemetry, not a list of changes. Which is what makes a destination removable at all.
+#
+# TURNING IT OFF. An endpoint set to the empty string is an explicit withdrawal — the Agent shuts
+# that exporter down, forgets the destination, and acknowledges it like any other offer:
+#
+#     [telemetry_offer]
+#     metrics_endpoint = ""      # stop reporting metrics
+#
+# That is the only way to say "stop all three", because a Server that offers nothing says nothing:
+# DELETING this section does not switch anything off. It withdraws nothing, so that a Server with no
+# telemetry of its own cannot tear down a fleet another Server pointed at a collector — and so an
+# Agent keeps reporting across restarts, which is the point of the destination being persisted.
+# To stop a fleet: set the endpoints empty, restart the Server, let the Agents acknowledge, then
+# remove the section.
 #
 # Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
 # them leaves the file with a duplicated table header, which is an error rather than a merge.
 #
+# (1) Development — the stack in .devcontainer/ comes up with the Dev Container and publishes
+#     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because loopback is
+#     inside the private address space, which is why this reads http:// and why the ports are
+#     published rather than left on a compose network.
 # [telemetry_offer]
 # metrics_endpoint = "http://localhost:4318/v1/metrics"
 # traces_endpoint = "http://localhost:4318/v1/traces"
 # logs_endpoint = "http://localhost:4318/v1/logs"
 
+# (2) Production — TLS in front of the collector, and a token if it wants one. An Agent REFUSES a
+#     cleartext destination outside the private address space, and refuses a cleartext HOST NAME
+#     whatever it resolves to: it is not warned about and not downgraded, the offer comes back
+#     FAILED naming the reason. Terminate TLS in front of the receiver and offer the https:// URL.
+#
+#     A Collector one hop away on the LAN needs no certificate for this: an address in 10/8,
+#     172.16/12, 192.168/16 or fc00::/7 is accepted in cleartext (ADR-0022), e.g.
+#     http://192.168.10.5:4318/v1/metrics. The judgement is on the ADDRESS — a name that resolves
+#     there is still refused, because a name can be re-pointed after the offer was admitted.
+# [telemetry_offer]
+# metrics_endpoint = "https://collector.example:4318/v1/metrics"
+# traces_endpoint = "https://collector.example:4318/v1/traces"
+# logs_endpoint = "https://collector.example:4318/v1/logs"
+# [telemetry_offer.headers]
+# Authorization = "Bearer a-telemetry-token"
 #
 # (3) Metrics only — the smallest useful shape: one signal, no header, nothing else offered.
+# [telemetry_offer]
+# metrics_endpoint = "https://collector.example:4318/v1/metrics"
 
 # THE OPERATOR PLANE (ADR-0023): the REST API, the API docs, and the bundled UI, on their own
 # listener. This port carries the authority to reconfigure and re-package the entire fleet, and

@@ -26,6 +26,7 @@ use super::runtime::{self, RunSpec};
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
 /// (ADR-0028 clause 3) — so it only needs to be stable.
+const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 /// The spec handed from [`run_as_service`] to the SCM-invoked `service_main`, which the
@@ -114,9 +115,23 @@ fn run_service() -> Result<(), String> {
     // actions from the exit code in this final status: a `Stopped` carrying `Win32(0)` is a clean
     // stop and is never retried, whatever went wrong. Reporting zero here is what made the
     // `RestartPolicy::OnFailure` of ADR-0028 unreachable on Windows even once failure actions
+    // exist, and it is what a self-update — which ends its run deliberately — depends on.
     if let Err(e) = &result {
         error!(error = %e, "the daemon exited with an error; reporting it to the SCM");
     }
+    let exit_code = match &result {
+        Ok(runtime::Exit::Normal) => ServiceExitCode::Win32(0),
+        // A self-update is not a failure, but the SCM's recovery actions are the only way to be
+        // restarted, and they run on a failure (ADR-0020).
+        Ok(runtime::Exit::RestartForUpdate) => {
+            error!("exiting so the SCM starts the newly installed version");
+            ServiceExitCode::ServiceSpecific(
+                crate::selfupdate::EXIT_RESTART_FOR_UPDATE
+                    .try_into()
+                    .unwrap_or(SERVICE_SPECIFIC_FAILURE),
+            )
+        }
+        Err(_) => ServiceExitCode::ServiceSpecific(SERVICE_SPECIFIC_FAILURE),
     };
     status_handle
         .set_service_status(ServiceStatus {
@@ -124,6 +139,7 @@ fn run_service() -> Result<(), String> {
             ..status(ScmState::Stopped, ServiceControlAccept::empty())
         })
         .map_err(|e| format!("cannot report Stopped: {e}"))?;
+    result.map(|_| ())
 }
 
 /// The service-specific exit code reported when the daemon body returns an error. Any non-zero

@@ -6,11 +6,17 @@
 //! carries n of these over one connection (ADR-0034, ADR-0010) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
 
+use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use opamp::attributes::{self, string_array_attr, string_attr};
 use opamp::proto::{
     AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig, AgentToServer,
     AvailableComponents, ComponentHealth, ConnectionSettingsOffers, ConnectionSettingsStatus,
+    ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageAvailable,
+    PackageDownloadDetails, PackageStatus, PackageStatusEnum, PackageStatuses, PackageType,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -27,6 +33,14 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsRemoteConfig as u64
     | AgentCapabilities::ReportsHealth as u64
     | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+    | AgentCapabilities::ReportsConnectionSettingsStatus as u64
+    // The Agent's own telemetry (ADR-0022). Declared unconditionally, unlike the capabilities that
+    // describe something this end *has*: these say the Client can report to a destination the
+    // Server names, which is true before any destination exists — and declaring them only once one
+    // is in force would mean the Server could never make the first offer.
+    | AgentCapabilities::ReportsOwnMetrics as u64
+    | AgentCapabilities::ReportsOwnTraces as u64
+    | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a handled `ServerToAgent` asks of the transport loop.
 #[derive(Debug, Default, PartialEq)]
@@ -45,9 +59,36 @@ pub struct Handled {
     pub package_download: Option<PackageDownload>,
 }
 
+/// The Agent type the Client's own Agent presents as `service.name` (ADR-0012, ADR-0029): the role
+/// it plays on the host, the Agent that supervises the others. A constant, not the configured
+/// instance name — every Client in a fleet is the same kind of thing, and that is what a type says.
+///
+/// Since ADR-0029 it is also the shipped program's name and its configuration file's — see
+/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
+/// **separate** constant. It is *not* the service's name: ADR-0028 clause 3 gives the service the
+/// product's name, and clause 9 keeps this one off
+/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
+/// extracts is the same in every variant build, which is what lets one published package Set
+/// serve them all. Derive this from the product and the fleet carries N products where it has one.
+///
+/// It was called `CLIENT_SERVICE_NAME` until ADR-0028. It never named a service, and with the
+/// service now carrying the product's name the old name would read as the one thing it is not.
+///
+/// The package that carries this Client is named after the type, so `[self_update] package`
+/// defaults to this constant.
+pub const CLIENT_AGENT_TYPE: &str = "supervisor";
+
 pub struct AgentState {
     uid: InstanceUid,
     sequence_num: u64,
+    /// The operator's name for this Agent, reported as `service.instance.name` (ADR-0012): the
+    /// `[[supervisor]]` block's `name`, or the top-level one for the Client's own Agent. Never
+    /// `service.name` — that is the type below.
+    instance_name: String,
+    /// The Agent *type*, reported as `service.name`. A Managed Process that reports one of its own
+    /// replaces it in the fold; this is what stands until then, and permanently for a process that
+    /// reports nothing.
+    service_name: String,
     /// This Agent's declared Capability Set: the base set plus whatever
     /// [`declare_capability`](Self::declare_capability) added. Carried in every report, so the
     /// Server's cached mask follows on the next exchange.
@@ -73,6 +114,10 @@ pub struct AgentState {
     managed: bool,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
+    /// The self-Agent's configuration in flight (ADR-0032): stored only once the apply succeeded,
+    /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
+    /// `APPLIED` on restart must mean the file was actually rewritten.
+    applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The Managed Process's health — derived or self-reported (ADR-0010). Absent for the
@@ -92,6 +137,10 @@ pub struct AgentState {
     /// `APPLIED`/`FAILED` once the transport verified. Its hash stops the Server re-offering.
     connection_settings_status: Option<ConnectionSettingsStatus>,
     send_settings_status: bool,
+    /// The pid of the Managed Process while it runs (ADR-0022) — what own metrics are sampled
+    /// from. `None` for the Client's own Agent, whose process is this one, and for a Supervisor
+    /// between restarts.
+    process_pid: Option<u32>,
     /// A PEM certificate signing request waiting to go out (ADR-0026), sent once and then
     /// forgotten: the answer arrives as an ordinary connection-settings offer, and asking again
     /// is what the renewal window decides, not this field.
@@ -99,6 +148,9 @@ pub struct AgentState {
     /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0018).
     /// Which package that is, is the Server's choice (ADR-0019) — this side only consents.
     accepts_packages: bool,
+    /// The only package name this Agent will install (ADR-0020); `None` takes whichever top-level
+    /// package the Server selects, which is what a Supervisor does (ADR-0019).
+    expected_package: Option<String>,
     /// The name of the top-level package the Server last offered. Learned from the offer, not
     /// configured: it keys the reported `PackageStatuses` map, which the Baseline requires to name
     /// every package the Agent has or is processing.
@@ -128,6 +180,7 @@ pub struct AgentState {
     /// PackagesAvailable message and that error is not related to any particular single package".
     offer_error: String,
     send_package_status: bool,
+    /// Operator-defined attributes from `supervisor.toml` (ADR-0011), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
     /// The deployment's `service.namespace`, when it has one. The Baseline asks for it "if it is
@@ -139,6 +192,11 @@ pub struct AgentState {
 impl AgentState {
     /// Restores identity and configuration from storage, so a restart reports the same Agent with
     /// the same applied config hash — and is therefore not reconfigured redundantly.
+    ///
+    /// `instance_name` is the operator's name for this Agent; the type it presents is
+    /// [`CLIENT_AGENT_TYPE`], since this constructor builds the Client's own Agent. A
+    /// Supervisor-backed one comes from [`supervised`](Self::supervised), which is told its type.
+    pub fn new(instance_name: String, storage: Storage) -> std::io::Result<Self> {
         let uid = storage.load_or_create_uid()?;
         let applied = storage.load_remote_config();
         let status = applied.as_ref().map(|config| RemoteConfigStatus {
@@ -150,6 +208,8 @@ impl AgentState {
         Ok(AgentState {
             uid,
             sequence_num: 0,
+            instance_name,
+            service_name: CLIENT_AGENT_TYPE.to_string(),
             capabilities: AGENT_CAPABILITIES,
             start_time_ns: now_ns(),
             storage,
@@ -161,6 +221,7 @@ impl AgentState {
             send_status: false,
             managed: false,
             pending_apply: None,
+            applying: None,
             pending_restart: false,
             process_health: None,
             send_health: false,
@@ -170,8 +231,10 @@ impl AgentState {
             send_components_full: false,
             connection_settings_status: None,
             send_settings_status: false,
+            process_pid: None,
             pending_csr: None,
             accepts_packages: false,
+            expected_package: None,
             offered_name: None,
             installed_package: None,
             downloading: None,
@@ -200,14 +263,57 @@ impl AgentState {
         self.declare_capability(AgentCapabilities::ReportsPackageStatuses);
     }
 
+    /// Opts this Agent into package delivery for **one named package only** (ADR-0020) — what the
+    /// Client's own Agent does. A Supervisor takes whichever top-level package the Server selects
+    /// for it (ADR-0019), because the worst case there is a Managed Process that will not start
+    /// and is rolled back. The Client has no such safety net: a package with an empty Selector
+    /// reaches every consenting Agent, and one written over this binary takes the host out of
+    /// reach for good. So this side matches the name and refuses everything else.
+    ///
+    /// The restored record is held against the version this binary *is*, and dropped when the two
+    /// are not the same release. `service uninstall` deliberately keeps the install layout and the
+    /// state (ADR-0028), so an operator who reinstalls an older Client comes up on top of the
+    /// record its successor wrote — and reporting that record would tell the Server this host runs
+    /// a version it does not have. Worse than the wrong line in the fleet view: the offer is gated
+    /// on the hash inside it, so the Server would never offer this host the package again. A
+    /// record that does not name the running binary is a record about a binary that is gone.
+    pub fn accept_packages_named(&mut self, name: String) {
+        self.accept_packages();
         let running = opamp::version::current();
+        if let Some(installed) = &self.installed_package {
+            // Not string equality: the record holds the version the operator uploaded (`1.2.3`)
+            // and this binary calls itself `1.2.3+a1b2c3d`. The same comparison the self-update
+            // probe makes before a version is ever pointed at (ADR-0017).
+            if !opamp::version::same_release(&installed.version, running) {
+                warn!(
+                    recorded = %installed.version, running = %running,
+                    "the installed package record does not name the version this Client runs; \
+                     discarding it, so the Server can offer the package again"
+                );
+                self.installed_package = None;
+                if let Err(e) = self.storage.forget_package() {
+                    warn!(error = %e, "cannot drop the stale installed package record");
+                }
+            }
+        }
+        self.expected_package = Some(name);
+    }
+
     /// The package this Agent is processing or has: the one being installed, else the installed
+    /// one, else the one last offered — and for the Client's own Agent, else the one it consents
+    /// to, which it knows from its own configuration before any offer arrives (ADR-0020).
+    ///
+    /// That last fallback is what lets this Client state a version for its own package from the
+    /// first report on. A Supervisor has no such name: which package it gets is the Server's
+    /// choice (ADR-0019), so before an offer there is nothing to key a status by, and `None` is
+    /// then the whole of "all packages the Agent has".
     fn package_name(&self) -> Option<String> {
         self.installing
             .as_ref()
             .map(|d| d.name.clone())
             .or_else(|| self.installed_package.as_ref().map(|p| p.name.clone()))
             .or_else(|| self.offered_name.clone())
+            .or_else(|| self.expected_package.clone())
     }
 
     /// Restores the outcome of a previously applied connection-settings offer (ADR-0027): the
@@ -241,6 +347,18 @@ impl AgentState {
 
     /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0010). Only
     /// such an Agent accepts a restart command — the self-Agent has no process to restart.
+    ///
+    /// The type is a parameter rather than a builder default because there is no sensible default
+    /// for it (ADR-0012): the Client's own type would be a lie, and the instance name in that slot
+    /// is exactly the confusion this signature exists to prevent. The caller always knows one —
+    /// the block's `service_name`, or the program's file name.
+    pub fn supervised(
+        instance_name: String,
+        service_name: String,
+        storage: Storage,
+    ) -> std::io::Result<Self> {
+        let mut state = Self::new(instance_name, storage)?;
+        state.service_name = service_name;
         state.managed = true;
         state.declare_capability(AgentCapabilities::AcceptsRestartCommand);
         Ok(state)
@@ -287,12 +405,57 @@ impl AgentState {
         self.uid
     }
 
+    /// The operator's name for this Agent (ADR-0012). The Supervisor's own value, never the
+    /// Managed Process's: a process reporting under that key is ignored in `describe`, so this is
+    /// the one answer to "which Agent is this" that a human can read.
+    pub fn instance_name(&self) -> &str {
+        &self.instance_name
+    }
+
+    /// The Agent *type* this Agent is reported under — `service.name` (ADR-0012).
+    ///
+    /// The Managed Process's own word where it gives one, the Supervisor's configured type
+    /// otherwise — the fold [`describe`](Self::describe) performs, mirrored here rather than
+    /// repeated: what the fleet view shows for an Agent and what its telemetry is labelled with
+    /// must be the one answer, and `describe` is too expensive to call per sample, since it reads
+    /// the host's addresses live.
+    ///
+    /// The two answers differ in exactly one case, deliberately. A process reporting
+    /// `service.name = ""` blanks the type in `describe`, because the fold replaces by key without
+    /// judging the value; here the empty string is not a value (ADR-0019), so the configured type
+    /// stands. A label nobody can read is worse than a stale one, and the Selector consequences of
+    /// the other reading are ADR-0019's own subject rather than this accessor's.
+    pub fn service_name(&self) -> &str {
+        self.process_description
+            .as_ref()
+            .and_then(|reported| {
+                opamp::attributes::string_value(
+                    &reported.identifying_attributes,
+                    attributes::SERVICE_NAME,
+                )
+            })
+            .unwrap_or(&self.service_name)
+    }
+
     /// A configuration stored `APPLYING` and not yet handed to the process adapter, if any.
     pub fn take_pending_apply(&mut self) -> Option<AgentRemoteConfig> {
         self.pending_apply.take()
     }
 
+    /// The verdict on an apply — the process adapter's for a Supervisor-backed Agent, the
+    /// Engine's Supervisor-set apply for the self-Agent (ADR-0032): closes the `APPLYING` →
+    /// `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
+        // The self-Agent's offer is persisted only now, on success: its hash is what a restarted
+        // Client reports as applied, and that must never get ahead of the file (ADR-0032).
+        if let Some(applying) = self.applying.take() {
+            if result.is_ok() && applying.config_hash == hash {
+                match self.storage.store_remote_config(&applying) {
+                    Ok(()) => self.applied = Some(applying),
+                    Err(e) => warn!(error = %e, "cannot store the applied configuration"),
+                }
+            }
+        }
         self.status = Some(match result {
             Ok(()) => RemoteConfigStatus {
                 last_remote_config_hash: hash,
@@ -446,6 +609,13 @@ impl AgentState {
             };
         };
         // `agent_has_*` is what the Agent actually runs — the last successful install, if any.
+        //
+        // For the Client's own Agent there is one without an install record too: *this process*.
+        // A Client that arrived by `.deb`, `.rpm`, MSI or by hand has installed no package, and
+        // reporting nothing there says "nothing installed under this name" — which since ADR-0014
+        // is precisely the answer that lets a Set of the version it already runs reach it, and a
+        // Set *older* than it downgrade it. The binary knows what it is; the record only says how
+        // it got here.
         let (has_version, has_hash) = self
             .installed_package
             .as_ref()
@@ -454,6 +624,16 @@ impl AgentState {
                     p.version.clone(),
                     hex::decode(&p.hash_hex).unwrap_or_default(),
                 )
+            })
+            .or_else(|| {
+                // The *identity* of what this binary reports, not the whole string: a version
+                // recorded by an install carries the operator's spelling, without the build
+                // metadata this binary appends (ADR-0017), and the two have to read alike in the
+                // fleet view. Nothing is lost — metadata takes no part in a comparison.
+                self.expected_package.as_ref().and_then(|_| {
+                    opamp::version::identity(opamp::version::current())
+                        .map(|version| (version.to_string(), Vec::new()))
+                })
             })
             .unwrap_or_default();
         let status = if self.downloading.is_some() {
@@ -467,6 +647,9 @@ impl AgentState {
         } else if !self.package_error.is_empty() {
             // The last attempt failed — a refusal is a report, not a silence.
             PackageStatusEnum::InstallFailed
+        } else if !has_version.is_empty() {
+            // Installed, whether a package put it there or an installer did: the status describes
+            // what is on the host under this name, not how it arrived.
             PackageStatusEnum::Installed
         } else {
             PackageStatusEnum::InstallPending
@@ -666,11 +849,31 @@ impl AgentState {
             return;
         }
         let name = name.clone();
+        // The Client's own Agent takes one named package and nothing else (ADR-0020). A
+        // fleet-wide package with an empty Selector reaches every consenting Agent, so without
+        // this an artifact meant for a Collector would be written over this binary and the host
+        // would be gone. Refused and reported, never silently ignored.
+        if let Some(expected) = &self.expected_package {
+            if &name != expected {
+                error!(
+                    offered = %name, expected = %expected,
+                    "refusing a package this Agent was not configured to take"
+                );
+                self.installing = None;
+                self.offer_error = format!(
+                    "this Agent installs only the package {expected:?}; the Server offered {name:?}"
+                );
+                self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+                self.send_package_status = true;
                 handled.send_report = true;
+                return;
+            }
+        }
         // A usable offer clears whatever the last unusable one complained about.
         self.offer_error.clear();
         self.offered_name = Some(name.clone());
         self.server_offered = Some((available.version.clone(), available.hash.clone()));
+        if self.already_has(available) {
             // Already running this package: in sync — echo the aggregate to end the offer.
             self.echoed_all_packages_hash = offer.all_packages_hash.clone();
             self.send_package_status = true;
@@ -714,6 +917,30 @@ impl AgentState {
         self.send_package_status = true;
         handled.send_report = true;
         handled.package_download = Some(download);
+    }
+
+    /// Whether this offer is what the Agent already has, so the offer ends with an echo rather
+    /// than a download.
+    ///
+    /// For the package that carries the Client itself (ADR-0020, ADR-0029) that question is
+    /// answered by the version *this process runs* — since ADR-0014, what a program reports about
+    /// itself outranks what a record says was once installed here. The record's hash would
+    /// otherwise end an offer of the very bytes this host is not running: a state directory that
+    /// outlived its binary claims a version, the Server offers it again, and the claim is what
+    /// swallows the offer.
+    ///
+    /// A Supervisor has no such answer — the Managed Process's version is the process's own, and a
+    /// package numbers it in whatever space the operator chose — so there the installed hash stays
+    /// the test: the same bytes are the same package.
+    fn already_has(&self, available: &PackageAvailable) -> bool {
+        if self.expected_package.is_some() {
+            return opamp::version::same_release(opamp::version::current(), &available.version);
+        }
+        self.installed_package
+            .as_ref()
+            .map(|p| hex::decode(&p.hash_hex).unwrap_or_default())
+            .as_deref()
+            == Some(available.hash.as_slice())
     }
 
     /// Records how far the artifact download has got (ADR-0018), so the next report carries
@@ -766,8 +993,46 @@ impl AgentState {
         self.send_package_status = true;
     }
 
+    /// Takes an offered configuration in and reports `APPLYING`; the outcome closes the
+    /// lifecycle through [`config_applied`](Self::config_applied). Success and failure alike
+    /// carry the hash the status refers to (a rejected configuration is a report, not a silence).
+    ///
+    /// For a Supervisor-backed Agent the entry files are stored now — the process adapter is
+    /// pointed at them — and the apply is handed over as pending. The self-Agent's configuration
+    /// is its Supervisor set (ADR-0032): it is left pending for the Engine's apply and stored
+    /// only once that succeeded, so a restart mid-apply reports nothing as applied and the
+    /// Server offers again.
     fn apply(&mut self, config: &AgentRemoteConfig) {
+        if self.managed {
+            match self.storage.store_remote_config(config) {
+                Ok(()) => {
+                    info!(hash = %hex::encode(&config.config_hash), "remote configuration stored; applying");
+                    self.applied = Some(config.clone());
+                    self.status = Some(RemoteConfigStatus {
+                        last_remote_config_hash: config.config_hash.clone(),
+                        status: RemoteConfigStatuses::Applying as i32,
+                        error_message: String::new(),
+                    });
+                    self.pending_apply = Some(config.clone());
+                }
+                Err(e) => {
+                    error!(error = %e, "cannot store the remote configuration");
+                    self.status = Some(RemoteConfigStatus {
+                        last_remote_config_hash: config.config_hash.clone(),
+                        status: RemoteConfigStatuses::Failed as i32,
+                        error_message: format!("cannot store the configuration: {e}"),
+                    });
+                }
             }
+        } else {
+            info!(hash = %hex::encode(&config.config_hash), "remote configuration received; applying to the supervisor set");
+            self.status = Some(RemoteConfigStatus {
+                last_remote_config_hash: config.config_hash.clone(),
+                status: RemoteConfigStatuses::Applying as i32,
+                error_message: String::new(),
+            });
+            self.pending_apply = Some(config.clone());
+            self.applying = Some(config.clone());
         }
         self.send_status = true;
     }
@@ -776,6 +1041,21 @@ impl AgentState {
     /// which is the one that carries what belongs to the connection rather than to a process.
     pub fn is_managed(&self) -> bool {
         self.managed
+    }
+
+    /// This Agent's description, for the Resource of its own telemetry (ADR-0022).
+    pub fn description(&self) -> AgentDescription {
+        self.describe()
+    }
+
+    /// The Managed Process's pid changed — it started, or it is gone (ADR-0022).
+    pub fn set_process_pid(&mut self, pid: Option<u32>) {
+        self.process_pid = pid;
+    }
+
+    /// The pid own metrics are sampled from, if this Agent has a process and it is running.
+    pub fn process_pid(&self) -> Option<u32> {
+        self.process_pid
     }
 
     /// Queues a certificate signing request for the next report (ADR-0026).
@@ -831,6 +1111,10 @@ impl AgentState {
     }
 
     fn describe(&self) -> AgentDescription {
+        // `service.name` is the Agent *type* — the Baseline's "reverse FQDN that uniquely
+        // identifies the Agent type" (ADR-0012). It used to carry the instance name, which a
+        // Managed Process reporting its own type then destroyed; the instance name now has its own
+        // key below, out of the way of the fold.
         let mut identifying_attributes =
             vec![string_attr(attributes::SERVICE_NAME, &self.service_name)];
         // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
@@ -856,6 +1140,11 @@ impl AgentState {
         // placeholder would say something false that a Selector could then match.
         let os = os_info();
         let mut non_identifying_attributes = vec![
+            // The operator's name for this Agent (ADR-0012). Non-identifying because the Baseline
+            // has no key for a human instance name and admits "any user-defined attributes the end
+            // user would like to associate with this Agent" here; identity itself stays
+            // `service.instance.id`. A Selector can match it, which is how ADR-0019's "pin one
+            // host" is expressed for a machine running several Supervisors.
             string_attr(attributes::SERVICE_INSTANCE_NAME, &self.instance_name),
             string_attr(attributes::OS_TYPE, os_type()),
             string_attr(attributes::HOST_ARCH, host_arch()),
@@ -863,12 +1152,24 @@ impl AgentState {
         for (key, value) in [
             ("os.name", os.name.as_deref()),
             ("os.version", os.version.as_deref()),
+            ("os.build_id", os.build_id.as_deref()),
             (attributes::OS_DESCRIPTION, os.description.as_deref()),
             ("host.name", host_name()),
             ("host.id", host_id()),
+            ("host.cpu.model.name", cpu_model()),
         ] {
             if let Some(value) = value {
                 non_identifying_attributes.push(string_attr(key, value));
+            }
+        }
+        // The host's network addresses — the conventions' `host.ip` and `host.mac` (ADR-0012),
+        // both arrays and both "excluding loopback interfaces". Read live rather than once, so a
+        // DHCP move is reported instead of the address the process happened to start with; a host
+        // with nothing to say reports no attribute rather than an empty array.
+        let (ips, macs) = host_addresses();
+        for (key, values) in [("host.ip", ips), ("host.mac", macs)] {
+            if !values.is_empty() {
+                non_identifying_attributes.push(string_array_attr(key, &values));
             }
         }
         let mut description = AgentDescription {
@@ -887,15 +1188,31 @@ impl AgentState {
                     .push(string_attr(key, value));
             }
         }
+        // Fold in what the Managed Process reported about itself — except the two attributes that
+        // are the Supervisor's to state: the Agent the Server sees is the Supervisor, keyed by the
+        // Supervisor's uid (goal 16) and called what the operator called it (ADR-0012). A process
+        // cannot know either, so a value it reports under those keys is not an improvement. Its
+        // `service.name` deliberately *does* win — a Collector's `dist.name` is a better type than
+        // anything this file can infer.
+        //
+        // The exemption is by *key*, in both lists, and not by the list the Supervisor happens to
+        // put each one in: the Server resolves a Selector against the identifying attributes first
+        // and the non-identifying ones only after (`configs.rs`), so a process reporting either key
+        // among the other list's would win every Selector while the fleet row went on showing the
+        // Supervisor's value.
         if let Some(reported) = &self.process_description {
             let supervisors_own = |key: &str| {
                 key == "service.instance.id" || key == attributes::SERVICE_INSTANCE_NAME
             };
             for attr in &reported.identifying_attributes {
+                if !supervisors_own(&attr.key) {
                     upsert_attr(&mut description.identifying_attributes, attr);
                 }
             }
             for attr in &reported.non_identifying_attributes {
+                if !supervisors_own(&attr.key) {
+                    upsert_attr(&mut description.non_identifying_attributes, attr);
+                }
             }
         }
         description
@@ -920,6 +1237,50 @@ impl AgentState {
             },
         }
     }
+}
+
+/// The host's network addresses, enumerated live from the platform (ADR-0012).
+fn host_addresses() -> (Vec<String>, Vec<String>) {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    collect_host_addresses(networks.values().map(|data| {
+        (
+            data.mac_address().0,
+            data.ip_networks().iter().map(|net| net.addr).collect(),
+        )
+    }))
+}
+
+/// The rules of [`host_addresses`], separated from the platform so they are testable: an
+/// interface whose every address is loopback is skipped whole — its MAC too, which is how the
+/// conventions' "excluding loopback interfaces" reads for both keys — and an unspecified MAC is
+/// no answer. Both lists come out deduplicated and sorted, so the description does not change
+/// with enumeration order and re-report an unchanged host.
+///
+/// The formats are the conventions': IPv4 dotted-quad and IPv6 RFC 5952 (both what [`IpAddr`]'s
+/// `Display` writes), the MAC in IEEE RA hyphen-separated uppercase hexadecimal.
+fn collect_host_addresses(
+    interfaces: impl Iterator<Item = ([u8; 6], Vec<IpAddr>)>,
+) -> (Vec<String>, Vec<String>) {
+    let mut ips = std::collections::BTreeSet::new();
+    let mut macs = std::collections::BTreeSet::new();
+    for (mac, addrs) in interfaces {
+        if !addrs.is_empty() && addrs.iter().all(IpAddr::is_loopback) {
+            continue;
+        }
+        if mac != [0; 6] {
+            macs.insert(format!(
+                "{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ));
+        }
+        ips.extend(
+            addrs
+                .iter()
+                .filter(|ip| !ip.is_loopback())
+                .map(ToString::to_string),
+        );
+    }
+    (ips.into_iter().collect(), macs.into_iter().collect())
 }
 
 fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
@@ -959,6 +1320,10 @@ struct OsInfo {
     name: Option<String>,
     /// `os.version` — the version that name is at: "24.04", "15.5", "10.0.26100.2033".
     version: Option<String>,
+    /// `os.build_id` — the build behind that version, where the platform stamps one: os-release's
+    /// `BUILD_ID`, `sw_vers`' BuildVersion ("24F74"), the build components of Windows' version
+    /// line ("26100.2033").
+    build_id: Option<String>,
 }
 
 fn os_info() -> &'static OsInfo {
@@ -968,6 +1333,15 @@ fn os_info() -> &'static OsInfo {
 
 #[cfg(target_os = "linux")]
 fn read_os_info() -> OsInfo {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|text| parse_os_release(&text))
+        .unwrap_or_default()
+}
+
+/// os-release(5): NAME="Ubuntu", VERSION_ID="24.04", PRETTY_NAME="Ubuntu 24.04.2 LTS", and —
+/// where the distribution stamps its image builds — BUILD_ID.
+#[cfg(target_os = "linux")]
+fn parse_os_release(text: &str) -> OsInfo {
     let field = |key: &str| {
         text.lines()
             .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
@@ -978,6 +1352,7 @@ fn read_os_info() -> OsInfo {
         description: field("PRETTY_NAME"),
         name: field("NAME"),
         version: field("VERSION_ID"),
+        build_id: field("BUILD_ID"),
     }
 }
 
@@ -1005,6 +1380,7 @@ fn read_os_info() -> OsInfo {
         description,
         name,
         version,
+        build_id: field("BuildVersion"),
     }
 }
 
@@ -1029,16 +1405,43 @@ fn read_os_info() -> OsInfo {
         .and_then(|(_, rest)| rest.split_once(']'))
         .map(|(inside, _)| inside.trim_start_matches("Version").trim().to_string())
         .filter(|value| !value.is_empty());
+    // `os.build_id` is the build that version line ends in: "10.0.26100.2033" is
+    // major.minor.build.revision, and the conventions' Windows example names the build ("22621").
+    // Everything from the third component on, so the UBR revision stays attached when `ver`
+    // prints one.
+    let build_id = version.as_ref().and_then(|version| {
+        let parts: Vec<&str> = version.split('.').collect();
+        (parts.len() >= 3).then(|| parts[2..].join("."))
+    });
     OsInfo {
         description: Some(text),
         name: Some("Windows".to_string()),
         version,
+        build_id,
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_os_info() -> OsInfo {
     OsInfo::default()
+}
+
+/// The processor's model designation (`host.cpu.model.name`) — read once, hardware does not
+/// change under a running process. From the same `sysinfo` the addresses come from (ADR-0012);
+/// one CPU answers for all of them, which is what the convention's singular key asks for.
+fn cpu_model() -> Option<&'static str> {
+    static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            let mut system = sysinfo::System::new();
+            system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+            system
+                .cpus()
+                .first()
+                .map(|cpu| cpu.brand().trim().to_string())
+                .filter(|brand| !brand.is_empty())
+        })
+        .as_deref()
 }
 
 /// The host's name (`host.name`) — read once. ADR-0019 twice offers a Selector on this attribute
@@ -1158,9 +1561,72 @@ mod tests {
     use opamp::proto::{AgentConfigMap, AgentConfigObject};
     use std::collections::HashMap;
 
+    /// `host.ip` and `host.mac` as the conventions define them (ADR-0012): loopback interfaces
+    /// excluded whole — the MAC of one too — an unspecified MAC not an answer, everything
+    /// deduplicated and sorted so the description is stable across enumeration order, IPv6 in
+    /// RFC 5952 form and the MAC in IEEE RA hyphenated uppercase.
+    #[test]
+    fn host_addresses_follow_the_conventions() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let loopback = (
+            [0; 6],
+            vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+        );
+        let mac = [0xac, 0xde, 0x48, 0x23, 0x45, 0x67];
+        let ethernet = (
+            mac,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140)),
+                IpAddr::V6(Ipv6Addr::new(
+                    0xfe80, 0, 0, 0, 0xabc2, 0x4a28, 0x737a, 0x609e,
+                )),
+            ],
+        );
+        // A bond partner: the same MAC again, one of its addresses again.
+        let bonded = (mac, vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140))]);
+        // A tunnel: an address worth reporting, no hardware address behind it.
+        let tunnel = ([0; 6], vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))]);
+        let (ips, macs) = collect_host_addresses([loopback, ethernet, bonded, tunnel].into_iter());
+        assert_eq!(
+            ips,
+            ["10.0.0.7", "192.168.1.140", "fe80::abc2:4a28:737a:609e"]
+        );
+        assert_eq!(macs, ["AC-DE-48-23-45-67"]);
+    }
+
+    /// The os-release parser behind `os.*`, now including `os.build_id` (ADR-0012): quotes
+    /// stripped, an absent or empty field absent rather than blank.
     #[cfg(target_os = "linux")]
     #[test]
+    fn os_release_parses_the_fields_the_description_reports() {
+        let info = parse_os_release(
+            "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\nBUILD_ID=20240801.1\nVARIANT=\n",
+        );
+        assert_eq!(info.name.as_deref(), Some("Ubuntu"));
+        assert_eq!(info.version.as_deref(), Some("24.04"));
+        assert_eq!(info.description.as_deref(), Some("Ubuntu 24.04.2 LTS"));
+        assert_eq!(info.build_id.as_deref(), Some("20240801.1"));
+        assert_eq!(parse_os_release("BUILD_ID=\n").build_id, None);
+    }
+
+    /// `/proc/cpuinfo` always names an x86 model, so on this platform the attribute must be
+    /// there — everywhere else it stays best effort.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn the_cpu_model_is_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let attrs = reported(&make_agent(dir.path()).describe());
+        assert!(
+            attrs
+                .get("host.cpu.model.name")
+                .is_some_and(|model| !model.is_empty()),
+            "no host.cpu.model.name in {attrs:?}"
+        );
+    }
+
     fn make_agent(dir: &std::path::Path) -> AgentState {
         let storage = Storage::new(dir.to_path_buf()).expect("storage");
         AgentState::new("test-agent".to_string(), storage).expect("agent")
@@ -1241,6 +1707,8 @@ mod tests {
     }
 
     /// Every reported attribute as `key -> value`, both lists together: what the Server actually
+    /// receives, and therefore what a Selector matches against. A string array (`host.ip`,
+    /// `host.mac`, ADR-0012) reads joined, as the Server's view joins it.
     fn reported(description: &AgentDescription) -> std::collections::BTreeMap<String, String> {
         description
             .identifying_attributes
@@ -1249,6 +1717,18 @@ mod tests {
             .map(|kv| {
                 let value = match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
                     Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+                    Some(opamp::proto::any_value::Value::ArrayValue(list)) => list
+                        .values
+                        .iter()
+                        .filter_map(|v| match v.value.as_ref() {
+                            Some(opamp::proto::any_value::Value::StringValue(s)) => {
+                                Some(s.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    other => panic!("{} must be a string or string array, got {other:?}", kv.key),
                 };
                 (kv.key.clone(), value)
             })
@@ -1267,24 +1747,159 @@ mod tests {
         }
     }
 
+    /// The defect ADR-0012 exists for: a Collector's `opampextension` reports the type it was
+    /// built with, and folding that in used to overwrite the operator's name for the Supervisor —
+    /// so every Collector of one distribution collapsed onto one name in the fleet view. Both
+    /// values must survive, each in its own key, each won by the side that actually knows it.
+    #[test]
+    fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol-edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+        )
+        .expect("agent");
+
+        let before = reported(&agent.describe());
+        assert_eq!(
+            before.get("service.name").map(String::as_str),
+            Some("otelcol")
+        );
+        assert_eq!(
+            before.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01")
+        );
+
+        // The extension connects and states its `dist.name` — and, being a Collector, knows
+        // nothing about the Supervisor that owns it, so its guess at an instance name is worthless.
         agent.set_process_description(AgentDescription {
             identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+            non_identifying_attributes: vec![string_attr(
+                "service.instance.name",
+                "some-collector",
+            )],
+        });
+
+        let after = reported(&agent.describe());
+        assert_eq!(
+            after.get("service.name").map(String::as_str),
+            Some("otelcol-contrib"),
+            "the process states the better type and wins the type"
+        );
+        assert_eq!(
+            after.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01"),
+            "but it cannot rename the Supervisor the operator configured"
+        );
+    }
+
+    /// And the exemption holds by *key*, not by the list the Supervisor states each one in. A
+    /// process reporting either of them among its *identifying* attributes would otherwise win
+    /// every Selector — the Server resolves those before the non-identifying ones — while the fleet
+    /// row, which reads the other list, went on showing the operator's value.
+    #[test]
+    fn the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol-edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+        )
+        .expect("agent");
+        let uid = reported(&agent.describe())
+            .get("service.instance.id")
+            .cloned()
+            .expect("the Supervisor's uid");
+
+        // Both keys, each in the list the fold does *not* exempt it in.
         agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.instance.name", "some-collector")],
+            non_identifying_attributes: vec![string_attr("service.instance.id", "not-the-uid")],
+        });
 
         let description = agent.describe();
+        assert!(
+            !description
                 .identifying_attributes
                 .iter()
+                .any(|kv| kv.key == "service.instance.name"),
+            "an instance name among the identifying attributes would win every Selector"
+        );
+        let after = reported(&description);
+        assert_eq!(
+            after.get("service.instance.name").map(String::as_str),
+            Some("otelcol-edge-01"),
+            "the operator's name stands, wherever the process put its own"
+        );
+        assert_eq!(
+            after.get("service.instance.id"),
+            Some(&uid),
+            "and identity stays the Supervisor's uid"
+        );
+    }
+
+    /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
+    /// constant `supervisor` (ADR-0029) and not whatever the operator called this instance — which
+    /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0012).
+    #[test]
+    fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::new("edge-fra1".to_string(), storage).expect("agent");
+        let attributes = reported(&agent.describe());
+        assert_eq!(
+            attributes.get("service.name").map(String::as_str),
+            Some(CLIENT_AGENT_TYPE)
+        );
+        assert_eq!(
+            attributes.get("service.instance.name").map(String::as_str),
+            Some("edge-fra1")
+        );
+    }
+
+    /// ADR-0029 pins the value, not just the separation: the type is `supervisor`. ADR-0029 then
+    /// gave the program, its service and its configuration file the same word, so what began as
+    /// the Agent's *role* is now the one name this thing has anywhere — which is the point, and
+    /// which is why the two constants are asserted to agree rather than to differ.
+    #[test]
+    fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
+        assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
+        assert_eq!(
+            CLIENT_AGENT_TYPE,
+            crate::service::layout::COMPONENT,
+            "the type, the program and the service are one word since ADR-0029"
+        );
+    }
+
+    /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
+    /// second way to set the two attributes the Supervisor itself owns.
+    #[test]
+    fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let agent = AgentState::supervised("edge-01".to_string(), "otelcol".to_string(), storage)
             .expect("agent")
             .with_attributes(
                 [
+                    ("service.name".to_string(), "hijacked".to_string()),
+                    ("service.instance.name".to_string(), "hijacked".to_string()),
+                ]
+                .into(),
+            );
+        let attributes = reported(&agent.describe());
+        assert_eq!(
+            attributes.get("service.name").map(String::as_str),
+            Some("otelcol")
+        );
+        assert_eq!(
+            attributes.get("service.instance.name").map(String::as_str),
+            Some("edge-01")
+        );
+    }
+
     /// ADR-0019 twice offers "a Selector matching that host's `host.name`" as the way to pin one
     /// host to one artifact. That only works if an Agent reports the attribute, which for a long
     /// time it did not.
@@ -1392,6 +2007,9 @@ mod tests {
 
         // A Supervisor-backed Agent reports no version until its Managed Process states one.
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         assert_eq!(version_of(&supervised), None);
 
         supervised.set_process_description(AgentDescription {
@@ -1405,19 +2023,51 @@ mod tests {
     /// `service.version` alone after every package swap, and the opampextension, which reports
     /// everything else. Replacing rather than merging would make each new probe erase the
     /// extension's self-report, and each self-report erase the probed version.
+    /// The type the metrics are labelled with is the type the fleet view shows — the process's own
+    /// word where it gives one, the configured type otherwise. Two answers to "what is this Agent"
+    /// would be worse than none: a series labelled `otelcol` beside a fleet row reading
+    /// `otelcol-contrib` is a question, not a fact.
+    #[test]
+    fn the_reported_type_is_the_processs_own_word_where_it_gives_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut agent =
+            AgentState::supervised("edge-01".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        assert_eq!(agent.service_name(), "otelcol");
+
         agent.set_process_description(AgentDescription {
             identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
             non_identifying_attributes: vec![],
         });
+        assert_eq!(agent.service_name(), "otelcol-contrib");
+        assert_eq!(
+            reported(&agent.describe()).get("service.name").cloned(),
+            Some("otelcol-contrib".to_string()),
+            "the accessor mirrors the fold rather than diverging from it"
+        );
+
+        // The one case where the two part company, asserted so that it is a decision rather than a
+        // surprise: an empty string is not a value here (ADR-0019), while the fold replaces by key
+        // without judging the value.
         agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.name", "")],
             non_identifying_attributes: vec![],
         });
+        assert_eq!(agent.service_name(), "otelcol");
+        assert_eq!(
+            reported(&agent.describe()).get("service.name").cloned(),
+            Some(String::new())
+        );
+    }
+
     #[test]
     fn what_the_process_reports_about_itself_accumulates_across_sources() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
 
         // The extension's self-report: everything but the version, which it happens not to state.
         agent.set_process_description(AgentDescription {
@@ -1486,6 +2136,8 @@ mod tests {
     fn a_restart_command_is_queued_by_supervised_agents_and_ignores_other_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut supervised =
+            AgentState::supervised("s".to_string(), "s".to_string(), storage).expect("agent");
         assert_ne!(
             supervised.next_report().capabilities & AgentCapabilities::AcceptsRestartCommand as u64,
             0,
@@ -1519,12 +2171,27 @@ mod tests {
         assert!(!this.take_pending_restart());
     }
 
+    /// ADR-0020: the Client's own Agent takes one named package and refuses everything else. A
+    /// package with an empty Selector reaches every consenting Agent (ADR-0019), so without this
+    /// the first fleet-wide Collector artifact an operator uploads would be written over the
+    /// Client and take the host out of reach.
+    #[test]
+    fn the_self_agent_refuses_a_package_it_was_not_configured_to_take() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+        let _ = agent.next_report();
+
+        let offer = |name: &str| PackagesAvailable {
+            packages: [(
+                name.to_string(),
                 PackageAvailable {
                     version: "2.0.0".to_string(),
                     file: Some(DownloadableFile {
+                        download_url: "/x".to_string(),
                         content_hash: b"chash".to_vec(),
                         ..Default::default()
                     }),
@@ -1535,51 +2202,219 @@ mod tests {
             .into(),
             all_packages_hash: b"agg-1".to_vec(),
         };
+
+        // A Collector's package, offered fleet-wide: refused, and nothing is downloaded.
         let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer("otelcol")),
             ..Default::default()
         });
         assert!(
             handled.package_download.is_none(),
+            "nothing is fetched for a package this Agent does not take"
+        );
+        assert!(handled.send_report, "the refusal is reported, not silent");
+        let statuses = agent
             .next_report()
             .package_statuses
+            .expect("a package status");
+        assert!(
+            statuses.error_message.contains("opamp-client"),
+            "the refusal names what this Agent would accept: {:?}",
             statuses.error_message
         );
+        assert_eq!(
+            statuses.server_provided_all_packages_hash, b"agg-1",
+            "the aggregate is echoed so the Server stops re-offering it"
+        );
+
+        // The configured one is taken.
         let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer("opamp-client")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("the named package is taken");
+        assert_eq!(download.name, "opamp-client");
+    }
+
+    /// One offer of a package, by name and hash — the shape both restore tests below hand to the
+    /// Agent to ask "would you take this again?".
+    fn package_offer(name: &str, version: &str, hash: &[u8]) -> opamp::proto::PackagesAvailable {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
+        PackagesAvailable {
+            packages: [(
+                name.to_string(),
+                PackageAvailable {
+                    version: version.to_string(),
                     file: Some(DownloadableFile {
+                        download_url: "/x".to_string(),
                         content_hash: b"chash".to_vec(),
                         ..Default::default()
                     }),
+                    hash: hash.to_vec(),
                     ..Default::default()
                 },
             )]
             .into(),
             all_packages_hash: b"agg-1".to_vec(),
+        }
+    }
+
+    /// A record naming a version this binary is not is a record about a binary that is gone:
+    /// `service uninstall` keeps the state, so reinstalling an older Client lands on top of what
+    /// its successor wrote. Reported, it would tell the Server a version this host does not run —
+    /// and the hash gate inside it would stop the package ever being offered here again.
+    #[test]
+    fn a_package_record_from_another_version_is_discarded_on_start() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                version: "9.9.9".to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store the record a successor left behind");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        // What is claimed is what this binary *is* — never the version the record named.
+        let statuses = agent
             .next_report()
             .package_statuses
+            .expect("a package status");
+        let reported = statuses
+            .packages
+            .get("opamp-client")
+            .expect("the package this Client consents to is named from the first report");
+        assert_eq!(
+            Some(reported.agent_has_version.as_str()),
+            opamp::version::identity(opamp::version::current()),
+            "a version this Client does not run must not be reported as installed"
+        );
+        assert!(
+            reported.agent_has_hash.is_empty(),
+            "and no hash is invented for bytes no package delivered"
+        );
+        assert!(
+            !dir.path().join("installed-package.json").exists(),
+            "the stale record is dropped from disk, not only from memory"
+        );
+
+        // And the very bytes the record named are taken again, rather than echoed as in sync.
         let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", "9.9.9", b"pkg-hash")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("the package is offered to this Client again");
+        assert_eq!(download.name, "opamp-client");
+    }
+
+    /// The other half, and the one that matters more: an ordinary restart must keep its record.
+    /// A Client that discarded it would reinstall the version it already runs on every start.
+    #[test]
+    fn a_package_record_for_the_running_version_survives_a_restart() {
+        use opamp::proto::PackageStatusEnum;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                // What the Server was told to offer: the release, without the build metadata this
+                // binary carries (ADR-0017).
                 version: opamp::version::parse(opamp::version::current())
+                    .expect("this build's version parses")
+                    .identity()
+                    .to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        let statuses = agent
             .next_report()
             .package_statuses
+            .expect("a package status");
+        let status = statuses.packages.get("opamp-client").expect("the package");
         assert_eq!(status.status, PackageStatusEnum::Installed as i32);
+        assert!(dir.path().join("installed-package.json").exists());
+
+        // Offered the version it runs, this Client is in sync and downloads nothing.
+        let running = opamp::version::identity(opamp::version::current()).expect("this version");
         let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", running, b"pkg-hash")),
             ..Default::default()
         });
         assert!(
             handled.package_download.is_none(),
+            "a restarted Client must not reinstall the version it already runs"
+        );
+    }
+
+    /// ADR-0014 point 15: for the package that carries this Client, *already installed* is what this
+    /// process runs — never a hash in a record. The same bytes can be published under a new version,
+    /// and a record about a binary that is gone must not swallow the offer that would replace it:
+    /// the Server offers because the Agent reports running something older, and a Client that
+    /// answered "in sync" from its record would strand the host exactly where ADR-0014 found it.
+    #[test]
+    fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                version: opamp::version::identity(opamp::version::current())
+                    .expect("this version")
+                    .to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        // The record's own hash, under a version this Client does not run: taken, not echoed.
         let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", "9.9.9", b"pkg-hash")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("a version this Client does not run is installed, whatever the record holds");
+        assert_eq!(download.version, "9.9.9");
+
+        // A Supervisor keeps the hash test: the Managed Process's version is numbered in whatever
+        // space the operator chose, so the same bytes are the same package and nothing else is.
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "2.0.0".to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+        let mut supervised =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        supervised.accept_packages();
+        let handled = supervised.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "2.0.0", b"pkg-hash")),
             ..Default::default()
         });
         assert!(
             handled.package_download.is_none(),
+            "the same bytes are the package a Supervisor already installed"
+        );
+    }
+
     #[test]
     fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
         use opamp::proto::{
@@ -1587,6 +2422,9 @@ mod tests {
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         let _ = agent.next_report();
 
@@ -1714,6 +2552,9 @@ mod tests {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         let _ = agent.next_report();
 
@@ -1772,6 +2613,9 @@ mod tests {
     fn package_statuses_stop_once_the_server_says_it_accepts_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
 
         // A Server that takes status reports and offers configuration, but no package status.
@@ -1800,6 +2644,9 @@ mod tests {
     fn package_statuses_ride_until_the_server_has_spoken() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         assert!(agent.next_report().package_statuses.is_some());
     }
@@ -1873,6 +2720,9 @@ mod tests {
     fn a_remote_config_status_rides_to_a_server_that_offers_no_remote_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
 
         // A configuration was offered and acknowledged at some point…
         agent.handle(&ServerToAgent {
@@ -1906,6 +2756,9 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
 
         let handled = agent.handle(&ServerToAgent {
@@ -1946,6 +2799,9 @@ mod tests {
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
         agent.accept_packages();
         agent.offered_all_packages_hash = b"agg-2".to_vec();
         agent.server_offered = Some(("9.9.9".to_string(), b"bad".to_vec()));
@@ -2114,6 +2970,9 @@ mod tests {
         assert_eq!(second.sequence_num, 2);
     }
 
+    /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
+    /// Supervisor-set apply (ADR-0032); the verdict closes the lifecycle, and only then does the
+    /// configuration echo as effective.
     #[test]
     fn an_offer_is_applied_and_acknowledged() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2128,11 +2987,21 @@ mod tests {
 
         let ack = agent.next_report();
         let status = ack.remote_config_status.expect("status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
         assert_eq!(status.last_remote_config_hash, b"hash-1");
+        assert!(agent.take_pending_apply().is_some());
+
+        agent.config_applied(b"hash-1".to_vec(), Ok(()));
+        let done = agent.next_report();
+        let status = done.remote_config_status.expect("status");
         assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
         assert_eq!(status.last_remote_config_hash, b"hash-1");
+        assert!(done.effective_config.is_some());
     }
 
+    /// A restart reports `APPLIED` only for a configuration whose apply actually finished
+    /// (ADR-0032): the offer is persisted on the verdict, never on receipt, so a Client
+    /// restarted mid-apply reports nothing and the Server offers again.
     #[test]
     fn the_applied_config_survives_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2144,9 +3013,16 @@ mod tests {
                 ..Default::default()
             });
         }
+        // Interrupted mid-apply: nothing was persisted, the restarted Agent reports no status.
+        {
+            let mut interrupted = make_agent(dir.path());
+            assert!(interrupted.next_report().remote_config_status.is_none());
+            interrupted.handle(&ServerToAgent {
                 remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
                 ..Default::default()
             });
+            interrupted.config_applied(b"hash-1".to_vec(), Ok(()));
+        }
         let mut restarted = make_agent(dir.path());
         let report = restarted.next_report();
         let status = report.remote_config_status.expect("status");

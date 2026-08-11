@@ -38,9 +38,25 @@ pub async fn spawn_with_auth(auth: Option<server::transport::OpampAuth>) -> Test
 /// Baseline's size rules without moving megabytes around.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_limit(limit: usize) -> TestServer {
+    spawn_full(None, None, limit, DEFAULT_STALE_AFTER).await
 }
 
+/// The same real router with a tightened staleness budget (ADR-0013), for the tests that need an
+/// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
+    spawn_full(
+        None,
+        None,
+        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+        stale_after,
+    )
+    .await
+}
+
+/// The Server's own default, restated here so a scaffolded Server behaves like a real one.
+const DEFAULT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// The full shape: optional credential check (ADR-0026) and optional connection-settings offer
 /// (ADR-0027).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
@@ -48,18 +64,28 @@ pub async fn spawn_with(
     auth: Option<server::transport::OpampAuth>,
     offer: Option<server::fleet::ConnectionOffer>,
 ) -> TestServer {
+    spawn_full(
+        auth,
+        offer,
+        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+        DEFAULT_STALE_AFTER,
+    )
+    .await
 }
 
 async fn spawn_full(
     auth: Option<server::transport::OpampAuth>,
     offer: Option<server::fleet::ConnectionOffer>,
     limit: usize,
+    stale_after: std::time::Duration,
 ) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store")
             .with_connection_offer(offer)
+            .with_max_message_size(limit)
+            .with_stale_after(stale_after),
     );
     let (addr, rest_addr) = serve(
         state.clone(),
@@ -112,7 +138,15 @@ pub async fn serve_guarded(
     (addr, rest_addr)
 }
 
+/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0012). It is a constant
+/// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
+/// which is also what makes one package able to reach several of them (ADR-0019).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
+
+/// A full status report for one Agent, the way a fresh Client sends it. `name` is the operator's
+/// name for it — `service.instance.name` — and is what tells two Agents apart; their *type* is the
+/// shared [`AGENT_TYPE`].
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToServer {
     AgentToServer {
@@ -126,9 +160,18 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
             identifying_attributes: vec![KeyValue {
                 key: "service.name".to_string(),
                 value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue(AGENT_TYPE.to_string())),
                 }),
             }],
             non_identifying_attributes: vec![
+                // The operator's name for this Agent (ADR-0012) — what distinguishes it from its
+                // neighbours, now that `service.name` says only what kind of thing it is.
+                KeyValue {
+                    key: "service.instance.name".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue(name.to_string())),
+                    }),
+                },
                 KeyValue {
                     key: "os.type".to_string(),
                     value: Some(AnyValue {
@@ -167,6 +210,9 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
     }
 }
 
+/// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
+/// portal) does — two calls since ADR-0014, because saving alone distributes nothing and the
+/// rollout act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
 pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
     distribute_with_role(rest_addr, name, selector, body, "").await;
@@ -195,15 +241,29 @@ pub async fn distribute_with_role(
         .expect("put the configuration");
     assert_eq!(response.status(), 200, "the configuration is accepted");
     let response = client
+        .post(format!(
             "http://{rest_addr}/api/v1/configurations/{name}/rollout"
         ))
         .send()
         .await
+        .expect("roll out the configuration");
+    assert_eq!(response.status(), 200, "the configuration is rolled out");
 }
+
+/// The same real router with own-telemetry destinations to offer (ADR-0022).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_telemetry(offer: server::fleet::TelemetryOffer) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store")
+            .with_telemetry_offer(offer),
+    );
     let (addr, rest_addr) = serve(state.clone(), server::transport::Admission::open()).await;
+    TestServer {
+        addr,
         rest_addr,
+        state,
+        _dir: dir,
+    }
+}

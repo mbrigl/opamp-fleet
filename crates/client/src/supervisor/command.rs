@@ -10,8 +10,12 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0025.
+///
+/// `command` is not among them: the core takes it out and resolves it (ADR-0032), and what
+/// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandSettings {
@@ -25,6 +29,11 @@ struct CommandSettings {
     /// command is invoked once with exactly these arguments and the first Semantic Versioning
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
+    ///
+    /// They are also this kind's **preflight** (ADR-0016): a package's staged program is run with
+    /// them before the running one is stopped, and a non-zero exit refuses the package with the
+    /// program's own message. Same arguments, same contract — a check that is cheap and touches
+    /// no state — asked where a refusal costs nothing rather than after the swap.
     #[serde(default)]
     version_args: Option<Vec<String>>,
 }
@@ -64,17 +73,33 @@ impl Plugin for CommandPlugin {
         "command"
     }
 
+    fn program_key(&self) -> &'static str {
+        "command"
+    }
+
     /// Nothing at all. This is the kind for an agent nobody has written a wrapper for, so every
     /// value is the operator's to state (ADR-0010).
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults::none()
     }
 
+    fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
+        // Taken out rather than consumed with `ctx`, because the placeholder expansion below is a
+        // method on the context and needs it whole.
         let raw = std::mem::take(&mut ctx.settings);
         refuse_retired(&ctx.name, &raw)?;
         let settings: CommandSettings = raw
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        // Everything the operator wrote about *where* things are goes through the placeholders
+        // (ADR-0032) — the program itself deliberately does not.
+        let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
+        let env: Vec<(String, String)> = settings
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), ctx.expand(v)))
+            .collect();
+        let command = ctx.program;
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         // Asked at startup and again after every package swap, so a Foreign Agent the Server
@@ -82,6 +107,20 @@ impl Plugin for CommandPlugin {
         let version_probe = settings.version_args.clone().map(|args| VersionProbe {
             program: command.clone(),
             args,
+        });
+        // The same arguments, asked of the *staged* program before the running one is stopped
+        // (ADR-0016). This kind knows no argument of its own to be safe to run — but an operator
+        // who set `version_args` has named one: the contract on that key is that the command may
+        // be invoked with exactly these and will print its version, which is precisely a check
+        // that is cheap and touches no state. Nothing new is asked of anyone; the arguments that
+        // already run after every swap now also run before one, where a refusal is free.
+        //
+        // Unset, this stays `None` and the kind behaves exactly as it did. No environment either,
+        // for the reason the probe has none: these arguments have always been invoked bare, so any
+        // that need one to succeed report no version today.
+        let preflight = settings.version_args.clone().map(|args| Preflight {
+            args,
+            env: Vec::new(),
         });
         // What this Foreign Agent will actually be invoked with, after the placeholders were
         // expanded (ADR-0032). The spawn line names the program; the arguments are where a
@@ -108,6 +147,7 @@ impl Plugin for CommandPlugin {
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
             version_probe,
+            preflight,
             // Not this kind's to know (ADR-0010): an agent nobody wrote a wrapper for applies a
             // configuration by restarting, which is ADR-0010's generic behaviour.
             reload_signal: None,
@@ -116,6 +156,9 @@ impl Plugin for CommandPlugin {
             // A Foreign Agent has its own configuration until told otherwise: it always runs.
             build: Box::new(move || {
                 Some(ProcessSpec {
+                    program: command.clone(),
+                    args: args.clone(),
+                    env: env.clone(),
                     // The program's own directory (ADR-0010), resolved at the spawn.
                     working_dir: None,
                     // Nothing: this kind knows no agent, so it knows no directory an
@@ -128,14 +171,22 @@ impl Plugin for CommandPlugin {
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
     }
+
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
         refuse_retired(name, &settings)?;
         let _: CommandSettings = settings
+            .try_into()
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// `command` is gone from these settings — the core resolves it (ADR-0032) — so a block that
+    /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
         let table: toml::Table = toml::from_str(

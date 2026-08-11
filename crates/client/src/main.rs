@@ -1,4 +1,5 @@
 //! Entry point: parse the CLI (ADR-0028) and hand off — `run` to the daemon runtime, the
+//! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
 //! Agent's identity, and runs the transport the endpoint selects (ADR-0023) until stopped.
 
 use std::path::{Path, PathBuf};
@@ -11,6 +12,23 @@ use client::service::runtime::{self, RunSpec};
 use client::service::{layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel};
 
 fn main() {
+    // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
+    // names a destination: the log bridge for events (ADR-0022) and the span layer for traces
+    // (ADR-0022). Both have to exist from the start: `tracing` takes one subscriber for the
+    // process, and it is installed long before any destination is known.
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let (spans, span_handle) = tracing_subscriber::reload::Layer::new(None);
+    client::telemetry::hold_span_layer(span_handle);
+    let (bridge, bridge_handle) = tracing_subscriber::reload::Layer::new(None);
+    client::telemetry::hold_log_bridge(bridge_handle);
+    // The slots go on first, spans before logs: a reloadable layer is typed for the subscriber it
+    // attaches to, and the registry is the only one of these that stays the same shape when a slot
+    // is filled — so the layer that carries that subscriber in its own type goes on the bare one.
+    tracing_subscriber::registry()
+        .with(spans)
+        .with(bridge)
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
@@ -50,11 +68,17 @@ fn main() {
             run_command(spec, args)
         }
         Some(Command::Service { action }) => service_command(&cli.config, config_named, &action),
+        // Answer for this executable so a self-update can prove it before pointing at it
+        // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
+        // configuration, no state directory, and no Server.
+        Some(Command::SelfCheck) => {
             println!(
                 "{}{}",
                 selfupdate::SELF_CHECK_TOKEN,
                 opamp::version::current()
             );
+            Ok(())
+        }
     };
     if let Err(e) = result {
         eprintln!("{e}");
@@ -161,7 +185,20 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
 
     if args.interactive {
         config_init::run(&config_path)?;
+    } else if let Some(endpoint) = &args.endpoint {
+        // The same file, from an answer given rather than asked for (ADR-0029): this is the branch
+        // the MSI's custom action and a `%post` script take. The self-update consent travels with
+        // it — standing unless this install was told to withdraw it (ADR-0020).
+        let self_update = if args.no_self_update {
+            None
+        } else {
+            Some(
+                args.self_update_package
+                    .as_deref()
                     .unwrap_or(client::supervisor::agent::CLIENT_AGENT_TYPE),
+            )
+        };
+        config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service starts, dials the development default, and manages nothing.

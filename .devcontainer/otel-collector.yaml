@@ -1,0 +1,91 @@
+# One receiver, one exporter — the Collector is the only thing an Agent needs to know about, and
+# since the move to ClickHouse it is also the only thing that knows where the data lands.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Guards the Collector against an Agent that floods it; checked before the batcher on purpose.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    username: otel
+    password: otel
+    database: otel
+    # The exporter owns the schema. It runs CREATE TABLE IF NOT EXISTS on start, which is why
+    # nothing here ships a .sql file to keep in step with the exporter's own column list — a
+    # hand-maintained copy would drift on the next Collector upgrade and fail at insert time.
+    create_schema: true
+    # Retention, as a TTL on the tables it creates. This is the whole retention story now: one
+    # setting instead of Prometheus' `--storage.tsdb.retention`, Loki's `retention_period`, and
+    # Tempo's `block_retention` — which is one of the reasons for a single store.
+    ttl: 24h
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    # Named explicitly, though these are the defaults: the dashboards query
+    # `otel_metrics_gauge` by name, so the coupling should be visible in both places.
+    metrics_tables:
+      gauge:
+        name: otel_metrics_gauge
+      sum:
+        name: otel_metrics_sum
+      summary:
+        name: otel_metrics_summary
+      histogram:
+        name: otel_metrics_histogram
+      exponential_histogram:
+        name: otel_metrics_exponential_histogram
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+  # Uncomment `debug` in a pipeline below to see what actually arrives.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]

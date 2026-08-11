@@ -3,12 +3,76 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpAMP Fleet</title>
     <style>
+      /* Dark by default, after GitKraken: deep desaturated navy surfaces, a teal-green primary,
+         and violet for the one thing that is *selected*. Dark is the ground state rather than the
+         alternative, because that palette is the whole of the look being borrowed — a page that
+         came up light would show none of it. Light is a deliberate switch away, below; the system
+         preference is not consulted, so what an operator last chose is what they get.
+
+         The exact values are ours: GitKraken ships its own inside the application
+         (`dark.jsonc-default`) and publishes none, so this is the character, not a copy. */
       :root {
+        color-scheme: dark;
+        --bg: #10131c;
+        --panel: #181c28;
+        --border: #252b3a;
+        --border-strong: #333a4e;
+        --text: #e6eaf4;
+        --muted: #8b95ad;
+        --link: #3fd0bb;
+        --primary: #2dd4bf;
+        /* What is legible *on* the primary — bright teal carries dark text, not white. */
+        --primary-fg: #06231f;
+        --primary-hover: #5fe0d0;
+        /* The second accent: what is picked, expanded, or being edited. */
+        --accent: #6f4cf5;
+        --accent-fg: #ffffff;
+        --row-hover: #1c2130;
+        --chip-bg: #222839;
+        --chip-fg: #aab3c8;
+        --ok-bg: #0f7d5f;
         --ok-fg: #ffffff;
+        --soft-green-bg: #0f2f28;
+        --soft-green-fg: #4fd8ab;
+        --soft-gray-bg: #222839;
+        --soft-gray-fg: #9aa4bb;
+        --soft-amber-bg: #33280f;
+        --soft-amber-fg: #e6b45e;
+        --soft-red-bg: #331a1e;
+        --soft-red-fg: #f2908b;
         --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
+      /* The only other state. Dark needs no rule of its own — :root above *is* dark, so the
+         toggle either sets this attribute or removes it. */
+      :root[data-theme="light"] {
+          color-scheme: light;
+          --bg: #f3f6f9;
+          --panel: #ffffff;
+          --border: #e1e6ee;
+          --border-strong: #ccd3e0;
+          --text: #16202e;
+          --muted: #5b6678;
+          --link: #0a7568;
+          --primary: #0b7d70;
+          --primary-fg: #ffffff;
+          --primary-hover: #086158;
+          --accent: #6d4aff;
+          --accent-fg: #ffffff;
+          --row-hover: #eef7f6;
+          --chip-bg: #eaeef4;
+          --chip-fg: #46516a;
+          --ok-bg: #0c8062;
           --ok-fg: #ffffff;
+          --soft-green-bg: #e2f6ef;
+          --soft-green-fg: #0a7259;
+          --soft-gray-bg: #eaeef4;
+          --soft-gray-fg: #54607a;
+          --soft-amber-bg: #fdf3e2;
+          --soft-amber-fg: #8a5d11;
+          --soft-red-bg: #fdecec;
+          --soft-red-fg: #b33227;
         }
 
       * { box-sizing: border-box; }
@@ -28,12 +92,38 @@
         border: 0; border-radius: 8px; padding: 9px 16px;
         font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
       }
+      .btn-primary { background: var(--primary); color: var(--primary-fg); }
       .btn-primary:hover { background: var(--primary-hover); }
       .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
       .btn-ghost:hover { background: var(--row-hover); }
+      /* The rollout act, wearing the Healthy badge's green and its shape: the same soft green the
+         table already uses for "this is well", pressable. Hover inverts it, as the ✕ disc does. */
+      .btn-ok {
+        background: var(--soft-green-bg); color: var(--soft-green-fg);
+        border-radius: 999px; padding: 3px 10px; font-size: 12px;
+      }
+      .btn-ok:hover { background: var(--soft-green-fg); color: var(--soft-green-bg); }
+      /* A button sized to sit inside a form line rather than to head one. */
+      .btn-sm { padding: 4px 12px; font-size: 12px; }
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
+      /* Tabs: the three managements — Agents, Packages, Configurations — one on screen at a time.
+         The active tab's underline is the primary, because the tab bar is where the next press
+         lands; violet stays reserved for what is selected *within* a section. */
+      .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+      .tab {
+        border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600;
+        padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+      }
+      .tab:hover { color: var(--text); }
+      .tab.active { color: var(--text); border-bottom-color: var(--primary); }
+      .tab .num { margin-left: 7px; }
+      .tab-panel { display: none; }
+      .tab-panel.active { display: block; }
+
+      /* Configurations and Packages editors — each fills its own tab */
+      .config { padding: 16px; margin-bottom: 20px; }
       .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
       .config-fields { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
       .config-fields input {
@@ -42,11 +132,20 @@
         font-family: var(--mono);
       }
       .config-fields input::placeholder { color: var(--muted); }
+      /* A field whose value is a short token, so four of them fit one row. */
+      .config-fields input.narrow { flex: 0 1 190px; min-width: 150px; }
       /* A field the action refuses to run without. Marked only while it is empty — once it holds
          a value there is nothing left to point at, and a border that kept shouting would be the
          same noise as no marking at all. */
       .config-fields input.required:placeholder-shown { border-color: var(--soft-amber-fg); }
+      /* A field that stands alone on its line and should not stretch across it — the package name,
+         which everything on the lines below is a statement about. */
+      .config-fields input.quarter { flex: 0 1 25%; min-width: 180px; }
+      /* Selected is the second accent, not the primary: the primary is what you press, this is
+         what you are looking at. */
+      .chip.selected { background: var(--accent); color: var(--accent-fg); }
       .chip.clickable { cursor: pointer; }
+      .pill.clickable { cursor: pointer; }
       textarea {
         width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
         border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
@@ -70,6 +169,20 @@
       .filters input::placeholder { color: var(--muted); font-family: var(--mono); }
 
       .table-wrap { overflow-x: auto; }
+      /* Fixed layout: the table is exactly as wide as its container and never wider — content
+         wraps or ellipsizes inside its column instead of growing a horizontal scrollbar. The
+         narrow columns are sized in px for the one kind of value they hold; Name gets a share of
+         the whole; what remains is split between the columns whose content is genuinely
+         elastic (Operating System is px too — its values repeat from a small set). The wrap's
+         overflow-x stays as the fallback for windows too narrow for any division. */
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; table-layout: fixed; }
+      th[data-key="name"] { width: 16%; }
+      th[data-key="version"] { width: 70px; }
+      th[data-key="os"] { width: 130px; }
+      th.col-network { width: 136px; }
+      th[data-key="config"] { width: 110px; }
+      th[data-key="seq"] { width: 50px; }
+      th[data-key="seen"] { width: 88px; }
       thead th {
         text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border);
         color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; user-select: none;
@@ -77,7 +190,23 @@
       thead th.sortable { cursor: pointer; }
       thead th.sortable:hover { color: var(--text); }
       th .arrow { opacity: .55; font-size: 10px; }
+      /* overflow hidden: under the fixed layout a value that fits no line of its column — one
+         overlong chip, an unbroken token — is clipped at the cell's edge rather than written
+         across the neighbour; the full value stays in the cell's own tooltip or details. */
+      tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
       tbody tr:last-child td { border-bottom: 0; }
+      /* An agent is a row — and, when it is the current one, the rows under it that carry its
+         sets. The separator then belongs after the last of them, or the agent would read as
+         several; a row without detail rows keeps its own. */
+      tbody tr.agent { cursor: pointer; }
+      tbody tr.agent.current td, tbody tr.detail td { border-bottom: 0; }
+      tbody tr.detail.last td { border-bottom: 1px solid var(--border); }
+      /* The current Agent: violet, because it is what is being looked at — the accent, not the
+         primary — carried as a bar on the row's edge so no cell content has to change color. */
+      tbody tr.agent.current td { background: var(--row-hover); }
+      tbody tr.agent.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
+      tbody tr.detail td { padding-top: 0; padding-bottom: 4px; }
+      tbody tr.detail:hover { background: transparent; }
       tbody tr:hover { background: var(--row-hover); }
       td.chk, th.chk { width: 34px; }
       input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
@@ -85,32 +214,84 @@
       .name { color: var(--link); font-weight: 600; text-decoration: none; }
       .name:hover { text-decoration: underline; }
       .sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 2px; }
+      /* The UID is long and rarely read, but must be selectable when it is: one line, its own text
+         selection, and a size that keeps it under the name rather than beside it. */
+      .uid { font-size: 11px; opacity: 0.75; white-space: nowrap; user-select: all; overflow: hidden; text-overflow: ellipsis; }
 
       .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      /* The ✕ riding inside the Disconnected badge: a small solid disc in the badge's own colors
+         inverted, so it reads as a control rather than dissolving into the label beside it. */
+      .pill .forget-btn {
+        cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border-radius: 50%; font-size: 11px; font-weight: 700;
+        background: var(--soft-red-fg); color: var(--soft-red-bg);
+      }
+      .pill .forget-btn:hover { filter: brightness(1.15); }
+      /* Sized for its widest state — "Disconnected" with the ✕ — so the column does not breathe
+         when an Agent's connection flips; the Stale pill wraps below rather than widening it. */
+      th.status, td.status { width: 180px; min-width: 180px; }
       .pill.solid-green { background: var(--ok-bg); color: var(--ok-fg); }
+      /* The badge that heads a detail row. The accent, because these rows exist only under the
+         current Agent — the same violet that marks its row as the one being looked at. */
+      .pill.violet { background: var(--accent); color: var(--accent-fg); }
       .pill.green { background: var(--soft-green-bg); color: var(--soft-green-fg); }
       .pill.gray { background: var(--soft-gray-bg); color: var(--soft-gray-fg); }
       .pill.amber { background: var(--soft-amber-bg); color: var(--soft-amber-fg); }
       .pill.red { background: var(--soft-red-bg); color: var(--soft-red-fg); }
       .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
+      .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .cfg.cfg-open { cursor: pointer; }
+      .cfg.cfg-open:hover { color: var(--text); }
+      /* Text that is a document rather than a cell — an effective configuration, the reason a
+         Supervisor will not start — opens whole in this dialog, where it scrolls inside its own
+         box. A row stays one line high whatever the text is: a column that grows to fit the
+         longest error pushes every other row off the screen, and the error is read once. */
+      .text-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; padding: 16px 18px; width: min(760px, 92vw); }
+      .text-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+      .text-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+      .text-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
       .empty { padding: 40px 0; text-align: center; color: var(--muted); }
       .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }
     </style>
+    <script>
+      // Before the first paint, or a stored choice of light would show dark for a frame and then
+      // swap. Only light needs setting: dark is what the stylesheet already is. The button below
+      // re-applies the same value once the page is up.
+      try {
+        if (localStorage.getItem("opamp-fleet-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch (e) { /* storage denied — dark, the stylesheet's ground state */ }
+    </script>
   </head>
   <body>
     <div class="wrap">
       <div class="page-head">
         <div>
+          <h1>OpAMP Fleet</h1>
+          <p>Monitor, configure, and manage your OpAMP fleet · <a class="name" href="/api/v1/docs" target="_blank" rel="noopener">API docs</a></p>
         </div>
         <div style="display: flex; gap: 10px;">
+          <button id="theme-toggle" class="btn btn-ghost" title="Theme">☾ Dark</button>
         </div>
       </div>
 
+      <!-- Each management is a tab, and the counts sit on the tabs themselves — so the numbers an
+           operator scans for ("how many agents, how many packages") are visible from every tab,
+           not only from the one that holds the list. -->
+      <nav class="tabs">
+        <button class="tab" data-tab="agents">Agents<span class="num" id="count">0</span></button>
+        <button class="tab" data-tab="packages">Packages<span class="num" id="package-count">0</span></button>
+        <button class="tab" data-tab="configurations">Configurations<span class="num" id="config-count">0</span></button>
+      </nav>
+
+      <div id="panel-configurations" class="tab-panel">
       <section id="config-card" class="card config">
+        <h2>Configurations — each proposes itself to the Agents of its type that its Selector matches; only a rollout act distributes</h2>
         <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
@@ -121,29 +302,102 @@
           <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
+        <textarea id="config" placeholder="The configuration body — saved only; distributed by a rollout act, per agent or to all matching…"></textarea>
         <div class="config-actions">
+          <button id="save" class="btn btn-primary" title="Save the form as this Configuration. Nothing is distributed by this press (ADR-0014); every agent keeps the revision its assignment pins, and the Agents tab shows the save waiting.">Save</button>
+          <button id="config-rollout" class="btn btn-ghost" title="Roll the saved revision out to every agent it currently fits and aims at — the press that changes the fleet. Agents that appear later wait for their own act (Agents tab).">Roll out to all matching</button>
           <button id="delete" class="btn btn-ghost">Delete</button>
           <span id="config-state" class="sub"></span>
           <span id="config-error" class="err"></span>
         </div>
       </section>
+      </div>
 
+      <!-- Packages as Sets (ADR-0019): one table of Sets, and a detail form for the *current* one.
+           A Set is identified by name, agent type, and version — stated at creation, never edited;
+           it holds one entry per platform. Saving never distributes (ADR-0014): a Set reaches an
+           agent only through a rollout act. The table is the master, the form the detail; while
+           nothing is current the form is not on screen. -->
+      <div id="panel-packages" class="tab-panel">
+      <div class="card filters" style="align-items: center; gap: 12px;">
+        <button id="set-create" class="btn btn-primary"
+                title="Define a new Set: name, agent type, and version — its identity — plus a Selector. Saved only: nothing reaches any agent until a rollout act names the Set.">＋ Create</button>
+        <span id="sets-result" class="sub"></span>
+        <span id="sets-error" class="err"></span>
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 18%">Agent type</th>
+              <th style="width: 110px">Version</th>
+              <th>Platforms</th>
+            </tr>
+          </thead>
+          <tbody id="sets"></tbody>
+        </table>
+        <div id="sets-empty" class="empty">No package sets yet. Create one.</div>
+      </div>
+
+      <!-- The detail form: exactly as capable as the API, one rule (the Server's), rendered. The
+           identity fields are writable only while creating; on an existing Set they are the frozen
+           (ADR-0014: the press that changes the fleet is never the press that carries the bytes). -->
+      <section id="set-detail" class="card config" style="display: none">
+        <h2 id="set-detail-title">Package set</h2>
         <div class="config-fields">
+          <input id="set-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib)" autocomplete="off"
+          <input id="set-version" class="narrow" placeholder="version (e.g. 1.2.3)" autocomplete="off"
+                 title="The version every entry of this Set shares. Part of the Set's identity — a new version is a new Set." />
         </div>
         <div class="config-fields">
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
+          <span id="set-state" class="sub"></span>
+        </div>
+        <div id="set-entries" class="chips" style="margin-bottom: 10px"></div>
+        <div id="entry-editor">
+        <div class="config-fields">
+          <input id="entry-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
+                 title="The operating system this entry is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
+          <input id="entry-arch" class="narrow" placeholder="arch: amd64, arm64" autocomplete="off"
+                 title="The architecture, as the agent reports host.arch. Other spellings (x86_64, aarch64) are accepted and stored canonically." />
         </div>
         <div class="config-fields">
-        </div>
-        <div class="config-fields">
+          <input id="entry-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
+          <input id="entry-sha256" placeholder="sha256 of the artifact (required with a source url)" autocomplete="off" />
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
+          <input id="entry-file" type="file" style="color: var(--muted); font-size: 13px;" />
+          <button id="entry-add" class="btn btn-ghost btn-sm"
+                  title="Store this entry into the set now — the chosen file, or the source url with its sha256, for the platform named above. Replaces the entry already held for that platform. While a new set is being created, OK is what saves the set and this entry together.">＋ Add entry</button>
+          <span class="sub">a file or source url named <code>&lt;name&gt;_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;.7z</code> fills the platform — and, while creating, whatever of the name, agent type, and version is still empty (<code>-</code> or <code>_</code>)</span>
         </div>
+        </div>
+        <!-- Delete stands alone on the left — the one press that destroys, kept away from the
+             two that finish an edit. OK and Cancel sit on the right, where a form is concluded.
+             The rollout act is not here at all: it lives on the Set's table row (ADR-0014's
+             seam — the press that changes the fleet is never the press that carries the bytes). -->
         <div class="config-actions">
+          <button id="set-delete" class="btn btn-ghost"
+                  title="Delete this Set — entries, artifacts, metadata, and every per-agent assignment that referenced it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
+          <span id="set-error" class="err" style="flex: 1"></span>
+          <button id="set-cancel" class="btn btn-ghost" style="margin-left: auto"
+                  title="Discard the form's changes: back to the stored state, or close the form when it was creating a new Set.">Cancel</button>
+          <button id="set-ok" class="btn btn-primary"
+                  title="Save the form: creates the Set or updates its Selector — and, when a file or source url is given above, stores that entry too. Nothing is distributed by this press (ADR-0014).">OK</button>
         </div>
       </section>
+      </div>
 
+      <div class="card filters" style="align-items: center; gap: 12px;">
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 18%">Name</th>
         <div class="config-fields">
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
@@ -154,11 +408,18 @@
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
         <div class="config-actions">
+      <div id="panel-agents" class="tab-panel">
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
+        <span id="fleet-error" class="err"></span>
       </div>
 
+      <div id="selection-bar" class="card filters" style="display: none; align-items: center; gap: 12px">
+        <span id="selection-count" class="sub"></span>
+        <button id="restart-selected" class="btn btn-ghost">⟳ Restart selected</button>
+        <span id="selection-result" class="sub"></span>
+      </div>
 
       <div class="card table-wrap">
         <table>
@@ -168,20 +429,83 @@
               <th class="sortable" data-key="name">Name <span class="arrow"></span></th>
               <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
+              <th class="col-network">Network</th>
               <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
+              <th>Rollout</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
+              <th class="sortable" data-key="health">Health <span class="arrow"></span></th>
+              <th class="sortable status" data-key="connected">Status <span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="agents"></tbody>
         </table>
         <div id="empty" class="empty">No agents connected yet. Start a Client.</div>
       </div>
+      </div>
     </div>
+
+    <!-- Text too long for a cell, opened from the cell that summarises it: an effective
+         configuration from its truncated column, an error from the red badge that reports it. A
+         native <dialog>:
+         the browser supplies the backdrop and the Esc-to-close, nothing here reinvents them. -->
+    <dialog id="text-dialog" class="text-dialog">
+      <div class="text-dialog-head">
+        <strong id="text-dialog-title"></strong>
+        <button id="text-dialog-close" class="btn btn-ghost">Close</button>
+      </div>
+      <pre id="text-dialog-body" class="text-full"></pre>
+    </dialog>
 
     <script>
       const $ = (id) => document.getElementById(id);
+
+      // Theme: dark or light, and nothing else. Dark is what the stylesheet is, so light is the
+      // one state that sets an attribute — the system preference is never consulted, which is why
+      // a first visit is dark wherever it happens. The choice is remembered per browser; there is
+      // nothing per-operator on the server to keep it in.
+      const THEME_KEY = "opamp-fleet-theme";
+      const THEME_LABEL = { dark: "☾ Dark", light: "☀ Light" };
+      function storedTheme() {
+        // Storage can be denied outright (private mode, a locked-down profile). Dark is then the
+        // answer every time, which is the stylesheet's own ground state and so costs nothing.
+        try {
+          return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+        } catch (e) {
+          return "dark";
+        }
+      }
+      function applyTheme(theme) {
+        if (theme === "light") document.documentElement.dataset.theme = "light";
+        else delete document.documentElement.dataset.theme;
+        const other = theme === "light" ? "dark" : "light";
+        $("theme-toggle").textContent = THEME_LABEL[theme];
+        $("theme-toggle").title = `Showing ${theme} — click for ${other}`;
+        try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* not remembered, still applied */ }
+      }
+      $("theme-toggle").addEventListener("click", () => {
+        applyTheme(storedTheme() === "light" ? "dark" : "light");
+      });
+      applyTheme(storedTheme());
+
+      // Tabs: which of the three managements is on screen. The choice lives in the URL's hash
+      // rather than in storage — unlike the theme it is a place, not a preference, so a reload
+      // comes back to the same tab and a link can point a colleague straight at #packages. An
+      // unknown hash falls back to Agents, the tab the fleet is watched from.
+      function showTab(name) {
+        if (!TABS.includes(name)) name = "agents";
+        document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+        for (const t of TABS) $(`panel-${t}`).classList.toggle("active", t === name);
+        document.title = `${name[0].toUpperCase()}${name.slice(1)} · OpAMP Fleet`;
+        // replaceState, not assignment: stepping through tabs is browsing one page, and Back
+        // should leave it, not replay every tab visited on the way.
+        if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+      }
+      document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+      window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+      showTab(location.hash.slice(1));
+
       let agents = [];
       let filterText = "";
       let sortKey = "name";
@@ -191,7 +515,19 @@
       // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
       const expandedComponents = new Set();
+      // The current Agent — the one whose detail rows are on screen. One at a time, toggled by
+      // pressing its row: the table stays one line per Agent until an operator asks about one,
+      // which is what keeps a fleet of fifty scannable. Distinct from the checkboxes, which
+      // collect Agents for a bulk action and must not fold rows open along the way.
+      let currentAgent = null;
+      // Which Agents the operator has ticked. Kept by instance_uid rather than by row, so a
+      // selection survives the two-second refresh instead of being wiped mid-decision.
+      const selectedAgents = new Set();
 
+      // Escapes every character that can break out of HTML text or an attribute value — including
+      // ' and ` so the safety does not depend on every attribute staying double-quoted. Agent-
+      // reported strings (names, attributes, health text) flow through here before reaching the DOM.
+      const esc = (s) => (s ?? "").toString().replace(/[&<>"'`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
       function ago(ms) {
         const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
         if (s < 60) return s + "s ago";
@@ -199,8 +535,27 @@
         return Math.round(s / 3600) + "h ago";
       }
 
+      // What to call an Agent (ADR-0012): the operator's name for it, falling back to its type and
+      // then to the UID. A foreign OpAMP client reports no instance name, and every Collector of
+      // one distribution reports the same type — so both steps are needed for a row to stay
+      // distinguishable from its neighbours.
+      const displayName = (a) => a.service_instance_name || a.service_name || a.instance_uid;
+
+      // The UID under the name, spelled out rather than left to a tooltip: it is the identity every
+      // REST call and every log line names an Agent by, so an operator reading a row has to be able
+      // to copy it. Suppressed when it is already the row's title — that is displayName's last
+      // fallback, and one line saying it twice reads as two Agents.
+      const uidLine = (a) =>
+        displayName(a) === a.instance_uid
+          ? ""
+          : `<div class="sub uid" title="the instance UID this Agent reports — what the Server keys it by">${esc(a.instance_uid)}</div>`;
+
       const sortVal = {
+        name: displayName,
         connected: (a) => (a.connected ? 1 : 0),
+        // Unhealthy first, then never-reported, then healthy: the sort exists to bring trouble
+        // to the top, and an Agent that reports nothing sits between finding and all-clear.
+        health: (a) => (a.healthy ? 2 : a.health_status || a.health_error ? 0 : 1),
         config: (a) => a.remote_config_status,
         version: (a) => a.service_version,
         os: (a) => a.os,
@@ -209,10 +564,53 @@
       };
 
       function statusPill(a) {
+        // Two facts, not one (ADR-0013): the pill says whether a connection is open — behind a
+        // Gateway, the Gateway's — and "Stale" beside it says the Agent itself stopped talking.
+        // Disconnected is soft red, not gray: a link that is down is a finding, not an absence —
+        // but soft, because behind a Gateway it can be routine (ADR-0013); FAILED keeps the
+        // stronger reading as the one hard error in the row.
+        //
+        // The badge carries a ✕: a disconnected row is where forgetting is usually decided, so
+        // the remedy rides on the diagnosis. A shortcut, not the rule — the details keep the
+        // forget chip for *every* Agent, because whether one may be forgotten is a question about
+        // silence and not about this flag (ADR-0013): an Agent behind a Gateway reads Connected
+        // however dead its host is, and must stay forgettable.
+        const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
+          : `<span class="pill red"><span class="dot"></span>Disconnected<span class="forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕</span></span>`;
+        return a.stale
+          ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
+          : base;
+      }
+      // The third fact beside the two the Status pill carries (ADR-0013): Connected says a
+      // connection is open, Stale says the Agent stopped talking — and this pill says whether
+      // what the connection carries is actually running. A Supervisor whose Managed Process
+      // will not start is exactly the case that needs the split: its row reads Connected,
+      // truthfully — the Supervisor lives — and only the health says the process does not.
+      // The red pill wears the Agent's own status string ("no process installed", …): the
+      // Baseline defines no status values, so the Agent's words are the most an operator can
+      // be told. Gray when no health was ever reported — absence of a report is not a finding,
+      // and a Foreign Agent that never promised ReportsHealth must not read as broken.
+      // A red badge and nothing else. The reason a process will not start is a paragraph — a
+      // linker error, a validation run's whole command line — and printed into the cell it makes
+      // that row twenty lines tall, which pushes every other Agent off the screen for a text that
+      // is read once and then acted on. So the row keeps the finding and the click carries the
+      // reason, the way the effective configuration column already works. Without an error there
+      // is nothing to open, and the badge stays a plain one rather than lying about being
+      // clickable.
+      function errorPill(a, kind, label, error) {
+        if (!error) return `<span class="pill red">${label}</span>`;
+        return `<span class="pill red clickable err-open" data-uid="${esc(a.instance_uid)}" data-kind="${kind}" title="Click to see the error">${label}</span>`;
+      }
+      function healthPill(a) {
+        if (a.healthy) return `<span class="pill green">Healthy</span>`;
+        if (a.health_status || a.health_error)
+          return errorPill(a, "health", esc(a.health_status) || "Unhealthy", a.health_error);
+        return `<span class="pill gray">—</span>`;
       }
       function configPill(a) {
         if (a.remote_config_status === "FAILED")
+          return errorPill(a, "config", "Failed", a.remote_config_error);
         if (!a.in_sync) return `<span class="pill amber">Syncing…</span>`;
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
@@ -224,7 +622,23 @@
         const n = a.non_identifying_attributes || {};
         return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
       }
+      // The host's addresses (ADR-0012), first of each on the row: the row answers "which host is
+      // this" at a glance, while the full lists stay in the details chips below and in the
+      // tooltip — a host can hold many addresses, and a column is as wide as its widest cell.
+      function networkOf(a) {
         const n = a.non_identifying_attributes || {};
+        const ips = (n["host.ip"] || "").split(", ").filter(Boolean);
+        const macs = (n["host.mac"] || "").split(", ").filter(Boolean);
+        if (!ips.length && !macs.length) return "—";
+        const more = (list) => (list.length > 1 ? ` +${list.length - 1}` : "");
+        const title = [ips.length ? `IP: ${ips.join(", ")}` : "", macs.length ? `MAC: ${macs.join(", ")}` : ""].filter(Boolean).join("\n");
+        return `<span title="${esc(title)}">${esc(ips[0]) || "—"}${more(ips)}</span><div class="sub" title="${esc(title)}">${esc(macs[0]) || ""}${more(macs)}</div>`;
+      }
+      // Everything about an agent that is a set rather than a value: reported attributes, the
+      // operator's labels (ADR-0013), the per-row actions, and its package pills. Not named
+      // `labels` — since ADR-0013 that word means the 🏷 chips alone, and a row headed with it
+      // reads as if a package status were one.
+      function details(a) {
         const chips = [];
         if (a.transport) chips.push(`<span class="chip">transport: ${esc(a.transport)}</span>`);
         if (a.health_status) chips.push(`<span class="chip">status: ${esc(a.health_status)}</span>`);
@@ -233,6 +647,10 @@
         // host.arch appear in the OS column too, and that is not a duplicate — there they are the
         // artifact's platform (`linux-amd64`, what an upload is keyed by), here they are attribute
         // pairs (`os.type: linux`, what a selector matches). Two questions, two spellings.
+        // By key, so the same attribute sits in the same place on every row and the eye can go
+        // straight to it. Sorted here rather than trusted from the server, which orders them by a
+        // map it is free to change.
+        for (const [k, v] of Object.entries(a.non_identifying_attributes || {}).sort(([x], [y]) => x.localeCompare(y))) {
           chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
         }
         const caps = a.capabilities || [];
@@ -248,6 +666,16 @@
         if (caps.includes("AcceptsRestartCommand")) {
           chips.push(`<span class="chip clickable restart-btn" data-uid="${esc(a.instance_uid)}" title="Restart the managed process">⟳ restart</span>`);
         }
+        // Offered on every row rather than pre-filtered (ADR-0013): whether an Agent may be
+        // forgotten is a question about silence, which this view does not carry. The Server holds
+        // the rule and says no with a reason — one place to be right instead of two to drift.
+        chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
+        // The operator's labels (ADR-0013): matched by Selectors exactly like a reported attribute,
+        for (const [key, value] of Object.entries(a.labels || {})) {
+          const dead = (a.shadowed_labels || []).includes(key);
+          chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
+        }
+        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused.">🏷 labels…</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
         }
@@ -266,14 +694,42 @@
           }
           chips.push(`<span class="pill ${cls}" title="${title}">${label}</span>`);
         }
+        // The chips only — the row below the agent supplies the `.chips` box they lay out in, and
+        // a second one nested inside it would wrap them as a single item rather than individually.
+        return chips.join("");
       }
+      // The rollout column (ADR-0014): what is rolled out to this Agent (its assignments), what
+      // waits for the operator's press, and the press itself. The Server never rolls out on its
+      // own — a save, a Selector edit, a label move, or this Agent enrolling only ever adds to
+      // the waiting list here.
+      function rolloutCell(a) {
+        const chips = [];
+        for (const n of a.assigned_configurations || []) {
+          chips.push(`<span class="chip" title="rolled out to this agent — the pinned revision it is offered">${esc(n)}</span>`);
+        }
+        }
+        for (const p of a.pending_configurations || []) {
+          chips.push(`<span class="pill amber" title="${p.change === "update" ? "a newer save of this configuration waits for a rollout act" : "this configuration matches the agent and waits for its first rollout act"}">⏳ ${esc(p.name)}${p.change === "update" ? " ✎" : ""}</span>`);
+        }
+        for (const p of a.pending_packages || []) {
+        }
+        const waiting = (a.pending_configurations || []).length + (a.pending_packages || []).length;
+        if (waiting) {
+          chips.push(`<span class="chip clickable agent-rollout-btn" data-uid="${esc(a.instance_uid)}" title="Roll out everything waiting to this agent — the one press that distributes (ADR-0014)">⤴ roll out</span>`);
+        }
+        if (!chips.length) return `<span class="pill gray">none</span>`;
+        return `<div class="chips">${chips.join("")}</div>`;
       }
 
       function matches(a) {
         if (!filterText) return true;
+        // Labels are searched beside the reported attributes, in the same `key=value` spelling:
+        // the fleet by (ADR-0013).
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
+          .concat(Object.entries(a.labels || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
+        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.health_error, a.healthy ? "healthy" : "", a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -288,20 +744,48 @@
         $("count").textContent = agents.length;
         $("empty").style.display = rows.length ? "none" : "block";
         $("agents").innerHTML = rows.map((a) => {
+          const current = a.instance_uid === currentAgent;
           const row = `
+          <tr class="agent${current ? " current" : ""}" data-uid="${esc(a.instance_uid)}">
+            <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
+            <td><a class="name" href="#">${esc(displayName(a)) || "agent"}</a><div class="sub">${esc(a.service_name) || "no type reported"}</div>${uidLine(a)}</td>
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
             <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
+            <td>${networkOf(a)}</td>
+            <td>${configPill(a)}</td>
+            <td>${rolloutCell(a)}</td>
+            <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
+            <td>${healthPill(a)}</td>
+            <td class="status">${statusPill(a)}</td>
           </tr>`;
+          // Everything about an agent that is a *set* rather than a value goes under its row
+          // rather than into a column of its own: a column has to be as wide as its widest cell,
+          // and one agent with a dozen attributes then pushed every other column off the screen.
+          const detailRow = ([label, chips], i, all) => `
+          <tr class="detail${i === all.length - 1 ? " last" : ""}">
             <td class="chk"></td>
+            <td colspan="11"><div class="chips" style="padding: 2px 0 6px">
+              <span class="pill violet">${label}</span>
               ${chips || `<span class="chip">none</span>`}
             </div></td>
           </tr>`;
+          // Only the current Agent carries its sets on screen — every other one is its row alone,
+          // and the per-Agent actions (restart, forget, labels) travel with the details, so making
+          // an Agent current is also what puts its controls in reach.
+          if (!current) return row;
+          const below = [["details", details(a)]];
           if (expandedCaps.has(a.instance_uid)) {
+            // A copy, sorted: the list arrives in the order of the protocol's capability bitmask,
+            // which is an implementation detail of the wire and not a reading order. `caps` in
+            // `details` is searched by name, so the original must not be reordered under it.
+            below.push(["declared capabilities", [...(a.capabilities || [])].sort().map((c) => `<span class="chip">${esc(c)}</span>`).join("")]);
           }
           if (expandedComponents.has(a.instance_uid)) {
+            below.push(["available components", [...(a.available_components || [])].sort().map((c) => `<span class="chip">${esc(c)}</span>`).join("")]);
           }
+          return row + below.map(detailRow).join("");
         }).join("");
         document.querySelectorAll("th.sortable").forEach((th) => {
           const arrow = th.querySelector(".arrow");
@@ -319,10 +803,61 @@
       });
       $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
       $("agents").addEventListener("click", (e) => {
+        const rolloutBtn = e.target.closest(".agent-rollout-btn");
+        if (rolloutBtn) {
+          // The empty body releases everything the row shows as waiting (ADR-0014).
+          fetch(`/api/v1/agents/${encodeURIComponent(rolloutBtn.dataset.uid)}/rollout`, { method: "POST" })
+            .then(async (res) => {
+              $("fleet-error").textContent = res.ok
+                ? ""
+                : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+              refreshAgents();
+            });
+          return;
+        }
         const restart = e.target.closest(".restart-btn");
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
             .then(() => refreshAgents());
+          return;
+        }
+        const label = e.target.closest(".label-btn");
+        if (label) {
+          const uid = label.dataset.uid;
+          const current = (agents.find((a) => a.instance_uid === uid) || {}).labels || {};
+          const asText = Object.entries(current).map(([k, v]) => `${k}=${v}`).join(", ");
+          const answer = prompt("Labels for this Agent — key=value, comma separated. Empty clears them.", asText);
+          if (answer === null) return;
+          const labels = {};
+          for (const pair of answer.split(",").map((p) => p.trim()).filter(Boolean)) {
+            const at = pair.indexOf("=");
+            if (at < 1) { $("fleet-error").textContent = `not a key=value pair: ${pair}`; return; }
+            labels[pair.slice(0, at).trim()] = pair.slice(at + 1).trim();
+          }
+          fetch(`/api/v1/agents/${encodeURIComponent(uid)}/labels`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ labels }),
+          }).then(async (res) => {
+            // A refusal is a normal answer — a key the Agent reports itself — so it is shown.
+            $("fleet-error").textContent = res.ok
+              ? ""
+              : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refreshAgents();
+          });
+          return;
+        }
+        const forget = e.target.closest(".forget-btn");
+        if (forget) {
+          fetch(`/api/v1/agents/${encodeURIComponent(forget.dataset.uid)}`, { method: "DELETE" })
+            .then(async (res) => {
+              // A refusal is a normal answer here — the Agent is still reporting — so it is shown
+              // rather than swallowed.
+              $("fleet-error").textContent = res.ok
+                ? ""
+                : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+              refreshAgents();
+            });
           return;
         }
         const comp = e.target.closest(".comp-toggle");
@@ -332,13 +867,108 @@
           render();
           return;
         }
+        const cfg = e.target.closest(".cfg-open");
+        if (cfg) {
+          const agent = agents.find((x) => x.instance_uid === cfg.dataset.uid);
+          if (agent && agent.effective_config) {
+            openTextDialog(`${displayName(agent) || "agent"} — effective configuration`, agent.effective_config);
+          }
+          return;
+        }
+        const errPill = e.target.closest(".err-open");
+        if (errPill) {
+          const agent = agents.find((x) => x.instance_uid === errPill.dataset.uid);
+          if (agent) {
+            const health = errPill.dataset.kind === "health";
+            openTextDialog(
+              `${displayName(agent) || "agent"} — ${health ? "health error" : "configuration error"}`,
+              health ? agent.health_error : agent.remote_config_error,
+            );
+          }
+          return;
+        }
         const toggle = e.target.closest(".cap-toggle");
+        if (toggle) {
+          const uid = toggle.dataset.uid;
+          if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
+          render();
+          return;
+        }
+        // Anywhere else on an Agent's row makes it the current one — or lets it go when it
+        // already is, folding its details away. Not the checkbox, which collects for a bulk
+        // action; not the UID, whose click is a copy and must stay one.
+        const tr = e.target.closest("tr.agent");
+        if (!tr || e.target.closest("input, .uid")) return;
+        // The name is an anchor with a dead href, kept for its link styling — following it
+        // would rewrite the tab hash.
+        e.preventDefault();
+        currentAgent = currentAgent === tr.dataset.uid ? null : tr.dataset.uid;
         render();
       });
+      // The one way this view shows a text that does not fit its cell.
+      function openTextDialog(title, body) {
+        $("text-dialog-title").textContent = title;
+        $("text-dialog-body").textContent = body;
+        $("text-dialog").showModal();
+      }
+      $("text-dialog-close").addEventListener("click", () => $("text-dialog").close());
+      // A click on the backdrop closes too: the dialog's own box catches clicks inside it, so a
+      // click that reaches the <dialog> element itself can only have hit the backdrop.
+      $("text-dialog").addEventListener("click", (e) => {
+        if (e.target === $("text-dialog")) $("text-dialog").close();
+      });
+      // Reflects the current selection in the bar above the table.
+      function renderSelection() {
+        $("selection-bar").style.display = selectedAgents.size ? "flex" : "none";
+        $("selection-count").textContent = `${selectedAgents.size} agent(s) selected`;
+      }
+
+      document.addEventListener("change", (e) => {
+        const box = e.target.closest(".row-select");
+        if (!box) return;
+        if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        $("selection-result").textContent = "";
+        renderSelection();
+      });
+
+      // A restart per selected Agent — the same route the per-row button uses, since the UI is a
+      // client of the API and nothing more. Refusals are counted and named rather than swallowed:
+      // an Agent that does not declare AcceptsRestartCommand is answered 409 by the Server.
+      $("restart-selected").addEventListener("click", async () => {
+        const uids = [...selectedAgents];
+        if (!uids.length) return;
+        $("selection-result").textContent = "restarting…";
+        let accepted = 0;
+        const refused = [];
+        for (const uid of uids) {
+          try {
+            const res = await fetch(`/api/v1/agents/${encodeURIComponent(uid)}/restart`, { method: "POST" });
+            if (res.ok) { accepted += 1; continue; }
+            const reason = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+            refused.push(`${uid.slice(0, 8)}…: ${reason}`);
+          } catch (e) {
+            refused.push(`${uid.slice(0, 8)}…: ${e.message}`);
+          }
+        }
+        $("selection-result").textContent = refused.length
+          ? `${accepted} restarted · ${refused.length} refused — ${refused.join("; ")}`
+          : `${accepted} restarted`;
+        refreshAgents();
+      });
+
+      // Select-all applies to what is on screen — which, with a filter active, is the point.
       $("select-all").addEventListener("change", (e) => {
+        document.querySelectorAll("#agents .row-select").forEach((box) => {
+          box.checked = e.target.checked;
+          if (box.checked) selectedAgents.add(box.dataset.uid); else selectedAgents.delete(box.dataset.uid);
+        });
+        $("selection-result").textContent = "";
+        renderSelection();
       });
 
       // Configurations editor (ADR-0011): name + type + selector + body, PUT/DELETE per
+      // Configuration. A PUT only saves; the rollout act is what changes the fleet (ADR-0014),
+      // and the type limits whom a Configuration can be rolled out to (ADR-0011).
       let configurations = [];
       let selectedName = null;
 
@@ -353,12 +983,20 @@
         return selector;
       }
       function renderConfigList() {
+        $("config-count").textContent = configurations.length;
+        $("config-list").innerHTML = configurations.map((c) =>
+          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="saved — which agents run which revision is in the Agents tab${c.role ? " · role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : ""}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
+        ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#config-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectConfig(chip.dataset.name));
         });
       }
+      // The action row follows the selected Configuration: the rollout act needs a stored name
+      // to act on (ADR-0014), so it is disabled until one is selected.
       function renderConfigActions() {
         const config = configurations.find((c) => c.name === selectedName);
+        $("config-rollout").disabled = !config;
+        $("config-state").textContent = "";
       }
       function selectConfig(name) {
         const config = configurations.find((c) => c.name === name);
@@ -397,20 +1035,30 @@
         await refreshConfigs();
         refreshAgents();
       });
+      $("config-rollout").addEventListener("click", async () => {
         const config = configurations.find((c) => c.name === selectedName);
         if (!config) return;
+        // The one press that distributes (ADR-0014): the saved revision is pinned and assigned
+        // to every agent it currently fits and aims at. Latecomers wait in the Agents tab.
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(config.name)}/rollout`, {
+          method: "POST",
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
           return;
         }
+        const outcome = await res.json();
         $("config-error").textContent = "";
         await refreshConfigs();
         refreshAgents();
+        $("config-state").textContent = `rolled out to ${outcome.assigned_agents} agent(s)`;
       });
       $("delete").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
         if (!name) return;
+        // Deletion removes every per-agent assignment with the Configuration (ADR-0014) — an
+        // active change on the agents that had it, so it asks first.
+        if (!confirm(`Delete "${name}"?\n\nEvery agent it was rolled out to applies its config map without this entry and restarts. Only an agent left assigned nothing keeps running unchanged.`)) return;
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
@@ -449,34 +1097,331 @@
         });
       }
 
+      // Packages as Sets (ADR-0019): a master table of every Set, and a detail form for the
+      // *current* one. The form enforces no rule of its own — what it greys out is what the
+      // Server answers 409 to — and the identity (name, agent type, version) is writable only
+      // while a new Set is being created, because a new version is a new Set, never an edit.
       let packages = [];
-      }
-      }
+      let currentSet = null;    // the identity string of the current row, or null — no current, no form
+      let creatingSet = false;  // the form is defining a new Set: identity fields writable
+      let setFormDirty = false; // an edit in flight — the periodic refresh must not overwrite it
+
+      const currentSetView = () => packages.find((p) => setKey(p) === currentSet) || null;
+      const fmtBytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KiB` : `${n} B`;
+
+      // How many Agents a rollout act would reach, as the Server resolves it. Zero is the case
+      // worth seeing — a mistyped agent type, a platform the fleet does not run, or a Selector
+      // matching nobody — none of which is a rejected upload, so nothing else would say it.
+      // Checking the aim before the act is what the count exists for (ADR-0014) — so the count
+      // rides on the act it aims, and is a button only where it is a count the act can reach.
+      // Zero has two meanings since ADR-0014, and only one of them is a mistake: a set that aims
+      // at nobody is the amber warning, a set everyone already runs is a plain statement.
+        }
       }
 
+      function renderSets() {
+        $("package-count").textContent = packages.length;
+        $("sets-empty").style.display = packages.length ? "none" : "block";
+        $("sets").innerHTML = packages.map((p) => {
+          const key = setKey(p);
+          const entries = (p.entries || []).map((e) =>
+          ).join("");
+          return `
+          <tr class="agent${key === currentSet ? " current" : ""}" data-key="${esc(key)}">
+            <td class="num">${esc(p.version)}</td>
+            <td><div class="chips">${entries || `<span class="chip">no entries yet</span>`}</div></td>
+          </tr>`;
+        }).join("");
+      }
+
+      // The entries of the current Set. Each carries a ✕ that deletes it; on a Set that is
+      // assigned to an agent the bytes are frozen and the Server answers 409 with the reason —
+      // one rule, held where the assignments are known (ADR-0014).
+      function renderSetEntries(p) {
+        const entries = p ? p.entries || [] : [];
+        $("set-entries").innerHTML = entries.map((e) =>
+      }
+
+      // Fills (or hides) the detail form from the current Set. With no current Set and nothing
+      // being created, the form is not on screen — the master–detail rule of ADR-0019.
+      function showSetDetail() {
+        const p = creatingSet ? null : currentSetView();
+        if (!creatingSet && !p) {
+          currentSet = null;
+          $("set-detail").style.display = "none";
+          return;
+        }
+        $("set-detail").style.display = "block";
+        $("set-detail-title").textContent = creatingSet
+          ? "New package set — saved, distributed by a rollout act"
+        // The identity: writable only while creating. Afterwards it *is* the Set (ADR-0019),
+        // and another version is another Create.
+          $(id).value = value;
+          $(id).disabled = !creatingSet;
+        }
+        $("set-state").textContent = !p
+          ? "will be saved — nothing reaches an agent until a rollout act names it"
+          : "saved — distributed only by a rollout act; entries freeze while the set is assigned to an agent";
+        $("set-delete").disabled = creatingSet;
+        renderSetEntries(p);
+          $(id).disabled = false;
+        }
+        $("entry-add").disabled = creatingSet;
+        setFormDirty = false;
+      }
+
+      function clearEntryEditor() {
+        $("entry-file").value = "";
+      }
+
+      // One PUT, answered with the message to show or "" when it went through.
+      async function put(path, init) {
         let res;
+        try { res = await fetch(path, { method: "PUT", ...init }); }
+        catch (e) { return e.message; }
         if (!res.ok) return (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
         return "";
       }
+      const putJson = (path, body) =>
+        put(path, { headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+      // The entry the editor holds, sent to a Set that now exists: a chosen file becomes an
+      // uploaded entry, a url + sha256 a referenced one (ADR-0018). Nothing in the editor is
+      // nothing to send. Returns the message to show, "" when it went through or was empty.
+        const file = $("entry-file").files[0];
+        const url = $("entry-url").value.trim();
+        const sha256 = $("entry-sha256").value.trim();
+        if (!file && !url && !sha256) return "";
+        const os = $("entry-os").value.trim();
+        const arch = $("entry-arch").value.trim();
+        if (!os || !arch) return "an entry needs an os and an arch — it is only ever offered to machines that match";
+        let failed;
+        if (file) {
+            headers: { "content-type": "application/octet-stream" },
+            body: await file.arrayBuffer(),
           });
+        } else {
+          if (!url || !sha256) return "a source needs both a url and the artifact's sha256 — that checksum is the whole of what an agent has to verify it against";
+        }
+        if (!failed) clearEntryEditor();
+        return failed;
       }
+
+      // Create: the form opens empty, identity writable, nothing current in the table.
+      $("set-create").addEventListener("click", () => {
+        creatingSet = true;
+        currentSet = null;
+        renderSets();
+        $("set-detail").style.display = "block";
+        clearEntryEditor();
+        $("entry-add").disabled = true; // the set does not exist yet — OK creates it, entry and all
+        $("set-detail-title").textContent = "New package set — saved, distributed by a rollout act";
+        $("set-state").textContent = "will be saved — nothing reaches an agent until a rollout act names it";
+        $("set-delete").disabled = true;
+        renderSetEntries(null);
+        $("set-error").textContent = "";
+        setFormDirty = false;
+      });
+
+      $("sets").addEventListener("click", async (e) => {
+        const tr = e.target.closest("tr.agent");
+        if (!tr) return;
+        e.preventDefault();
+        creatingSet = false;
+        currentSet = currentSet === tr.dataset.key ? null : tr.dataset.key;
+        $("set-error").textContent = "";
+        clearEntryEditor();
+        renderSets();
+        showSetDetail();
+      });
+
+      $("set-ok").addEventListener("click", async () => {
+        $("set-error").textContent = "";
+        const type = $("set-type").value.trim();
+        const version = $("set-version").value.trim();
+          return;
+        }
+        if (failed) { $("set-error").textContent = failed; return; }
+        creatingSet = false;
+        // OK concludes the form: the current row is let go and the form leaves the screen. Only
+        // a failed entry keeps the Set current, so the message is read next to the fields it is
+        // about.
         await refreshPackages();
         refreshAgents();
-        await refreshPackages();
-        refreshAgents();
+        renderSets();
+        showSetDetail();
+        $("set-error").textContent = entryError;
+      });
+
+      // Cancel concludes the form exactly as OK does, minus the writes: the changes are
+      // discarded, the current row is let go, and the form leaves the screen.
+      $("set-cancel").addEventListener("click", () => {
+        $("set-error").textContent = "";
+        clearEntryEditor();
+        creatingSet = false;
+        currentSet = null;
+        renderSets();
+        $("set-detail").style.display = "none";
+      });
+
+      // Delete: the Set goes — entries, artifacts, metadata — and with it the current record, so
+      // the form leaves the screen. Nothing is uninstalled on any host (ADR-0019).
+      $("set-delete").addEventListener("click", async () => {
+        const p = currentSetView();
+        if (!p) return;
+        if (!res.ok && res.status !== 404) {
+          $("set-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        currentSet = null;
+        creatingSet = false;
+        $("set-detail").style.display = "none";
         await refreshPackages();
         refreshAgents();
       });
+
+      // Deleting one entry of the current Set; the Server refuses while it is assigned.
+      $("set-entries").addEventListener("click", async (e) => {
+        const del = e.target.closest(".entry-del");
+        if (!del) return;
+        const p = currentSetView();
+        if (!p) return;
+        const res = await fetch(
+          { method: "DELETE" }
+        );
+        $("set-error").textContent = res.ok || res.status === 404
+          ? ""
+          : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
         await refreshPackages();
         refreshAgents();
       });
+
+      // Add entry: stores what the editor holds into the current set, now — one request per
+      // entry, so a five-platform release is five adds on one set rather than five saves. The
+      // removal beside each entry chip is the same shape in reverse.
+      $("entry-add").addEventListener("click", async () => {
+        const p = currentSetView();
+        if (!p) return;
+        const file = $("entry-file").files[0];
+        const url = $("entry-url").value.trim();
+        if (!file && !url && !$("entry-sha256").value.trim()) {
+          $("set-error").textContent = "nothing to add — choose a file, or give a source url with its sha256";
+          return;
+        }
+        $("set-error").textContent = failed;
+        if (!failed) setFormDirty = false;
+        await refreshPackages();
+        refreshAgents();
+      });
+
+      // Edits in flight: the periodic refresh must not overwrite a form being typed in.
+        $(id).addEventListener("input", () => { setFormDirty = true; });
       }
+
+      // Older and foreign spellings, mirroring the server's table. The server canonicalises
+      // whatever it is sent anyway, so a drift here costs a prefilled field and never correctness.
+      const OS_ALIASES = { macos: "darwin", osx: "darwin", win: "windows", win32: "windows", win64: "windows" };
+      const ARCH_ALIASES = { x86_64: "amd64", x64: "amd64", aarch64: "arm64" };
+      const KNOWN_OS = new Set(["linux", "darwin", "windows", ...Object.keys(OS_ALIASES)]);
+      const KNOWN_ARCH = new Set(["amd64", "arm64", ...Object.keys(ARCH_ALIASES)]);
+
+      // What an artifact's file name already says. A release is `<name><sep><version><sep><os>`
+      // `<sep><arch>.7z` (ADR-0029), and the last two fields are exactly the platform
+      // pair an entry is keyed by (ADR-0019) — so naming the file answers the fields. The platform
+      // is found by matching the known tokens at the end, not by splitting: `linux-x86_64` must
+      // not come apart at its own underscore. A tail the vocabulary does not know returns null
+      // rather than a guess, because a wrong platform is an entry no agent is ever offered.
+      const PLATFORM_TAIL = new RegExp(
+        "[-_](" + [...KNOWN_OS].sort((a, b) => b.length - a.length).join("|") + ")" +
+        "[-_](" + [...KNOWN_ARCH].sort((a, b) => b.length - a.length).join("|") + ")$", "i");
+
+      function fromArtifactName(fileName) {
+        const stem = fileName.replace(/\.(7z|tgz|tar\.gz)$/i, "");
+        const tail = PLATFORM_TAIL.exec(stem);
+        if (!tail) return null;
+        const head = stem.slice(0, tail.index);
+        const os = tail[1].toLowerCase();
+        const arch = tail[2].toLowerCase();
+        const at = head.search(/[-_]\d/);
+        return {
+          name: at === -1 ? head : head.slice(0, at),
+          version: at === -1 ? "" : head.slice(at + 1),
+          os: OS_ALIASES[os] || os,
+          arch: ARCH_ALIASES[arch] || arch,
+        };
+      }
+
+      // The last path segment of a source url is a file name like any other, so an address that
+      // names its artifact fills the same fields.
+      function fromArtifactUrl(url) {
+        try {
+          const path = new URL(url, window.location.origin).pathname;
+          return fromArtifactName(decodeURIComponent(path.slice(path.lastIndexOf("/") + 1)));
+        } catch (e) {
+          return null; // not an address yet — the operator is still typing
+        }
+      }
+
+      // Naming an artifact is a statement about what is being uploaded, so it fills what it can
+      // answer: the entry's platform always, and — while a new Set is being created — whatever of
+      // the name, the agent type, and the version is still empty. The type is not picked from a
+      // list; it is read out of the file's name, which for a release artifact is the type its
+      // agents report (`otelcol-contrib_…`, `opamp-fleet-client_…`). A suggestion in a visible,
+      // editable identity field that OK confirms — not the silent server-side default ADR-0019
+      // rejected — so a package named for the rollout rather than the type (a canary) is one
+      // correction in the field before OK. It never rewrites a value already given, never an
+      // identity already frozen, and clears nothing it cannot answer.
+      function fillFromArtifact(parsed) {
+        if (!parsed) return;
+        $("entry-os").value = parsed.os;
+        $("entry-arch").value = parsed.arch;
+        if (creatingSet && parsed.name) {
+          if (!$("set-type").value.trim()) $("set-type").value = parsed.name;
+          if (!$("set-version").value.trim() && parsed.version) $("set-version").value = parsed.version;
+        }
+        setFormDirty = true;
+      }
+      $("entry-file").addEventListener("change", () => {
+        const file = $("entry-file").files[0];
         fillFromArtifact(file ? fromArtifactName(file.name) : null);
+      });
+      // On `change`, not on every keystroke: a half-typed address would otherwise rewrite the
+      // fields under the operator's hands.
+      $("entry-url").addEventListener("change", () => {
+        fillFromArtifact(fromArtifactUrl($("entry-url").value.trim()));
+      });
+
+      // A checksum is copied from wherever it was published, and half of those write it
+      // `sha256:<hex>`. The field takes either and shows the hex. Only `sha256:` is dropped — a
+      // `sha512:` digest keeps its name and is refused as the invalid hex it is, because that
+      // hash is the whole of what protects a referenced artifact (ADR-0018).
+      $("entry-sha256").addEventListener("change", () => {
+        const field = $("entry-sha256");
+        const given = field.value.trim();
+        const colon = given.indexOf(":");
+        field.value = colon !== -1 && given.slice(0, colon).trim().toLowerCase() === "sha256"
+          ? given.slice(colon + 1).trim()
+          : given;
+      });
+
+          refreshAgents();
+          return;
+        }
+        const tr = e.target.closest("tr.agent");
+        if (!tr) return;
+        e.preventDefault();
       async function refreshPackages() {
         try {
           const res = await fetch("/api/v1/packages");
           packages = res.ok ? await res.json() : [];
         } catch { return; }
+        renderSets();
+        // The form follows the store unless an edit is in flight — a refresh must never type
+        // over the operator.
+        if (!setFormDirty && (currentSet || !creatingSet)) {
+          if (currentSet) showSetDetail();
+          else if (!creatingSet) $("set-detail").style.display = "none";
+        }
       }
 
       async function refreshAgents() {

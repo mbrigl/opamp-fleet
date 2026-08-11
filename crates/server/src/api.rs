@@ -24,6 +24,7 @@ use utoipa_axum::routes;
 use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
 use crate::credentials::Credentials;
+use crate::labels::LabelError;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -73,16 +74,27 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
+        .routes(routes!(forget_agent))
+        .routes(routes!(set_agent_labels))
+        .routes(routes!(rollout_to_agent))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
             put_configuration,
             delete_configuration
         ))
+        .routes(routes!(rollout_configuration))
         .routes(routes!(list_packages))
+        .routes(routes!(
+            get_package_set,
+            put_package_set,
+            delete_package_set
+        ))
         // The one route that legitimately carries a program: the framework's 2 MiB default would
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
         // by `max_package_size_bytes` instead (ADR-0025). No other route is unbounded.
+        .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
+        .routes(routes!(put_package_entry_source))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -162,6 +174,9 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// A CSRF guard for the body-less `POST` routes (`restart`, the rollout acts). Those are CORS
+/// "simple requests": a cross-origin page can fire them without the preflight the Server would
+/// have to answer, so nothing else stops a victim operator's browser from being made to send one.
 ///
 /// Fetch Metadata closes it. A browser sends `Sec-Fetch-Site` on every request and forbids page
 /// scripts from setting it, so a value other than `same-origin` (the bundled UI) or `none` (a
@@ -240,10 +255,39 @@ async fn restart_agent(
     }
 }
 
+/// The labels to put on an Agent (ADR-0013). The whole set, replacing what was there.
 #[derive(Deserialize, ToSchema)]
+struct LabelsBody {
+    /// Equality pairs a Selector can match, exactly like a reported attribute — `rollout: canary`
+    /// being the one this exists for. An empty map clears the Agent's labels.
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Sets an Agent's labels, which decide what Selectors match it.
+#[utoipa::path(
+    put,
+    path = "/api/v1/agents/{instance_uid}/labels",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    request_body = LabelsBody,
+    description = "Replace this Agent's labels (ADR-0013). A label is an operator's key/value pair \
+                   that joins what a Selector matches — for Configurations and for packages alike — \
+                   the host. An empty map clears them. Labels never travel to the Agent, and they \
+                   outlive it: forgetting an Agent does not clear them. A key the Agent already \
+                   reports is refused, because reported attributes decide which artifact fits the \
+                   machine and a label must never be able to overrule them.",
+    responses(
+        (status = 200, description = "The Agent, with its new labels", body = AgentView),
+        (status = 400, description = "Malformed Instance UID, or an unusable label", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody)
+    )
+)]
+async fn set_agent_labels(
     State(state): State<Arc<AppState>>,
     Path(instance_uid): Path<String>,
+    Json(body): Json<LabelsBody>,
 ) -> Response {
     let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
         return error(
@@ -251,13 +295,58 @@ async fn restart_agent(
             format!("{instance_uid:?} is not an Instance UID"),
         );
     };
+    match state.set_labels(&uid, body.labels) {
+        Ok(()) => match state.snapshot().into_iter().find(|a| a.instance_uid == uid.to_string()) {
+            Some(view) => Json(view).into_response(),
+            // Forgotten between the write and the read: the labels are stored, and the Agent is
+            // simply no longer in the view to return.
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(LabelError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(LabelError::RestatesReported(key)) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "agent {uid} reports {key:?} itself, and a label may not restate it — a reported \
+                 attribute decides which artifact fits this machine, so it wins. Change it where it \
+                 comes from, in that host's supervisor.toml, or label it under another key"
+            ),
+        ),
+        Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// What a per-Agent rollout act releases (ADR-0014). Name at most one of the two; an empty body
+/// releases everything currently waiting for the Agent.
+#[derive(Deserialize, ToSchema, Default)]
 #[serde(deny_unknown_fields)]
+struct AgentRolloutSpec {
+    /// Release this Configuration — its saved revision, pinned as of this press.
+    #[serde(default)]
+    configuration: Option<String>,
+    #[serde(default)]
+}
+
+/// body, everything the fleet view shows as waiting for it. The operator's press is the only
+/// thing that distributes: saving, publishing-like states, Selector edits and label moves all
+/// merely change what is *proposed* here.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{instance_uid}/rollout",
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    request_body(content = AgentRolloutSpec, description = "What to release; empty releases everything waiting"),
+    responses(
+        (status = 200, description = "Rolled out; the Agent with its new assignments", body = AgentView),
+        (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 409, description = "The named resource does not fit or aim at this Agent", body = ErrorBody)
+    )
+)]
+async fn rollout_to_agent(
     State(state): State<Arc<AppState>>,
     _csrf: SameOrigin,
     Path(instance_uid): Path<String>,
+    body: Option<Json<AgentRolloutSpec>>,
 ) -> Response {
     let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
         return error(
@@ -265,9 +354,45 @@ async fn restart_agent(
             format!("{instance_uid:?} is not an Instance UID"),
         );
     };
+    let spec = body.map(|Json(spec)| spec).unwrap_or_default();
             StatusCode::BAD_REQUEST,
+    match state.rollout_to_agent(&uid, &target) {
+        Ok(()) => match state
+            .snapshot()
+            .into_iter()
+            .find(|a| a.instance_uid == uid.to_string())
+        {
+            Some(view) => Json(view).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(e) => rollout_error(e),
+    }
+}
+
+/// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
+///
+/// Reaches no host: nothing is stopped, nothing is uninstalled, and no credential is revoked —
+/// there is none per Agent to revoke. A Client that is still running reappears on its next report.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agents/{instance_uid}",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
+                   view (ADR-0013). Nothing happens on the host — no process is stopped, nothing \
+                   is uninstalled, and no credential is revoked, because a credential here proves \
+                   fleet membership rather than one Agent's identity. A Client still configured \
+                   for this Server therefore comes back on its next report. Refused while the \
+                   Agent is still reporting, since forgetting it would have its configuration \
+                   offered again and a managed process restarted with it.",
+    responses(
+        (status = 204, description = "The Agent is forgotten"),
         (status = 400, description = "Malformed Instance UID", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "The Agent is still reporting", body = ErrorBody)
+    )
+)]
+async fn forget_agent(
     State(state): State<Arc<AppState>>,
     Path(instance_uid): Path<String>,
 ) -> Response {
@@ -277,6 +402,19 @@ async fn restart_agent(
             format!("{instance_uid:?} is not an Instance UID"),
         );
     };
+    match state.forget_agent(&uid) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(ForgetError::UnknownAgent) => error(StatusCode::NOT_FOUND, format!("no agent {uid}")),
+        Err(ForgetError::StillReporting) => error(
+            StatusCode::CONFLICT,
+            format!("agent {uid} is still reporting; stop it or wait for it to go stale"),
+        ),
+    }
+}
+
+/// One Configuration as the API shows it (ADR-0014): the **saved** revision — what editing
+/// operates on and what a rollout act releases. Which Agents run which pinned revision is a fact
+/// about the Agents, answered per Agent by `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct ConfigurationView {
     name: String,
@@ -294,11 +432,20 @@ impl From<Configuration> for ConfigurationView {
     fn from(config: Configuration) -> Self {
         ConfigurationView {
             name: config.name,
+            selector: config.saved.selector,
+            body: config.saved.body,
+            role: config.saved.role,
+            service_name: config.saved.service_name,
         }
     }
 }
 
+/// What a resource-level rollout act did (ADR-0014 point 5).
 #[derive(Serialize, ToSchema)]
+struct RolloutOutcome {
+    /// How many Agents the act assigned the resource to — every Agent it currently fits and
+    /// aims at. An Agent that appears later waits for its own act.
+    assigned_agents: usize,
 }
 
 /// All Configurations, in name order.
@@ -340,6 +487,9 @@ async fn get_configuration(
     }
 }
 
+/// Creates a Configuration or replaces its saved revision. **Saving only saves** (ADR-0014):
+/// nothing reaches any Agent — every Agent keeps the revision its assignment pins — until a
+/// rollout act (`POST …/rollout`, or per Agent) releases the saved revision as one snapshot.
 #[utoipa::path(
     put,
     path = "/api/v1/configurations/{name}",
@@ -347,6 +497,7 @@ async fn get_configuration(
     params(("name" = String, Path, description = "The Configuration's name (ADR-0028 grammar)")),
     request_body = ConfigurationSpec,
     responses(
+        (status = 200, description = "The stored Configuration — distributed to nobody until rolled out", body = ConfigurationView),
         (status = 400, description = "Invalid name or empty body", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
@@ -384,28 +535,59 @@ async fn put_configuration(
     };
     match state.save_configuration(&name, revision) {
         Ok(config) => {
+            info!(configuration = %config.name, role = %config.saved.role, service_name = %config.saved.service_name, bytes = config.saved.body.len(), "configuration saved from the API");
             Json(ConfigurationView::from(config)).into_response()
         }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-///
-#[utoipa::path(
-    tag = "configurations",
-    params(("name" = String, Path, description = "The Configuration's name")),
-    responses(
-        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No Configuration of that name", body = ErrorBody),
-    )
-)]
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Response {
-        }
+/// Maps a rollout refusal onto the REST contract (ADR-0014).
+fn rollout_error(e: RolloutError) -> Response {
+    match e {
+        RolloutError::UnknownAgent => error(StatusCode::NOT_FOUND, "no such agent"),
+        RolloutError::UnknownResource(e) => error(StatusCode::NOT_FOUND, e),
+        RolloutError::NotApplicable(e) => error(StatusCode::CONFLICT, e),
+        RolloutError::Storage(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
+/// Rolls a Configuration out to **every Agent it currently fits and aims at** (ADR-0014).
+///
+/// **This is the moment the fleet changes.** The saved revision is pinned as one snapshot and
+/// written into each matching Agent's assignment; a later edit changes nothing anywhere until
+/// the next rollout act. An Agent that enrols — or starts matching — later is *not* included: it
+/// surfaces in the fleet view as waiting, for its own act.
+#[utoipa::path(
+    post,
+    path = "/api/v1/configurations/{name}/rollout",
+    tag = "configurations",
+    params(("name" = String, Path, description = "The Configuration's name")),
+    responses(
+        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No Configuration of that name", body = ErrorBody),
+        (status = 500, description = "The rollout could not be persisted", body = ErrorBody)
+    )
+)]
+async fn rollout_configuration(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(name): Path<String>,
+) -> Response {
+    match state.rollout_configuration(&name) {
+        Ok(assigned_agents) => {
+            info!(configuration = %name, agents = assigned_agents, "configuration rolled out from the API");
+            Json(RolloutOutcome { assigned_agents }).into_response()
+        }
+        Err(e) => rollout_error(e),
+    }
+}
+
+/// Deletes a Configuration and removes every per-Agent assignment that referenced it
+/// (ADR-0014). That is **not inert** for an Agent that had it assigned: its composed map
+/// shrinks, and it applies the map without the entry; only an Agent left assigned nothing keeps
+/// running what it runs.
 #[utoipa::path(
     delete,
     path = "/api/v1/configurations/{name}",
@@ -428,10 +610,22 @@ async fn delete_configuration(
     }
 }
 
+/// One stored package **Set** as the API shows it (ADR-0019) — never its artifact bytes.
+///
+/// A Set is identified by *(name, agent type, version)*, stated at creation and never edited: a
+/// new version is a new Set. It may define a Selector and holds one entry per platform. **Saving
+/// never distributes anything** (ADR-0014): a Set reaches an Agent only through a rollout act,
+/// and which Agents run it is answered per Agent by `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
+struct PackageSetView {
+    version: String,
+    entries: Vec<PackageEntryView>,
+    ///
 }
 
+/// One platform's entry of a Set: an uploaded artifact or a source reference (ADR-0018).
 #[derive(Serialize, ToSchema)]
+struct PackageEntryView {
     /// The operating system, as `os.type` reports it: `linux`, `darwin`, `windows`.
     os: String,
     /// The architecture, as `host.arch` reports it: `amd64`, `arm64`.
@@ -444,13 +638,25 @@ async fn delete_configuration(
     source_url: Option<String>,
 }
 
+impl PackageSetView {
+        PackageSetView {
+            version: summary.version,
+            entries: summary
+                .entries
                 .into_iter()
+                .map(|entry| PackageEntryView {
+                    os: entry.os,
+                    arch: entry.arch,
+                    size: entry.size,
+                    source_url: entry.source_url,
                 })
                 .collect(),
         }
     }
 }
 
+/// The Platform the download route names (ADR-0019): the artifact endpoint serves bytes, and a
+/// request naming bytes names the Platform they are for.
 #[derive(Deserialize)]
 struct PlatformQuery {
     /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
@@ -467,25 +673,67 @@ impl PlatformQuery {
     }
 }
 
+/// The query parameters of an entry upload: everything but the artifact, which is the body — and
+/// the platform, which is the path.
 #[derive(Deserialize, IntoParams)]
+struct EntryUpload {
     /// Hex-encoded Ed25519 signature over the artifact; verified by the Agent before it installs.
     #[serde(default)]
     signature: Option<String>,
 }
 
+/// The identity triple as every Set route carries it in its path.
+}
+
+/// A stored Set as the API answers with it, read back from the store rather than assembled from
+/// whatever the handler happened to be given — so every response describes the Set as it now is.
+    match state.packages().and_then(|store| store.summary(id)) {
+        Some(summary) => {
+                .unwrap_or_default();
+        }
+        None => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
     }
 }
 
+/// Maps a store refusal onto the status the REST contract names: immutability and emptiness are
+/// conflicts with the Set's current state (`409`), absence is `404`, bad input `400`.
+fn package_error(e: String) -> Response {
+    if e.contains("not configured") || e.starts_with("no package set") {
+        error(StatusCode::NOT_FOUND, e)
+    } else if e.contains("immutable") || e.contains("holds no entries") {
+        error(StatusCode::CONFLICT, e)
+    } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
+        error(StatusCode::BAD_REQUEST, e)
+    } else {
+        error(StatusCode::INTERNAL_SERVER_ERROR, e)
+    }
+}
+
+/// All stored Sets, in identity order (never the artifact bytes). A UI groups them by name; the
+/// list itself is flat, sorted by name, then version, then type.
 #[utoipa::path(
     get,
     path = "/api/v1/packages",
     tag = "packages",
     responses(
+        (status = 200, description = "Every stored package Set", body = [PackageSetView]),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody)
     )
 )]
 async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     match state.packages() {
+        Some(store) => {
+            let summaries = store.list();
+            // One pass over the fleet for the whole list, rather than one per Set.
+            Json(
+                summaries
+                    .into_iter()
+                    .map(|summary| {
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
         None => error(
             StatusCode::NOT_FOUND,
             "package delivery is not configured on this Server",
@@ -493,39 +741,133 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// One stored Set.
+#[utoipa::path(
+    get,
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name (ADR-0028 grammar)"),
+        ("agent_type" = String, Path, description = "The Agent type the Set is built for (ADR-0019)"),
+        ("version" = String, Path, description = "The Set's version")
+    ),
+    responses(
+        (status = 200, description = "The stored Set", body = PackageSetView),
+        (status = 400, description = "Invalid identity", body = ErrorBody),
+        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody)
+    )
+)]
+async fn get_package_set(
     State(state): State<Arc<AppState>>,
+) -> Response {
+        Ok(id) => set_response(&state, &id),
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Creates a Set, or updates an existing one's Selector and kind. **Saving never distributes**
+/// (ADR-0014): the Set reaches an Agent only through a rollout act. The identity in the path is
+/// the whole identity: a new version is a new Set, never a mutation of an old one.
 #[utoipa::path(
     put,
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name (ADR-0028 grammar)"),
+        ("agent_type" = String, Path, description = "The Agent type the Set is built for, compared raw against the `service.name` Agents report"),
+        ("version" = String, Path, description = "The Set's version — every entry shares it")
     ),
     responses(
+        (status = 200, description = "The stored Set", body = PackageSetView),
+        (status = 400, description = "Invalid identity or body", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its kind is frozen", body = ErrorBody),
+        (status = 500, description = "The Set could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_set(
     State(state): State<Arc<AppState>>,
+) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+        Ok(()) => set_response(&state, &id),
+        Err(e) => package_error(e),
+    }
+}
+
+/// Deletes a Set — entries, artifacts, metadata, and every per-Agent assignment that referenced
+/// it (ADR-0014): the offer is withdrawn, and Agents that installed it keep running it
+/// (ADR-0019).
+#[utoipa::path(
+    delete,
+    tag = "packages",
+    params(
+        ("name" = String, Path, description = "The package name"),
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version")
+    ),
     responses(
         (status = 204, description = "Deleted"),
+        (status = 400, description = "Invalid identity", body = ErrorBody),
+        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 500, description = "The Set could not be deleted", body = ErrorBody)
+    )
+)]
+async fn delete_package_set(
     State(state): State<Arc<AppState>>,
+) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match state.delete_package_set(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
+        Err(e) => package_error(e),
+    }
+}
+
+/// Stores one platform's artifact as an entry of a Set (ADR-0019). The artifact is the raw
+/// request body; the Set and the platform are the path. Nothing is distributed: the Set reaches
+/// nobody until a rollout act releases it (ADR-0014). Refused while the Set is assigned to an
+/// Agent — an assigned Set's bytes are immutable.
+#[utoipa::path(
+    put,
+    tag = "packages",
+    params(
+        ("name" = String, Path, description = "The package name"),
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version"),
+        ("os" = String, Path, description = "The operating system this artifact is built for, as `os.type`: `linux`, `darwin`, `windows`"),
+        ("arch" = String, Path, description = "The architecture, as `host.arch`: `amd64`, `arm64`"),
+        EntryUpload
     ),
     request_body(content = Vec<u8>, description = "The artifact bytes", content_type = "application/octet-stream"),
     responses(
+        (status = 200, description = "The Set, with the stored entry", body = PackageSetView),
+        (status = 400, description = "Invalid identity, platform, empty artifact, or bad signature", body = ErrorBody),
+        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
+        (status = 500, description = "The entry could not be persisted", body = ErrorBody),
         (status = 507, description = "Storing it would exceed max_total_package_bytes", body = ErrorBody)
     )
 )]
+async fn put_package_entry(
     State(state): State<Arc<AppState>>,
+    Query(upload): Query<EntryUpload>,
     body: Body,
 ) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
         return error(
             StatusCode::BAD_REQUEST,
+    let platform = match crate::packages::Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
+    let staged = match state.package_staging_path(&id, &platform) {
         Ok(path) => path,
+        Err(e) => return package_error(e),
     };
     // Refuse before streaming a gibibyte we would only reject: a store already at its ceiling takes
     // nothing more. This — with the whole-store check after the stream — is what stops a caller
@@ -570,42 +912,79 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
         );
     }
         Ok(()) => {
+            info!(set = %id, bytes = written, "package entry stored from the API");
+            set_response(&state, &id)
         }
+        Err(e) => package_error(e),
     }
 }
 
+/// Deletes one entry of a Set. Refused while the Set is assigned to an Agent — its bytes are
+/// immutable (ADR-0014). The last entry taken away leaves an empty Set: a Set being reassembled
+/// is a normal state, and deleting the Set is its own act.
 #[utoipa::path(
     delete,
     tag = "packages",
+    params(
+        ("name" = String, Path, description = "The package name"),
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version"),
+        ("os" = String, Path, description = "The entry's operating system"),
+        ("arch" = String, Path, description = "The entry's architecture")
+    ),
     responses(
         (status = 204, description = "Deleted"),
+        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
+        (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
+        (status = 500, description = "The entry could not be deleted", body = ErrorBody)
     )
 )]
+async fn delete_package_entry(
     State(state): State<Arc<AppState>>,
 ) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let platform = match crate::packages::Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
+    match state.delete_package_entry(&id, &platform) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error(
+            StatusCode::NOT_FOUND,
+            format!("no entry {}-{} in set {id}", platform.os, platform.arch),
+        ),
+        Err(e) => package_error(e),
     }
 }
 
+/// The body of `PUT …/entries/{os}/{arch}/source` (ADR-0018, per ADR-0019): an entry that is a
+/// reference instead of an upload.
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+struct EntrySourceSpec {
     /// Where the artifact lives — `http://` or `https://`. Agents fetch it from here; this Server
     /// never downloads it.
     url: String,
     /// The artifact's SHA-256, hex, as published in the release's checksums file. Required: for a
+    /// referenced entry nothing here ever sees the bytes, so this is what protects every Agent.
     sha256: String,
     #[serde(default)]
     signature: Option<String>,
     /// Headers the Agents send with the download — a token for a private source. Two things to know
     /// before using one: it is stored in cleartext in the package store (owner-only on disk, not
+    /// encrypted), and it is delivered to **every** Agent the Set targets. Prefer a
     /// narrowly-scoped, rotatable token over a long-lived credential.
     #[serde(default)]
     headers: std::collections::BTreeMap<String, String>,
 }
 
+/// Points one entry of a Set at an artifact hosted elsewhere (ADR-0018), instead of uploading
+/// it. Refused while the Set is assigned to an Agent (ADR-0014). The Server stores the reference
+/// and offers it verbatim; it never downloads the artifact, so the `sha256` — and the signature,
+/// when one is configured — is what protects every Agent.
 ///
 /// The URL is probed once, to catch a typo while the operator is still looking at the screen. A
 /// definitive refusal from the source (a 4xx) fails the request; a source this Server simply
@@ -614,12 +993,30 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
 #[utoipa::path(
     put,
     tag = "packages",
+    params(
+        ("name" = String, Path, description = "The package name"),
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version"),
+        ("os" = String, Path, description = "The entry's operating system"),
+        ("arch" = String, Path, description = "The entry's architecture")
+    ),
+    request_body = EntrySourceSpec,
     responses(
+        (status = 200, description = "The Set, with the referenced entry", body = PackageSetView),
+        (status = 400, description = "Invalid identity, url, hash or signature — or the source refused the probe", body = ErrorBody),
+        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 500, description = "The reference could not be persisted", body = ErrorBody)
     )
 )]
+async fn put_package_entry_source(
     State(state): State<Arc<AppState>>,
+    Json(spec): Json<EntrySourceSpec>,
 ) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let platform = match crate::packages::Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
@@ -637,7 +1034,10 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
         headers: spec.headers.clone(),
     };
         Ok(()) => {
+            info!(set = %id, url = %spec.url, "package entry source stored from the API");
+            set_response(&state, &id)
         }
+        Err(e) => package_error(e),
     }
 }
 
@@ -767,15 +1167,23 @@ async fn download_package(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PlatformQuery>,
 ) -> Response {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
     let platform = match query.platform() {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
     let Some(path) = state
         .packages()
+        .and_then(|store| store.artifact_path(&id, &platform))
     else {
         return error(
             StatusCode::NOT_FOUND,
+            format!(
+                "no set {id} with an artifact for {}-{}",
+                platform.os, platform.arch
+            ),
         );
     };
     // Streamed from disk, never buffered: a fleet updating at once means many concurrent
@@ -856,11 +1264,19 @@ fn read_chunks(
 #[derive(Serialize, ToSchema)]
     selector: std::collections::BTreeMap<String, String>,
 #[derive(Serialize, ToSchema)]
+    agent_type: String,
+    version: String,
+            targeted_agents: reach.targeted,
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
     selector: std::collections::BTreeMap<String, String>,
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
     State(state): State<Arc<AppState>>,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -869,11 +1285,31 @@ fn read_chunks(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version)): Path<(String, String, String)>,
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
     State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version)): Path<(String, String, String)>,
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
     State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+                StatusCode::BAD_REQUEST,
     State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
 #[derive(Deserialize, IntoParams)]
+    responses(
+        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
     State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
     Path(name): Path<String>,
 ) -> Response {
+            Json(RolloutOutcome { assigned_agents }).into_response()
+        }
+        Err(e) => rollout_error(e),
+    }
+}
+

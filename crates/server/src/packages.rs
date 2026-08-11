@@ -1,6 +1,13 @@
 //! The package store (ADR-0018, reorganised by ADR-0019): the Server's software artifacts,
 //! organised as **Sets**. A Set is identified by *(name, Agent type, version)*, may define a
 //! Selector, and holds **one entry per Platform** (ADR-0019) — an uploaded artifact or a source
+//! reference (ADR-0018), with the SHA-256 content hash and an optional Ed25519 signature. A
+//! saved Set reaches nobody by itself (ADR-0014): what an Agent is offered is composed from the
+//! per-Agent assignments the operator's rollout acts wrote; [`resolve`] only computes the
+//! **candidates** such an act would release. Since ADR-0014 a Set reaches an Agent only as an
+//! **upgrade**: what the Agent reports as installed is the fourth matching test, beside type,
+//! platform and Selector. The immutability of an assigned Set's entries is enforced by the fleet,
+//! which knows the assignments.
 //!
 //! Package *bodies* are opaque bytes: what a package contains and how it is applied is the Agent's
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
@@ -126,6 +133,13 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     }
 
     fn dir_name(&self) -> String {
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut parts = text.split('@');
+            _ => Err(format!(
+            )),
+        }
     }
 }
 
@@ -383,6 +397,8 @@ impl PackageStore {
         })
     }
 
+    }
+
         self.dir.join(id.dir_name())
     }
 
@@ -460,11 +476,17 @@ impl PackageStore {
     /// overwrite each other while they are still in flight.
     ///
     /// # Errors
+    /// Returns an error when no Set of that identity exists. The fleet refuses the upload before
+    /// this when the Set is assigned to an Agent — an assigned Set's bytes are immutable
+    /// (ADR-0014), so there would be nothing an upload could become.
         self.writable(id)?;
         Ok(self.set_dir(id).join(format!("{}.upload", platform.tag())))
     }
 
+    /// The gate every entry write passes: the Set must exist. The immutability of an assigned
+    /// Set (ADR-0014) is the fleet's to enforce — only it knows the assignments.
         let sets = self.sets.read().expect("sets lock");
+        sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
         Ok(())
     }
 
@@ -588,6 +610,10 @@ impl PackageStore {
         self.write_meta(id, &meta)
     }
 
+    /// Deletes one entry; `Ok(false)` when the Set or the entry does not exist. The fleet refuses
+    /// this before calling here when the Set is assigned to an Agent (ADR-0014). The last entry
+    /// taken away leaves an **empty Set**, kept: a Set being reassembled is a normal state, and
+    /// deleting the Set is its own act.
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
@@ -605,6 +631,8 @@ impl PackageStore {
     }
 
     /// Deletes a whole Set — entries, artifacts, and metadata; `Ok(false)` when none of that
+    /// identity exists. The fleet removes every assignment that referenced it, which withdraws
+    /// the offer; Agents that installed it keep running it (ADR-0019).
         let mut sets = self.sets.write().expect("sets lock");
         if sets.remove(id).is_none() {
             return Ok(false);
@@ -615,23 +643,103 @@ impl PackageStore {
         Ok(true)
     }
 
+    /// One Agent's offer, composed from its **assignments** (ADR-0014): for each assigned Set,
+    /// the entry built for the platform the Agent reports, plus the `all_packages_hash` over that
+    /// set (the Baseline's per-Agent aggregate). `None` when the Agent is assigned nothing it
+    /// fits — it is offered nothing and keeps running what it runs. An assignment whose Set is
+    /// gone composes nothing rather than failing: deletion removes assignments, so the case is a
+    /// race, not a state.
+    pub fn offer_for_assigned(
         &self,
         description: Option<&AgentDescription>,
         download_base: &str,
         headers: Option<Headers>,
+    ) -> Option<PackagesAvailable> {
+        let sets = self.sets.read().expect("sets lock");
+        Some(PackagesAvailable {
+        })
+    }
+
+    /// The aggregate hash over one Agent's assignments, to gate re-offering without building the
+    /// whole message. Empty when the Agent is assigned nothing it fits — it is offered nothing,
+    /// and has nothing to be in sync with.
+    pub fn assigned_hash_for(
+        &self,
+        description: Option<&AgentDescription>,
+    ) -> Vec<u8> {
+        let sets = self.sets.read().expect("sets lock");
+        }
+    }
+
+        &self,
+        description: Option<&AgentDescription>,
+        installed: &InstalledVersions,
         let sets = self.sets.read().expect("sets lock");
     }
 
+    ///
+    ///
+    /// Still **not** the version *ranking* of [`resolve`]: rolling out a Set older than a sibling
+    /// the store also holds stays the operator's to make. What ADR-0014 forbids is aiming an act
+    /// at an Agent it would move backwards, or not move at all — the count beside the button and
+    /// the button itself now answer the same question.
+    pub fn fits_agent(
+        &self,
         description: Option<&AgentDescription>,
-        let sets = self.sets.read().expect("sets lock");
-        description: Option<&AgentDescription>,
-        let sets = self.sets.read().expect("sets lock");
-        description: Option<&AgentDescription>,
+        installed: &InstalledVersions,
+    ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
+        if set.entries.is_empty() {
             return Err(format!(
                 "set {id} holds no entries — a set contains one or more entries before it can be \
+                 rolled out"
+            ));
         }
+        let Some(platform) = Platform::reported(description) else {
+            return Err(format!(
+                "set {id} fits no platform this Agent reports — it reports none"
+            ));
+        };
+            return Err(format!(
+                "set {id} is built for Agent type {:?}, which this Agent does not report",
+            ));
+        }
+        if !set.entries.contains_key(&platform) {
+            return Err(format!(
+                "set {id} holds no entry for {}-{}, which this Agent reports",
+                platform.os, platform.arch
+            ));
+        }
+        if !upgrades(set, installed, description) {
+            // *Which* of the two versions decided is the operator's first question here (ADR-0014
+            // point 8): the running one wherever it can be ordered, the claim only where it cannot.
+            // A refusal naming a number without saying which of the two it was would read like the
+            // wrong rule applied — and where both are reported and they disagree, saying that the
+            // claim was not consulted is the whole explanation.
+            let running = reported_service_version(description)
+                .filter(|version| opamp::version::parse(version).is_some());
+            return Err(match (running, claimed_version(set, installed)) {
+                (Some(runs), Some(has)) => format!(
+                    "set {id} is not an upgrade for this Agent, which runs {runs:?}; its package \
+                     status claims {has:?} for package {:?}, which is not consulted while the \
+                     Agent reports what it runs",
+                ),
+                (Some(runs), None) => {
+                    format!("set {id} is not an upgrade for this Agent, which runs {runs:?}")
+                }
+                (None, Some(has)) => format!(
+                    "set {id} is not an upgrade for this Agent, which reports {has:?} installed \
+                     for package {:?} and no version it runs that can be ordered",
+                ),
+                (None, None) => {
+                    format!("set {id} is not an upgrade for this Agent, which reports no version")
+                }
+            });
+        }
+        Ok(())
+    }
+
         let dir = self.set_dir(id);
         // Metadata can carry a private source's headers (a bearer token, ADR-0018), so it is
         // written owner-only — the mode is set in the open call so the token is never briefly
@@ -680,19 +788,95 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
 }
 
     description: Option<&AgentDescription>,
-    description: Option<&AgentDescription>,
-    opamp::attributes::string_value(
-        &description?.identifying_attributes,
-fn resolve<'a>(
-    description: Option<&AgentDescription>,
 }
 
+/// What an Agent reports it has installed, per package name: `PackageStatuses.packages[name]
+/// .agent_has_version` as the Agent last sent it (ADR-0018). A name that is absent — and a name
+/// whose reported version is empty, which is how an Agent that has installed nothing reports a
+/// package it was offered — means *nothing is installed under that name*.
+pub type InstalledVersions = BTreeMap<String, String>;
+
+/// The fourth matching test: a Set reaches an Agent only as an **upgrade** (ADR-0014 points 10 to 4).
+///
+/// An Agent reports up to two versions, and they can contradict each other. **What it runs decides**
+/// — the reported `service.version`, a statement about the present. Where it is there and can be
+/// ordered, the Set must be strictly greater than it and the claim is not read at all: not to admit
+/// a Set the running version refuses, and not to refuse one it admits.
+///
+/// *What it claims* is the **package status** for this Set's name, derived from what an install once
+/// wrote. That record outlives the binary it describes — a staged update that did not take, a host
+/// reinstalled from an older artifact — so it cannot overrule the program's own statement, and it
+/// does not get a veto over it either. The Baseline defines the field as *"the version of the package
+/// that the Agent has"*, which a record naming a version the program denies running is not.
+///
+/// Where no `service.version` can be ordered — a program numbering itself `1.19` or `24.04.1`, or an
+/// Agent reporting none at all — the claim is the whole test, exactly as ADR-0014 wrote it: strictly
+/// greater to match, and a claim that cannot itself be ordered **refuses** outright. That is the safe
+/// direction for a claim about that very package, and the Client's own
+/// (`selfupdate::install_offer`): what cannot be ordered must not be installed over what is running.
+///
+/// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
+fn upgrades(
+    installed: &InstalledVersions,
+    description: Option<&AgentDescription>,
+) -> bool {
+    use std::cmp::Ordering;
+    let greater =
+        |has: &str| opamp::version::precedence(&set.id.version, has) == Some(Ordering::Greater);
+    // An unorderable `service.version` says nothing at all — it is dropped here rather than
+    // refusing, so what remains is either a version to be greater than or no statement.
+    let runs = reported_service_version(description)
+        .filter(|running| opamp::version::parse(running).is_some());
+    match runs {
+        // The program's own word about the program, in both directions.
+        Some(running) => greater(running),
+        // No statement about the present: fall back to the record, ADR-0014 unchanged. An
+        // unorderable claim refuses, which `greater` already does by yielding `None`.
+        None => match claimed_version(set, installed) {
+            Some(claimed) => greater(claimed),
+            None => true,
+        },
+    }
+}
+
+/// What an Agent claims to have installed under this Set's name, if it claims anything: a package
+/// status reported with an empty version is no claim (ADR-0014).
+    installed
+        .map(String::as_str)
+        .filter(|has| !has.is_empty())
+}
+
+/// The version an Agent reports as `service.version` — its program's own number, and since ADR-0014
+/// what a Set is held against when the Agent reports no version for the package itself. Since
+/// ADR-0014 it is also read beside a reported one, as what the Agent actually runs.
+fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
+    opamp::attributes::string_value(
+        &description?.identifying_attributes,
+        opamp::attributes::SERVICE_VERSION,
+    )
+    .filter(|version| !version.is_empty())
+}
+
+}
+
+///
+///
+fn resolve<'a>(
+    description: Option<&AgentDescription>,
+    installed: &InstalledVersions,
+}
+
+/// The Agent type an Agent reports, as `service.name` (ADR-0012) — the identifying attribute the
+/// Baseline reserves for "a reverse FQDN that uniquely identifies the Agent type".
+///
 /// `None` for an Agent that has not described itself or reports no type, which fits no Set
 /// (ADR-0019). An empty value is `None` too: it is not a type.
     opamp::attributes::string_value(
         &description?.identifying_attributes,
         opamp::attributes::SERVICE_NAME,
     )
+}
+
     let mut hasher = Sha256::new();
     hasher.finalize().to_vec()
 }
@@ -731,9 +915,54 @@ mod tests {
         }
     }
 
+    /// An Agent that reports what its program is, as a Client does: `service.version`, identifying,
+    /// beside the type (ADR-0012).
+    fn running_agent(version: &str) -> AgentDescription {
+        let mut description = agent("linux", "amd64", &[]);
+        description.identifying_attributes.push(KeyValue {
+            key: "service.version".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(version.to_string())),
+            }),
+        });
+        description
+    }
+
+    /// A Set with one uploaded linux entry — stored, which since ADR-0014 reaches nobody until
+    /// an assignment names it.
         let id = id(name, version);
+        store
             .expect("entry");
         id
+    }
+
+    /// What an Agent reports installed, as the record hands it to the store (ADR-0014).
+    fn installed(versions: &[(&str, &str)]) -> InstalledVersions {
+        versions
+            .iter()
+            .map(|(name, version)| ((*name).to_string(), (*version).to_string()))
+            .collect()
+    }
+
+    fn candidates(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
+        candidates_for(store, description, &InstalledVersions::new())
+    }
+
+    fn candidates_for(
+        store: &PackageStore,
+        description: &AgentDescription,
+        installed: &InstalledVersions,
+    ) -> Vec<(String, String)> {
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn offered(
+        store: &PackageStore,
+        description: &AgentDescription,
+    ) -> Vec<(String, String)> {
+        store
             .map(|offer| {
                     .packages
                     .iter()
@@ -743,6 +972,7 @@ mod tests {
     }
 
     /// ADR-0019: the identity is the triple, entries are per platform, and the whole Set —
+    /// entries and selector — survives a reopen.
     #[test]
     fn a_set_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -760,41 +990,353 @@ mod tests {
                         url: "https://example.com/w.7z".into(),
                         headers: BTreeMap::new(),
                     },
+                )
                 .expect("windows entry");
+        }
         let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
         let summary = store.summary(&id("otelcol", "1.2.3")).expect("summary");
         assert_eq!(summary.entries.len(), 2);
         assert_eq!(summary.entries[0].os, "linux");
+        assert_eq!(
             summary.entries[1].source_url.as_deref(),
             Some("https://example.com/w.7z")
+        );
+    }
+
+    /// ADR-0014: a saved Set reaches nobody by itself. It is a visible candidate, and only an
+    /// assignment — the operator's rollout act — composes an offer from it.
+    #[test]
+    fn a_saved_set_reaches_nobody_without_an_assignment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
+        assert_eq!(
+            candidates(&store, &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())],
+            "the candidate is visible"
+        );
+        assert!(
+            "no assignment, no offer"
+        );
+        assert_eq!(
             [("otelcol".to_string(), "1.0.0".to_string())]
+        );
+    }
+
+    #[test]
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let empty = id("otelcol", "0.9.0");
+        assert!(store
+            .fits_agent(
+                &empty,
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new()
+            )
+            .expect_err("empty refused")
+            .contains("holds no entries"));
+
+        let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
+            store
+                .is_ok(),
+            "the older Set fits an Agent that runs nothing yet"
+        assert!(store
+            .is_ok());
+                .fits_agent(
+                    &InstalledVersions::new()
+                )
+        assert!(store
+            .fits_agent(
+                &new,
+                Some(&agent("windows", "amd64", &[])),
+                &InstalledVersions::new()
+            )
+            .expect_err("wrong platform")
+            .contains("no entry for"));
+                .fits_agent(
+                    &new,
+                    Some(&AgentDescription::default()),
+                    &InstalledVersions::new()
+                )
             "no platform and no type fits nothing"
         );
+        assert!(store
+            .fits_agent(
+                &id("otelcol", "9.9.9"),
+                &InstalledVersions::new(),
+            )
+            .expect_err("unknown set")
+            .contains("no package set"));
+    }
+
+    /// ADR-0014's fourth test at the gate: an act may only be aimed at an Agent the Set would
+    /// move *forward*. Equal is not greater — a Set the Agent already runs changes nothing — and
+    /// a reported version that cannot be ordered is refused rather than guessed at.
+    #[test]
+    fn fits_agent_refuses_what_is_not_an_upgrade() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let host = agent("linux", "amd64", &[]);
+
+        let running_v2 = installed(&[("otelcol", "2.0.0")]);
+        assert!(store
+            .fits_agent(&old, Some(&host), &running_v2)
+            .expect_err("backwards")
+            .contains("not an upgrade"));
+        assert!(store
+            .fits_agent(&new, Some(&host), &running_v2)
+            .expect_err("the same version")
+            .contains("not an upgrade"));
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "1.0.0")]))
+                .is_ok(),
+            "forward is what a rollout act is for"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "")]))
+                .is_ok(),
+            "an empty reported version is nothing installed, not an unorderable one"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "nightly")]))
+                .is_err(),
+            "what cannot be ordered must not be installed over what is running"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("promtail", "9.9.9")]))
+                .is_ok(),
+            "another package's version says nothing about this one"
+        );
+    }
+
+    /// The same test on the way in (ADR-0014): a Set the Agent already runs is no candidate, so
+    /// nothing proposes it and no count includes it. The Set the Agent is *behind* still is one.
+    #[test]
+    fn a_set_that_is_no_upgrade_is_no_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "1.0.0", b"v1");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let host = agent("linux", "amd64", &[]);
+
         assert_eq!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "1.0.0")])),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+        );
+        assert!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "2.0.0")])).is_empty(),
+            "an Agent already at the greatest version is proposed nothing"
+        );
+        assert!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "3.0.0")])).is_empty(),
+            "and one ahead of the store is proposed nothing either"
+        );
+    }
+
+    /// ADR-0014: an Agent that reports no version for the package is held against the version it
+    /// reports *running*. This is what reaches the Clients released before the one that reports its
+    /// own package version — they cannot state it, and they all state `service.version`.
+    #[test]
+    fn a_set_is_held_against_the_version_an_agent_reports_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let nothing = InstalledVersions::new();
+
+        // The build metadata every Client appends takes no part in it (ADR-0017).
+        for running in ["2.0.0", "2.0.0+a1b2c3d", "3.0.0"] {
+            assert!(
+                candidates_for(&store, &running_agent(running), &nothing).is_empty(),
+                "an Agent already running {running} is proposed nothing"
+            );
+        }
+        assert_eq!(
+            candidates_for(&store, &running_agent("1.0.0"), &nothing),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+            "and one genuinely behind is still reached"
+        );
+
+        // The act at the gate says the same thing, and says which version it read.
+        let refusal = store
+            .fits_agent(
+                &id("otelcol", "2.0.0"),
+                Some(&running_agent("2.0.0")),
+                &nothing,
+            )
+            .expect_err("the same version is no upgrade");
+        assert!(
+            refusal.contains("not an upgrade") && refusal.contains("runs \"2.0.0\""),
+            "the refusal names the version it compared against: {refusal}"
+        );
+    }
+
+    /// ADR-0014 points 10 and 11, as re-decided: **what an Agent runs decides, in both directions**,
+    /// and the claim is not consulted beside it. The record a package status comes from outlives
+    /// the binary it describes; the program's own number is the statement about the present.
+    ///
+    /// This is the direction the accepted text had the other way round, and both halves of the
+    /// trade are asserted here rather than only the convenient one — including that a Managed
+    /// Process numbered below its Set can now be moved backwards, which is the cost the ADR
+    /// records under Consequences.
+    #[test]
+    fn the_version_an_agent_runs_wins_over_the_version_it_claims() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+
+        // A program above the Set holds it back now, where the claim used to admit it.
+        assert!(
+            candidates_for(
+                &store,
+                &running_agent("9.9.9"),
+                &installed(&[("otelcol", "1.0.0")])
+            )
+            .is_empty(),
+            "the program says it is at 9.9.9; a Set at 2.0.0 moves it nowhere"
+        );
+
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        stored_set(&store, "otelcol", "1.5.0", b"v15");
+        assert_eq!(
+            candidates_for(
+                &store,
+                &running_agent("0.98.0"),
+                &installed(&[("otelcol", "2.0.0")])
+            ),
+        );
+                .fits_agent(
+                    &id("otelcol", "1.5.0"),
+                    Some(&running_agent("0.98.0")),
+                    &installed(&[("otelcol", "2.0.0")])
+                )
+                .is_ok(),
+            "and the act admits the lower Set too: 1.5.0 is ahead of what the program reports, so \
+             the claim of 2.0.0 no longer refuses it — the downgrade ADR-0014 admits as its cost"
+        );
+    }
+
+    /// ADR-0014: a claim the Agent's own program denies no longer holds the Set back. A Client that
+    /// reports `supervisor 0.4.1` installed while reporting that it runs 0.4.0 has a record about a
+    /// binary that is gone — and until this rule it was offered nothing, for good.
+    #[test]
+    fn a_claim_the_running_program_denies_no_longer_holds_the_set_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+
+        assert_eq!(
+            candidates_for(&store, &running_agent("0.4.0"), &claims_041),
+            "the version it runs is what it has; the record says only how it once got there"
+        );
+                .fits_agent(
+                    Some(&running_agent("0.4.0")),
+                    &claims_041
+                )
+                .is_ok(),
+            "and the act at the gate agrees, as all three consumers must"
+        );
+
+        // Corroborated, and nothing changes: an Agent that runs what it claims is proposed nothing.
+        assert!(
+            candidates_for(&store, &running_agent("0.4.1"), &claims_041).is_empty(),
+            "a claim its program confirms is still the end of it"
+        );
+        let refusal = store
+            .fits_agent(
+                Some(&running_agent("0.4.1+a1b2c3d")),
+                &claims_041,
+            )
+            .expect_err("the version it runs is the version offered");
+        assert!(
+            refusal.contains("runs \"0.4.1+a1b2c3d\"") && refusal.contains("not consulted"),
+            "the refusal names the version that decided, and says the claim was not: {refusal}"
+        );
+
+        // A program that cannot be ordered says nothing, and the claim becomes the whole test
+        // (ADR-0014 point 12) — which here refuses the Set the claim already names.
+        assert!(
+            candidates_for(&store, &running_agent("nightly"), &claims_041).is_empty(),
+            "an unorderable program version says nothing, and the claim stands"
+        );
+    }
+
+    /// The case that re-opened ADR-0014, and the other face of the one above: a claim *above* the
+    /// Set, over a program that denies running it. A self-update that staged 0.4.2 and did not take
+    /// leaves `supervisor 0.4.2` recorded on a host whose program still reports 0.4.0 — and rolling
+    /// 0.4.1 out to it was refused as a downgrade, so the host stayed where it was for good.
+    #[test]
+    fn a_claim_above_the_set_no_longer_holds_it_back_either() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+
+        assert_eq!(
+            candidates_for(&store, &running_agent("0.4.0"), &claims_042),
+            "the record names a binary this host is not running; 0.4.1 still moves it forward"
+        );
+                .fits_agent(
+                    Some(&running_agent("0.4.0")),
+                    &claims_042
+                )
+                .is_ok(),
+            "and the act at the gate agrees, as all three consumers must"
+        );
+
+        // The running version decides in *both* directions, so it still refuses what moves nobody:
+        // a host already at 0.4.1 is proposed nothing, however high its record reads.
+        assert!(
+            candidates_for(&store, &running_agent("0.4.1"), &claims_042).is_empty(),
+            "equal to what it runs is no upgrade, whatever the claim says"
+        );
+    }
+
+    /// ADR-0014 point 12: a running version that cannot be ordered says nothing, rather than
+    /// refusing, and the claim becomes the whole test. A GLPI Agent numbers itself `1.19` and an
+    /// appliance `24.04.1`; failing closed on those would make a program's numbering habit into a
+    /// fleet that cannot deliver to it at all.
+    #[test]
+    fn a_program_version_nothing_can_order_leaves_the_set_reaching() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let nothing = InstalledVersions::new();
+
+        for running in ["1.19", "24.04.1", "unknown", "v2.0.0"] {
+            assert_eq!(
+                candidates_for(&store, &running_agent(running), &nothing),
+                [("otelcol".to_string(), "2.0.0".to_string())],
+                "{running:?} orders against nothing, so it says nothing"
+            );
+        }
+
+        // And an Agent reporting no version at all is the first rollout, unchanged (ADR-0014).
+        assert_eq!(
+            candidates_for(&store, &agent("linux", "amd64", &[]), &nothing),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+        );
+    }
+
+    #[test]
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let host = agent("linux", "amd64", &[]);
+
+        assert_eq!(
+        );
+    }
+
+    #[test]
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "1.0.0", b"v1");
+        assert_eq!(
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new()
     }
 
     /// Fit before aim (ADR-0019): an entry for another platform, or a Set for another
@@ -803,13 +1345,17 @@ mod tests {
     fn fit_is_mandatory_platform_and_type() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "1.0.0", b"linux-only");
         store
             .expect("entry");
 
+        assert!(candidates(&store, &agent("windows", "amd64", &[])).is_empty());
         assert_eq!(
+            candidates(&store, &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())],
             "the promtail set fits another type and is not a candidate"
         );
+                &InstalledVersions::new()
             "no platform and no type fits nothing"
         );
     }
@@ -824,8 +1370,10 @@ mod tests {
         let mac = Platform::new("macos", "x86_64").expect("canonicalised");
         assert_eq!((mac.os.as_str(), mac.arch.as_str()), ("darwin", "amd64"));
         assert_eq!(
+            candidates(&store, &agent("darwin", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
+        assert_eq!(
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
     }
@@ -836,7 +1384,9 @@ mod tests {
     fn the_offer_carries_a_download_url_naming_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let set = stored_set(&store, "otelcol", "1.2.3", b"bytes");
         let offer = store
+            .offer_for_assigned(
                 Some(&agent("linux", "amd64", &[])),
                 "https://fleet.example",
                 None,
@@ -852,13 +1402,21 @@ mod tests {
         );
     }
 
+    /// The aggregate hash is per Agent and follows its assignments (ADR-0014): it changes when
+    /// the assigned Set changes, and is empty for an Agent assigned nothing it fits.
     #[test]
+    fn the_aggregate_hash_is_per_agent_and_follows_the_assignment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let v1 = stored_set(&store, "otelcol", "1.0.0", b"v1");
         assert!(!before.is_empty());
         assert!(store
             .is_empty());
         assert!(store
+            .is_empty());
+
+        let v2 = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        assert_ne!(before, after, "a new assigned version moves the aggregate");
     }
 
     /// Deleting an entry frees its artifact; deleting the Set takes the directory with it.

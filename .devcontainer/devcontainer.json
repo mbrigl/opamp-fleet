@@ -1,6 +1,23 @@
 {
   "name": "OpAMP Fleet DevContainer",
 
+  // A Compose project rather than a bare image, so the development observability stack comes up
+  // with the container and is reachable from inside it — the Collector on `localhost:4318`, Grafana
+  // on `grafana:3000`, ClickHouse on `clickhouse:9000`. The base image pin, the workspace mount and
+  // the published Agent-plane port live in `docker-compose.yml`, which is where a Compose-based Dev
+  // Container reads them from; the reasoning sits there with them. Still no host Docker socket
+  // (ADR-0002): the compose runs on the host, before VS Code attaches.
+  //
+  // One file, not two. The stack used to live in `deploy/observability/` and be merged in as a
+  // second compose file so it could also run standalone; it is now part of this directory and this
+  // project, so `otel-collector` states its workspace network namespace directly instead of
+  // overriding an imported service. See `OBSERVABILITY.md` for what the three services are for.
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  // The services started alongside `workspace`, which is always started. Drop an entry to keep it
+  // out of the next start — from inside the container there is no daemon to start it by hand, so
+  // this list is the on/off switch. All three together want roughly 2 GB beyond the toolchain.
+  "runServices": ["clickhouse", "otel-collector", "grafana"],
   "workspaceFolder": "/workspace",
 
   "remoteUser": "vscode",
@@ -14,6 +31,9 @@
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind"
   ],
 
+  // `stopCompose`, not `stopContainer`: a Compose-based Dev Container takes the whole project down
+  // together, so the observability containers do not outlive the window that started them.
+  "shutdownAction": "stopCompose",
 
   // Runs on the host before the container is created. Ensures the bind-mount source for the agent
   // config exists, so Docker does not auto-create it as a root-owned directory (which breaks
@@ -32,6 +52,7 @@
   // from a host-side VS Code extension instead (README → "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
+    // credential helper. Git writes still require explicit human approval (see AGENTS.md §6).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
     // toolchain (ADR-0025). The build chain needs no system protoc (ADR-0009 uses the
@@ -39,6 +60,21 @@
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
+  //
+  // The first five are *developer tooling* — nothing shipped depends on them, which is why they
+  // need no ADR (AGENTS.md §3.6) — and each earns its place:
+  //
+  // The Boost and protobuf libraries after them are a different kind of entry: they are not used by
+  // anything in this repository, they are what `opamp-package-fetch` *copies into* the Icinga 2
+  // artifact. The repack bundles the closure `ldd` resolves on this host (ADR-0016), so a library
+  // missing here is a library missing from the tree — which the tool refuses to pack rather than
+  // ship, by design. They are the exact set `icinga2-bin` needs beyond what the base image already
+  // has. Two things about them:
+  //
+  //   * The `1.74.0` / `32` in the names are bookworm's versions and move with the image pin above.
+  //   * `libboost-regex1.74.0` pulls `libicu72` in, so ICU rides along in the artifact. Icinga 2
+  //     2.14.6 did not link `boost_regex` at all; 2.16.5 does.
+  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
   "customizations": {
     // VS Code extensions installed inside the container
     "vscode": {
@@ -56,6 +92,9 @@
 
   // The Server's two planes (ADR-0023), published the way each one is meant to be reached.
   //
+  // The Agent plane (4320, OpAMP + package downloads) is where the fleet connects, so Docker
+  // publishes it itself (`ports:` on the `workspace` service) and the Server is reachable from the
+  // host network under the host's own IP — not just from the host via localhost. VS Code's
   // `forwardPorts` would bind the host side to 127.0.0.1 only; do not add 4320 to it, the two
   // mechanisms fight over the same host port.
   //
@@ -65,6 +104,15 @@
   // developer, not the network.
   "forwardPorts": [4321],
   "portsAttributes": {
+    "4320": { "label": "Fleet Server (OpAMP + downloads)" },
+    "4321": { "label": "Fleet Server (Control plane: REST + UI)" },
+    // The Collector listens in this container's network namespace, so VS Code sees its sockets and
+    // would offer to forward ports Docker already publishes from the same service. Labelled for
+    // the Ports view, ignored by the auto-forwarder.
+    "4317": { "label": "OTLP/gRPC → Collector", "onAutoForward": "ignore" },
+    "4318": { "label": "OTLP/HTTP → Collector", "onAutoForward": "ignore" },
+    "8888": { "label": "Collector self-metrics", "onAutoForward": "ignore" },
+    "13133": { "label": "Collector health", "onAutoForward": "ignore" }
   },
 
   "hostRequirements": {
