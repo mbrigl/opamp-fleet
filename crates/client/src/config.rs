@@ -532,6 +532,14 @@ pub struct GatewayConfig {
     /// and never beyond, so a Gateway in front of three Agents holds three connections.
     #[serde(default = "default_upstream_connections")]
     pub upstream_connections: usize,
+    /// The most distinct Agents a single downstream connection may carry. It bounds the routing
+    /// state one peer can make this Gateway hold: a misbehaving or hostile downstream Client
+    /// streaming reports under endless fabricated `instance_uid`s would otherwise grow the registry
+    /// and pool maps without limit. Generous for a nested Gateway carrying a real sub-fleet; a
+    /// report for a *new* Agent past the cap is dropped, the ones already carried keep working. `0`
+    /// is refused at load.
+    #[serde(default = "default_max_carried_agents")]
+    pub max_carried_agents: usize,
     /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0035): what this verifies is the
     /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     pub tls: Option<GatewayTlsConfig>,
@@ -557,6 +565,13 @@ impl GatewayConfig {
     fn check(&self, endpoint: &str) -> Result<(), String> {
         if self.upstream_connections == 0 {
             return Err("[gateway] upstream_connections must be at least 1".to_string());
+        }
+        if self.max_carried_agents == 0 {
+            return Err(
+                "[gateway] max_carried_agents must be at least 1 — it bounds routing state, not a \
+                 switch"
+                    .to_string(),
+            );
         }
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
@@ -626,6 +641,12 @@ fn default_heartbeat_interval_secs() -> u64 {
 /// a ceiling, not a cost: connections are opened as Agents appear.
 fn default_upstream_connections() -> usize {
     10
+}
+
+/// Generous enough for a nested Gateway carrying a real sub-fleet, small enough that a single
+/// hostile connection cannot grow the routing maps without bound.
+fn default_max_carried_agents() -> usize {
+    10_000
 }
 
 fn default_state_dir() -> PathBuf {
@@ -1009,6 +1030,32 @@ mod tests {
         std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_artifact_size_bytes"), "{err}");
+    }
+
+    /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
+    /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
+    /// so it fails startup.
+    #[test]
+    fn the_gateway_agent_cap_defaults_and_rejects_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the default cap");
+        assert_eq!(config.gateway.expect("gateway").max_carried_agents, 10_000);
+
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+             max_carried_agents = 0\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_carried_agents"), "{err}");
     }
 
     /// Both keys that once configured package delivery on the host are refused rather than

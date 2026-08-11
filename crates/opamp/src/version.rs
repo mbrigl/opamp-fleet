@@ -140,6 +140,80 @@ pub fn same_release(a: &str, b: &str) -> bool {
     }
 }
 
+/// Orders two versions by SemVer precedence (SemVer §11): the numeric base first, then the
+/// pre-release rules — a pre-release has lower precedence than the release it heads for, and
+/// pre-release identifiers compare field by field. Build metadata is ignored (SemVer §10), so two
+/// builds of the same release compare `Equal`.
+///
+/// `None` when either side is not a version. The self-update's anti-downgrade check relies on this:
+/// a value it cannot order is one it must not install over what is running.
+#[must_use]
+pub fn precedence(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    Some(compare(&parse(a)?, &parse(b)?))
+}
+
+fn compare(a: &Version, b: &Version) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // The base is three numeric identifiers; parse() already proved each is digits with no leading
+    // zero, so "longer is larger, equal length compares lexically" orders them without parsing into
+    // an integer that a pathologically long component could overflow.
+    for (x, y) in a.base.split('.').zip(b.base.split('.')) {
+        match cmp_numeric(x, y) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    match (a.prerelease, b.prerelease) {
+        (None, None) => Ordering::Equal,
+        // A release outranks any pre-release of the same base (1.0.0 > 1.0.0-rc.1).
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(x), Some(y)) => compare_prerelease(x, y),
+    }
+}
+
+fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let (mut ai, mut bi) = (a.split('.'), b.split('.'));
+    loop {
+        return match (ai.next(), bi.next()) {
+            (None, None) => Ordering::Equal,
+            // Fewer fields loses when all the shared ones are equal (rc < rc.1).
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(x), Some(y)) => match compare_identifier(x, y) {
+                Ordering::Equal => continue,
+                other => other,
+            },
+        };
+    }
+}
+
+/// One pre-release identifier: numeric ones compare numerically and rank below alphanumeric ones;
+/// alphanumeric ones compare in ASCII order (SemVer §11.4).
+fn compare_identifier(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (is_numeric(a), is_numeric(b)) {
+        (true, true) => cmp_numeric(a, b),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => a.cmp(b),
+    }
+}
+
+fn is_numeric(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Two digit strings with no leading zeros: the longer is the larger, and equal lengths compare
+/// lexically — a numeric compare that cannot overflow.
+fn cmp_numeric(a: &str, b: &str) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +246,41 @@ mod tests {
         // Two builds of the same release are the same release; which bytes arrived is the content
         // hash's question, not this one.
         assert!(same_release("0.1.1+799e36a", "0.1.1+deadbee"));
+    }
+
+    /// SemVer precedence (§11), the ordering the self-update's anti-downgrade check reads.
+    #[test]
+    fn precedence_orders_versions_by_semver_rules() {
+        use std::cmp::Ordering;
+
+        // Numeric base, component by component.
+        assert_eq!(precedence("1.0.0", "2.0.0"), Some(Ordering::Less));
+        assert_eq!(precedence("1.2.0", "1.10.0"), Some(Ordering::Less));
+        assert_eq!(precedence("1.0.10", "1.0.2"), Some(Ordering::Greater));
+        assert_eq!(precedence("1.2.3", "1.2.3"), Some(Ordering::Equal));
+
+        // Build metadata is ignored: two builds of a release are equal.
+        assert_eq!(
+            precedence("1.2.3+aaaaaaa", "1.2.3+bbbbbbb"),
+            Some(Ordering::Equal)
+        );
+
+        // A pre-release ranks below the release it heads for, and pre-releases order field by field.
+        assert_eq!(precedence("1.0.0-rc.1", "1.0.0"), Some(Ordering::Less));
+        assert_eq!(
+            precedence("1.0.0-alpha", "1.0.0-beta"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(precedence("1.0.0-rc", "1.0.0-rc.1"), Some(Ordering::Less));
+        assert_eq!(
+            precedence("1.0.0-alpha.2", "1.0.0-alpha.10"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(precedence("1.0.0-2", "1.0.0-alpha"), Some(Ordering::Less));
+
+        // A value that is not a version cannot be ordered.
+        assert_eq!(precedence("1.0.0", "latest"), None);
+        assert_eq!(precedence("", "1.0.0"), None);
     }
 
     /// The distinction the pre-release exists for (ADR-0009), kept at the gate that can enforce it.

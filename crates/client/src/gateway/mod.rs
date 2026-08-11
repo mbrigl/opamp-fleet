@@ -54,6 +54,9 @@ struct Gateway {
     pool: Pool,
     registry: Arc<Registry>,
     limit: usize,
+    /// The most distinct Agents one downstream connection may carry (ADR-0037): past it a report
+    /// for a *new* Agent is dropped, so a single peer cannot grow the routing state without bound.
+    max_agents: usize,
 }
 
 /// Serves the downstream endpoint until `shutdown` fires.
@@ -77,6 +80,7 @@ pub async fn run(config: Arc<ClientConfig>, shutdown: Shutdown) -> Result<(), St
         pool: Pool::new(config.clone(), registry.clone()),
         registry,
         limit: config.max_message_size_bytes,
+        max_agents: gateway.max_carried_agents,
     });
 
     let app = Router::new()
@@ -216,8 +220,9 @@ async fn serve_socket(
 ) {
     debug!(%peer, "a downstream client connected");
     let (replies_tx, mut replies_rx) = mpsc::channel::<ServerToAgent>(64);
-    // Every Agent this peer turned out to carry, so all of them are released when it goes.
-    let mut carried: Vec<InstanceUid> = Vec::new();
+    // Every Agent this peer turned out to carry, so all of them are released when it goes. A set,
+    // not a list: membership is checked per report, and the cap below bounds how large it grows.
+    let mut carried: std::collections::HashSet<InstanceUid> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -267,7 +272,16 @@ async fn serve_socket(
                     continue;
                 };
                 if !carried.contains(&uid) {
-                    carried.push(uid);
+                    // Bound the routing state one connection can create: past the cap a report for
+                    // a new Agent is dropped, while the Agents already carried keep being served.
+                    if carried.len() >= state.max_agents {
+                        warn!(
+                            %peer, agent = %uid, cap = state.max_agents,
+                            "a downstream connection reached its Agent cap; dropping a report for a new Agent"
+                        );
+                        continue;
+                    }
+                    carried.insert(uid);
                     info!(agent = %uid, %peer, "carrying an Agent");
                 }
                 state.registry.attach(uid, replies_tx.clone());
@@ -284,8 +298,9 @@ async fn serve_socket(
 
     // The peer is gone. Its Agents stop being routable here — and nothing is said upstream on
     // their behalf, because they said nothing (ADR-0037 rule 7).
-    state.registry.detach_all(&carried);
-    debug!(%peer, agents = carried.len(), "a downstream client disconnected");
+    let count = carried.len();
+    state.registry.detach_all(carried);
+    debug!(%peer, agents = count, "a downstream client disconnected");
 }
 
 /// The plain-HTTP half: one report in, one reply out, with the pool in between.

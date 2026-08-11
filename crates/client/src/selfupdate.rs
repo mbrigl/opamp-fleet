@@ -154,6 +154,20 @@ pub fn install(
         ));
     }
 
+    // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
+    // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
+    // fleet; the Ed25519 signature is over the artifact bytes only and carries no version ordering,
+    // so an old release stays validly signed forever. A rebuild of the same release (Equal) and any
+    // newer one still install. Rollback to the *previous* version is a separate mechanism — the
+    // crash-loop pointer move ([`on_start`]) — not a Server-offered older version.
+    let running = opamp::version::current();
+    if opamp::version::precedence(version, running) == Some(std::cmp::Ordering::Less) {
+        return Err(format!(
+            "the offered version {version:?} is older than the running {running:?}; \
+             refusing to downgrade"
+        ));
+    }
+
     let exe = layout::running_exe()?;
     // Outside the versioned layout there is no pointer to switch and no previous version to go
     // back to — a `cargo run` build, or a binary an operator dropped somewhere by hand.
@@ -455,6 +469,24 @@ mod tests {
                 "{bad:?} was not refused as a version: {err}"
             );
         }
+    }
+
+    /// A Server offering an older release than the one running is refused before it can be staged,
+    /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
+    /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
+    /// project builds.
+    #[test]
+    fn install_refuses_a_downgrade() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"payload").expect("write the artifact");
+
+        let err = install(dir.path(), &artifact, "0.0.1", b"\x00", None)
+            .expect_err("an older release must be refused");
+        assert!(
+            err.contains("refusing to downgrade"),
+            "an older version was not refused as a downgrade: {err}"
+        );
     }
 
     #[test]

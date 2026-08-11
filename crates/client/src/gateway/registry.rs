@@ -58,10 +58,10 @@ impl Registry {
     ///
     /// Nothing is sent upstream about it: a downstream Client that vanished said no goodbye, and
     /// this Gateway does not say one for it (ADR-0037 rule 7).
-    pub fn detach_all(&self, uids: &[InstanceUid]) {
+    pub fn detach_all(&self, uids: impl IntoIterator<Item = InstanceUid>) {
         let mut routes = self.routes.lock().expect("registry lock");
         for uid in uids {
-            routes.remove(uid);
+            routes.remove(&uid);
         }
     }
 

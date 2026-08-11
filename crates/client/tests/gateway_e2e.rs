@@ -168,6 +168,97 @@ async fn one_agent_opens_one_upstream_connection() {
     assert_eq!(state.snapshot().len(), 1, "three reports, one Agent");
 }
 
+/// A single downstream connection is bounded in how many Agents it may carry: past the cap a
+/// report for a new Agent is dropped rather than growing the routing state, while the Agents already
+/// carried keep being served. This is what stops one hostile peer streaming endless fabricated
+/// `instance_uid`s from inflating the registry and pool maps without limit.
+#[tokio::test]
+async fn a_downstream_connection_carries_no_more_than_its_agent_cap() {
+    let (server, state, _dir) = spawn_server().await;
+
+    // A Gateway with a cap of two, built directly so the TOML carries `max_carried_agents`.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    drop(listener);
+    let toml = format!(
+        r#"
+        endpoint = "ws://{server}/v1/opamp"
+        [gateway]
+        listen = "{listen}"
+        max_carried_agents = 2
+        "#
+    );
+    let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
+    let (_stop, shutdown) = shutdown_channel();
+    tokio::spawn(async move {
+        client::gateway::run(Arc::new(config), shutdown)
+            .await
+            .expect("gateway");
+    });
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(listen).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{listen}/v1/opamp"))
+        .await
+        .expect("connect to the gateway");
+    let uids: Vec<InstanceUid> = (0..3).map(|_| InstanceUid::default()).collect();
+
+    // The first two Agents are within the cap: carried, forwarded, and answered.
+    for uid in &uids[..2] {
+        let frame = opamp::frame::encode_within(&report(uid, 1), 64 << 20).expect("encode");
+        socket
+            .send(Message::Binary(frame.into()))
+            .await
+            .expect("send");
+        let reply = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("a reply in time")
+            .expect("a message")
+            .expect("no error");
+        assert!(
+            matches!(reply, Message::Binary(_)),
+            "the carried Agent is answered"
+        );
+    }
+
+    // The third is past the cap: its report is dropped, so nothing comes back for it.
+    let frame = opamp::frame::encode_within(&report(&uids[2], 1), 64 << 20).expect("encode");
+    socket
+        .send(Message::Binary(frame.into()))
+        .await
+        .expect("send");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), socket.next())
+            .await
+            .is_err(),
+        "a report past the Agent cap must not be answered"
+    );
+
+    // The Server saw exactly the two Agents within the cap, never the third.
+    let seen: Vec<String> = state
+        .snapshot()
+        .iter()
+        .map(|a| a.instance_uid.clone())
+        .collect();
+    assert_eq!(
+        seen.len(),
+        2,
+        "only the capped number of Agents reached the Server"
+    );
+    assert!(seen.contains(&uids[0].to_string()));
+    assert!(seen.contains(&uids[1].to_string()));
+    assert!(
+        !seen.contains(&uids[2].to_string()),
+        "the Agent past the cap was dropped"
+    );
+}
+
 /// A downstream peer that speaks the wrong content type is refused by the Gateway rather than
 /// forwarded — the Baseline's rule for the plain-HTTP transport, enforced per hop.
 #[tokio::test]

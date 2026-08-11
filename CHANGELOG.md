@@ -59,6 +59,27 @@ carries a date once its tag exists.
   fleet distributes artifacts larger than 1 GiB — then raise `max_artifact_size_bytes` in
   `client.toml`.
 
+- **A self-update can no longer be talked into a downgrade.** The install decision was "is the
+  offered version different from the running one", so a compromised Server could offer an older,
+  still-validly-signed release with a known vulnerability and the Client would install it — the
+  Ed25519 signature is over the artifact bytes only and carries no version ordering. The Client now
+  refuses an offer whose version has lower SemVer precedence than the one running; a rebuild of the
+  same release and any newer version still install, and rollback to the *previous* version stays the
+  crash-loop mechanism it always was. No operator action required.
+
+- **A single downstream Gateway connection can no longer grow the routing state without bound.** For
+  every distinct `instance_uid` a downstream peer reported, the Gateway grew its per-connection,
+  registry, and pool maps; one hostile or buggy peer streaming endless fabricated `instance_uid`s
+  was an unbounded-memory denial of service. A connection is now capped at the new
+  `[gateway] max_carried_agents` (default 10000): past it a report for a *new* Agent is dropped while
+  the Agents already carried keep being served. **What to do:** nothing, unless a single nested
+  Gateway carries more than 10000 Agents on one connection — then raise `max_carried_agents`.
+
+- **The WebSocket transport marks the `Authorization` header sensitive.** The HTTP transport already
+  flagged the credential so it is redacted from any debug formatting of the request; the WebSocket
+  path did not, so the value could surface in a log line. It now matches. No operator action
+  required.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added
