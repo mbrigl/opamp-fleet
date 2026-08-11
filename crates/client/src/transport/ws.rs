@@ -32,10 +32,14 @@ enum Served {
     ConnectionLost,
     /// Verified connection settings took effect (ADR-0018); the runtime reconnects with them.
     Reconfigured,
+    /// A self-update switched to a new version (ADR-0021); the run ends and the process asks the
+    /// service manager for a restart.
+    RestartForUpdate,
 }
 
 pub async fn run(
     engine: &mut Engine,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
     telemetry: &crate::telemetry::Telemetry,
 ) -> Result<RunOutcome, String> {
@@ -47,8 +51,12 @@ pub async fn run(
     // server checks it before the WebSocket comes up.
     let authorization = match config.authorization_value()? {
         Some(value) => {
+            let mut value: tokio_tungstenite::tungstenite::http::HeaderValue = value
                 .parse()
                 .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
+            // Redact it from any `Debug` of the request headers, as the HTTP transport does
+            // (`transport/http.rs`): a credential must not surface in a log line by accident.
+            value.set_sensitive(true);
             if config.sends_credentials_in_cleartext() {
                 warn!(
                     "sending credentials over unencrypted ws:// beyond the loopback — use wss://"
@@ -91,6 +99,7 @@ pub async fn run(
                         return Ok(RunOutcome::Shutdown);
                     }
                     Served::Reconfigured => return Ok(RunOutcome::Reconfigured),
+                    Served::RestartForUpdate => return Ok(RunOutcome::RestartForUpdate),
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
             }
@@ -119,6 +128,7 @@ pub async fn run(
 async fn serve(
     mut socket: Socket,
     engine: &mut Engine,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
     telemetry: &crate::telemetry::Telemetry,
 ) -> Served {
@@ -230,8 +240,22 @@ async fn serve(
                         {
                             return Served::ConnectionLost;
                         }
+                        // The `Installing` above is the last thing this version says (ADR-0021).
+                        // Then exit for the restart *cleanly*: stop the Managed Processes and send
+                        // the goodbyes over this connection, exactly as an ordinary shutdown does,
+                        // rather than abandoning the children when the process exits.
+                        if engine.restart_for_update() {
+                            engine.shutdown_processes().await;
+                            let _ = send_all(&mut socket, engine.disconnect_messages(), limit).await;
                             let _ = socket.close(None).await;
+                            info!("disconnected for the self-update restart");
+                            return Served::RestartForUpdate;
+                        }
+                        // The self-Agent's configuration is its Supervisor set (ADR-0022):
+                        // apply it — stop what left, rewrite `supervisor.toml`, start what arrived —
+                        // send the retired Agents' goodbyes, and flush the outcome.
                         let mut sink = FrameSink { socket: &mut socket, limit };
+                        if crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await
                             && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
                         {
                             return Served::ConnectionLost;
@@ -349,6 +373,7 @@ mod tests {
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let state = AgentState::new("limit-test".to_string(), storage).expect("agent state");
         let mut engine = Engine::new(vec![state]);
+        let mut config = ClientConfig {
             endpoint: format!("ws://{addr}/v1/opamp"),
             max_message_size_bytes: LIMIT,
             heartbeat_interval_secs: 0,

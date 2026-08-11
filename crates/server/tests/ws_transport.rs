@@ -180,6 +180,7 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     distribute(
         server.rest_addr,
         "left-only",
+        &[("service.instance.name", "left")],
         "exporters: {}\n",
     )
     .await;
@@ -202,6 +203,7 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     let view = |name: &str| {
         views
             .iter()
+            .find(|a| a.service_instance_name == name)
             .expect("a known agent")
     };
     assert_eq!(view("left").matched_configurations, ["base", "left-only"]);
@@ -262,6 +264,7 @@ async fn agent_disconnect_and_socket_loss_mark_the_agent_disconnected() {
             .state
             .snapshot()
             .into_iter()
+            .find(|a| a.service_instance_name == "vanisher")
             .map(|a| !a.connected)
             .unwrap_or(false)
     };
@@ -317,6 +320,7 @@ async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
         let disconnected = |name: &str| {
             agents
                 .iter()
+                .any(|a| a.service_instance_name == name && !a.connected)
         };
         (disconnected("clone") && !disconnected("original")).then_some(())
     };

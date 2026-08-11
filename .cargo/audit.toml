@@ -1,0 +1,23 @@
+# cargo-audit configuration (RustSec). See docs/adr and README → "Build, Test & Run".
+#
+# The advisories below are REVIEWED AND ACCEPTED — every one is a `warning` (unmaintained/unsound),
+# not a vulnerability, and none is fixable by this project today. cargo-audit still fails on any
+# *new* advisory, including a real vulnerability in any of these same crates (a different id), so the
+# gate stays meaningful. Revisit each when its upstream ships a fix, then delete the line.
+[advisories]
+ignore = [
+    # `paste` (RUSTSEC-2024-0436): unmaintained. A transitive proc-macro helper with no first-party
+    # use, no security impact, and no maintained drop-in — nothing to act on here.
+    "RUSTSEC-2024-0436",
+
+    # `rustls-pemfile` (RUSTSEC-2025-0134): unmaintained; its API moved into `rustls-pki-types`,
+    # which this project's own PEM parsing now uses directly (crates/opamp/src/pem.rs). It remains
+    # only transitively via `axum-server`, and leaves the tree when that migrates.
+    "RUSTSEC-2025-0134",
+
+    # `git2` (RUSTSEC-2026-0183, RUSTSEC-2026-0184): unsound `Remote::list()` and buffer-created
+    # `BlameHunk`. Neither API is used — git2 appears only in crates/opamp/build.rs for build-time
+    # version derivation (tags + HEAD), so there is no runtime exposure. No fixed release exists yet.
+    "RUSTSEC-2026-0183",
+    "RUSTSEC-2026-0184",
+]

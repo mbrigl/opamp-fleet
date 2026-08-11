@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use opamp::proto::{AgentDescription, ComponentHealth};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tracing::{info, instrument, warn, Instrument as _};
 
 use crate::install;
 use crate::service::runtime::Shutdown;
@@ -263,12 +264,19 @@ impl Runner {
             tokio::select! {
                 _ = sweep.tick() => self.sweep_backup(),
                 command = self.commands.recv() => match command {
+                    Some(ProcessCommand::ApplyConfig { config, span }) => {
                         backoff.reset();
                         streak = 0; // a new configuration is a fresh chance (ADR-0019)
                         // In place first (ADR-0015): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
+                        match self
+                            .try_reload(&mut child, &mut shutdown)
+                            .instrument(span.clone())
+                            .await
+                        {
                             Reloaded::Applied => {
+                                crate::telemetry::succeeded(&span);
                                 self.events
                                     .send(ProcessEvent::ConfigApplied {
                                         hash: config.config_hash,
@@ -280,13 +288,21 @@ impl Runner {
                             Reloaded::ShuttingDown => break,
                             Reloaded::NotApplied => {}
                         }
+                        // The restart phase. Created and dropped around the two awaits rather than
+                        // entered across them: a guard held over an `.await` stays current on the
+                        // thread while this task is parked, which would attribute another task's
+                        // work to this apply. An unentered span still carries the phase's duration,
+                        // which is what this one is here for.
+                        let restart = tracing::info_span!(parent: &span, "restart");
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         child = self.spawn_if_due().await;
+                        drop(restart);
                         last_start = Instant::now();
                         // Applying means running on the new files — and surviving the apply
                         // grace (ADR-0015's health-gated acknowledgement): a process that exits
                         // right away has rejected its configuration the only way a process can.
                         let mut exited_in_grace = false;
+                        let gate = tracing::info_span!(parent: &span, "gate");
                         let result = match (child.take(), (self.build)().is_some()) {
                             (Some(mut started), _) if !self.apply_grace.is_zero() => {
                                 tokio::select! {
@@ -323,6 +339,11 @@ impl Runner {
                             (None, false) => Ok(()), // nothing should run; that is the config
                             (None, true) => Err("the process did not start".to_string()),
                         };
+                        drop(gate);
+                        match &result {
+                            Ok(()) => crate::telemetry::succeeded(&span),
+                            Err(e) => crate::telemetry::failed(&span, e),
+                        }
                         self.events
                             .send(ProcessEvent::ConfigApplied { hash: config.config_hash, result })
                             .await;
@@ -344,11 +365,22 @@ impl Runner {
                             }
                         }
                     }
+                    Some(ProcessCommand::ApplyPackage { staged, version, hash, span }) => {
+                        //
+                        // The install's trace came with the command (ADR-0025): every phase below
+                        // runs inside it, so the download that started it and the rollback that may
+                        // end it are one trace across two tasks.
+                        let prepared = self.stage_and_check(&staged).instrument(span.clone()).await;
+                                crate::telemetry::failed(&span, &e);
                         // Swap the binary, restart, and health-gate on the apply grace — a binary
                         // that will not stay up is rolled back to the bytes it replaced (ADR-0019).
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
                         streak = 0; // a new package is a fresh chance (ADR-0019)
+                        let result = self
+                            .swap_and_gate(prepared, &version, &mut child, &mut shutdown)
+                            .instrument(span.clone())
+                            .await;
                         if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
                             child = self.spawn_if_due().await;
                             last_start = Instant::now();
@@ -361,11 +393,13 @@ impl Runner {
                                 // this the swap is reported as installed while the Agent goes on
                                 // describing the version it replaced, until the Client restarts.
                                 self.probe_version();
+                                crate::telemetry::succeeded(&span);
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Ok(version) })
                                     .await;
                             }
                             GraceOutcome::Failed(error) => {
+                                crate::telemetry::failed(&span, &error);
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Err(error) })
                                     .await;
@@ -450,6 +484,14 @@ impl Runner {
     /// caller respawns it).
     ///
     /// Everything here moves *files*: the old binary is renamed aside rather than read into
+    /// memory, and the artifact is moved or streamed rather than loaded. A program can weigh
+    /// hundreds of megabytes, and holding two copies of one in RAM to update it is not a trade
+    /// this makes. The artifact may already be gone by the time it is cleaned up —
+    /// [`install_executable`] moves it when it can — so every removal of it is best-effort.
+    /// The `stage` phase of an install's trace (ADR-0025); the preflight below is its own child.
+    #[instrument(name = "stage", skip_all, fields(supervisor = %self.name))]
+    /// The `swap` phase, with `gate` and — where it comes to that — `rollback` beneath it.
+    #[instrument(name = "swap", skip_all, fields(supervisor = %self.name, version = %version))]
     async fn swap_and_gate(
         &self,
         version: &str,
@@ -501,6 +543,10 @@ impl Runner {
         match (&outcome, has_backup) {
             // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
+                // A phase of its own in the trace (ADR-0025): a rollback is the part of a failed
+                // install an operator most wants timed, and its own failure is the one that leaves
+                // a host with no program at all.
+                let _rollback = tracing::info_span!("rollback").entered();
                 if let Err(e) = target.restore() {
                     warn!(supervisor = %self.name, error = %e, "cannot roll the program back");
                 } else {
@@ -590,6 +636,8 @@ impl Runner {
     /// The apply-grace health gate shared by a package swap: a freshly started process must
     /// survive `apply_grace` to count as applied; exiting within it fails. `child` is left holding
     /// the running process on success.
+    /// The `gate` phase: the apply grace a freshly started process must survive (ADR-0015).
+    #[instrument(name = "gate", skip_all, fields(supervisor = %self.name))]
     async fn gate(
         &self,
         started: Option<Child>,
@@ -636,6 +684,7 @@ impl Runner {
     /// short of that is `NotApplied`, and the caller restarts on the new files instead
     /// (`reload-or-restart`): no mechanism declared, nothing running to signal, a failed
     /// signal, or a death within the grace.
+    #[instrument(name = "reload", skip_all, fields(supervisor = %self.name))]
     async fn try_reload(&self, child: &mut Option<Child>, shutdown: &mut Shutdown) -> Reloaded {
         let Some(signal) = self.reload_signal else {
             return Reloaded::NotApplied;
@@ -769,6 +818,8 @@ impl Runner {
         match command.spawn() {
             Ok(child) => {
                 info!(supervisor = %self.name, program = %spec.program.display(), "process started");
+                // Before the health report, so a sampler that wakes on it already has the pid.
+                self.events.send(ProcessEvent::Pid(child.id())).await;
                 self.events
                     .send(ProcessEvent::Health(ComponentHealth {
                         healthy: true,
@@ -931,6 +982,7 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
+#[instrument(name = "preflight", skip_all)]
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
         String::from_utf8_lossy(&output.stdout),
@@ -973,10 +1025,22 @@ enum GraceOutcome {
     ShuttingDown,
 }
 
+/// Installs a downloaded artifact as `path`: put in place beside it, made executable, then renamed
+/// over `path` — the final rename being what makes the swap atomic, so a crash mid-install never
+/// leaves a half-written program where one is about to be started.
+///
+/// A raw artifact is **moved** rather than copied when it can be: since ADR-0022 the download is
+/// staged in the same Supervisor directory the program lives in, so the two are normally on one
+/// filesystem and the install costs a metadata update instead of a second full write of several
+/// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
+/// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
+/// directory an operator has put elsewhere; either way the stream below is the fallback, and the
+/// error that matters is reported from there rather than from the attempt.
 ///
 /// The artifact may be the program or an archive holding it (ADR-0019). An archive is opened here,
 /// where the binary's name is known, and the member of that name is what gets installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
+/// its author published. Unpacking always writes; only the raw case can be a move.
     artifact: &std::path::Path,
     path: &std::path::Path,
     archive_key: Option<&str>,
@@ -988,7 +1052,9 @@ enum GraceOutcome {
     if crate::archive::detect(artifact)? == crate::archive::Kind::Raw
         && std::fs::rename(artifact, &temp).is_ok()
     {
+        info!(artifact = %artifact.display(), "moved the package artifact into place");
         install::make_executable(&temp)?;
+    } else {
         let member = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1128,11 +1194,20 @@ mod tests {
         assert_eq!(find_semver("no version at all"), None);
     }
 
+    /// ADR-0022 stages the download in the same directory the program lives in, so installing a
+    /// raw artifact is a move and not a second full write of several hundred megabytes. What makes
+    /// that observable is *why* the artifact is gone: it became the program, rather than being
+    /// copied and deleted.
+    ///
     /// The mode assertion is the one this could genuinely break, and it is Unix's alone. A written
     /// file gets its permissions from the process umask and was always chmod'ed afterwards; a moved
     /// one carries whatever the download had — 0644 here, as `File::create` leaves it — so skipping
     /// the chmod would install a program that cannot be executed.
+    #[test]
+    fn a_raw_artifact_beside_the_program_is_moved_into_place() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("packages/agent.staged");
+        std::fs::create_dir_all(artifact.parent().expect("parent")).expect("mkdir");
         std::fs::write(&artifact, b"the-program").expect("stage");
         #[cfg(unix)]
         {
@@ -1140,7 +1215,15 @@ mod tests {
             std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o644))
                 .expect("chmod");
         }
+
+        let program = dir.path().join("program/agent");
+        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+
         assert_eq!(std::fs::read(&program).expect("read"), b"the-program");
+        assert!(
+            !artifact.exists(),
+            "the artifact was moved, not copied — the caller's cleanup of it is best-effort"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1154,14 +1237,40 @@ mod tests {
                 "a moved artifact is still made executable"
             );
         }
+    }
+
+    /// An archive can never be moved: what belongs at the program's path is one member of it, not
+    /// the container. It is unpacked, and the artifact stays for the caller to clean up.
+    ///
+    /// that fails because the staging directory an operator configured is on another filesystem —
+    /// runs the same code and is not forced here; doing so would need a second mount.
+    #[test]
+    fn an_archive_is_unpacked_and_the_artifact_survives_the_install() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&artifact).expect("create");
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
             let mut builder = tar::Builder::new(encoder);
             let content = b"the-member".as_slice();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "agent-2.0.0/agent", content)
+                .expect("append");
             builder.into_inner().expect("tar").finish().expect("gzip");
         }
 
+        let program = dir.path().join("agent");
+
         assert_eq!(std::fs::read(&program).expect("read"), b"the-member");
+        assert!(
+            artifact.exists(),
+            "the archive is read, never consumed — only its member is installed"
+        );
+    }
 
     /// ADR-0019: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
