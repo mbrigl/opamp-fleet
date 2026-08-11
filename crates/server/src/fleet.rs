@@ -588,6 +588,12 @@ impl AppState {
     /// The control loop for one report, shared by both transports (ADR-0007): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
     /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
+    ///
+    /// The reported `instance_uid` is taken at face value: admission proved fleet membership, not
+    /// which Agent is speaking, so within an admitted fleet a report's identity is self-asserted and
+    /// not authorized against any other Agent (ADR-0047). The plain-HTTP path in particular offers
+    /// nothing to tell two pollers apart; the WebSocket duplicate-`instance_uid` rekey below is
+    /// collision handling, not authorization.
     pub fn process(
         &self,
         msg: AgentToServer,

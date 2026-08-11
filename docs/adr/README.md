@@ -75,4 +75,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0044](0044-what-the-shared-crate-holds.md) | The shared crate holds what both ends implement *identically* — measured, not by category | 🟢 accepted |
 | [0045](0045-the-version-helper-lives-in-the-shared-crate.md) | The single version helper lives in `crates/opamp`, so both ends report one number | 🟢 accepted |
 | [0046](0046-a-release-ships-native-installers.md) | A release also ships native installers — `.deb`, `.rpm`, and an `.msi` that asks for the install root and the endpoint | 🟢 accepted |
+| [0047](0047-admission-is-a-fleet-wide-trust-boundary.md) | Admission is a fleet-wide trust boundary — `instance_uid` is self-asserted, and there is no authorization between Agents | 🟢 accepted |
 
