@@ -63,6 +63,12 @@ impl<'a> Version<'a> {
 /// Returns `None` when the string does not begin with three dot-separated numeric components —
 /// which is a refusal, not a fallback: a value that is not a version cannot be compared to one.
 /// Leading zeros are rejected the way SemVer rejects them, so `01.2.3` is not a version.
+///
+/// The pre-release and build metadata are held to the SemVer character set — dot-separated,
+/// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
+/// name in the self-update layout (ADR-0010), so a value carrying `/`, `\`, or a bare `..` is both
+/// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
+/// rest of the project trusts.
 #[must_use]
 pub fn parse(raw: &str) -> Option<Version<'_>> {
     let (without_build, build) = match raw.split_once('+') {
@@ -90,12 +96,27 @@ pub fn parse(raw: &str) -> Option<Version<'_>> {
         return None;
     }
 
+    if prerelease.is_some_and(|pre| !is_dot_identifiers(pre))
+        || build.is_some_and(|meta| !is_dot_identifiers(meta))
+    {
+        return None;
+    }
+
     Some(Version {
         base,
         prerelease,
         build,
         identity: without_build,
     })
+}
+
+/// Whether `field` is one or more dot-separated, non-empty SemVer identifiers — each drawn only
+/// from ASCII letters, digits, and `-`. A `/`, `\`, `.`-only, or empty identifier fails, which is
+/// what keeps a parsed version from ever naming a path outside its layout.
+fn is_dot_identifiers(field: &str) -> bool {
+    field
+        .split('.')
+        .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
@@ -191,6 +212,34 @@ mod tests {
         // And a comparison against one is false rather than an accident.
         assert!(!same_release("0.1.1", "0.1.1 799e36a"));
         assert!(!same_release("latest", "latest"));
+    }
+
+    /// The self-update turns this string into a directory name (ADR-0010), so a pre-release or
+    /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
+    /// the gate that stops a crafted Server offer from escaping `versions/`.
+    #[test]
+    fn a_version_that_would_escape_a_path_is_refused() {
+        for traversal in [
+            "1.0.0+../../../evil",
+            "1.0.0-../x",
+            "1.0.0+a/b",
+            r"1.0.0+a\b",
+            "1.0.0+..",
+            "1.0.0-.",
+            "1.0.0+a..b",
+            "1.0.0+a.",
+        ] {
+            assert!(
+                parse(traversal).is_none(),
+                "{traversal:?} parsed as a version"
+            );
+            assert!(identity(traversal).is_none(), "{traversal:?}");
+        }
+        // The shapes this project actually produces still parse — the tightening rejects only what
+        // was never a valid identifier to begin with.
+        assert!(parse("1.2.3+a1b2c3d").is_some());
+        assert!(parse("0.1.1-dev+799e36a").is_some());
+        assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
     /// The baked string has the shape ADR-0009 prescribes — and, now that both live here, it is

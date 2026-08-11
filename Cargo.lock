@@ -409,6 +409,7 @@ name = "client"
 version = "0.2.1"
 dependencies = [
  "axum",
+ "axum-server",
  "base64",
  "clap",
  "dialoguer",

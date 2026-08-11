@@ -15,6 +15,30 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.1]
+
+### Fixed
+
+- **A Gateway now serves its downstream hop over TLS, and `[gateway.tls] client_ca_file` gates who
+  may connect.** The `[gateway.tls]` section ([ADR-0037](docs/adr/0037-gateway-mode.md),
+  [ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)) was read and
+  then ignored: the endpoint stayed plaintext and the client CA verified nobody, so the downstream
+  `Authorization` credential travelled in the clear and any peer could connect and report under any
+  `instance_uid`. The section now takes effect — the Gateway presents its `cert_file`/`key_file`, and
+  when `client_ca_file` is set a downstream Agent **must** present a certificate that chains to it or
+  the handshake is refused. **What to do:** an operator relying on that section for security must
+  confirm downstream Agents now dial `wss://`/`https://` and, if a client CA is configured, carry a
+  client certificate — connections that worked only because the boundary was silently off will now
+  fail. A Gateway left without a `[gateway.tls]` section still serves plaintext, and now logs a
+  warning saying so.
+
+- **A Server-offered self-update version can no longer escape the install layout.** The offered
+  version string becomes a directory name under `versions/` (ADR-0010); a crafted value carrying
+  `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged binary outside the layout
+  and repoint `current` at it — an escape the package hash and signature never covered, because they
+  sign the bytes, not the destination. The version is now validated before it names a path, and the
+  staged directory is asserted to stay directly under `versions/`. No operator action required.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added
