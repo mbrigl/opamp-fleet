@@ -81,6 +81,14 @@ carries a date once its tag exists.
   signature check it had already passed (TOCTOU). The directory (`packages/` under the Agent's state
   or supervisor directory) is now `0700`. No operator action required.
 
+- **A Client that installs packages without a verification key now says so at startup.** Package
+  signing is opt-in (ADR-0015): with no `[packages] verification_key`, an offered package or
+  self-update is accepted on the Server-supplied content hash alone, with no signature binding the
+  bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
+  managed process's, or its own self-update) without a key now logs a warning at startup, so the
+  weaker posture is a knowing choice rather than a silent default. **What to do:** to require an
+  Ed25519 signature, set `[packages] verification_key` (see `opamp-package-sign`); otherwise nothing.
+
 - **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
   with no bound, so a malicious or compromised Server could answer the download with an endless body
   and fill the staging filesystem before the content hash — checked only once the whole stream lands

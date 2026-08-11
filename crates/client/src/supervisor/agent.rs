@@ -342,6 +342,13 @@ impl AgentState {
         self.capabilities |= capability as u64;
     }
 
+    /// Whether this Agent takes Server-offered packages (ADR-0015) — the self-Agent when
+    /// `[self_update]` is set, a Supervisor whose program it owns (ADR-0021). Read without side
+    /// effects, so a startup check can ask it before anything is polled.
+    pub fn accepts_packages(&self) -> bool {
+        self.capabilities & AgentCapabilities::AcceptsPackages as u64 != 0
+    }
+
     /// Attaches the operator-defined attributes this Agent reports (ADR-0012).
     #[must_use]
     pub fn with_attributes(
