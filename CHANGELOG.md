@@ -75,6 +75,12 @@ carries a date once its tag exists.
   which another local user could read it. The mode is now set in the open call, closing the window.
   No operator action required.
 
+- **The artifact staging directory is kept owner-only.** A downloaded artifact is verified and then
+  re-opened by the installer; the staging directory was created at the umask default, so on a
+  multi-user host another local user could swap the file in that window and defeat the hash and
+  signature check it had already passed (TOCTOU). The directory (`packages/` under the Agent's state
+  or supervisor directory) is now `0700`. No operator action required.
+
 - **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
   with no bound, so a malicious or compromised Server could answer the download with an endless body
   and fill the staging filesystem before the content hash — checked only once the whole stream lands

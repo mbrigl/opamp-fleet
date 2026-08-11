@@ -120,3 +120,38 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
         "a body under the ceiling must not be refused for size: {err}"
     );
 }
+
+/// The staging directory is kept owner-only, so the verified artifact cannot be swapped for another
+/// between the hash check and the installer re-opening it (TOCTOU). It starts deliberately wide here
+/// and must be narrowed; the hardening happens before a byte is written, so even a failing download
+/// leaves it owner-only.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_staging_directory_is_kept_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let addr = spawn().await;
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let staging = scratch.path().join("packages");
+    std::fs::create_dir_all(&staging).expect("mkdir");
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("widen");
+
+    // Fails on the deliberately wrong content hash — the directory is hardened regardless.
+    let _ = download_and_verify(
+        &download(format!("http://{addr}/known")),
+        &small_cap_config(8192),
+        &staging,
+        &Progress::default(),
+    )
+    .await;
+
+    let mode = std::fs::metadata(&staging)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o700,
+        "the staging directory must be owner-only"
+    );
+}

@@ -91,6 +91,17 @@ pub async fn download_and_verify(
 
     std::fs::create_dir_all(staging_dir)
         .map_err(|e| format!("cannot create {}: {e}", staging_dir.display()))?;
+    // Keep the staging directory owner-only. The artifact is verified here and then re-opened by the
+    // installer (`install::write_program`, the Supervisor's swap); if another local user could write
+    // into this directory they could swap the file in that window and defeat the hash and signature
+    // check it already passed (TOCTOU). Owner-only closes it — the predictable `<name>.staged`
+    // filename is then harmless, since no other user can reach the directory to race it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staging_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot restrict {}: {e}", staging_dir.display()))?;
+    }
     let path = staging_dir.join(format!("{}.staged", package.name));
 
     // Stream to disk, hashing on the way past: peak memory is one chunk, whatever the artifact
