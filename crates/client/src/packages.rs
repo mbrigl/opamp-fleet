@@ -95,8 +95,16 @@ pub async fn download_and_verify(
 
     // Stream to disk, hashing on the way past: peak memory is one chunk, whatever the artifact
     // weighs. A failure anywhere leaves no half-written file behind for the next attempt to trip
-    // over.
-    let staged = match write_stream(&path, &mut response, progress).await {
+    // over. The size ceiling stops a Server from filling the staging filesystem with an endless
+    // body before the content hash — which comes only after the whole stream lands — can reject it.
+    let staged = match write_stream(
+        &path,
+        &mut response,
+        progress,
+        config.max_artifact_size_bytes,
+    )
+    .await
+    {
         Ok(hash) => hash,
         Err(e) => {
             let _ = std::fs::remove_file(&path);
@@ -153,17 +161,30 @@ impl Progress {
     }
 }
 
+/// The message for a download that has reached `max_bytes`, or `None` while it is within the
+/// ceiling. `max_bytes == 0` is never passed — the loader refuses it (a bound, not a switch).
+fn over_cap(len: u64, max_bytes: u64) -> Option<String> {
+    (len > max_bytes).then(|| {
+        format!("the artifact exceeds the {max_bytes}-byte limit (max_artifact_size_bytes)")
+    })
+}
+
 async fn write_stream(
     path: &Path,
     response: &mut reqwest::Response,
     progress: &Progress,
+    max_bytes: u64,
 ) -> Result<Staged, String> {
     use tokio::io::AsyncWriteExt;
 
     // What the Server advertises, so a percentage is possible at all.
-    progress
-        .total
-        .store(response.content_length().unwrap_or(0), Ordering::Relaxed);
+    let advertised = response.content_length().unwrap_or(0);
+    progress.total.store(advertised, Ordering::Relaxed);
+    // Refuse a body that says up front it is too large, before a single byte is written. A lying or
+    // absent Content-Length is caught by the running check below instead.
+    if let Some(e) = over_cap(advertised, max_bytes) {
+        return Err(e);
+    }
     let mut file = tokio::fs::File::create(path)
         .await
         .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
@@ -174,8 +195,13 @@ async fn write_stream(
         .await
         .map_err(|e| format!("cannot read the download: {e}"))?
     {
-        hasher.update(&chunk);
         len += chunk.len() as u64;
+        // Stop the moment the body crosses the ceiling — a chunked response carries no
+        // Content-Length, so this running check is what bounds it at all.
+        if let Some(e) = over_cap(len, max_bytes) {
+            return Err(e);
+        }
+        hasher.update(&chunk);
         progress.downloaded.store(len, Ordering::Relaxed);
         file.write_all(&chunk)
             .await
@@ -281,6 +307,17 @@ mod tests {
             content_hash,
             signature,
         }
+    }
+
+    #[test]
+    fn the_cap_triggers_only_past_the_limit() {
+        assert!(over_cap(1000, 1024).is_none(), "within the ceiling is fine");
+        assert!(
+            over_cap(1024, 1024).is_none(),
+            "exactly at the ceiling is fine"
+        );
+        let err = over_cap(1025, 1024).expect("past the ceiling is refused");
+        assert!(err.contains("max_artifact_size_bytes"), "got {err}");
     }
 
     #[test]

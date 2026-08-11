@@ -39,6 +39,26 @@ carries a date once its tag exists.
   sign the bytes, not the destination. The version is now validated before it names a path, and the
   staged directory is asserted to stay directly under `versions/`. No operator action required.
 
+- **The Server-rotated connection credential is no longer left world-readable.** The
+  `connection-settings.pb` in the state directory holds the `Authorization` value the Server rotates
+  in (ADR-0014), which outranks the one in `client.toml`. It was written at the umask default
+  (typically `0644`), so on a multi-user host any local user could read the live fleet credential.
+  It is now written `0600` and its state directory `0700`. No operator action required.
+
+- **The enrolment private key is written owner-only from the start.** `client-key.pem` (ADR-0035)
+  was created at the umask default and narrowed to `0600` only afterwards, leaving a brief window in
+  which another local user could read it. The mode is now set in the open call, closing the window.
+  No operator action required.
+
+- **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
+  with no bound, so a malicious or compromised Server could answer the download with an endless body
+  and fill the staging filesystem before the content hash — checked only once the whole stream lands
+  — could reject it. The download is now capped at the new `max_artifact_size_bytes` (default one
+  gibibyte, matching the Server's own per-package limit), enforced against an over-large
+  `Content-Length` up front and while a chunked body streams in. **What to do:** nothing, unless a
+  fleet distributes artifacts larger than 1 GiB — then raise `max_artifact_size_bytes` in
+  `client.toml`.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added

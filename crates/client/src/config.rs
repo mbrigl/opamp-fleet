@@ -81,6 +81,13 @@ pub struct ClientConfig {
     /// this default, and asks that it be configurable.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
+    /// The largest package or self-update artifact the Client downloads before verifying it
+    /// (ADR-0015). Streaming already caps peak memory at one chunk, but disk is finite: without a
+    /// ceiling a Server could answer the artifact GET with an endless body and fill the staging
+    /// filesystem before the content hash is ever checked. Matches the Server's own per-package
+    /// ceiling; `0` is refused at load, the same as the message limit.
+    #[serde(default = "default_max_artifact_size")]
+    pub max_artifact_size_bytes: u64,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -629,6 +636,12 @@ fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
 }
 
+/// One gibibyte — the Server's own `DEFAULT_MAX_PACKAGE_SIZE`. A Server that will not store a
+/// larger artifact never offers one, so the two ends agree by default.
+fn default_max_artifact_size() -> u64 {
+    1 << 30
+}
+
 fn default_stop_timeout_secs() -> u64 {
     10
 }
@@ -657,6 +670,7 @@ impl Default for ClientConfig {
             self_update: None,
             package_key: None,
             max_message_size_bytes: default_max_message_size(),
+            max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
         }
     }
@@ -708,6 +722,15 @@ impl ClientConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        // A ceiling of zero would refuse every artifact; like the message limit it is a bound, not
+        // a switch, so a value that cannot carry a download fails startup rather than silently
+        // rejecting every package.
+        if config.max_artifact_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_artifact_size_bytes must be greater than zero",
                 path.display()
             ));
         }
@@ -969,6 +992,23 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
+    /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
+    /// a bound that could carry nothing rather than "unlimited", so it fails startup.
+    #[test]
+    fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
+        assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
+        let tightened: ClientConfig =
+            toml::from_str("max_artifact_size_bytes = 1048576").expect("parse");
+        assert_eq!(tightened.max_artifact_size_bytes, 1_048_576);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_artifact_size_bytes"), "{err}");
     }
 
     /// Both keys that once configured package delivery on the host are refused rather than

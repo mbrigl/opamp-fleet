@@ -35,9 +35,36 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 }
 
 /// Persists the settings now in force, losslessly as the received protobuf.
+///
+/// The file holds the Server-rotated `Authorization` value (ADR-0014), which outranks the one in
+/// `client.toml` — so it is written no wider than its owner, and the state directory holding it no
+/// wider than `0700`. On a multi-user host the default umask would otherwise leave the live fleet
+/// credential world-readable. On Windows the directory ACL under `%ProgramData%` protects it
+/// (ADR-0010); there is no mode to set.
 pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
-    std::fs::write(state_dir.join(SETTINGS_FILE), settings.encode_to_vec())
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        // Narrow the directory too: create_dir_all leaves it at the umask default, and the file's
+        // own mode is no protection if the directory it sits in is world-traversable and listable.
+        std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700))?;
+        let path = state_dir.join(SETTINGS_FILE);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        // The open sets the mode only when it creates the file; narrow a pre-existing one too.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(&settings.encode_to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(state_dir.join(SETTINGS_FILE), settings.encode_to_vec())
+    }
 }
 
 /// Folds a verified offer over what was already in force. An offer carries only what changes —
@@ -280,6 +307,40 @@ mod tests {
             restored.opamp.unwrap().destination_endpoint,
             "wss://x/v1/opamp"
         );
+    }
+
+    /// The persisted file holds the live, Server-rotated credential, so it — and the directory it
+    /// sits in — must not be readable by another user on the host.
+    #[cfg(unix)]
+    #[test]
+    fn stored_settings_and_their_directory_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        store(
+            &state_dir,
+            &offer_with(b"h1", "wss://x/v1/opamp", Some("Bearer secret"), 20),
+        )
+        .expect("store");
+
+        let file_mode = state_dir
+            .join(SETTINGS_FILE)
+            .metadata()
+            .expect("file metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            file_mode & 0o777,
+            0o600,
+            "the credential file is owner-only"
+        );
+        let dir_mode = state_dir
+            .metadata()
+            .expect("dir metadata")
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700, "the state directory is owner-only");
     }
 
     #[test]
