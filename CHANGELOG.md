@@ -31,6 +31,15 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
+  Configurations each manage from their own tab; the active tab lives in the URL hash
+  (`#packages`), so a reload — or a link handed to a colleague — comes back to it, and each tab
+  carries its count. The fleet table shows one line per Agent (columns now: Name, Version,
+  Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
+  Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
+  capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
+  of gray. No operator action required.
+
 - **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
   version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
   `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer

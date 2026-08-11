@@ -169,10 +169,16 @@
       th .arrow { opacity: .55; font-size: 10px; }
       tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
       tbody tr:last-child td { border-bottom: 0; }
-      /* An agent is a row plus the rows under it that carry its sets. The separator belongs after
-         the last of them, or every agent would read as several. */
-      tbody tr.agent td, tbody tr.detail td { border-bottom: 0; }
+      /* An agent is a row — and, when it is the current one, the rows under it that carry its
+         sets. The separator then belongs after the last of them, or the agent would read as
+         several; a row without detail rows keeps its own. */
+      tbody tr.agent { cursor: pointer; }
+      tbody tr.agent.current td, tbody tr.detail td { border-bottom: 0; }
       tbody tr.detail.last td { border-bottom: 1px solid var(--border); }
+      /* The current Agent: violet, because it is what is being looked at — the accent, not the
+         primary — carried as a bar on the row's edge so no cell content has to change color. */
+      tbody tr.agent.current td { background: var(--row-hover); }
+      tbody tr.agent.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
       tbody tr.detail td { padding-top: 0; padding-bottom: 4px; }
       tbody tr.detail:hover { background: transparent; }
       tbody tr:hover { background: var(--row-hover); }
@@ -188,6 +194,9 @@
 
       .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
       .pill.solid-green { background: var(--ok-bg); color: var(--ok-fg); }
+      /* The badge that heads a detail row. The accent, because these rows exist only under the
+         current Agent — the same violet that marks its row as the one being looked at. */
+      .pill.violet { background: var(--accent); color: var(--accent-fg); }
       .pill.green { background: var(--soft-green-bg); color: var(--soft-green-fg); }
       .pill.gray { background: var(--soft-gray-bg); color: var(--soft-gray-fg); }
       .pill.amber { background: var(--soft-amber-bg); color: var(--soft-amber-fg); }
@@ -338,15 +347,15 @@
             <tr id="head-row">
               <th class="chk"><input type="checkbox" id="select-all" /></th>
               <th class="sortable" data-key="name">Name <span class="arrow"></span></th>
-              <th class="sortable" data-key="connected">Status <span class="arrow"></span></th>
-              <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
               <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
               <th>Network</th>
+              <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
               <th>Matched configs</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
+              <th class="sortable" data-key="connected">Status <span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="agents"></tbody>
@@ -414,6 +423,11 @@
       // instance_uid so the state survives the periodic re-render.
       const expandedCaps = new Set();
       const expandedComponents = new Set();
+      // The current Agent — the one whose detail rows are on screen. One at a time, toggled by
+      // pressing its row: the table stays one line per Agent until an operator asks about one,
+      // which is what keeps a fleet of fifty scannable. Distinct from the checkboxes, which
+      // collect Agents for a bulk action and must not fold rows open along the way.
+      let currentAgent = null;
       // Which Agents the operator has ticked. Kept by instance_uid rather than by row, so a
       // selection survives the two-second refresh instead of being wiped mid-decision.
       const selectedAgents = new Set();
@@ -454,9 +468,12 @@
       function statusPill(a) {
         // Two facts, not one (ADR-0038): the pill says whether a connection is open — behind a
         // Gateway, the Gateway's — and "Stale" beside it says the Agent itself stopped talking.
+        // Disconnected is soft red, not gray: a link that is down is a finding, not an absence —
+        // but soft, because behind a Gateway it can be routine (ADR-0038); FAILED keeps the
+        // stronger reading as the one hard error in the row.
         const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
-          : `<span class="pill gray"><span class="dot"></span>Disconnected</span>`;
+          : `<span class="pill red"><span class="dot"></span>Disconnected</span>`;
         return a.stale
           ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
           : base;
@@ -582,19 +599,20 @@
         $("count").textContent = agents.length;
         $("empty").style.display = rows.length ? "none" : "block";
         $("agents").innerHTML = rows.map((a) => {
+          const current = a.instance_uid === currentAgent;
           const row = `
-          <tr class="agent">
+          <tr class="agent${current ? " current" : ""}" data-uid="${esc(a.instance_uid)}">
             <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
             <td><a class="name" href="#">${esc(displayName(a)) || "agent"}</a><div class="sub">${esc(a.service_name) || "no type reported"}</div>${uidLine(a)}</td>
-            <td>${statusPill(a)}</td>
-            <td>${configPill(a)}</td>
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
             <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
             <td>${networkOf(a)}</td>
+            <td>${configPill(a)}</td>
             <td>${matchedConfigs(a)}</td>
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
+            <td>${statusPill(a)}</td>
           </tr>`;
           // Everything about an agent that is a *set* rather than a value goes under its row
           // rather than into a column of its own: a column has to be as wide as its widest cell,
@@ -603,10 +621,14 @@
           <tr class="detail${i === all.length - 1 ? " last" : ""}">
             <td class="chk"></td>
             <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
-              <span class="sub" style="align-self: center">${label}:</span>
+              <span class="pill violet">${label}</span>
               ${chips || `<span class="chip">none</span>`}
             </div></td>
           </tr>`;
+          // Only the current Agent carries its sets on screen — every other one is its row alone,
+          // and the per-Agent actions (restart, forget, labels) travel with the details, so making
+          // an Agent current is also what puts its controls in reach.
+          if (!current) return row;
           const below = [["details", details(a)]];
           if (expandedCaps.has(a.instance_uid)) {
             // A copy, sorted: the list arrives in the order of the protocol's capability bitmask,
@@ -688,9 +710,21 @@
           return;
         }
         const toggle = e.target.closest(".cap-toggle");
-        if (!toggle) return;
-        const uid = toggle.dataset.uid;
-        if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
+        if (toggle) {
+          const uid = toggle.dataset.uid;
+          if (expandedCaps.has(uid)) expandedCaps.delete(uid); else expandedCaps.add(uid);
+          render();
+          return;
+        }
+        // Anywhere else on an Agent's row makes it the current one — or lets it go when it
+        // already is, folding its details away. Not the checkbox, which collects for a bulk
+        // action; not the UID, whose click is a copy and must stay one.
+        const tr = e.target.closest("tr.agent");
+        if (!tr || e.target.closest("input, .uid")) return;
+        // The name is an anchor with a dead href, kept for its link styling — following it
+        // would rewrite the tab hash.
+        e.preventDefault();
+        currentAgent = currentAgent === tr.dataset.uid ? null : tr.dataset.uid;
         render();
       });
       // Reflects the current selection in the bar above the table.
