@@ -16,8 +16,12 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0011.
+///
+/// `binary` is not among them: the core takes it out and resolves it (ADR-0022), and what arrives
+/// here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectorSettings {
@@ -81,6 +85,10 @@ impl Plugin for CollectorPlugin {
         "collector"
     }
 
+    fn program_key(&self) -> &'static str {
+        "binary"
+    }
+
     /// Nothing: a Collector's distribution is a decision the block states (ADR-0015), and a
     /// Foreign Agent is by definition one nobody has written a wrapper for.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
@@ -107,6 +115,7 @@ impl Plugin for CollectorPlugin {
             .map(|(k, v)| (k.clone(), ctx.expand(v)))
             .collect();
         let config_dir = ctx.config_dir;
+        let binary = ctx.program;
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         let runner = Runner {
@@ -125,7 +134,19 @@ impl Plugin for CollectorPlugin {
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),
+            // The same `--version`, asked of the *staged* program before the running one is
+            // stopped (ADR-0029). It is the same question the probe above asks and the same cost,
+            // so the only thing that was ever missing here was asking it early: until now the swap
+            // itself was the first thing to try a new binary, and a build the host cannot run —
+            // one linked against a libc newer than this host's — paid for that with a stop, a
+            // swap, a failed start and a rollback instead of a refusal that touches nothing.
+            //
+            // No environment: the probe already invokes the live program bare, so a Collector that
+            // needs one to answer `--version` would report no version today either.
+            preflight: Some(Preflight {
                 args: vec!["--version".to_string()],
+                env: Vec::new(),
+            }),
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0015), which is also what the reference supervisor does.
             reload_signal: None,
@@ -136,16 +157,28 @@ impl Plugin for CollectorPlugin {
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
     }
+
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
+        let _: CollectorSettings = settings
+            .try_into()
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// `binary` is gone from these settings — the core resolves it (ADR-0022) — so a block that
+    /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
+        let table: toml::Table = toml::from_str("args = [\"--feature-gates=x\"]\n").expect("table");
         let settings: CollectorSettings = table.try_into().expect("settings");
+        assert_eq!(settings.args, vec!["--feature-gates=x".to_string()]);
 
+        let typo: toml::Table = toml::from_str("arg = [\"--x\"]").expect("table");
         assert!(typo.try_into::<CollectorSettings>().is_err());
     }
 

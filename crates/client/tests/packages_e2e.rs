@@ -61,6 +61,7 @@ async fn spawn_server(
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
+        Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())
@@ -70,7 +71,12 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
+/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0024), which is the
+/// `[[supervisor]]` block's `name`. The block below is deliberately named something other than its
+/// program, so looking up by `service.name` would find nothing: that attribute is the Agent type,
+/// and with no `service_name` set it falls back to the program's file name.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
+    agents.iter().find(|a| a.service_instance_name == name)
 }
 
 #[tokio::test]
@@ -88,11 +94,18 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     // The Set's identity states the Agent type it is built for (ADR-0020): the
     // Supervisor below names its program `managed-agent` and sets no `service_name`, so that file
     // name is the type it reports.
+    store
         .expect("put entry");
 
     let (addr, state, dir) = spawn_server(store).await;
 
+    // The managed binary starts as a copy of the stub, in the Supervisor's own `program/`
+    // directory — which is what a bare `command` names, and what consents to the update
+    // (ADR-0022). The package swap replaces it there.
     let state_dir = dir.path().join("client-state");
+    let program_dir = state_dir.join("supervisors/myagent/program");
+    std::fs::create_dir_all(&program_dir).expect("create the program dir");
+    let managed = program_dir.join("managed-agent");
     std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &managed).expect("copy stub");
     #[cfg(unix)]
     {
@@ -111,6 +124,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
             "type = \"command\"\n",
             "name = \"myagent\"\n",
             "apply_grace_secs = 1\n",
+            "command = \"managed-agent\"\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
@@ -118,8 +132,21 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         key = public_key_hex,
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
+
+    // A saved Set reaches nobody (ADR-0027): the rollout act releases it, retried until the
+    // Agent has reported and can be assigned — which is the decision, not an accident of the
+    // test.
+    wait_until("the rollout act to reach the agent", || {
+        state
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
 
     // The Agent connects, is offered the package, downloads and verifies it, swaps the binary,
     // and reports Installed at the offered version.
@@ -130,6 +157,15 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     })
     .await;
 
+    // Name and type are the two things this block states separately, and they differ here: the
+    // operator called the Supervisor `myagent`, its program is `managed-agent`, and with no
+    // `service_name` set the program's file name is what the Agent reports as its type (ADR-0024).
+    let agent = view(&state.snapshot(), "myagent")
+        .expect("the agent is found by the operator's name for it")
+        .service_name
+        .clone();
+    assert_eq!(agent, "managed-agent");
+
     // The managed process ran the swapped-in binary (the marker exists) and the persisted record
     // survives — a restart is not re-offered the same package.
     assert!(marker.exists(), "the swapped binary ran");
@@ -137,15 +173,30 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         .join("supervisors/myagent/installed-package.json")
         .exists());
 }
+
+/// ADR-0029's preflight, reached through the `command` kind's own configuration: `version_args`
+/// is the arguments an operator has declared safe to invoke the program with, so they are also
+/// what proves a *staged* program runs before the running one is stopped.
+///
+/// The stub is asked to exit non-zero on them — what a binary this host's libc cannot satisfy
+/// does, with the dynamic linker's message in place of the stub's silence. The package must be
+/// refused with that message and nothing may be recorded as installed. Without the wiring the
+/// swap itself would be the first thing to try the new binary, and this would report `Installed`.
+#[tokio::test]
+async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    store
         .expect("put entry");
 
     let (addr, state, dir) = spawn_server(store).await;
 
     let state_dir = dir.path().join("client-state");
+    let program_dir = state_dir.join("supervisors/myagent/program");
+    std::fs::create_dir_all(&program_dir).expect("create the program dir");
+    let managed = program_dir.join("managed-agent");
     std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &managed).expect("copy stub");
     #[cfg(unix)]
     {
@@ -153,6 +204,9 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
     let marker = dir.path().join("marker");
+    // `--exit-code 1` is both the version check and the refusal: the same arguments the probe
+    // already runs after every swap, failing the way an unrunnable build fails. The supervised
+    // process itself is started with `--touch` and is untouched by any of it.
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -162,14 +216,47 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
             "type = \"command\"\n",
             "name = \"myagent\"\n",
             "apply_grace_secs = 1\n",
+            "command = \"managed-agent\"\n",
             "args = [\"--touch\", {marker:?}]\n",
+            "version_args = [\"--exit-code\", \"1\"]\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
 
+    wait_until("the rollout act to reach the agent", || {
+        state
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
+
+    let error = wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
+        (package.status == "InstallFailed").then(|| package.error.clone())
+    })
+    .await;
+
+    // The refusal carries what the program said rather than an exit status: a real one names the
+    // library or the symbol version, which is the whole reason the check runs the program at all.
+    assert!(
+        error.contains("does not run on this host"),
+        "the refusal names the preflight: {error:?}"
+    );
+
+    // Nothing was installed, and the process the operator configured ran throughout.
+    assert!(
+        !state_dir
+            .join("supervisors/myagent/installed-package.json")
+            .exists(),
+        "a refused package records no installation"
+    );
+    assert!(marker.exists(), "the configured process kept running");
+}

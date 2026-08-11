@@ -8,3 +8,4 @@ struct Harness {
         .commands
         .send(ProcessCommand::ApplyConfig {
             config: AgentRemoteConfig {
+            span: tracing::Span::current(),

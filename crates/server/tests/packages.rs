@@ -4,6 +4,8 @@
 mod support;
 
 use opamp::proto::{
+    AgentCapabilities, AgentToServer, PackageStatus, PackageStatusEnum, PackageStatuses,
+    ServerCapabilities, ServerToAgent,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -69,6 +71,7 @@ const HOST: &str = "linux/amd64";
     assert_eq!(response.status(), 200, "creating the set should succeed");
 }
 
+/// `PUT …/entries/{os}/{arch}` — stores one platform's artifact into a Set.
 async fn upload_entry(
     server: &TestServer,
     version: &str,
@@ -83,11 +86,20 @@ async fn upload_entry(
         .send()
         .await
         .expect("put entry")
+}
+
     let response = reqwest::Client::new()
+        .send()
+        .await
+        .expect("post rollout");
+    assert_eq!(response.status(), 200, "the rollout should succeed");
+    response.json().await.expect("json")
 }
 
     let response = reqwest::Client::new()
         .put(format!(
+/// Create + upload in one go: the Set is complete — and still reaches nobody until a rollout act
+/// names it (ADR-0027).
     assert_eq!(response.status(), 200, "upload should succeed");
 }
 
@@ -96,16 +108,33 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes).to_vec()
 }
 
+/// ADR-0020's versions under ADR-0027: versions are first-class Sets, and the act names the one
+/// the operator releases — no one produces an old artifact again, and no publication state is
+/// juggled. An Agent that has reported nothing installed takes either of them; what happens once
+/// it *has* reported is ADR-0027's, tested below.
 #[tokio::test]
+async fn the_act_names_the_version_it_releases() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let server_ref = &server;
     let offered = |sequence: u64| async move {
         let mut report = full_report(&uid, "collector", sequence);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server_ref, &report).await.packages_available
     };
 
+    // The Agent is known first — a rollout act assigns to the fleet as it is.
+    assert!(offered(1).await.is_none());
 
+    // Both versions are saved; the act names the one the operator releases.
+    assert_eq!(
+        "0.157.0"
+    );
+
+    // The same act, pointed at the older version. This Agent reports no package statuses, so it
+    // has nothing installed to be held against (ADR-0027) and the older Set still reaches it —
+    // and its artifact is still here.
+    let fallback = offered(3).await.expect("the fallback offer");
     let served = reqwest::Client::new()
         .get(format!(
             "{}?os=linux&arch=amd64",
@@ -167,6 +196,10 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
         0
     );
 
+    assert_eq!(
+        1,
+        "the act assigns the one known Agent"
+    );
 
     // Now the offer arrives, declares the capability, and carries a working download URL.
     let reply = exchange(&server, &report).await;
@@ -227,8 +260,11 @@ async fn no_offer_without_the_capability() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     // full_report declares no AcceptsPackages.
+    exchange(&server, &full_report(&uid, "incapable", 1)).await;
+    let reply = exchange(&server, &full_report(&uid, "incapable", 2)).await;
     assert!(
         reply.packages_available.is_none(),
+        "capability negotiation is binding, whatever is assigned"
     );
 }
 
@@ -297,13 +333,16 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
 }
 
 #[tokio::test]
+async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
 
     // full_report describes an Agent with os.type = linux (see the test scaffolding).
     let targeted = InstanceUid::default();
     let mut report = full_report(&targeted, "collector", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
 
+    // A second Agent that reports another platform.
     let other = InstanceUid::default();
     let mut elsewhere = full_report(&other, "windows-box", 1);
     elsewhere.capabilities |= AgentCapabilities::AcceptsPackages as u64;
@@ -318,12 +357,25 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
             }
         }
     }
+    exchange(&server, &elsewhere).await;
+
+    assert_eq!(
+        1,
+    );
+
+    let mut report = full_report(&targeted, "collector", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
         .await
         .packages_available
         .expect("the matching Agent is offered it");
     assert!(!offer.all_packages_hash.is_empty());
+
+    // The Agent outside the aim is offered nothing at all — not an empty offer, no offer: it
+    // keeps running what it runs (goal 9, applied to software).
+    let mut elsewhere2 = full_report(&other, "windows-box", 2);
+    elsewhere2.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let reply = exchange(&server, &elsewhere2).await;
     assert!(
         reply.packages_available.is_none(),
     );
@@ -338,7 +390,13 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     let mut report = full_report(&uid, "collector", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64
         | AgentCapabilities::ReportsPackageStatuses as u64;
+    exchange(&server, &report).await;
 
+    assert_eq!(
+        0,
+    );
+
+    let mut report = full_report(&uid, "collector", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64
         | AgentCapabilities::ReportsPackageStatuses as u64;
     let offer = exchange(&server, &report)
@@ -351,6 +409,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     );
 
     // Echoing exactly that aggregate settles it — the Server must not keep re-offering.
+    let mut installed = full_report(&uid, "collector", 3);
     installed.capabilities |= AgentCapabilities::AcceptsPackages as u64
         | AgentCapabilities::ReportsPackageStatuses as u64;
     installed.package_statuses = Some(PackageStatuses {
@@ -375,9 +434,24 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
 }
 
 #[tokio::test]
+async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     let (server, _scratch) = spawn_with_packages().await;
+    let canary = InstanceUid::default();
+    let ordinary = InstanceUid::default();
+    for (uid, name) in [(&canary, "canary-host"), (&ordinary, "ordinary-host")] {
+        let mut report = full_report(uid, name, 1);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(&server, &report).await;
+    }
 
+
+    async fn version_offered_to(
+        server: &TestServer,
+        uid: &InstanceUid,
+        name: &str,
+        sequence: u64,
+    ) -> String {
+        let mut report = full_report(uid, name, sequence);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
         let offer = exchange(server, &report)
             .await
@@ -386,14 +460,20 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     }
 
     assert_eq!(
+        version_offered_to(&server, &canary, "canary-host", 2).await,
         "3.0.0",
         "the named host gets the canary version"
     );
     assert_eq!(
+        version_offered_to(&server, &ordinary, "ordinary-host", 2).await,
         "2.0.0",
         "everyone else keeps the fleet-wide version"
     );
 
+    assert_eq!(
+        version_offered_to(&server, &ordinary, "ordinary-host", 3).await,
+        "3.0.0"
+    );
 }
 
 #[tokio::test]
@@ -422,6 +502,9 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
 async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
+    let mut hello = full_report(&uid, "collector", 1);
+    hello.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &hello).await;
 
     // A source the probe can reach: a tiny server standing in for a release page.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -454,8 +537,12 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
         .await
         .expect("put source");
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        1
+    );
 
     // The offer names the source, carries the operator's hash, and passes the headers on.
+    let mut report = full_report(&uid, "collector", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
         .await
@@ -538,12 +625,19 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
     let unreachable = put_source("http://127.0.0.1:1/otelcol.tar.gz".to_string()).await;
     assert_eq!(unreachable.status(), 200);
 }
+
 /// ADR-0020 in place of ADR-0020's late typing: the Agent type is identity, stated at creation —
+/// there is no untyped state — and a Set built for another type fits nobody here: its rollout
+/// act assigns no one, whatever its Selector says.
+#[tokio::test]
 async fn a_set_reaches_only_agents_of_its_type() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    // A Set for a different kind of Agent, complete — and its act assigns nobody.
     let response = reqwest::Client::new()
         .put(format!(
             server.rest_addr
@@ -556,6 +650,10 @@ async fn a_set_reaches_only_agents_of_its_type() {
     let response = reqwest::Client::new()
         .put(format!(
             server.rest_addr
+        ))
+        .body(b"the-binary".to_vec())
+        .send()
+        .await
         .expect("put entry");
     assert_eq!(response.status(), 200);
     let response = reqwest::Client::new()
@@ -563,48 +661,281 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .send()
         .await
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        outcome["assigned_agents"], 0,
+    );
+
     let mut report = full_report(&uid, "edge-01", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-            .packages_available
-            .is_none(),
-    // The same artifact under this fleet's type reaches it.
-    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-    let offer = exchange(&server, &report)
-        .await
-        .packages_available
-        .expect("an offer");
-    let (server, _scratch) = spawn_with_packages().await;
-    let uid = InstanceUid::default();
-        .await
-        .packages_available
-        .expect("an offer");
-        .await
-        .packages_available
-/// The silent no-op ADR-0020 named: a Set can target nobody through a mistyped Agent type, a
-/// platform the fleet does not run, or a Selector that matches no one — and none of the three is
-/// a rejected upload, so without a count nothing says it.
-async fn a_set_says_how_many_agents_it_reaches() {
-    let (server, _scratch) = spawn_with_packages().await;
-    let uid = InstanceUid::default();
-    assert_eq!(response.status(), 200);
-async fn a_label_aims_a_set_at_part_of_the_fleet() {
-    let (server, _scratch) = spawn_with_packages().await;
-            server.rest_addr
-    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-    let offer = exchange(&server, &report)
-        .await
-        .packages_available
-    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    assert!(
+        exchange(&server, &report)
             .await
             .packages_available
             .is_none(),
+        "nothing was assigned, so nothing is offered"
+    );
+
+    // The same artifact under this fleet's type reaches it.
+    let mut report = full_report(&uid, "edge-01", 3);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
+}
+
+/// ADR-0027 end to end: a Set reaches an Agent only as an **upgrade**. What the Agent reports
+/// installed is the fourth matching test, so the count, the per-Agent act and the bulk act all
+/// refuse to move a host backwards — or to move it nowhere at all. The assignment path is
+/// deliberately exempt: an installed package stays in the Agent's offer, or the Agent would be
+/// told the package is no longer wanted.
+#[tokio::test]
+async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
-        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+
+    /// A report that says "I run this version of this package".
+    fn running(uid: &InstanceUid, sequence: u64, version: &str) -> AgentToServer {
+        let mut report = full_report(uid, "collector", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64
+            | AgentCapabilities::ReportsPackageStatuses as u64;
+        report.package_statuses = Some(PackageStatuses {
+            packages: [(
+                PackageStatus {
+                    agent_has_version: version.to_string(),
+                    status: PackageStatusEnum::Installed as i32,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            // Empty: this Agent is never in sync with an offer, so the hash gate never silences
+            // one and every exchange shows what it would be offered.
+            server_provided_all_packages_hash: Vec::new(),
+            error_message: String::new(),
+        });
+        report
+    }
+
+    /// The two counts the Set view carries (ADR-0027 point 19): whom it aims at, and whom it
+    /// would actually reach.
+    async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
+        let list: serde_json::Value = reqwest::Client::new()
+            .send()
+            .await
+            .expect("list")
+            .json()
+            .await
+            .expect("json");
+        let row = list
+            .as_array()
+            .expect("array")
+            .iter()
+            .clone();
+        (
+            row["targeted_agents"].as_i64().expect("targeted_agents"),
+        )
+    }
+
+    exchange(&server, &running(&uid, 1, "1.0.0")).await;
+
+    assert_eq!(counts(&server, "1.0.0").await, (1, 0));
+    assert_eq!(
+        0,
+        "the bulk act skips an Agent it would not move"
+    );
+
+    // The per-Agent act says so rather than doing nothing quietly.
+    let refused = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/rollout",
+            server.rest_addr
+        ))
+        .send()
+        .await
+        .expect("rollout to agent");
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
+            .contains("not an upgrade"),
+        "{body}"
+    );
+
+    assert_eq!(counts(&server, "2.0.0").await, (1, 1));
+    let offer = exchange(&server, &running(&uid, 2, "1.0.0"))
+        .await
+        .packages_available
+        .expect("an offer");
+
+    // And once the Agent reports it installed, the assignment keeps composing the offer — the
+    // Set the Agent runs must not vanish from its desired state (ADR-0027 point 17).
+    let offer = exchange(&server, &running(&uid, 3, "2.0.0"))
+        .await
+        .packages_available
+        .expect("the assignment still composes an offer");
+
+    assert_eq!(counts(&server, "2.0.0").await, (1, 0));
+    assert_eq!(counts(&server, "1.0.0").await, (1, 0));
+}
+
+/// The silent no-op ADR-0020 named: a Set can target nobody through a mistyped Agent type, a
+/// platform the fleet does not run, or a Selector that matches no one — and none of the three is
+/// a rejected upload, so without a count nothing says it.
+#[tokio::test]
+async fn a_set_says_how_many_agents_it_reaches() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    exchange(&server, &support::full_report(&uid, "one", 1)).await;
+
+    async fn list(server: &TestServer) -> serde_json::Value {
+        reqwest::Client::new()
+            .send()
+            .await
+            .json()
+            .await
+            .expect("json")
+    }
+
+        list(server)
+            .await
+            .as_array()
+            .expect("array")
+            .iter()
+            .as_i64()
+            .expect("targeted_agents")
+    }
+
+
+    // A second Agent on the same platform doubles it.
+    exchange(
+        &server,
+        &support::full_report(&InstanceUid::default(), "two", 1),
+    )
+    .await;
+
+    // A Selector that matches nobody: still stored, still valid, reaching no one — the case that
+    // was invisible before.
 
     assert_eq!(response.status(), 200);
+}
+
+/// ADR-0026 reaches packages, not just Configurations — which is the case it exists for. A binary
+/// access to that host.
+#[tokio::test]
+async fn a_label_aims_a_set_at_part_of_the_fleet() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let canary = InstanceUid::default();
+    let rest = InstanceUid::default();
+    exchange(&server, &full_report(&canary, "canary-host", 1)).await;
+    exchange(&server, &full_report(&rest, "other-host", 1)).await;
+
+
+    async fn reach(server: &TestServer) -> i64 {
+        let list: serde_json::Value = reqwest::Client::new()
+            .send()
+            .await
+            .expect("list")
+            .json()
+            .await
+            .expect("json");
+        list[0]["targeted_agents"].as_i64().expect("count")
+    }
+    assert_eq!(reach(&server).await, 0);
+
+    let labelled = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/agents/{canary}/labels",
+            server.rest_addr
+        ))
+        .json(&serde_json::json!({ "labels": { "rollout": "canary" } }))
+        .send()
+        .await
+        .expect("put labels");
+    assert_eq!(labelled.status(), 200);
+    assert_eq!(
+        reach(&server).await,
+        1,
+    );
+
+    let mut report = full_report(&canary, "canary-host", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("the canary host is offered the package");
+
+    let mut report = full_report(&rest, "other-host", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    assert!(
+        exchange(&server, &report)
+            .await
+            .packages_available
+            .is_none(),
+    );
+}
+
+/// ADR-0027 through the API, from the operator's side: a saved Set waits, rolling out an empty
+/// one is refused, the act is its own request — and an assigned Set's entries are immutable
+/// while its Selector stays editable.
+#[tokio::test]
+async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    exchange(&server, &full_report(&uid, "edge-01", 1)).await;
+
+    async fn offered_now(
+        server: &TestServer,
+        uid: &InstanceUid,
+        sequence: u64,
+    ) -> Option<opamp::proto::PackagesAvailable> {
+        let mut report = full_report(uid, "edge-01", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server, &report).await.packages_available
+    }
+        reqwest::Client::new()
+            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+            .send()
+            .await
+            .expect("list")
+            .json::<serde_json::Value>()
+            .await
+            .expect("json")
+            .as_array()
+            .expect("array")
+            .iter()
+            .clone()
+    }
+
+        .send()
+        .await
+        .expect("rollout");
+
+    assert_eq!(response.status(), 200);
+
+    assert!(
+        staged.get("published").is_none(),
+        "ADR-0027: there is no publication state to show: {staged}"
+    );
+    assert_eq!(
+    );
+    assert!(
+        offered_now(&server, &uid, 2).await.is_none(),
+        "a saved Set reaches nobody, however complete it is"
+    );
+
+    // Its entries are still editable: nothing is assigned yet.
+    assert_eq!(editable.status(), 200, "an unassigned set is editable");
+
+    // The act is its own request, and the fleet has the package on the next exchange.
+    let offer = offered_now(&server, &uid, 3)
+        .await
+        .expect("the released package");
+
+    // While assigned, the bytes are frozen: writing or deleting an entry answers 409 —
     // the Server's rule, which is exactly what the UI renders as a greyed-out control.
+    assert_eq!(frozen.status(), 409, "assigned entries are immutable");
     let frozen_delete = reqwest::Client::new()
         .delete(format!(
             "{}/entries/{HOST}",
@@ -615,6 +946,25 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     assert_eq!(frozen_delete.status(), 409);
     // The Selector is not bytes, and stays editable.
 
+    // Deleting the Set removes its assignments with it: the offer is withdrawn, and nothing is
+    // uninstalled — an Agent that already took it keeps running it (ADR-0020).
+    let deleted = reqwest::Client::new()
+        .send()
+        .await
+        .expect("delete set");
+    assert_eq!(deleted.status(), 204);
+    assert!(
+        offered_now(&server, &uid, 4).await.is_none(),
+        "a deleted set is not handed to an Agent that has not taken it"
+    );
+
+    // Rolling out a Set that does not exist is a 404, not a Set conjured out of a URL.
+    let missing = reqwest::Client::new()
+        .send()
+        .await
+        .expect("rollout");
+    assert_eq!(missing.status(), 404);
+}
 
 /// A source URL that steers the probe at the cloud metadata endpoint — or another never-legitimate
 /// internal address — is refused (SSRF). The URL and its headers are entirely caller-supplied, so
@@ -697,33 +1047,76 @@ async fn the_package_store_has_a_total_size_ceiling() {
         .send()
         .await
     let (server, _scratch) = spawn_with_packages().await;
+    let refused = reqwest::Client::new()
     assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
     let (server, _scratch) = spawn_with_packages().await;
     let (server, _scratch) = spawn_with_packages().await;
     let (server, _scratch) = spawn_with_packages().await;
+    let missing = reqwest::Client::new()
+    assert_eq!(missing.status(), 404);
+    let deleted = reqwest::Client::new()
+    assert_eq!(deleted.status(), 204);
     let (server, _scratch) = spawn_with_packages().await;
+        let mut report = full_report(uid, name, 1);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(&server, &report).await;
+    }
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
             .await
             .packages_available
             .expect("an offer");
     let (server, _scratch) = spawn_with_packages().await;
+    let refused = reqwest::Client::new()
+        ))
+        .body(b"the-binary".to_vec())
+        .send()
+        .await
         .expect("put entry");
     assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+        server: &TestServer,
+        uid: &InstanceUid,
+        sequence: u64,
+    ) -> Option<opamp::proto::PackagesAvailable> {
+        let mut report = full_report(uid, "edge-01", sequence);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server, &report).await.packages_available
+    }
+        .await
+        .expect("the released package");
     let view = &server.state.snapshot()[0];
+        .expect("the assignment still composes an offer");
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/rollout",
+            server.rest_addr
+        ))
+        .send()
+        .await
+        .expect("rollout to agent");
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
     let mut report = full_report(&uid, "edge-01", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
@@ -735,6 +1128,7 @@ async fn the_package_store_has_a_total_size_ceiling() {
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
     let mut report = full_report(&uid, "edge-01", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
@@ -745,6 +1139,8 @@ async fn the_package_store_has_a_total_size_ceiling() {
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
     let view = &server.state.snapshot()[0];
     assert_eq!(response.status(), 200);
     let response = reqwest::Client::new()
