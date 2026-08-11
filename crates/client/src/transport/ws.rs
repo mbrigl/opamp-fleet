@@ -50,9 +50,12 @@ pub async fn run(
     // server checks it before the WebSocket comes up.
     let authorization = match config.authorization_value()? {
         Some(value) => {
-            let value: tokio_tungstenite::tungstenite::http::HeaderValue = value
+            let mut value: tokio_tungstenite::tungstenite::http::HeaderValue = value
                 .parse()
                 .map_err(|e| format!("the [auth] credentials are not a valid header: {e}"))?;
+            // Redact it from any `Debug` of the request headers, as the HTTP transport does
+            // (`transport/http.rs`): a credential must not surface in a log line by accident.
+            value.set_sensitive(true);
             if config.sends_credentials_in_cleartext() {
                 warn!(
                     "sending credentials over unencrypted ws:// beyond the loopback — use wss://"

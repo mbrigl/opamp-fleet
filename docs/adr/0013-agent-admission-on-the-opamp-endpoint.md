@@ -108,6 +108,40 @@ key locally, submits a CSR, an authenticated-but-unprivileged identity bootstrap
 the control plane signs — which is also where the "who approves" question is normally answered by
 policy rather than by a human queue.
 
+### What admission proves
+
+A security review of the Server raised: **within an admitted fleet, `instance_uid` is self-asserted
+and not authorized between Agents.** Any peer that passes admission — the `[auth]` credential and/or
+the client certificate (above) — may send an `AgentToServer` under *any* `instance_uid`. The
+Server's `process` (`crates/server/src/fleet.rs`) takes the reported `instance_uid` at face value and
+updates that record's `sequence_num`, `health`, `effective_config`, and `remote_config_status`.
+Because `remote_config_status` is the hash that gates whether a Configuration is (re-)offered, a peer
+polling as a victim's `instance_uid` can suppress or force config delivery to that Agent, or poison
+the fleet view. Over plain HTTP the Server is explicitly unable to tell two pollers apart (the code
+says so); the WebSocket path rekeys a *duplicate* `instance_uid` seen on a second connection, but
+that is collision handling, not authorization.
+
+The forces that make this hard to "fix" are settled decisions, not open questions:
+
+- **The Baseline makes `instance_uid` self-asserted.** An Agent chooses its own UID (UUID v7
+  recommended), and the Server may *assign* a new one via `AgentIdentification`. Identity is a
+  routing key, not a secret ([ADR-0004](0004-protocol-baseline-and-conformance-tracking.md)).
+- **A certificate cannot serve as per-Agent identity.** Point 4 decides this directly:
+  the Server re-keys an Agent at any time with `AgentIdentification`, which would invalidate a
+  certificate whose validity depended on its subject matching the current `instance_uid`; and a
+  Client in Gateway Mode terminates TLS, so the certificate the Server sees belongs to the Gateway,
+  not to the Agents behind it. `ca.rs` therefore signs the CSR subject verbatim and binds it to
+  nothing.
+- **A Gateway folds many Agents onto few connections.** [ADR-0025](0025-gateway-mode.md) has one
+  Gateway certificate carry the reports of every downstream Agent, so "one connection, one Agent
+  identity" is false by design.
+- **Admission is fleet-wide.** The `[auth]` credential set and the `client_ca_file` client CA both
+  prove *fleet membership*. There is no per-Agent secret anywhere in the model to authorize against.
+
+So the property is not a defect layered on top of the design — it is the direct consequence of the
+identity model chosen above. What is missing is that this trust boundary is implicit: it lives in
+scattered code comments, not in a decision an operator can read.
+
 ## Decision
 
 ### Static Basic and Bearer credentials
@@ -285,13 +319,24 @@ Concretely this binds ten things:
 What this does **not** decide: whether the Server may proxy a CSR to an external CA instead of
 signing it, and how a Gateway is configured. Both are described under Consequences.
 
+### Admission is a fleet-wide trust boundary
+
+We will record that **admission is a fleet-wide trust boundary**, and that **within it there is no
+authorization between Agents**: a report's `instance_uid` is self-asserted, and any admitted peer may
+report under any `instance_uid`. We will make this explicit in operator-facing documentation
+([`SECURITY.md`](../../SECURITY.md)) and in the Server's identity/admission module docs, and we will
+**not** add per-Agent authorization by default, because the only mechanism that could provide it —
+binding a certificate to `instance_uid` — is rejected by point 4 and is incompatible
+with Gateway Mode (ADR-0025) and with Server-initiated re-keying.
+
+Operators who require isolation between mutually distrusting Agents must not place them in one
+admitted fleet: separate them by Server instance or network segment. This is the same shape as the
+OpAMP specification's own guidance that the transport, not the message, is the trust boundary.
+
 ## Alternatives considered
 
 ### Static credentials
 
-- **Per-Agent credentials mapped to `instance_uid`** — turns authentication into identity
-  management and brushes against authorization/tenancy, which the specification explicitly defers.
-  One fleet-membership check is what goal 17 asks of this step.
 - **Authenticating the whole listener (REST API + UI too)** — tempting for symmetry, but operator
   and Agent are different principals with different lifecycles; coupling them silently would
   prejudge the operator-auth decision.
@@ -338,10 +383,6 @@ signing it, and how a Gateway is configured. Both are described under Consequenc
 - **A second listener, or a second port, for mutual-TLS OpAMP.** Would let the verifier demand a
   certificate unconditionally. Rejected: it reverses ADR-0005's one-port decision to avoid writing
   one small acceptor, and it doubles the TLS configuration surface an operator has to get right.
-- **Bind the certificate subject to the Agent's `instance_uid`.** The strongest reading of "accepts
-  only authenticated Agent identities". Rejected in point 4: `AgentIdentification`
-  re-keys an Agent at the Server's own initiative, and a certificate that a re-key invalidates turns
-  a routine duplicate-uid resolution into a lost host.
 - **Honour `TLSConnectionSettings`.** It would close a `[Development]` field and one more part of
   the offer. Rejected in point 8: most of what it can say weakens verification, and a
   Server able to command `insecure_skip_verify` on its Agents can disarm the check that proves it is
@@ -375,6 +416,33 @@ signing it, and how a Gateway is configured. Both are described under Consequenc
   modes and credentials, and nothing in the fleet needs it yet. Point 6's `[client_ca]`
   is the seam it would be added behind.
 
+### Authorization between Agents
+
+- **Bind the certificate subject to `instance_uid` and reject mismatches (true per-Agent
+  authorization).** The strongest reading of "accepts only authenticated Agent identities".
+  Rejected — point 4 rejects certificate-bound identity: `AgentIdentification` re-keys
+  an Agent at the Server's own initiative, and a certificate that a re-key invalidates turns a
+  routine duplicate-uid resolution into a lost host. Enforcing it would also break certificate
+  renewal and Gateway Mode (one Gateway certificate legitimately carries many UIDs). It trades a
+  medium-severity in-fleet poisoning risk for an outage of the Server's own making.
+- **Trust-on-first-use pinning of `instance_uid` ↔ certificate.** Rejected — a legitimate certificate
+  renewal (point 7) or an Agent moving between Gateways changes the presented
+  certificate, which TOFU would flag as impersonation. It would fire false positives on the system's
+  own mechanisms.
+- **Reject a report whose `sequence_num` regresses.** Rejected — an Agent restart legitimately resets
+  `sequence_num` and sends a full report (the Baseline's own recovery), which a forger can imitate.
+  It authorizes nothing while breaking legitimate restarts.
+- **An optional, opt-in strict mode** (a config switch that binds certificate subject → `instance_uid`
+  on the mTLS path and refuses mismatches, usable only where Gateway Mode is off and the Server does
+  not re-key). Not chosen for this decision, but the least-incompatible way to offer real per-Agent
+  isolation to operators who want it; recorded as possible future work rather than decided now,
+  because it adds a security-relevant configuration surface and a mutual exclusion with Gateway Mode
+  that deserve their own decision.
+- **Per-Agent credentials instead of a fleet credential, mapped to `instance_uid`.** Rejected — it
+  turns authentication into identity management and brushes against authorization/tenancy, which
+  the specification explicitly defers. It is a much larger change to the identity model and
+  admission story; one fleet-membership check is what goal 17 asks.
+
 ## Sources / Prior art
 
 - [OpAMP specification](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md) —
@@ -391,6 +459,9 @@ signing it, and how a Gateway is configured. Both are described under Consequenc
   [`ConnectionSettingsRequest`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L130-L157),
   [`TLSConnectionSettings`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L434-L452),
   [`ProxyConnectionSettings`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L455-L464).
+- OpAMP specification: `instance_uid` is Agent-chosen and Server-assignable (`ServerToAgent.agent_identification`);
+  its security model treats the connection, authenticated by the transport, as the trust boundary
+  rather than authorizing individual messages.
 - [`opamp-go` `StartSettings`](https://github.com/open-telemetry/opamp-go/blob/main/client/types/startsettings.go)
   — static `Header` plus per-request `HeaderFunc`; the server side authenticates in the
   connection callbacks before accepting.
@@ -430,6 +501,12 @@ signing it, and how a Gateway is configured. Both are described under Consequenc
   (verify-by-connecting, persisted settings overriding `client.toml`, capability declared only while
   armed), and the [Mutual TLS section of `CONFORMANCE.md`](../CONFORMANCE.md) which states the gap
   and the acknowledgement problem this decision closes.
+- This project's settled decisions on the same forces: ADR-0025 (a Gateway certificate carries many
+  Agents) and ADR-0004 (Baseline conformance), beside point 4 (why a certificate is not
+  bound to `instance_uid`) and the fleet-wide `[auth]` credential above.
+- Comparable systems: mutual-TLS fleets (e.g. a shared client CA in service meshes) likewise prove
+  membership, not per-caller identity, unless a separate identity document (SPIFFE SVID and the like)
+  is layered on — which is the "per-Agent credential" alternative above.
 
 ## Consequences
 
@@ -487,3 +564,19 @@ signing it, and how a Gateway is configured. Both are described under Consequenc
   host faster than a certificate expires. The Gateway's own TLS configuration surface belongs to the
   ADR that designs Gateway Mode. The REST API and the UI remain unauthenticated (see the Scope
   bullet above), which is untouched by mutual TLS and still its own open question.
+
+### What admission proves
+
+- **Positive:** the trust model is an explicit, reviewable decision rather than an implicit
+  property. Operators can reason about it and design around it (one fleet = one trust domain; isolate
+  by Server or network). The security review finding is closed as *documented and accepted* rather
+  than left ambiguous.
+- **Negative / trade-offs:** a malicious or compromised admitted peer can poison another Agent's
+  Server-side record — most cleanly over plain HTTP, which offers nothing to distinguish pollers. We
+  accept this *within* a fleet that shares admission; it is not a cross-fleet or unauthenticated
+  exposure.
+- **Follow-ups:** an optional strict per-Agent-identity mode (excluding Gateway Mode and re-keying),
+  and separately a per-Agent-credential identity model, are each possible future decisions — described
+  here by topic, to be given their own ADR if and when pursued. The documentation decided on above
+  (SECURITY.md and the Server's admission/identity module docs) is the implementation that follows
+  its acceptance.

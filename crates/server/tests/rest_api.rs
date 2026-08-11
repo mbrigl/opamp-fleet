@@ -361,6 +361,74 @@ async fn forgetting_what_is_not_there_is_reported() {
     assert_eq!(malformed.status(), 400);
 }
 
+/// The body-less `POST` routes (`restart`, `rollback`) are CORS "simple requests": a cross-origin
+/// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
+/// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
+/// callers pass. The guard runs before the handler, so it decides regardless of the target.
+#[tokio::test]
+async fn a_cross_site_state_changing_post_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+
+    // A browser marks a cross-site request: refused with 403, whether or not the Agent exists.
+    let cross = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .expect("restart");
+    assert_eq!(cross.status(), 403, "a cross-site restart is refused");
+
+    // The same-site case from the bundled UI passes the guard — the request reaches the handler,
+    // which then answers 404 for an Agent that is not there. The point is it is *not* 403.
+    let same_origin = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await
+        .expect("restart");
+    assert_ne!(
+        same_origin.status(),
+        403,
+        "a same-origin restart is not a CSRF"
+    );
+    assert_eq!(
+        same_origin.status(),
+        404,
+        "it reaches the handler: no such agent"
+    );
+
+    // A non-browser client (curl, a portal) sends no Sec-Fetch header and is unaffected.
+    let no_header = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .send()
+        .await
+        .expect("restart");
+    assert_ne!(
+        no_header.status(),
+        403,
+        "a client with no fetch metadata is not a CSRF"
+    );
+
+    // The rollback route is guarded the same way (package delivery is not even configured here, but
+    // the guard decides first).
+    let cross_rollback = client
+        .post(url(
+            server.addr,
+            "/api/v1/packages/otelcol/rollback?os=linux&arch=amd64",
+        ))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .expect("rollback");
+    assert_eq!(
+        cross_rollback.status(),
+        403,
+        "a cross-site rollback is refused"
+    );
+}
+
 /// The fleet as the REST API shows it.
 async fn agents(client: &reqwest::Client, addr: std::net::SocketAddr) -> Vec<serde_json::Value> {
     client

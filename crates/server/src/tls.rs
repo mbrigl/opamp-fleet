@@ -35,7 +35,8 @@ pub struct PeerCertificate(pub Option<CertificateDer<'static>>);
 impl PeerCertificate {
     /// The peer's certificate subject, for the record the fleet row shows. Deliberately *not* an
     /// identity check: a certificate proves fleet membership, never which Agent is speaking
-    /// (ADR-0013), all the more so behind a Gateway, where it belongs to the Gateway.
+    /// (ADR-0013), all the more so behind a Gateway, where it belongs to the Gateway. Admission is a
+    /// fleet-wide trust boundary, and `instance_uid` is self-asserted within it (ADR-0013).
     pub fn present(&self) -> bool {
         self.0.is_some()
     }

@@ -1027,3 +1027,103 @@ async fn an_uploaded_package_is_a_draft_until_it_is_published_and_can_be_retract
         .expect("put publication");
     assert_eq!(missing.status(), 404);
 }
+
+/// A source URL that steers the probe at the cloud metadata endpoint — or another never-legitimate
+/// internal address — is refused (SSRF). The URL and its headers are entirely caller-supplied, so
+/// without this the Server could be made to read `169.254.169.254` and reflect the answer back.
+#[tokio::test]
+async fn a_source_url_aimed_at_an_internal_address_is_refused() {
+    let (server, _scratch) = spawn_with_packages().await;
+
+    let put_source = |url: &str| {
+        let url = url.to_string();
+        async move {
+            reqwest::Client::new()
+                .put(format!(
+                    "http://{}/api/v1/packages/otelcol/source",
+                    server.addr
+                ))
+                .json(&serde_json::json!({
+                    "url": url,
+                    "sha256": hex::encode(sha256(b"x")),
+                    "version": "1.0.0",
+                    "os": "linux",
+                    "arch": "amd64"
+                }))
+                .send()
+                .await
+                .expect("put source")
+        }
+    };
+
+    // The cloud metadata endpoint (link-local), the shared/CGNAT metadata address, and a scheme the
+    // probe must never follow.
+    for url in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://100.100.100.200/latest/meta-data/",
+        "file:///etc/passwd",
+    ] {
+        let response = put_source(url).await;
+        assert_eq!(response.status(), 400, "{url} must be refused");
+    }
+}
+
+/// The store has a whole-store ceiling, so a caller cannot fill the disk by uploading artifact after
+/// artifact under distinct names: once the store is at its limit, the next upload is refused.
+#[tokio::test]
+async fn the_package_store_has_a_total_size_ceiling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    // A ceiling of 10 KiB: the first 8 KiB artifact fits, a second does not.
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(PackageOffering::new(store, String::new())))
+            .with_max_total_package_bytes(10 * 1024),
+    );
+    let app = server::app(state.clone(), server::transport::Admission::open());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let server = TestServer {
+        addr,
+        state,
+        _dir: dir,
+    };
+
+    // The first artifact fits under the ceiling.
+    let first = reqwest::Client::new()
+        .put(format!(
+            "http://{addr}/api/v1/packages/one?version=1.0.0&{HOST}"
+        ))
+        .body(vec![0u8; 8 * 1024])
+        .send()
+        .await
+        .expect("put one");
+    assert_eq!(
+        first.status(),
+        200,
+        "the first artifact is within the ceiling"
+    );
+
+    // A second distinct name would take the store past the ceiling — refused, and nothing is left
+    // staged for it.
+    let second = reqwest::Client::new()
+        .put(format!(
+            "http://{addr}/api/v1/packages/two?version=1.0.0&{HOST}"
+        ))
+        .body(vec![0u8; 8 * 1024])
+        .send()
+        .await
+        .expect("put two");
+    assert_eq!(
+        second.status(),
+        507,
+        "the second upload is refused: it would exceed the store ceiling"
+    );
+    let _ = server;
+}

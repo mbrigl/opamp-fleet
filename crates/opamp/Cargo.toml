@@ -14,7 +14,6 @@ uuid.workspace = true
 # three are already workspace dependencies of both binaries, so nothing new is linked into either.
 flate2.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 
 [dev-dependencies]
 # Generating a certificate and key for the PEM tests, rather than pasting a fixture that expires.

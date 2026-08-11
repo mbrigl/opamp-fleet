@@ -377,6 +377,13 @@ impl Engine {
         self.agents.iter().map(|a| a.state.uid())
     }
 
+    /// Whether any Agent this Engine runs takes Server-offered packages — a self-update or a managed
+    /// process's package. What the startup check uses to decide whether an unconfigured verification
+    /// key is worth warning about (ADR-0015).
+    pub fn installs_packages(&self) -> bool {
+        self.agents.iter().any(|a| a.state.accepts_packages())
+    }
+
     /// Every Agent starts over with a full snapshot — after (re)connecting, or when an exchange
     /// was lost and the Server may be missing state.
     pub fn force_full_all(&mut self) {
