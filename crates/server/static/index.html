@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agents · OpAMP Fleet</title>
+    <title>OpAMP Fleet</title>
     <style>
       /* Dark by default, after GitKraken: deep desaturated navy surfaces, a teal-green primary,
          and violet for the one thing that is *selected*. Dark is the ground state rather than the
@@ -99,9 +99,22 @@
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
-      /* Configurations editor (revealed by the primary button) */
-      .config { padding: 16px; margin-bottom: 20px; display: none; }
-      .config.open { display: block; }
+      /* Tabs: the three managements — Agents, Packages, Configurations — one on screen at a time.
+         The active tab's underline is the primary, because the tab bar is where the next press
+         lands; violet stays reserved for what is selected *within* a section. */
+      .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+      .tab {
+        border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600;
+        padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+      }
+      .tab:hover { color: var(--text); }
+      .tab.active { color: var(--text); border-bottom-color: var(--primary); }
+      .tab .num { margin-left: 7px; }
+      .tab-panel { display: none; }
+      .tab-panel.active { display: block; }
+
+      /* Configurations and Packages editors — each fills its own tab */
+      .config { padding: 16px; margin-bottom: 20px; }
       .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
       .config-fields { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
       .config-fields input {
@@ -203,16 +216,24 @@
     <div class="wrap">
       <div class="page-head">
         <div>
-          <h1>Agents</h1>
-          <p>Monitor, configure, and manage your OpAMP fleet · <span id="count">0</span> agent(s) · <a class="name" href="/api/v1/docs" target="_blank" rel="noopener">API docs</a></p>
+          <h1>OpAMP Fleet</h1>
+          <p>Monitor, configure, and manage your OpAMP fleet · <a class="name" href="/api/v1/docs" target="_blank" rel="noopener">API docs</a></p>
         </div>
         <div style="display: flex; gap: 10px;">
           <button id="theme-toggle" class="btn btn-ghost" title="Theme">☾ Dark</button>
-          <button id="toggle-packages" class="btn btn-ghost">Packages</button>
-          <button id="toggle-config" class="btn btn-primary">Configurations</button>
         </div>
       </div>
 
+      <!-- Each management is a tab, and the counts sit on the tabs themselves — so the numbers an
+           operator scans for ("how many agents, how many packages") are visible from every tab,
+           not only from the one that holds the list. -->
+      <nav class="tabs">
+        <button class="tab" data-tab="agents">Agents<span class="num" id="count">0</span></button>
+        <button class="tab" data-tab="packages">Packages<span class="num" id="package-count">0</span></button>
+        <button class="tab" data-tab="configurations">Configurations<span class="num" id="config-count">0</span></button>
+      </nav>
+
+      <div id="panel-configurations" class="tab-panel">
       <section id="config-card" class="card config">
         <h2>Configurations — each targets the Agents its Selector matches; an empty Selector targets every Agent</h2>
         <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
@@ -226,11 +247,12 @@
         <div class="config-actions">
           <button id="save" class="btn btn-primary">Save &amp; distribute</button>
           <button id="delete" class="btn btn-ghost">Delete</button>
-          <button id="cancel" class="btn btn-ghost">Close</button>
           <span id="config-error" class="err"></span>
         </div>
       </section>
+      </div>
 
+      <div id="panel-packages" class="tab-panel">
       <section id="packages-card" class="card config">
         <h2>Packages — a software artifact offered to the Agents its Selector matches; verified (content hash, and signature when a key is configured), then swapped and health-gated. One name carries one artifact per platform, and an Agent is only ever offered the one built for the machine it reported. A package also states the <em>agent type</em> it is built for, matched against the agent's <code>service.name</code>: without one it reaches nobody, and it never reaches an agent of another type whatever its Selector says. An empty Selector then targets every agent of that type; a narrower one overrides it for the agents it names — which is how a rollout starts on part of the fleet.</h2>
         <div id="package-list" class="chips" style="margin-bottom: 12px"></div>
@@ -295,7 +317,9 @@
           <span id="package-error" class="err"></span>
         </div>
       </section>
+      </div>
 
+      <div id="panel-agents" class="tab-panel">
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
         <input id="filter" type="text" placeholder="Filter by name, status, OS or label" autocomplete="off" />
@@ -318,6 +342,7 @@
               <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
               <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
+              <th>Network</th>
               <th>Matched configs</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
@@ -327,6 +352,7 @@
           <tbody id="agents"></tbody>
         </table>
         <div id="empty" class="empty">No agents connected yet. Start a Client.</div>
+      </div>
       </div>
     </div>
 
@@ -360,6 +386,25 @@
         applyTheme(storedTheme() === "light" ? "dark" : "light");
       });
       applyTheme(storedTheme());
+
+      // Tabs: which of the three managements is on screen. The choice lives in the URL's hash
+      // rather than in storage — unlike the theme it is a place, not a preference, so a reload
+      // comes back to the same tab and a link can point a colleague straight at #packages. An
+      // unknown hash falls back to Agents, the tab the fleet is watched from.
+      const TABS = ["agents", "packages", "configurations"];
+      function showTab(name) {
+        if (!TABS.includes(name)) name = "agents";
+        document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+        for (const t of TABS) $(`panel-${t}`).classList.toggle("active", t === name);
+        document.title = `${name[0].toUpperCase()}${name.slice(1)} · OpAMP Fleet`;
+        // replaceState, not assignment: stepping through tabs is browsing one page, and Back
+        // should leave it, not replay every tab visited on the way.
+        if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+      }
+      document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+      window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+      showTab(location.hash.slice(1));
+
       let agents = [];
       let filterText = "";
       let sortKey = "name";
@@ -429,6 +474,18 @@
       function platformOf(a) {
         const n = a.non_identifying_attributes || {};
         return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
+      }
+      // The host's addresses (ADR-0050), first of each on the row: the row answers "which host is
+      // this" at a glance, while the full lists stay in the details chips below and in the
+      // tooltip — a host can hold many addresses, and a column is as wide as its widest cell.
+      function networkOf(a) {
+        const n = a.non_identifying_attributes || {};
+        const ips = (n["host.ip"] || "").split(", ").filter(Boolean);
+        const macs = (n["host.mac"] || "").split(", ").filter(Boolean);
+        if (!ips.length && !macs.length) return "—";
+        const more = (list) => (list.length > 1 ? ` +${list.length - 1}` : "");
+        const title = [ips.length ? `IP: ${ips.join(", ")}` : "", macs.length ? `MAC: ${macs.join(", ")}` : ""].filter(Boolean).join("\n");
+        return `<span title="${esc(title)}">${esc(ips[0]) || "—"}${more(ips)}</span><div class="sub" title="${esc(title)}">${esc(macs[0]) || ""}${more(macs)}</div>`;
       }
       // Everything about an agent that is a set rather than a value: reported attributes, the
       // operator's labels (ADR-0042), the per-row actions, and its package pills. Not named
@@ -533,6 +590,7 @@
             <td>${configPill(a)}</td>
             <td class="num" title="${esc(a.service_build) || ""}">${esc(a.service_version) || "—"}</td>
             <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
+            <td>${networkOf(a)}</td>
             <td>${matchedConfigs(a)}</td>
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
@@ -544,7 +602,7 @@
           const detailRow = ([label, chips], i, all) => `
           <tr class="detail${i === all.length - 1 ? " last" : ""}">
             <td class="chk"></td>
-            <td colspan="9"><div class="chips" style="padding: 2px 0 6px">
+            <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
               <span class="sub" style="align-self: center">${label}:</span>
               ${chips || `<span class="chip">none</span>`}
             </div></td>
@@ -699,6 +757,7 @@
         return selector;
       }
       function renderConfigList() {
+        $("config-count").textContent = configurations.length;
         $("config-list").innerHTML = configurations.map((c) =>
           `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${c.role ? "role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : "top-level configuration"}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
         ).join("") || `<span class="chip">none yet</span>`;
@@ -718,10 +777,7 @@
         $("config-error").textContent = "";
         renderConfigList();
       }
-      const closeConfig = () => $("config-card").classList.remove("open");
       $("config").addEventListener("input", () => { configDirty = true; });
-      $("toggle-config").addEventListener("click", () => $("config-card").classList.toggle("open"));
-      $("cancel").addEventListener("click", () => { configDirty = false; closeConfig(); });
       $("save").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
         const role = $("config-role").value.trim();
@@ -886,6 +942,8 @@
         return ` · ${agents}`;
       };
       function renderPackageList() {
+        // The count is of names, not artifacts: five platforms of one package are one package.
+        $("package-count").textContent = packages.length;
         const chips = packages.flatMap((p) =>
           (p.variants || []).map((v) => {
             const tag = `${v.os}-${v.arch}`;
@@ -1134,7 +1192,6 @@
         await refreshPackages();
         refreshAgents();
       }
-      $("toggle-packages").addEventListener("click", () => $("packages-card").classList.toggle("open"));
       // Upload: the file becomes this package's artifact for the platform named, and every other
       // field is applied to it in the same press — so what one action produces is a package that is
       // complete, never one that is stored and reaching nobody. It creates the package when no

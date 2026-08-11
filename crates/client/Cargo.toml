@@ -47,7 +47,9 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry-semantic-conventions.workspace = true
 opentelemetry-appender-tracing.workspace = true
-sysinfo.workspace = true
+# `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
+# `host.mac` (ADR-0050).
+sysinfo = { workspace = true, features = ["network"] }
 # The downstream OpAMP endpoint of Gateway Mode (ADR-0037): a WebSocket upgrade and a plain-HTTP
 # POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
 # it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.

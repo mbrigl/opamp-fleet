@@ -79,4 +79,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0048](0048-the-packaged-cli-is-a-symlink-through-current.md) | The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it | 🟡 proposed |
 | [0048](0048-the-packaged-cli-is-a-symlink-through-current.md) | The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it | 🟡 proposed |
 | [0049](0049-the-msi-prefills-the-development-endpoint.md) | The MSI's endpoint dialog is prefilled with the development default — interactively only | 🟡 proposed |
+| [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟡 proposed |
 

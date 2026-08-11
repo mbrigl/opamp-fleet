@@ -6,9 +6,10 @@
 //! carries n of these over one connection (ADR-0003, ADR-0011) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
 
+use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use opamp::attributes::{self, string_attr};
+use opamp::attributes::{self, string_array_attr, string_attr};
 use opamp::proto::{
     AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig, AgentToServer,
     AvailableComponents, ComponentHealth, ConnectionSettingsOffers, ConnectionSettingsStatus,
@@ -970,12 +971,24 @@ impl AgentState {
         for (key, value) in [
             ("os.name", os.name.as_deref()),
             ("os.version", os.version.as_deref()),
+            ("os.build_id", os.build_id.as_deref()),
             (attributes::OS_DESCRIPTION, os.description.as_deref()),
             ("host.name", host_name()),
             ("host.id", host_id()),
+            ("host.cpu.model.name", cpu_model()),
         ] {
             if let Some(value) = value {
                 non_identifying_attributes.push(string_attr(key, value));
+            }
+        }
+        // The host's network addresses — the conventions' `host.ip` and `host.mac` (ADR-0050),
+        // both arrays and both "excluding loopback interfaces". Read live rather than once, so a
+        // DHCP move is reported instead of the address the process happened to start with; a host
+        // with nothing to say reports no attribute rather than an empty array.
+        let (ips, macs) = host_addresses();
+        for (key, values) in [("host.ip", ips), ("host.mac", macs)] {
+            if !values.is_empty() {
+                non_identifying_attributes.push(string_array_attr(key, &values));
             }
         }
         let mut description = AgentDescription {
@@ -1045,6 +1058,50 @@ impl AgentState {
     }
 }
 
+/// The host's network addresses, enumerated live from the platform (ADR-0050).
+fn host_addresses() -> (Vec<String>, Vec<String>) {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    collect_host_addresses(networks.values().map(|data| {
+        (
+            data.mac_address().0,
+            data.ip_networks().iter().map(|net| net.addr).collect(),
+        )
+    }))
+}
+
+/// The rules of [`host_addresses`], separated from the platform so they are testable: an
+/// interface whose every address is loopback is skipped whole — its MAC too, which is how the
+/// conventions' "excluding loopback interfaces" reads for both keys — and an unspecified MAC is
+/// no answer. Both lists come out deduplicated and sorted, so the description does not change
+/// with enumeration order and re-report an unchanged host.
+///
+/// The formats are the conventions': IPv4 dotted-quad and IPv6 RFC 5952 (both what [`IpAddr`]'s
+/// `Display` writes), the MAC in IEEE RA hyphen-separated uppercase hexadecimal.
+fn collect_host_addresses(
+    interfaces: impl Iterator<Item = ([u8; 6], Vec<IpAddr>)>,
+) -> (Vec<String>, Vec<String>) {
+    let mut ips = std::collections::BTreeSet::new();
+    let mut macs = std::collections::BTreeSet::new();
+    for (mac, addrs) in interfaces {
+        if !addrs.is_empty() && addrs.iter().all(IpAddr::is_loopback) {
+            continue;
+        }
+        if mac != [0; 6] {
+            macs.insert(format!(
+                "{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ));
+        }
+        ips.extend(
+            addrs
+                .iter()
+                .filter(|ip| !ip.is_loopback())
+                .map(ToString::to_string),
+        );
+    }
+    (ips.into_iter().collect(), macs.into_iter().collect())
+}
+
 fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {
     match attrs.iter_mut().find(|existing| existing.key == attr.key) {
         Some(existing) => existing.value = attr.value.clone(),
@@ -1082,6 +1139,10 @@ struct OsInfo {
     name: Option<String>,
     /// `os.version` — the version that name is at: "24.04", "15.5", "10.0.26100.2033".
     version: Option<String>,
+    /// `os.build_id` — the build behind that version, where the platform stamps one: os-release's
+    /// `BUILD_ID`, `sw_vers`' BuildVersion ("24F74"), the build components of Windows' version
+    /// line ("26100.2033").
+    build_id: Option<String>,
 }
 
 fn os_info() -> &'static OsInfo {
@@ -1091,10 +1152,15 @@ fn os_info() -> &'static OsInfo {
 
 #[cfg(target_os = "linux")]
 fn read_os_info() -> OsInfo {
-    // os-release(5): NAME="Ubuntu", VERSION_ID="24.04", PRETTY_NAME="Ubuntu 24.04.2 LTS".
-    let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
-        return OsInfo::default();
-    };
+    std::fs::read_to_string("/etc/os-release")
+        .map(|text| parse_os_release(&text))
+        .unwrap_or_default()
+}
+
+/// os-release(5): NAME="Ubuntu", VERSION_ID="24.04", PRETTY_NAME="Ubuntu 24.04.2 LTS", and —
+/// where the distribution stamps its image builds — BUILD_ID.
+#[cfg(target_os = "linux")]
+fn parse_os_release(text: &str) -> OsInfo {
     let field = |key: &str| {
         text.lines()
             .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
@@ -1105,6 +1171,7 @@ fn read_os_info() -> OsInfo {
         description: field("PRETTY_NAME"),
         name: field("NAME"),
         version: field("VERSION_ID"),
+        build_id: field("BUILD_ID"),
     }
 }
 
@@ -1132,6 +1199,7 @@ fn read_os_info() -> OsInfo {
         description,
         name,
         version,
+        build_id: field("BuildVersion"),
     }
 }
 
@@ -1156,16 +1224,43 @@ fn read_os_info() -> OsInfo {
         .and_then(|(_, rest)| rest.split_once(']'))
         .map(|(inside, _)| inside.trim_start_matches("Version").trim().to_string())
         .filter(|value| !value.is_empty());
+    // `os.build_id` is the build that version line ends in: "10.0.26100.2033" is
+    // major.minor.build.revision, and the conventions' Windows example names the build ("22621").
+    // Everything from the third component on, so the UBR revision stays attached when `ver`
+    // prints one.
+    let build_id = version.as_ref().and_then(|version| {
+        let parts: Vec<&str> = version.split('.').collect();
+        (parts.len() >= 3).then(|| parts[2..].join("."))
+    });
     OsInfo {
         description: Some(text),
         name: Some("Windows".to_string()),
         version,
+        build_id,
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn read_os_info() -> OsInfo {
     OsInfo::default()
+}
+
+/// The processor's model designation (`host.cpu.model.name`) — read once, hardware does not
+/// change under a running process. From the same `sysinfo` the addresses come from (ADR-0050);
+/// one CPU answers for all of them, which is what the convention's singular key asks for.
+fn cpu_model() -> Option<&'static str> {
+    static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            let mut system = sysinfo::System::new();
+            system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+            system
+                .cpus()
+                .first()
+                .map(|cpu| cpu.brand().trim().to_string())
+                .filter(|brand| !brand.is_empty())
+        })
+        .as_deref()
 }
 
 /// The host's name (`host.name`) — read once. ADR-0017 twice offers a Selector on this attribute
@@ -1285,6 +1380,72 @@ mod tests {
     use opamp::proto::{AgentConfigFile, AgentConfigMap};
     use std::collections::HashMap;
 
+    /// `host.ip` and `host.mac` as the conventions define them (ADR-0050): loopback interfaces
+    /// excluded whole — the MAC of one too — an unspecified MAC not an answer, everything
+    /// deduplicated and sorted so the description is stable across enumeration order, IPv6 in
+    /// RFC 5952 form and the MAC in IEEE RA hyphenated uppercase.
+    #[test]
+    fn host_addresses_follow_the_conventions() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let loopback = (
+            [0; 6],
+            vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+        );
+        let mac = [0xac, 0xde, 0x48, 0x23, 0x45, 0x67];
+        let ethernet = (
+            mac,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140)),
+                IpAddr::V6(Ipv6Addr::new(
+                    0xfe80, 0, 0, 0, 0xabc2, 0x4a28, 0x737a, 0x609e,
+                )),
+            ],
+        );
+        // A bond partner: the same MAC again, one of its addresses again.
+        let bonded = (mac, vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 140))]);
+        // A tunnel: an address worth reporting, no hardware address behind it.
+        let tunnel = ([0; 6], vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))]);
+        let (ips, macs) = collect_host_addresses([loopback, ethernet, bonded, tunnel].into_iter());
+        assert_eq!(
+            ips,
+            ["10.0.0.7", "192.168.1.140", "fe80::abc2:4a28:737a:609e"]
+        );
+        assert_eq!(macs, ["AC-DE-48-23-45-67"]);
+    }
+
+    /// The os-release parser behind `os.*`, now including `os.build_id` (ADR-0050): quotes
+    /// stripped, an absent or empty field absent rather than blank.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn os_release_parses_the_fields_the_description_reports() {
+        let info = parse_os_release(
+            "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\nBUILD_ID=20240801.1\nVARIANT=\n",
+        );
+        assert_eq!(info.name.as_deref(), Some("Ubuntu"));
+        assert_eq!(info.version.as_deref(), Some("24.04"));
+        assert_eq!(info.description.as_deref(), Some("Ubuntu 24.04.2 LTS"));
+        assert_eq!(info.build_id.as_deref(), Some("20240801.1"));
+        assert_eq!(parse_os_release("BUILD_ID=\n").build_id, None);
+    }
+
+    /// `/proc/cpuinfo` always names an x86 model, so on this platform the attribute must be
+    /// there — everywhere else it stays best effort.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn the_cpu_model_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attrs = reported(&make_agent(dir.path()).describe());
+        assert!(
+            attrs
+                .get("host.cpu.model.name")
+                .is_some_and(|model| !model.is_empty()),
+            "no host.cpu.model.name in {attrs:?}"
+        );
+    }
+
     fn make_agent(dir: &std::path::Path) -> AgentState {
         let storage = Storage::new(dir.to_path_buf()).expect("storage");
         AgentState::new("test-agent".to_string(), storage).expect("agent")
@@ -1365,7 +1526,8 @@ mod tests {
     }
 
     /// Every reported attribute as `key -> value`, both lists together: what the Server actually
-    /// receives, and therefore what a Selector matches against.
+    /// receives, and therefore what a Selector matches against. A string array (`host.ip`,
+    /// `host.mac`, ADR-0050) reads joined, as the Server's view joins it.
     fn reported(description: &AgentDescription) -> std::collections::BTreeMap<String, String> {
         description
             .identifying_attributes
@@ -1374,7 +1536,18 @@ mod tests {
             .map(|kv| {
                 let value = match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
                     Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
-                    other => panic!("{} must be a string, got {other:?}", kv.key),
+                    Some(opamp::proto::any_value::Value::ArrayValue(list)) => list
+                        .values
+                        .iter()
+                        .filter_map(|v| match v.value.as_ref() {
+                            Some(opamp::proto::any_value::Value::StringValue(s)) => {
+                                Some(s.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    other => panic!("{} must be a string or string array, got {other:?}", kv.key),
                 };
                 (kv.key.clone(), value)
             })

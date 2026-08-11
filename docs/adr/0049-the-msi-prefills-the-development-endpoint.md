@@ -19,17 +19,20 @@ them empty — the one value they will type is the development default the Clien
 
 ## Decision
 
-We will prefill the `ENDPOINT` property with the Client's own development default,
-**in the UI sequence only** (a `SetProperty` with `Sequence="ui"`, conditioned on the property
-being unset and the product not yet installed).
+We will prefill the `ENDPOINT` property with the development Server in its HTTP form,
+`http://localhost:4320/v1/opamp`, **in the UI sequence only** (a `SetProperty` with
+`Sequence="ui"`, conditioned on the property being unset and the product not yet installed).
 
 - A silent install that names no `ENDPOINT` behaves exactly as before: no configuration is
   written, the install warns and defers — unattended fleet deployment cannot acquire the
   development default by omission.
 - A value given on the `msiexec` command line wins over the prefill; clearing the field remains
   the "configure later" answer.
-- The prefilled value is the loader's `default_endpoint()` verbatim, and
-  `crates/client/tests/msi_exe_command.rs` fails when the two drift apart.
+- The prefilled value names the same host, port and path as the loader's `default_endpoint()`,
+  but with the `http://` scheme — the scheme selects the transport (ADR-0008), and HTTP polling
+  is the operator's explicit choice for the click-through install.
+  `crates/client/tests/msi_exe_command.rs` holds the value to the loader's endpoint rule and to
+  this string.
 
 ## Alternatives considered
 
@@ -39,10 +42,10 @@ being unset and the product not yet installed).
 - **A static `Property` default (both sequences)** — one line, but it changes silent-install
   semantics: `/qn` without `ENDPOINT=` would pin every unattended host to localhost, precisely the
   state ADR-0046 refuses to manufacture.
-- **Prefill `http://localhost:4320/v1/opamp`** — the literally requested string. Same host, port
-  and path, but the scheme selects the transport (ADR-0008), so `http://` would flip the default
-  from WebSocket to HTTP polling and diverge from the one development default the Client bakes in;
-  the `ws://` form keeps a single value defined once.
+- **Prefill the loader's `default_endpoint()` (`ws://127.0.0.1:4320/v1/opamp`) verbatim** — one
+  value defined once, and the transport an unconfigured Client picks anyway. Rejected by the
+  operator in favour of the `http://` form; the divergence (two development defaults, a scheme
+  apart) is accepted and pinned by test rather than left to drift.
 
 ## Sources / Prior art
 
@@ -55,10 +58,11 @@ being unset and the product not yet installed).
 ## Consequences
 
 - Positive: the local-evaluation install is a click-through; the interactive and unattended paths
-  keep their distinct semantics; the default lives in one place (the loader) with a test holding
-  the MSI to it.
+  keep their distinct semantics; a test holds the MSI's value to the loader's endpoint rule.
 - Negative / trade-offs: an operator interactively installing on a production host and clicking
   through without reading now gets a `client.toml` pinned to localhost rather than a warning — the
-  narrow slice of ADR-0046's concern this decision consciously accepts.
+  narrow slice of ADR-0046's concern this decision consciously accepts. And a click-through
+  install runs HTTP polling where an unconfigured Client would have chosen WebSocket — two
+  development defaults, a scheme apart.
 - Follow-ups: none. The Linux packages have no interactive channel to mirror this in (ADR-0046
   records endpoint preseeding there as rejected).

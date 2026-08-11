@@ -1454,18 +1454,28 @@ fn capability_names(mask: u64) -> Vec<String> {
     names
 }
 
-/// Reported attributes as the API shows them: string values as-is, other value kinds in their
-/// debug form — the view is for reading, the wire keeps the typed original.
+/// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
+/// conventions give `host.ip` and `host.mac`, ADR-0050) joined with a comma, other value kinds in
+/// their debug form — the view is for reading, the wire keeps the typed original.
 fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+    fn text(value: &any_value::Value) -> String {
+        match value {
+            any_value::Value::StringValue(s) => s.clone(),
+            any_value::Value::ArrayValue(list) => list
+                .values
+                .iter()
+                .filter_map(|v| v.value.as_ref())
+                .map(text)
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => format!("{other:?}"),
+        }
+    }
     attributes
         .iter()
         .filter_map(|kv| {
             let value = kv.value.as_ref()?.value.as_ref()?;
-            let text = match value {
-                any_value::Value::StringValue(s) => s.clone(),
-                other => format!("{other:?}"),
-            };
-            Some((kv.key.clone(), text))
+            Some((kv.key.clone(), text(value)))
         })
         .collect()
 }
@@ -1662,6 +1672,22 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
+    /// (ADR-0050): joined for reading, not dumped in debug form.
+    #[test]
+    fn the_view_joins_a_string_array_attribute() {
+        let attrs = vec![
+            opamp::attributes::string_attr("host.name", "edge-01"),
+            opamp::attributes::string_array_attr(
+                "host.ip",
+                &["10.0.0.7".into(), "192.168.1.140".into()],
+            ),
+        ];
+        let map = super::attr_map(&attrs);
+        assert_eq!(map["host.name"], "edge-01");
+        assert_eq!(map["host.ip"], "10.0.0.7, 192.168.1.140");
+    }
+
     /// The gatewayed case, which is why this exists: the connection is up — it is the Gateway's —
     /// and the Agent behind it has stopped talking. Both facts are reported, neither overwrites
     /// the other (ADR-0038).

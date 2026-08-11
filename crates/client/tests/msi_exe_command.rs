@@ -153,12 +153,13 @@ fn register_service_survives_the_crt() {
     assert_eq!(args.endpoint, None);
 }
 
-/// The endpoint prefill (ADR-0049) is the loader's own development default, stated once — if
-/// `default_endpoint()` ever changes, the MSI follows or this fails. And it must stay confined to
-/// the UI sequence: leaking it into a silent install would write the development default on every
-/// unattended host, the state ADR-0046 refuses to manufacture.
+/// The endpoint prefill (ADR-0049): the development Server in its `http://` form, held to the
+/// loader's own endpoint rule so the dialog can never offer a value that `service install
+/// --endpoint` would then reject. And it must stay confined to the UI sequence: leaking it into a
+/// silent install would write the development default on every unattended host, the state
+/// ADR-0046 refuses to manufacture.
 #[test]
-fn endpoint_prefill_is_the_development_default_and_interactive_only() {
+fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     let source = package_source();
     let element = source
         .split("<SetProperty")
@@ -166,10 +167,14 @@ fn endpoint_prefill_is_the_development_default_and_interactive_only() {
         .expect("no ENDPOINT prefill in the package source");
     let element = &element[..element.find('>').expect("unterminated SetProperty element")];
     assert_eq!(attribute(element, "Id").as_deref(), Some("ENDPOINT"));
-    assert_eq!(
-        attribute(element, "Value"),
-        Some(client::config::ClientConfig::default().endpoint)
-    );
+    let value = attribute(element, "Value").expect("the prefill has no Value");
+    assert_eq!(value, "http://localhost:4320/v1/opamp");
+    client::config::ClientConfig {
+        endpoint: value,
+        ..Default::default()
+    }
+    .transport()
+    .expect("the loader rejects the prefilled endpoint");
     assert_eq!(attribute(element, "Sequence").as_deref(), Some("ui"));
 }
 

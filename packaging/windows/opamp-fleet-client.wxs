@@ -58,12 +58,14 @@
       defers configuration instead of pinning every host it touches to localhost, which is the
       thousand-hosts state ADR-0046 refuses to manufacture. A value given on the command line wins
       over the prefill, and a maintenance run never re-answers a question the first install already
-      settled. The value must stay the loader's own development default
-      (`crates/client/src/config.rs`); `tests/msi_exe_command.rs` fails on drift.
+      settled. The value is the development Server in its `http://` form — deliberately not the
+      loader's own `ws://` default: the scheme selects the transport, and ADR-0049 records the
+      operator's choice of HTTP for the click-through install. `tests/msi_exe_command.rs` holds
+      the value to the loader's endpoint rule and to this string.
     -->
     <Property Id="ENDPOINT" Secure="yes" />
     <SetProperty Id="ENDPOINT"
-                 Value="ws://127.0.0.1:4320/v1/opamp"
+                 Value="http://localhost:4320/v1/opamp"
                  Sequence="ui"
                  After="LaunchConditions"
                  Condition="NOT ENDPOINT AND NOT Installed" />

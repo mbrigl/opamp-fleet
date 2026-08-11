@@ -17,6 +17,18 @@ carries a date once its tag exists.
 
 ## [0.2.2]
 
+### Added
+
+- **Agents report the host's network addresses, CPU model, and OS build.** Every Agent a Client
+  presents now carries the OpenTelemetry `host.ip` and `host.mac` attributes — loopback excluded,
+  deduplicated, IPv6 in RFC 5952 form, MACs hyphen-separated uppercase — plus
+  `host.cpu.model.name` and, where the platform stamps one, `os.build_id`. The fleet table gains a
+  **Network** column — the first address of each kind at a glance, the full lists in the tooltip
+  and the attribute chips — and everything stays searchable like any other reported attribute
+  ([ADR-0050](docs/adr/0050-agents-report-host-network-addresses.md)). Addresses are re-read on
+  each description, so a DHCP move shows up. No operator action required; note that host addresses
+  are now visible to anyone who can read the fleet API.
+
 ### Changed
 
 - **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
@@ -33,7 +45,7 @@ carries a date once its tag exists.
   `/usr/libexec/opamp-fleet-client`.
 
 - **The MSI's endpoint page comes prefilled with the development default**
-  (`ws://127.0.0.1:4320/v1/opamp`) instead of empty, so a local evaluation install is a
+  (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
   click-through (ADR-0049). Interactive installs only: clearing the field still means "configure
   later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
   install (`/qn`) without one still writes no configuration — unattended deployments are
