@@ -81,6 +81,13 @@ pub struct ClientConfig {
     /// this default, and asks that it be configurable.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
+    /// The largest package or self-update artifact the Client downloads before verifying it
+    /// (ADR-0015). Streaming already caps peak memory at one chunk, but disk is finite: without a
+    /// ceiling a Server could answer the artifact GET with an endless body and fill the staging
+    /// filesystem before the content hash is ever checked. Matches the Server's own per-package
+    /// ceiling; `0` is refused at load, the same as the message limit.
+    #[serde(default = "default_max_artifact_size")]
+    pub max_artifact_size_bytes: u64,
     /// The `[[supervisor]]` blocks (ADR-0011): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
@@ -525,6 +532,14 @@ pub struct GatewayConfig {
     /// and never beyond, so a Gateway in front of three Agents holds three connections.
     #[serde(default = "default_upstream_connections")]
     pub upstream_connections: usize,
+    /// The most distinct Agents a single downstream connection may carry. It bounds the routing
+    /// state one peer can make this Gateway hold: a misbehaving or hostile downstream Client
+    /// streaming reports under endless fabricated `instance_uid`s would otherwise grow the registry
+    /// and pool maps without limit. Generous for a nested Gateway carrying a real sub-fleet; a
+    /// report for a *new* Agent past the cap is dropped, the ones already carried keep working. `0`
+    /// is refused at load.
+    #[serde(default = "default_max_carried_agents")]
+    pub max_carried_agents: usize,
     /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0035): what this verifies is the
     /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     pub tls: Option<GatewayTlsConfig>,
@@ -550,6 +565,13 @@ impl GatewayConfig {
     fn check(&self, endpoint: &str) -> Result<(), String> {
         if self.upstream_connections == 0 {
             return Err("[gateway] upstream_connections must be at least 1".to_string());
+        }
+        if self.max_carried_agents == 0 {
+            return Err(
+                "[gateway] max_carried_agents must be at least 1 — it bounds routing state, not a \
+                 switch"
+                    .to_string(),
+            );
         }
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
@@ -621,12 +643,24 @@ fn default_upstream_connections() -> usize {
     10
 }
 
+/// Generous enough for a nested Gateway carrying a real sub-fleet, small enough that a single
+/// hostile connection cannot grow the routing maps without bound.
+fn default_max_carried_agents() -> usize {
+    10_000
+}
+
 fn default_state_dir() -> PathBuf {
     PathBuf::from("client-state")
 }
 
 fn default_max_message_size() -> usize {
     opamp::frame::DEFAULT_MAX_MESSAGE_SIZE
+}
+
+/// One gibibyte — the Server's own `DEFAULT_MAX_PACKAGE_SIZE`. A Server that will not store a
+/// larger artifact never offers one, so the two ends agree by default.
+fn default_max_artifact_size() -> u64 {
+    1 << 30
 }
 
 fn default_stop_timeout_secs() -> u64 {
@@ -657,6 +691,7 @@ impl Default for ClientConfig {
             self_update: None,
             package_key: None,
             max_message_size_bytes: default_max_message_size(),
+            max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
         }
     }
@@ -708,6 +743,15 @@ impl ClientConfig {
         if config.max_message_size_bytes == 0 {
             return Err(format!(
                 "{}: max_message_size_bytes must be greater than zero",
+                path.display()
+            ));
+        }
+        // A ceiling of zero would refuse every artifact; like the message limit it is a bound, not
+        // a switch, so a value that cannot carry a download fails startup rather than silently
+        // rejecting every package.
+        if config.max_artifact_size_bytes == 0 {
+            return Err(format!(
+                "{}: max_artifact_size_bytes must be greater than zero",
                 path.display()
             ));
         }
@@ -969,6 +1013,49 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
+    /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
+    /// a bound that could carry nothing rather than "unlimited", so it fails startup.
+    #[test]
+    fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
+        assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
+        let tightened: ClientConfig =
+            toml::from_str("max_artifact_size_bytes = 1048576").expect("parse");
+        assert_eq!(tightened.max_artifact_size_bytes, 1_048_576);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_artifact_size_bytes"), "{err}");
+    }
+
+    /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
+    /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
+    /// so it fails startup.
+    #[test]
+    fn the_gateway_agent_cap_defaults_and_rejects_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the default cap");
+        assert_eq!(config.gateway.expect("gateway").max_carried_agents, 10_000);
+
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+             max_carried_agents = 0\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_carried_agents"), "{err}");
     }
 
     /// Both keys that once configured package delivery on the host are refused rather than

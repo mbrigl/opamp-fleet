@@ -6,7 +6,7 @@
 //! config-map entry so an operator (and, later, a Managed Process) can read it off disk.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use opamp::proto::AgentRemoteConfig;
 use opamp::uid::InstanceUid;
@@ -43,7 +43,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(dir: PathBuf) -> io::Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        create_private_dir(&dir)?;
         Ok(Storage { dir })
     }
 
@@ -97,9 +97,11 @@ impl Storage {
     /// its name is recorded in [`SUPPLEMENTARY_FILE`] for the plugin to leave out of what it
     /// starts the process with.
     pub fn store_remote_config(&self, config: &AgentRemoteConfig) -> io::Result<()> {
-        std::fs::write(self.dir.join(CONFIG_PB_FILE), config.encode_to_vec())?;
+        // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
+        // that is a certificate or key), so both the config directory and the files are owner-only.
+        write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())?;
         let config_dir = self.dir.join(CONFIG_DIR);
-        std::fs::create_dir_all(&config_dir)?;
+        create_private_dir(&config_dir)?;
         for entry in std::fs::read_dir(&config_dir)? {
             let path = entry?.path();
             if path.is_file() {
@@ -110,7 +112,7 @@ impl Storage {
         if let Some(map) = &config.config {
             for (name, file) in &map.config_map {
                 let file_name = entry_file_name(name);
-                std::fs::write(config_dir.join(&file_name), &file.body)?;
+                write_private(&config_dir.join(&file_name), &file.body)?;
                 if !file.role.is_empty() {
                     supplementary.push(file_name);
                 }
@@ -118,9 +120,9 @@ impl Storage {
         }
         if !supplementary.is_empty() {
             supplementary.sort();
-            std::fs::write(
-                config_dir.join(SUPPLEMENTARY_FILE),
-                supplementary.join("\n") + "\n",
+            write_private(
+                &config_dir.join(SUPPLEMENTARY_FILE),
+                (supplementary.join("\n") + "\n").as_bytes(),
             )?;
         }
         Ok(())
@@ -209,6 +211,47 @@ fn read_supplementary(config_dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// Create `dir` (and its parents) and, on Unix, narrow it to `0700`.
+///
+/// The state directory holds the Agent's identity and the Server-pushed configuration, and a
+/// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0016). At the
+/// umask default the directory is world-listable, so on a multi-user host another local user could
+/// read that material; owner-only closes it. The Managed Process runs as this same user, so it still
+/// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0010).
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write `contents` to `path`, owner-only on Unix — for the files that can carry secret material
+/// (the stored configuration protobuf and each config-map entry). Defence in depth beside the
+/// `0700` directory: the mode is set in the open call so the bytes are never briefly world-readable,
+/// and a pre-existing file is narrowed too.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 /// Config-map keys are arbitrary peer input; a file name derived from one must never escape the
 /// config directory or hide itself.
 fn entry_file_name(name: &str) -> String {
@@ -263,6 +306,43 @@ mod tests {
         storage.forget_package().expect("forget");
         assert!(storage.load_package().is_none());
         assert!(!dir.path().join(PACKAGE_FILE).exists());
+    }
+
+    /// The state directory holds the identity and the Server-pushed configuration — which can carry
+    /// secret material by path (ADR-0016) — so the directories are owner-only and the secret-bearing
+    /// files are `0600`, whatever the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn the_state_and_configuration_are_kept_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("state");
+        let storage = Storage::new(root.clone()).expect("storage");
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&root), 0o700, "the state directory is owner-only");
+
+        storage
+            .store_remote_config(&roled_offer(&[("certs", b"PEM-SECRET\n", "supplementary")]))
+            .expect("store");
+        let config_dir = storage.config_dir();
+        assert_eq!(
+            mode(&config_dir),
+            0o700,
+            "the config directory is owner-only"
+        );
+        assert_eq!(
+            mode(&root.join(CONFIG_PB_FILE)),
+            0o600,
+            "the stored configuration protobuf is owner-only"
+        );
+        assert_eq!(
+            mode(&config_dir.join("certs")),
+            0o600,
+            "a config entry — which may be a certificate or key — is owner-only"
+        );
     }
 
     #[test]

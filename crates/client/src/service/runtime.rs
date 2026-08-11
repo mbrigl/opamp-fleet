@@ -170,6 +170,18 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             probation,
         );
     }
+    // Signing is opt-in (ADR-0015): with no `[packages] verification_key`, an offered artifact — a
+    // managed process's package or this Client's own self-update — is accepted on the Server-supplied
+    // content hash alone, with no signature binding those bytes to a key the operator holds. That is
+    // a deliberate posture, not a bug, but it is one an operator should choose knowingly, so say so
+    // loudly at startup rather than only in the code path that acts on it.
+    if config.package_key().is_none() && engine.installs_packages() {
+        tracing::warn!(
+            "accepting packages without a signature check: no [packages] verification_key is set, so \
+             an offered package or self-update is trusted on the Server's content hash alone \
+             (ADR-0015). Set verification_key to require an Ed25519 signature."
+        );
+    }
     if let Some(outcome) = &owed_outcome {
         // The install finished in another process; this one owes the Server its terminal status.
         engine.report_self_update_outcome(outcome);

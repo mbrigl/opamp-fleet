@@ -15,6 +15,132 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.1] - 2026-08-11
+
+### Fixed
+
+- **The package-source probe can no longer be aimed at internal addresses (SSRF).** `PUT
+  /api/v1/packages/{name}/source` probes the operator-supplied URL once; that URL and its headers
+  are entirely caller-supplied, so the probe could be pointed at the cloud metadata endpoint
+  (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
+  refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
+  no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0018)
+  legitimately lives on an internal network. No operator action required unless a source URL
+  deliberately used a link-local or CGNAT host.
+
+- **The body-less state-changing `POST` routes reject cross-site browser requests (CSRF).**
+  `POST …/restart` and `POST …/rollback` are CORS "simple requests" a cross-origin page could fire
+  at a logged-in operator's browser without a preflight. They now require Fetch Metadata to mark the
+  request same-origin — a browser stamps `Sec-Fetch-Site` and forbids page scripts from forging it,
+  so a cross-site call is refused with `403`. Non-browser clients (`curl`, a portal) send no such
+  header and are unaffected; no API client or token changes. This is not operator authentication,
+  which remains a separate decision (ADR-0013).
+
+- **The package store has a whole-store size ceiling.** The upload route bounded a single artifact
+  by `max_package_size_bytes` but nothing bounded the *store*, so a caller could fill the disk by
+  uploading artifact after artifact under distinct names. Uploads are now also refused (`507`) once
+  the stored artifacts reach the new `max_total_package_bytes` (default 16 GiB). **What to do:**
+  nothing, unless a fleet's package set legitimately exceeds 16 GiB — then raise
+  `max_total_package_bytes` in `server.toml`.
+
+- **A Gateway now serves its downstream hop over TLS, and `[gateway.tls] client_ca_file` gates who
+  may connect.** The `[gateway.tls]` section ([ADR-0037](docs/adr/0037-gateway-mode.md),
+  [ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)) was read and
+  then ignored: the endpoint stayed plaintext and the client CA verified nobody, so the downstream
+  `Authorization` credential travelled in the clear and any peer could connect and report under any
+  `instance_uid`. The section now takes effect — the Gateway presents its `cert_file`/`key_file`, and
+  when `client_ca_file` is set a downstream Agent **must** present a certificate that chains to it or
+  the handshake is refused. **What to do:** an operator relying on that section for security must
+  confirm downstream Agents now dial `wss://`/`https://` and, if a client CA is configured, carry a
+  client certificate — connections that worked only because the boundary was silently off will now
+  fail. A Gateway left without a `[gateway.tls]` section still serves plaintext, and now logs a
+  warning saying so.
+
+- **A Server-offered self-update version can no longer escape the install layout.** The offered
+  version string becomes a directory name under `versions/` (ADR-0010); a crafted value carrying
+  `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged binary outside the layout
+  and repoint `current` at it — an escape the package hash and signature never covered, because they
+  sign the bytes, not the destination. The version is now validated before it names a path, and the
+  staged directory is asserted to stay directly under `versions/`. No operator action required.
+
+- **The Server-rotated connection credential is no longer left world-readable.** The
+  `connection-settings.pb` in the state directory holds the `Authorization` value the Server rotates
+  in (ADR-0014), which outranks the one in `client.toml`. It was written at the umask default
+  (typically `0644`), so on a multi-user host any local user could read the live fleet credential.
+  It is now written `0600` and its state directory `0700`. No operator action required.
+
+- **The enrolment private key is written owner-only from the start.** `client-key.pem` (ADR-0035)
+  was created at the umask default and narrowed to `0600` only afterwards, leaving a brief window in
+  which another local user could read it. The mode is now set in the open call, closing the window.
+  No operator action required.
+
+- **A referenced package's private-source token is stored owner-only on the Server.** A referenced
+  source (ADR-0018) can carry headers — a bearer token for a private artifact host — that were
+  persisted in the package store at the umask default, readable by other local users on the Server
+  host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
+  design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say so.
+  **What to do:** prefer a narrowly-scoped, rotatable token for a private source.
+
+- **The Client's OpAMP endpoint no longer follows HTTP redirects; artifact downloads follow a bounded
+  chain.** The OpAMP endpoint is a fixed, operator-configured address, so its HTTP transport and the
+  connection-settings probe now refuse redirects — a redirect there could only bounce an
+  authenticated session elsewhere. Artifact downloads still follow redirects (a mirror is often a CDN
+  that bounces to signed storage, ADR-0018) but are now bounded to a short chain; integrity still
+  rests on the content hash and signature, never on where the bytes came from. No operator action
+  required unless an OpAMP endpoint was, unusually, served behind an HTTP redirect.
+
+- **The Agent's state and configuration directories are kept owner-only.** The persisted state
+  directory and the `config/` directory the Managed Process reads from were created at the umask
+  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0016) can be a
+  certificate or a key — so on a multi-user host that material was world-readable. The directories
+  are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
+  Process runs as the same user and still reads its own config. No operator action required.
+
+- **The artifact staging directory is kept owner-only.** A downloaded artifact is verified and then
+  re-opened by the installer; the staging directory was created at the umask default, so on a
+  multi-user host another local user could swap the file in that window and defeat the hash and
+  signature check it had already passed (TOCTOU). The directory (`packages/` under the Agent's state
+  or supervisor directory) is now `0700`. No operator action required.
+
+- **A Client that installs packages without a verification key now says so at startup.** Package
+  signing is opt-in (ADR-0015): with no `[packages] verification_key`, an offered package or
+  self-update is accepted on the Server-supplied content hash alone, with no signature binding the
+  bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
+  managed process's, or its own self-update) without a key now logs a warning at startup, so the
+  weaker posture is a knowing choice rather than a silent default. **What to do:** to require an
+  Ed25519 signature, set `[packages] verification_key` (see `opamp-package-sign`); otherwise nothing.
+
+- **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
+  with no bound, so a malicious or compromised Server could answer the download with an endless body
+  and fill the staging filesystem before the content hash — checked only once the whole stream lands
+  — could reject it. The download is now capped at the new `max_artifact_size_bytes` (default one
+  gibibyte, matching the Server's own per-package limit), enforced against an over-large
+  `Content-Length` up front and while a chunked body streams in. **What to do:** nothing, unless a
+  fleet distributes artifacts larger than 1 GiB — then raise `max_artifact_size_bytes` in
+  `client.toml`.
+
+- **A self-update can no longer be talked into a downgrade.** The install decision was "is the
+  offered version different from the running one", so a compromised Server could offer an older,
+  still-validly-signed release with a known vulnerability and the Client would install it — the
+  Ed25519 signature is over the artifact bytes only and carries no version ordering. The Client now
+  refuses an offer whose version has lower SemVer precedence than the one running; a rebuild of the
+  same release and any newer version still install, and rollback to the *previous* version stays the
+  crash-loop mechanism it always was. No operator action required.
+
+- **A single downstream Gateway connection can no longer grow the routing state without bound.** For
+  every distinct `instance_uid` a downstream peer reported, the Gateway grew its per-connection,
+  registry, and pool maps; one hostile or buggy peer streaming endless fabricated `instance_uid`s
+  was an unbounded-memory denial of service. A connection is now capped at the new
+  `[gateway] max_carried_agents` (default 10000): past it a report for a *new* Agent is dropped while
+  the Agents already carried keep being served. **What to do:** nothing, unless a single nested
+  Gateway carries more than 10000 Agents on one connection — then raise `max_carried_agents`.
+
+- **The WebSocket transport marks the `Authorization` header sensitive.** The HTTP transport already
+  flagged the credential so it is redacted from any debug formatting of the request; the WebSocket
+  path did not, so the value could surface in a log line. It now matches. No operator action
+  required.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added

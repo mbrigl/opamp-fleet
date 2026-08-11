@@ -142,6 +142,32 @@ pub fn install(
     package_hash: &[u8],
     archive_key: Option<&str>,
 ) -> Result<Install, String> {
+    // The version is Server-controlled and becomes an on-disk directory name below (ADR-0010).
+    // Refuse anything that is not a well-formed version *before* it names a path: a value carrying
+    // `..` or a separator would otherwise stage the (hash-verified) binary outside `versions/` and
+    // repoint `current` at it — an escape the content hash and signature never cover, because they
+    // sign the bytes, not the destination. The probe's own version check (ADR-0029) is too late; it
+    // runs only after the artifact is already staged on disk.
+    if opamp::version::parse(version).is_none() {
+        return Err(format!(
+            "the offered version {version:?} is not a valid version; refusing to self-update"
+        ));
+    }
+
+    // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
+    // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
+    // fleet; the Ed25519 signature is over the artifact bytes only and carries no version ordering,
+    // so an old release stays validly signed forever. A rebuild of the same release (Equal) and any
+    // newer one still install. Rollback to the *previous* version is a separate mechanism — the
+    // crash-loop pointer move ([`on_start`]) — not a Server-offered older version.
+    let running = opamp::version::current();
+    if opamp::version::precedence(version, running) == Some(std::cmp::Ordering::Less) {
+        return Err(format!(
+            "the offered version {version:?} is older than the running {running:?}; \
+             refusing to downgrade"
+        ));
+    }
+
     let exe = layout::running_exe()?;
     // Outside the versioned layout there is no pointer to switch and no previous version to go
     // back to — a `cargo run` build, or a binary an operator dropped somewhere by hand.
@@ -153,7 +179,17 @@ pub fn install(
         )
     })?;
 
+    let versions = layout.versions_dir();
     let new_dir = layout.version_dir(&layout::version_dir_name(version));
+    // Defence in depth: whatever the name derived to, it must be a direct child of `versions/`. The
+    // version check above already blocks the known escapes; this keeps the path guarantee from
+    // resting on that parsing staying correct in the future.
+    if new_dir.parent() != Some(versions.as_path()) {
+        return Err(format!(
+            "the offered version {version:?} does not map to a directory under {}",
+            versions.display()
+        ));
+    }
     if new_dir == running_dir {
         // Not a failure: this *is* the version the Server wants installed. It reaches here every
         // time a freshly updated Client is offered the package it just installed, which is the
@@ -406,6 +442,50 @@ mod tests {
         assert!(
             !marker_path(dir.path()).exists(),
             "the unreadable marker is removed, not left to be re-read"
+        );
+    }
+
+    /// A crafted Server offer whose `version` carries `..` or a path separator must be refused
+    /// before it is ever turned into a directory name — otherwise the staged binary lands outside
+    /// `versions/` and `current` is pointed at it. The refusal happens ahead of the layout check,
+    /// so it holds even where this test binary does not run from an install layout.
+    #[test]
+    fn install_refuses_a_version_that_would_escape_the_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"payload").expect("write the artifact");
+
+        for bad in [
+            "1.0.0+../../../evil",
+            "1.0.0-../x",
+            "../../etc/cron.d/x",
+            r"1.0.0+a\b",
+            "latest",
+        ] {
+            let err = install(dir.path(), &artifact, bad, b"\x00", None)
+                .expect_err("a path-escaping version must be refused");
+            assert!(
+                err.contains("not a valid version"),
+                "{bad:?} was not refused as a version: {err}"
+            );
+        }
+    }
+
+    /// A Server offering an older release than the one running is refused before it can be staged,
+    /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
+    /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
+    /// project builds.
+    #[test]
+    fn install_refuses_a_downgrade() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"payload").expect("write the artifact");
+
+        let err = install(dir.path(), &artifact, "0.0.1", b"\x00", None)
+            .expect_err("an older release must be refused");
+        assert!(
+            err.contains("refusing to downgrade"),
+            "an older version was not refused as a downgrade: {err}"
         );
     }
 

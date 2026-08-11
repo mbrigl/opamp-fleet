@@ -28,6 +28,29 @@ security posture:
   not just documented: [`.claude/settings.json`](.claude/settings.json) prompts on `git add`,
   `git commit`, `git push`, and `gh`. Authentication uses `gh`'s web flow with no stored tokens.
 
+## Fleet trust model
+
+**Admission is a fleet-wide trust boundary, not per-Agent authentication**
+([ADR-0047](docs/adr/0047-admission-is-a-fleet-wide-trust-boundary.md)). A peer reaches the OpAMP
+endpoint by proving *fleet membership* — the [ADR-0013](docs/adr/0013-opamp-endpoint-authentication.md)
+credential and/or the [ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)
+client certificate. Neither identifies *which* Agent is speaking: an Agent's `instance_uid` is
+self-asserted (the Server may itself re-key it), a certificate is deliberately not bound to it, and a
+Gateway ([ADR-0037](docs/adr/0037-gateway-mode.md)) forwards many Agents' reports under one
+certificate.
+
+The consequence, which is a design property rather than a defect: **within one admitted fleet there
+is no authorization between Agents.** Any admitted peer can send a report under any `instance_uid`
+and update that Agent's Server-side record (health, effective config, remote-config status, and so
+the Configuration offered to it) — most cleanly over plain HTTP, which offers nothing to tell two
+pollers apart. This is *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
+
+**What this means for operators:** treat one fleet (one Server, one shared admission) as a single
+trust domain. Do not place mutually distrusting Agents in the same fleet; isolate them by separate
+Server instance or network segment. The rationale, and the alternatives that were weighed and
+rejected (binding certificates to `instance_uid`, trust-on-first-use pinning, sequence-number
+checks), are in [ADR-0047](docs/adr/0047-admission-is-a-fleet-wide-trust-boundary.md).
+
 ## Supported versions
 
 <!-- TODO: document which versions/branches receive security fixes once the project has releases. -->

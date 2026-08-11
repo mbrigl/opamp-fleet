@@ -111,6 +111,9 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
 }
 
 async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: Next) -> Response {
+    // What this gate proves is *fleet membership*, not which Agent is speaking: the credential and
+    // the client certificate are fleet-wide, and `instance_uid` stays self-asserted behind them
+    // (ADR-0047). Admission is the trust boundary; there is no authorization between admitted Agents.
     // Every configured proof, not the first that happens to pass.
     if admission.require_client_certificate {
         let presented = request

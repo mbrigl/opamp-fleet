@@ -125,10 +125,37 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     std::fs::create_dir_all(&config.state_dir)
         .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
     let key_file = config.state_dir.join(ISSUED_KEY_FILE);
-    std::fs::write(&key_file, key.serialize_pem())
-        .map_err(|e| format!("cannot store the private key: {e}"))?;
+    write_private_key(&key_file, &key.serialize_pem())?;
+    // Also narrow a key file that already existed at a wider mode (a prior enrolment left it): the
+    // open above sets the mode only when it creates the file.
     restrict(&key_file)?;
     Ok(csr.into_bytes())
+}
+
+/// Writes the private key, never wider than its owner. On Unix the mode is set **in the open call**
+/// so the key is never on disk at the umask default even briefly — the same reasoning
+/// [`config_init::write_new`](crate::config_init) states for a file that may hold a bearer token.
+/// On Windows there is no mode; the state directory's ACL under `%ProgramData%` protects it
+/// (ADR-0010).
+fn write_private_key(path: &Path, pem: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("cannot store the private key: {e}"))?;
+        file.write_all(pem.as_bytes())
+            .map_err(|e| format!("cannot store the private key: {e}"))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, pem).map_err(|e| format!("cannot store the private key: {e}"))
+    }
 }
 
 /// The private key is readable by its owner and nobody else. On Windows the state directory's own
@@ -166,6 +193,27 @@ mod tests {
         assert!(String::from_utf8_lossy(&csr).contains("BEGIN CERTIFICATE REQUEST"));
         assert!(dir.path().join(ISSUED_KEY_FILE).exists());
         assert!(config.client_identity().is_none(), "a key alone is inert");
+    }
+
+    /// The private key is never on disk wider than its owner — set in the open call, so there is no
+    /// window between a world-readable create and a later chmod for a local attacker to read it.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_key_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        request(&config).expect("a request");
+
+        let mode = dir
+            .path()
+            .join(ISSUED_KEY_FILE)
+            .metadata()
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the private key must be owner-only");
     }
 
     /// What comes back is stored beside the key and is what the Client presents from then on.

@@ -26,6 +26,10 @@ pub async fn run(
 ) -> Result<RunOutcome, String> {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
+        // The OpAMP endpoint is a fixed, operator-configured address; it never legitimately
+        // redirects, so following one would only let a compromised or misconfigured Server bounce
+        // the authenticated session elsewhere. Refuse them.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30));
     if let Some(value) = config.authorization_value()? {
         // The Authorization header (ADR-0013, rotated per ADR-0014) rides every request, the

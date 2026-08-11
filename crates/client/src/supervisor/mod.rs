@@ -267,6 +267,35 @@ mod tests {
         );
     }
 
+    /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
+    /// (ADR-0015) agrees with the `AcceptsPackages` capability an Agent actually declares.
+    #[tokio::test]
+    async fn installs_packages_reflects_declared_package_acceptance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+
+        let owned: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let engine = build_engine(&owned, &shutdown).expect("build");
+        assert!(
+            engine.installs_packages(),
+            "an owned program is package-updatable, so the Client installs packages"
+        );
+
+        let foreign = dir.path().join("elsewhere/managed-agent");
+        let machines: ClientConfig = toml::from_str(&config(
+            dir.path(),
+            &foreign.to_string_lossy(),
+            Some(dir.path().join("other")),
+        ))
+        .expect("parse");
+        let engine = build_engine(&machines, &shutdown).expect("build");
+        assert!(
+            !engine.installs_packages(),
+            "an absolute program is the machine's; the Client installs no packages"
+        );
+    }
+
     /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0023). The
     /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
     /// replace a directory something else created and filled — so preparing the program's parent,
