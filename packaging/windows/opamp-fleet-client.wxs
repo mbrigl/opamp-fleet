@@ -51,10 +51,22 @@
                 INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
                 ENDPOINT="wss://fleet.example.com/v1/opamp"
 
-      ENDPOINT has no default on purpose: an empty one is a legal answer meaning "configure later",
-      and it selects the second custom action below.
+      ENDPOINT is empty by default in the execute sequence: an empty one is a legal answer meaning
+      "configure later", and it selects the second custom action below. Only the interactive dialog
+      is prefilled with the development default (ADR-0049) — the SetProperty runs in the UI
+      sequence alone, so a silent deploy (`/qn`, Intune, Group Policy) that names no ENDPOINT still
+      defers configuration instead of pinning every host it touches to localhost, which is the
+      thousand-hosts state ADR-0046 refuses to manufacture. A value given on the command line wins
+      over the prefill, and a maintenance run never re-answers a question the first install already
+      settled. The value must stay the loader's own development default
+      (`crates/client/src/config.rs`); `tests/msi_exe_command.rs` fails on drift.
     -->
     <Property Id="ENDPOINT" Secure="yes" />
+    <SetProperty Id="ENDPOINT"
+                 Value="ws://127.0.0.1:4320/v1/opamp"
+                 Sequence="ui"
+                 After="LaunchConditions"
+                 Condition="NOT ENDPOINT AND NOT Installed" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes" />
 
     <!--
@@ -98,17 +110,26 @@
       is not the same request as no endpoint flag at all: the first would be rejected by the
       loader's own endpoint rule, the second is the ordinary "configure it later" install that
       only warns.
+
+      The backslash before each [INSTALLFOLDER] closing quote is load-bearing. A directory
+      property always resolves with a trailing backslash, so without it the command line ends in
+      `...Client\" ...` — and the C runtime that builds the client's argv reads a backslash before
+      a quote as an escaped, literal quote, not as the end of the argument. The root then swallows
+      the rest of the line, `service install` stages into an impossible path, and the whole
+      install dies with error 1722. With it, the CRT's rule (2n backslashes + quote = n
+      backslashes, then the quote closes) yields the intended path. `tests/msi_exe_command.rs`
+      parses these lines exactly as the CRT will and fails on a regression.
     -->
     <CustomAction Id="RegisterServiceWithEndpoint"
                   FileRef="OpampFleetClientExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]&quot; --endpoint &quot;[ENDPOINT]&quot;"
+                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot; --endpoint &quot;[ENDPOINT]&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
 
     <CustomAction Id="RegisterService"
                   FileRef="OpampFleetClientExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]&quot;"
+                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />

@@ -15,6 +15,27 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.2]
+
+### Changed
+
+- **The MSI's endpoint page comes prefilled with the development default**
+  (`ws://127.0.0.1:4320/v1/opamp`) instead of empty, so a local evaluation install is a
+  click-through (ADR-0049). Interactive installs only: clearing the field still means "configure
+  later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
+  install (`/qn`) without one still writes no configuration — unattended deployments are
+  unaffected.
+
+### Fixed
+
+- **The Windows MSI installs.** Every install from the `.msi` failed at the end of the progress
+  bar with "A program run as part of the setup did not finish as expected" (error 1722) and rolled
+  back. The custom action running `service install` quoted `[INSTALLFOLDER]` directly, and a
+  directory property always resolves with a trailing backslash — which the C runtime reads as
+  escaping the closing quote, so the root argument swallowed the rest of the command line and the
+  install staged into an impossible path. The failed installs rolled back cleanly and left nothing
+  behind; no cleanup is needed — install this version's `.msi`.
+
 ## [0.2.1] - 2026-08-11
 
 ### Fixed

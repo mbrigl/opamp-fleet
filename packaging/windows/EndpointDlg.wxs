@@ -26,7 +26,7 @@
                  Text="Which Server this Client reports to." />
 
         <Control Id="EndpointLabel" Type="Text" X="20" Y="60" Width="320" Height="30" NoPrefix="yes"
-                 Text="OpAMP endpoint, for example wss://fleet.example.com/v1/opamp — the scheme selects the transport. Leave it empty to configure the Client after the install." />
+                 Text="OpAMP endpoint — the scheme selects the transport. The prefilled value is the local development Server; replace it with your Server's endpoint, for example wss://fleet.example.com/v1/opamp, or clear it to configure the Client after the install." />
         <Control Id="EndpointEdit" Type="Edit" X="20" Y="95" Width="320" Height="18" Property="ENDPOINT" />
 
         <Control Id="CredentialNote" Type="Text" X="20" Y="130" Width="320" Height="60" NoPrefix="yes"
