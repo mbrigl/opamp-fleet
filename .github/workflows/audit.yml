@@ -20,10 +20,12 @@ on:
       - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   schedule:
-    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+    - cron: "17 6 * * *" # Daily at 06:17 UTC — timeliness matters more than quiet for a security check.
 
+# `issues: write` is for the scheduled-failure notification below; the audit itself only reads.
 permissions:
   contents: read
+  issues: write
 
 jobs:
   audit:
@@ -35,3 +37,43 @@ jobs:
           tool: cargo-audit
       - name: cargo audit
         run: cargo audit
+
+      # A failing *scheduled* run is easy to miss — nobody watches the Actions tab the way they watch
+      # a red check on a PR. Turn it into a GitHub issue so a new advisory in an untouched dependency
+      # is actually seen. Only one open issue at a time; later failures comment on it rather than pile
+      # up. On a PR/push the failing check is already visible, so this is scheduled-only.
+      - name: Open an issue when the scheduled audit fails
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'security-audit';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+            if (open.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'cargo audit: a new advisory affects a locked dependency',
+                labels: [label],
+                body: [
+                  'The scheduled `cargo audit` run failed — a new RustSec advisory affects a dependency in `Cargo.lock`.',
+                  '',
+                  `Run: ${runUrl}`,
+                  '',
+                  'Fix it by updating the dependency, or — if reviewed and non-actionable — record the advisory id with rationale in `.cargo/audit.toml`. Close this issue once the audit is green again.',
+                ].join('\n'),
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body: `The scheduled \`cargo audit\` run failed again: ${runUrl}`,
+              });
+            }
