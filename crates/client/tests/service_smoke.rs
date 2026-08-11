@@ -51,6 +51,7 @@ struct Registered;
 impl Drop for Registered {
     fn drop(&mut self) {
         let _ = service().stop();
+        let _ = client(&["service", "uninstall"], &PathBuf::from("supervisor.toml"));
     }
 }
 
@@ -58,6 +59,7 @@ impl Drop for Registered {
 /// rather than the library is the point here: `service install` also stages the versioned layout,
 /// and an operator's mistake would be in that command line.
 fn client(args: &[&str], config: &Path) -> Result<String, String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config)
         .args(args)
@@ -205,12 +207,14 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("install");
     let (addr, state, _server) = spawn_server();
+    let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
         format!(
             "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n"
         ),
     )
+    .expect("write supervisor.toml");
 
     client(
         &["service", "install", "--root", &root.to_string_lossy()],

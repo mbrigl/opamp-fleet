@@ -728,6 +728,7 @@ fn list_7z(
 fn open_7z_error(e: sevenz_rust2::Error) -> String {
     match e {
         sevenz_rust2::Error::PasswordRequired => {
+            "the archive is encrypted; set [packages] archive_key in supervisor.toml".to_string()
         }
         sevenz_rust2::Error::MaybeBadPassword(_) => {
             "cannot open the archive — [packages] archive_key is wrong, or the archive is damaged"

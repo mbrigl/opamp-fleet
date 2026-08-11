@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde::Deserialize;
 
+/// `supervisor.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
 /// startup instead of silently applying a default.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,7 +16,11 @@ pub struct ClientConfig {
     /// `ws://` / `wss://` is the WebSocket transport, `http://` / `https://` the polling one.
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
+    /// The operator's name for the Client's own Agent, reported as `service.instance.name`
+    /// (ADR-0015) — *which* Client this is. Its `service.name` is the type
     /// [`CLIENT_AGENT_TYPE`](crate::supervisor::agent::CLIENT_AGENT_TYPE) — `supervisor`, a
+    /// constant (ADR-0021) — so this key cannot state it: every Client in a fleet is the same kind
+    /// of thing.
     #[serde(default = "default_name")]
     pub name: String,
     /// The deployment's `service.namespace`. The Baseline asks for it "if it is used in the
@@ -36,6 +41,11 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Where the per-Supervisor directories live (ADR-0017); absent means
+    /// `<state_dir>/supervisors`, which is where they have always been. Set it to put the
+    /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
+    /// onto a volume sized for a few hundred megabytes of agent rather than for state.
+    pub supervisor_dir: Option<PathBuf>,
     /// Operator-defined attributes (ADR-0025), reported as non-identifying attributes of **every**
     /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
     /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
@@ -56,6 +66,11 @@ pub struct ClientConfig {
     /// Package verification (ADR-0028); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
+    /// Consent for the Server to replace this Client's own binary (ADR-0020). Absent means the
+    /// section's own defaults, which since ADR-0020 are **consent given** under the Client's own
+    /// name — write `enabled = false` to withdraw it.
+    #[serde(default)]
+    pub self_update: SelfUpdateConfig,
     /// Where this Client's own log goes when it runs as a service (ADR-0021). Absent takes the
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
@@ -72,6 +87,17 @@ pub struct ClientConfig {
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
     pub package_key: Option<Vec<u8>>,
+    /// The file's own text with secret values masked (see [`redact_secrets`]), kept from load so
+    /// the Client's own Agent can report it as its effective configuration — the file *is* what
+    /// this Client runs (a file that fails to load fails startup, so a running Client and its file
+    /// never disagree). `None` when no file exists and the defaults run.
+    #[serde(skip)]
+    pub source: Option<String>,
+    /// The path this configuration was loaded from — where an accepted Supervisor set is written
+    /// back to (ADR-0017). Kept even when the file does not exist yet: the first applied offer
+    /// creates it. `None` only for a configuration never loaded from a path (tests, defaults).
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
@@ -100,7 +126,23 @@ pub struct ClientConfig {
 pub struct SupervisorBlock {
     /// The plugin this block selects (the TOML key `type`), e.g. `"collector"` or `"command"`.
     pub kind: String,
+    /// The Supervisor's name: the Agent's `service.instance.name` and its state directory name, so
+    /// it follows the instance-name grammar of ADR-0021. Must be unique across blocks.
+    ///
+    /// It is the operator's name for *this* Agent, never its type — that is
+    /// [`service_name`](Self::service_name), which the grammar here could not spell anyway
+    /// (ADR-0015): a reverse FQDN has dots, and this value is a path component on three operating
+    /// systems.
     pub name: String,
+    /// The Agent *type* this Supervisor presents as `service.name` — the Baseline's "reverse FQDN
+    /// that uniquely identifies the Agent type" (ADR-0015). `None` falls back to the program's own
+    /// file name, and a Managed Process that reports a type of its own overrides both: a
+    /// Collector's `opampextension` states the `dist.name` it was built with, which is the truth
+    /// this key can only approximate.
+    ///
+    /// Set it for a Managed Process that reports nothing — the core `otelcol` distribution, every
+    /// Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0028).
+    pub service_name: Option<String>,
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.
     pub endpoint_port: u16,
@@ -133,10 +175,14 @@ pub struct SupervisorBlock {
     pub settings: toml::Table,
 }
 
+/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0017).
+///
 /// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
 /// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
 /// the same root (ADR-0028, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
 /// directory name is cheap; a layout migration on every host is not.
+pub const PROGRAM_DIR: &str = "program";
+
 /// The subdirectory of `program/` holding an unpacked package tree (ADR-0028), with the tree it
 /// replaced kept beside it under the same name plus `.rollback`.
 ///
@@ -146,34 +192,64 @@ pub struct SupervisorBlock {
 /// in there is reported by the Agent, not spelled on disk.
 pub const TREE_DIR: &str = "tree";
 
+/// The subdirectory a downloaded artifact is staged in, per Supervisor.
+const PACKAGES_DIR: &str = "packages";
+
+/// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
+/// replace it (ADR-0017).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    /// What the process is spawned from, and what a package is installed over.
     ///
     /// Always inside this Supervisor's own `program/` directory (ADR-0017): a Managed Process is
     /// always the fleet's. There is no `owned` flag beside this any more, because there is nothing
     /// left for it to distinguish — every block that parses names a program this Client installs,
     /// so `AcceptsPackages` is a constant of this Client rather than a function of its
     /// configuration.
+    pub path: PathBuf,
+}
+
 /// Resolves the program path of a `[[supervisor]]` block (ADR-0017 clause 21, as amended by
 /// ADR-0017).
+///
+/// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
 /// wrote. **One shape**, since ADR-0017 removed the second: a **bare file name**, resolving to
 /// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
 /// (ADR-0028) — a directory this Client creates and owns, so it may replace what is in it. A bare
 /// name cannot escape that directory, which is why nothing here has to sanitize a path.
+///
 /// Everything else is refused, and an **absolute path** gets its own message: it is the shape this
 /// Client used to accept, so its refusal is the only notice an operator carrying such a block will
 /// get and it carries the whole explanation rather than a rule number.
+///
+/// # Errors
 /// Returns an error for anything that is not a bare file name, naming the rule and the way across.
+pub fn resolve_program(
+    key: &str,
+    value: &Path,
     program_path: Option<&Path>,
+    supervisor_dir: &Path,
+    name: &str,
+) -> Result<Program, String> {
     // The machine's program, which this Client no longer manages (ADR-0017). `has_root` rather
     // than `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`,
     // no drive letter — folds into the same message: it was only ever a near-miss of the absolute
     // form, and both now have the same answer.
     if value.is_absolute() || value.has_root() {
+        return Err(format!(
             "supervisor {name:?}: `{key} = {}` names a program on the machine, and this Client \
              manages only programs it installs. A program the fleet is to manage must reach the \
              host as a package: build or repack it, upload it as a Set, and name it here with a \
              bare file name — it then lives in this Supervisor's own directory, where an update \
              is a rename this Client can make. To keep the machine's copy instead, take the block \
              out and let whatever put the file there keep it.",
+            value.display()
+        ));
+    }
+    let mut components = value.components();
+    let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if bare {
         // With a tree the program is one file *inside* the unpacked package (ADR-0028), and the
         // bare name above is what it always was: the consent, readable in the file.
         let path = match program_path {
@@ -181,9 +257,15 @@ pub const TREE_DIR: &str = "tree";
             None => supervisor_dir.join(PROGRAM_DIR).join(value),
         };
         return Ok(Program { path });
+    }
+    Err(format!(
         "supervisor {name:?}: `{key} = {}` is not a bare file name — no path separator and no \
          `..`. The program lives in this Supervisor's own directory and is updated from \
          Server-offered packages (ADR-0017); name the file, not a path to it",
+        value.display()
+    ))
+}
+
 impl TryFrom<toml::Table> for SupervisorBlock {
     type Error = String;
 
@@ -194,8 +276,20 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             .ok_or_else(|| "a [[supervisor]] block needs a `name`".to_string())?;
         crate::cli::parse_instance_name(&name)
             .map_err(|e| format!("invalid supervisor name {name:?}: {e}"))?;
+        // Deliberately not run through `parse_instance_name`: a type may be a reverse FQDN
+        // (ADR-0015), which that grammar forbids. Only emptiness is refused — an empty
+        // `service.name` would report "no type" as if it were one.
+        let service_name = match take_string(&mut table, "service_name")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?
         {
+            Some(raw) if raw.trim().is_empty() => {
+                return Err(format!(
+                    "supervisor {name:?}: `service_name` must not be empty — leave it out to use \
+                     the program's file name"
+                ));
+            }
+            other => other,
+        };
         let endpoint_port = match take_integer(&mut table, "endpoint_port")? {
             None => 0,
             Some(port) => u16::try_from(port)
@@ -243,8 +337,18 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
             return Err(format!(
+                "supervisor {name:?}: `package` is no longer a supervisor key — the Server \
+                 decides which artifact this Agent receives, through the package's Selector \
+                 (PUT /api/v1/packages/<name>/selector)"
+            ));
+        }
+        // And `accepts_packages = true` said *whether*, while the program's path said *where* —
+        // two keys for one truth, and nothing ever checked that the second permitted the first
         // (ADR-0017). ADR-0017 left one shape, so every Supervisor accepts packages and the key
         // would only be a way to disagree with a constant.
+        if table.contains_key("accepts_packages") {
+            return Err(format!(
+                "supervisor {name:?}: `accepts_packages` is no longer a supervisor key — a \
                  program is named by a bare file name, so it lives in this Supervisor's own \
                  directory and is updated from Server-offered packages; there is no longer a \
                  second shape for the key to distinguish"
@@ -253,6 +357,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         Ok(SupervisorBlock {
             kind,
             name,
+            service_name,
             endpoint_port,
             stop_timeout_secs,
             apply_grace_secs,
@@ -348,6 +453,48 @@ impl AuthConfig {
     }
 }
 
+/// Keys whose values are credentials: `[auth]`'s `bearer_token` and `password`, and
+/// `[packages]`'s `archive_key`. Paths and public keys are not on the list — a path locates a
+/// secret, it is not one, and the `verification_key` is the *public* half of the signing pair.
+const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
+
+/// The file's text with every secret value replaced by `***`, for reporting it off the host —
+/// the Server persists effective configurations to disk, so a credential must never be in one.
+///
+/// Text-based on purpose: parsing and re-serialising would drop the operator's comments and
+/// ordering, which are half of what a configuration file says. A line assigning a secret key
+/// keeps its key with a masked value; any other non-comment line merely *mentioning* a secret
+/// key (an inline table, some spelling this scan does not know) is masked whole — over-redaction
+/// is the cheap failure here, a leaked credential the expensive one.
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let assigned_key = SECRET_KEYS.iter().find(|key| {
+            trimmed
+                .split_once('=')
+                .is_some_and(|(lhs, _)| lhs.trim() == **key)
+        });
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            out.push_str(line);
+        } else if let Some(key) = assigned_key {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push_str(indent);
+            out.push_str(key);
+            out.push_str(" = \"***\"");
+        } else if SECRET_KEYS.iter().any(|key| line.contains(key)) {
+            out.push_str("# (line redacted: it mentions a credential key)");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !text.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// The `[packages]` block (ADR-0028): how downloaded package artifacts are verified.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -365,9 +512,90 @@ pub struct PackagesConfig {
     pub archive_key: Option<String>,
 }
 
+/// The `[self_update]` block (ADR-0020): consent for the Server to replace *this Client's* binary.
+///
+/// **The section is absent on most hosts, and absent means consent** (ADR-0020, superseding
+/// ADR-0021 point 17): a Client the fleet cannot update is a Client that has to be updated by hand
+/// on every host, which is the state fleet management exists to end. What used to be the default —
+/// no consent at all — is now written down, as `enabled = false`.
+///
+/// The *name* is what the consent is narrowed to, and it does the work the absent section used to:
+/// a package with an empty Selector reaches every Agent that accepts packages (ADR-0028), so
+/// without a name to match, the first fleet-wide Collector artifact an operator uploads would be
+/// installed over the Client and take the host out of reach. An offer under any other name is
+/// refused and reported, never applied. The default name is the Client's own Agent type —
+/// `supervisor` since ADR-0021 — which is what a Set carrying this Client is keyed by anyway
+/// (ADR-0028), so the default is not a wildcard: it is the one package that could legitimately be
+/// this Client.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SelfUpdateConfig {
+    /// Whether the consent stands. `false` is the withdrawal — the Client's own Agent then declares
+    /// no package capability at all and no offer can reach it, which is exactly what an absent
+    /// section meant before ADR-0020.
+    #[serde(default = "default_self_update_enabled")]
+    pub enabled: bool,
+    /// The name of the package that carries this Client; defaults to the Client's own Agent type
+    /// (ADR-0021). An empty name with the consent standing is refused at load: the name is the
+    /// whole of the narrowing, and an empty one would widen it to every package the Server offers.
+    #[serde(default = "default_self_update_package")]
+    pub package: String,
+}
+
+impl Default for SelfUpdateConfig {
+    fn default() -> Self {
+        SelfUpdateConfig {
+            enabled: default_self_update_enabled(),
+            package: default_self_update_package(),
+        }
+    }
+}
+
+/// What the configuration file was called until ADR-0021, and the one reason a missing file is an
+/// error rather than the defaults.
+pub const LEGACY_CONFIG_FILE_NAME: &str = "client.toml";
+
+/// Refuses to carry on when the configuration is only *missing* because it was renamed
+/// (ADR-0021): the file this Client looks for is absent and a `supervisor.toml` — what it was called
+/// until ADR-0021 — sits where it would be.
+///
+/// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
+/// and manages nothing until one exists (ADR-0021). That is exactly the wrong answer here, and the
+/// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
+/// none of the Agents it used to, and nothing about it would look like a failure. So this one case
+/// fails closed, naming both paths and the single command that fixes it.
+fn legacy_name_beside(path: &Path) -> Result<(), String> {
+    let legacy = path.with_file_name(LEGACY_CONFIG_FILE_NAME);
+    if path
+        .file_name()
+        .is_some_and(|name| name == LEGACY_CONFIG_FILE_NAME)
+        || !legacy.exists()
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "no configuration at {}, but {} is beside it: the file was renamed in this release \
+         (ADR-0021). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
+         changed.",
+        path.display(),
+        legacy.display(),
+        legacy.display(),
+        path.display()
+    ))
+}
+
+fn default_self_update_enabled() -> bool {
+    true
+}
+
+/// The Client's own Agent type (ADR-0021): the Set that carries this Client is keyed by the type it
+/// is built for (ADR-0028), so the type is also what names it. Deliberately *not* the product's name
+/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0021 is a different
+/// string and names the binary, the service, and the version directories rather than the package.
+fn default_self_update_package() -> String {
     crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()
+}
+
 /// The `[logging]` section (ADR-0021): this Client's own log, on disk, while it runs as a service.
 ///
 /// It exists because the Windows SCM discards a service's stderr, so a Client installed there had
@@ -479,6 +707,14 @@ pub struct GatewayConfig {
     /// and never beyond, so a Gateway in front of three Agents holds three connections.
     #[serde(default = "default_upstream_connections")]
     pub upstream_connections: usize,
+    /// The most distinct Agents a single downstream connection may carry. It bounds the routing
+    /// state one peer can make this Gateway hold: a misbehaving or hostile downstream Client
+    /// streaming reports under endless fabricated `instance_uid`s would otherwise grow the registry
+    /// and pool maps without limit. Generous for a nested Gateway carrying a real sub-fleet; a
+    /// report for a *new* Agent past the cap is dropped, the ones already carried keep working. `0`
+    /// is refused at load.
+    #[serde(default = "default_max_carried_agents")]
+    pub max_carried_agents: usize,
     /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0022): what this verifies is the
     /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     pub tls: Option<GatewayTlsConfig>,
@@ -504,6 +740,13 @@ impl GatewayConfig {
     fn check(&self, endpoint: &str) -> Result<(), String> {
         if self.upstream_connections == 0 {
             return Err("[gateway] upstream_connections must be at least 1".to_string());
+        }
+        if self.max_carried_agents == 0 {
+            return Err(
+                "[gateway] max_carried_agents must be at least 1 — it bounds routing state, not a \
+                 switch"
+                    .to_string(),
+            );
         }
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
@@ -557,6 +800,14 @@ fn default_endpoint() -> String {
 }
 
 fn default_name() -> String {
+    // A *display* name, and deliberately not the program's own (ADR-0021): this key is the one
+    // place an operator says which Client this is, and a default that reads exactly like the Agent
+    // type would put the same word in both columns of the fleet view — the collapse ADR-0015 ended.
+    // Spelled as a person would write it, spaces and capitals included: nothing resolves a path or
+    // a service from it, the grammar of ADR-0021 governs the `--instance` and the `[[supervisor]]`
+    // block names instead, and the questionnaire asks for this one first (ADR-0021) so that a fleet
+    // is told apart by names somebody chose.
+    "Supervisor Agent".to_string()
 }
 
 fn default_poll_interval_secs() -> u64 {
@@ -572,6 +823,12 @@ fn default_heartbeat_interval_secs() -> u64 {
 /// a ceiling, not a cost: connections are opened as Agents appear.
 fn default_upstream_connections() -> usize {
     10
+}
+
+/// Generous enough for a nested Gateway carrying a real sub-fleet, small enough that a single
+/// hostile connection cannot grow the routing maps without bound.
+fn default_max_carried_agents() -> usize {
+    10_000
 }
 
 fn default_state_dir() -> PathBuf {
@@ -608,13 +865,17 @@ impl Default for ClientConfig {
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             state_dir: default_state_dir(),
+            supervisor_dir: None,
             attributes: BTreeMap::new(),
             gateway: None,
             tls: None,
             auth: None,
             authorization_override: None,
             packages: None,
+            self_update: SelfUpdateConfig::default(),
             package_key: None,
+            source: None,
+            path: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
@@ -643,16 +904,34 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored.
+    /// The package this Client consents to be replaced by, or `None` when the consent is withdrawn
+    /// (ADR-0020). The one place the two fields of `[self_update]` are read together, so
+    /// no caller can honour the name while ignoring the switch.
+    #[must_use]
+    pub fn self_update_package(&self) -> Option<&str> {
+        self.self_update
+            .enabled
+            .then_some(self.self_update.package.as_str())
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         if !path.exists() {
+            legacy_name_beside(path)?;
             let default = ClientConfig::default();
+            return Ok(ClientConfig {
+                path: Some(path.to_path_buf()),
                 state_dir: absolute(&default.state_dir),
                 ..default
+            });
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let mut config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+        // Redacted once, here, so no later reader can reach for the unredacted text by mistake:
+        // everything downstream — the effective-configuration report above all — sees the mask.
+        config.source = Some(redact_secrets(&text));
+        config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
         // it can be done once. Since ADR-0017 a Managed Process starts in its own directory, so a
         // path the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}`
@@ -671,6 +950,17 @@ impl ClientConfig {
         if let Some(tls) = &config.tls {
             tls.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // An empty name with the consent standing must fail startup rather than widen the consent
+        // to whatever the Server offers next (ADR-0020). Withdrawn, the name is not read at all,
+        // so an empty one there is simply unused.
+        if config.self_update.enabled && config.self_update.package.trim().is_empty() {
+            return Err(format!(
+                "{}: [self_update].package is empty — it is the whole of what the consent is \
+                 narrowed to. Name the package that carries this Client, or write \
+                 `enabled = false` to withdraw the consent.",
+                path.display()
+            ));
         }
         if let Some(gateway) = &config.gateway {
             gateway
@@ -731,7 +1021,9 @@ impl ClientConfig {
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
+    /// connection settings have over `supervisor.toml` (ADR-0013): the file stays what the operator
     /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
+    /// certificate — it keeps standing in `supervisor.toml`, unused, once a real one has been issued.
     pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
         let cert = self.state_dir.join(crate::tls::ISSUED_CERT_FILE);
         let key = self.state_dir.join(crate::tls::ISSUED_KEY_FILE);
@@ -745,6 +1037,36 @@ impl ClientConfig {
     /// The CA bundle that replaces the built-in roots, when one is configured (ADR-0012).
     pub fn ca_file(&self) -> Option<&Path> {
         self.tls.as_ref()?.ca_file.as_deref()
+    }
+
+    /// The root the per-Supervisor directories sit under (ADR-0017) — `supervisor_dir` when the
+    /// operator set one, and `<state_dir>/supervisors` when they did not.
+    #[must_use]
+    pub fn supervisors_root(&self) -> PathBuf {
+        self.supervisor_dir
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("supervisors"))
+    }
+
+    /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
+    /// a single root the operator can place (ADR-0017).
+    #[must_use]
+    pub fn supervisor_dir(&self, name: &str) -> PathBuf {
+        self.supervisors_root().join(name)
+    }
+
+    /// Where the artifact offered to an Agent is staged, by the name of the Supervisor behind it —
+    /// `None` for the Client's own Agent. Inside that Supervisor's own directory, so that the
+    /// install which follows is a rename within one filesystem instead of a copy across two
+    /// (ADR-0017); the Client's own Agent stages under `state_dir`, beside the versions a
+    /// self-update writes (ADR-0020). Keyed by name rather than by Engine index because the Agent
+    /// set can change at runtime (ADR-0017), which is exactly when an index stops naming a block.
+    #[must_use]
+    pub fn staging_dir_for(&self, supervisor: Option<&str>) -> PathBuf {
+        match supervisor {
+            Some(name) => self.supervisor_dir(name).join(PACKAGES_DIR),
+            None => self.state_dir.join(PACKAGES_DIR),
+        }
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -826,6 +1148,7 @@ mod tests {
     #[test]
     fn a_relative_state_dir_yields_absolute_directories() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "state_dir = \"client-state\"\n").expect("write");
 
         let config = ClientConfig::load(&path).expect("load");
@@ -895,6 +1218,8 @@ mod tests {
     #[test]
     fn the_service_namespace_is_a_top_level_key_and_absent_by_default() {
         assert!(ClientConfig::default().service_namespace.is_none());
+        let untouched: ClientConfig =
+            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
         assert!(untouched.service_namespace.is_none());
 
         let configured: ClientConfig =
@@ -936,6 +1261,7 @@ mod tests {
         // `keep = 0` is the one setting that fills a disk on a host nobody watches, so it is not
         // reachable: it fails startup and the message points at the switch that does mean "off".
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "[logging]\nkeep = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero retention must fail startup");
         assert!(err.contains("keep"), "{err}");
@@ -949,10 +1275,106 @@ mod tests {
         assert!(ClientConfig::load(&path).is_ok());
     }
 
+    /// ADR-0021: the rename must not turn a managed host into a silent one. A missing
+    /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
+    /// beside it is an upgraded host that would otherwise come up on the development endpoint and
+    /// manage nothing, which is the failure nobody sees.
+    #[test]
+    fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let expected = dir.path().join(crate::config_init::FILE_NAME);
+
+        // Neither file: an ordinary fresh host, and the defaults are the answer (ADR-0021).
+        assert!(ClientConfig::load(&expected).is_ok());
+
+        std::fs::write(
+            dir.path().join(LEGACY_CONFIG_FILE_NAME),
+            "endpoint = \"ws://h/v1/opamp\"\n",
+        )
+        .expect("write the file this host was configured with");
+        let error = ClientConfig::load(&expected).expect_err("an upgraded host must not go quiet");
+        assert!(
+            error.contains(LEGACY_CONFIG_FILE_NAME)
+                && error.contains(crate::config_init::FILE_NAME),
+            "the refusal names both files: {error}"
+        );
+
+        // And once renamed, it is an ordinary configuration again.
+        std::fs::rename(dir.path().join(LEGACY_CONFIG_FILE_NAME), &expected).expect("rename");
+        assert_eq!(
+            ClientConfig::load(&expected).expect("loads").endpoint,
+            "ws://h/v1/opamp"
+        );
+    }
+
+    /// ADR-0020: the consent stands unless the file withdraws it, and it is narrowed to a name
+    /// either way — the Client's own Agent type when the file names none, which since ADR-0021 is
+    /// `supervisor`. A withdrawal is a written `enabled = false`, so a Client the fleet cannot
+    /// update says so in its own configuration instead of saying nothing at all.
+    #[test]
+    fn self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name() {
+        let default = ClientConfig::default();
+        assert_eq!(
+            default.self_update_package(),
             Some(crate::supervisor::agent::CLIENT_AGENT_TYPE),
+            "a Client with nothing configured consents under its own Agent type"
+        );
+
+        // A file that never mentions the section is the common case, and it is consent.
+        let untouched: ClientConfig =
+            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+        assert_eq!(
+            untouched.self_update_package(),
             Some(crate::supervisor::agent::CLIENT_AGENT_TYPE)
+        );
+
+        // And that name is `supervisor` since ADR-0021 — pinned here because the default travels
+        // into every written configuration and has to line up with the Set the Server publishes.
+        assert_eq!(untouched.self_update_package(), Some("supervisor"));
+
+        // A name of its own is honoured, and it is the *only* name an offer may carry.
+        let named: ClientConfig =
+            toml::from_str("[self_update]\npackage = \"opamp-client\"\n").expect("parse");
+        assert_eq!(named.self_update_package(), Some("opamp-client"));
+
+        // The withdrawal, which is what an absent section used to mean.
+        let withdrawn: ClientConfig =
+            toml::from_str("[self_update]\nenabled = false\n").expect("parse");
+        assert_eq!(withdrawn.self_update_package(), None);
+
+        // Withdrawn *and* named parses, and stays withdrawn: the switch wins over the name, which
+        // is why no caller reads them apart (`self_update_package` is the only reader).
+        let both: ClientConfig =
+            toml::from_str("[self_update]\nenabled = false\npackage = \"x\"\n").expect("parse");
+        assert_eq!(both.self_update_package(), None);
+
+        // An empty section is now legal — it is the default spelled out — and a typo still is not.
+        assert!(toml::from_str::<ClientConfig>("[self_update]\n").is_ok());
+        assert!(
+            toml::from_str::<ClientConfig>("[self_update]\npackge = \"x\"\n").is_err(),
+            "a typo fails startup rather than silently changing what the consent covers"
+        );
+    }
+
+    /// The name is the whole of the narrowing (ADR-0020), so an empty one with the consent standing
+    /// is refused at load rather than left to widen the consent to every package the Server offers.
+    /// Withdrawn, the name is not read at all and an empty one is simply unused.
+    #[test]
+    fn an_empty_self_update_package_is_refused_while_the_consent_stands() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+
+        std::fs::write(&path, "[self_update]\npackage = \"\"\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("an empty name is not a narrowing");
+        assert!(err.contains("[self_update].package is empty"), "{err}");
+
+        std::fs::write(&path, "[self_update]\nenabled = false\npackage = \"\"\n").expect("write");
+        assert!(
+            ClientConfig::load(&path).is_ok(),
+            "withdrawn, the name is never read"
+        );
+    }
+
     /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
     /// configurable; zero is not "unlimited" but a limit that could carry nothing, so it fails.
     #[test]
@@ -966,6 +1388,7 @@ mod tests {
         assert_eq!(tightened.max_message_size_bytes, 65536);
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
@@ -982,19 +1405,82 @@ mod tests {
         assert_eq!(tightened.max_artifact_size_bytes, 1_048_576);
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_artifact_size_bytes"), "{err}");
     }
 
-        let dir = tempfile::tempdir().expect("tempdir");
+    /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
+    /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
+    /// so it fails startup.
     #[test]
-                command = "agent"
+    fn the_gateway_agent_cap_defaults_and_rejects_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
 
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the default cap");
+        assert_eq!(config.gateway.expect("gateway").max_carried_agents, 10_000);
+
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+             max_carried_agents = 0\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_carried_agents"), "{err}");
+    }
+
+    /// Both keys that once configured package delivery on the host are refused rather than
+    /// ignored: `package` named the artifact (ADR-0028 moved that to the Server's Selector), and
+    /// `accepts_packages` said whether to take one (ADR-0017 derives that from the program's
+    /// path). An operator who still has either in a file believes it does something.
+    #[test]
+    fn the_retired_package_keys_are_refused() {
+        let block = |extra: &str| {
+            format!(
+                r#"
+                [[supervisor]]
+                type = "command"
+                name = "agent"
+                command = "agent"
+                {extra}
+                "#
+            )
+        };
+        assert!(
+            toml::from_str::<ClientConfig>(&block("")).is_ok(),
+            "a block without either key still parses"
+        );
+
+        let stale = toml::from_str::<ClientConfig>(&block("package = \"otelcol\""))
+            .expect_err("the old naming key must fail loudly");
+        assert!(
+            stale.to_string().contains("Selector"),
+            "the error says what decides instead: {stale}"
+        );
+
+        let consent = toml::from_str::<ClientConfig>(&block("accepts_packages = true"))
+            .expect_err("the old consent key must fail loudly");
+        let message = consent.to_string();
+        assert!(
             message.contains("bare file name"),
+            "the error states the rule that replaced it: {message}"
+        );
+    }
+
     /// One shape (ADR-0017): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
+    #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
+        let dir = PathBuf::from("/srv/fleet/otelcol");
+
         let resolved = resolve_program(
             "binary",
             Path::new("otelcol-contrib"),
@@ -1003,8 +1489,21 @@ mod tests {
             "otelcol",
         )
         .expect("a bare file name resolves");
+        assert_eq!(
             resolved,
+            Program {
+                path: dir.join(PROGRAM_DIR).join("otelcol-contrib"),
+            }
+        );
+
+        // `..` in particular never reaches a `join`, which is why nothing downstream has a path
+        // to sanitize.
+        for refused in ["./otelcol", "bin/otelcol", "../otelcol", "a/../../b", ""] {
             let err = resolve_program("binary", Path::new(refused), None, &dir, "otelcol")
+                .expect_err("must be refused: {refused}");
+            assert!(err.contains("bare file name"), "{refused}: {err}");
+        }
+    }
 
     /// With a tree (ADR-0028) the program is one file *inside* the package, so the spawn path is
     /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0017
@@ -1068,25 +1567,79 @@ mod tests {
     /// makes a path absolute, on Windows nothing does until it names a drive. Written per platform
     /// rather than with one string that only happens to work on the machine the tests were first
     /// run on.
+    #[test]
     fn an_absolute_program_path_is_refused_and_names_the_way_across() {
+        let dir = PathBuf::from("/srv/fleet/otelcol");
+        #[cfg(unix)]
+        let foreign = "/usr/local/bin/otelcol-contrib";
+        #[cfg(windows)]
+        let foreign = r"C:\Program Files\otelcol\otelcol-contrib.exe";
+
         let err = resolve_program("binary", Path::new(foreign), None, &dir, "otelcol")
             .expect_err("a program on the machine must be refused");
         assert!(err.contains("only programs it installs"), "{err}");
         assert!(err.contains("package"), "it names the route: {err}");
         assert!(err.contains("bare file name"), "it names the shape: {err}");
         assert!(err.contains(foreign), "it quotes what was written: {err}");
+    }
+
+    /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
+    /// but no drive, so it resolves against whichever drive the process is on — it *looks*
     /// absolute and is not. Since ADR-0017 it folds into the same refusal as the absolute form,
     /// because it was only ever a near-miss of it and both now have one answer.
+    #[cfg(windows)]
+    #[test]
     fn a_drive_relative_windows_path_folds_into_the_same_refusal() {
+        let dir = PathBuf::from(r"C:\ProgramData\fleet\otelcol");
+        let err = resolve_program(
+            "binary",
+            Path::new(r"\Program Files\otelcol\otelcol.exe"),
             None,
+            &dir,
+            "otelcol",
+        )
+        .expect_err("a drive-relative path must be refused");
         assert!(err.contains("only programs it installs"), "{err}");
+    }
 
+    /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and
+    /// everything that Supervisor owns hangs off the same place (ADR-0017).
+    #[test]
+    fn the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable() {
+        let default = ClientConfig {
+            state_dir: PathBuf::from("/var/lib/fleet/state"),
+            ..ClientConfig::default()
+        };
+        assert_eq!(
+            default.supervisor_dir("otelcol"),
+            PathBuf::from("/var/lib/fleet/state/supervisors/otelcol")
+        );
+
+        let moved: ClientConfig = toml::from_str(
             r#"
+            state_dir = "/var/lib/fleet/state"
+            supervisor_dir = "/opt/fleet/supervisors"
+
             [[supervisor]]
             type = "command"
             name = "agent"
+            command = "agent"
             "#,
         )
+        .expect("parse");
+        assert_eq!(
+            moved.supervisor_dir("agent"),
+            PathBuf::from("/opt/fleet/supervisors/agent")
+        );
+        // The Client's own Agent keeps staging beside its versions; a Supervisor stages in its own
+        // directory, which is what makes the install a rename rather than a copy.
+        assert_eq!(
+            moved.staging_dir_for(None),
+            PathBuf::from("/var/lib/fleet/state/packages")
+        );
+        assert_eq!(
+            moved.staging_dir_for(Some("agent")),
+            PathBuf::from("/opt/fleet/supervisors/agent/packages")
         );
     }
 
@@ -1171,6 +1724,7 @@ mod tests {
             r#"
             [updates]
             retain_previous_secs = 3600
+
             [[supervisor]]
             type = "command"
             name = "keeps-default"
@@ -1241,14 +1795,58 @@ mod tests {
         assert_eq!(zero_grace.supervisors[0].apply_grace_secs, Some(0));
     }
 
+    /// The Agent type is a common key like `name`, and — unlike `name` — is not bound by the
+    /// ADR-0021 instance grammar, because the Baseline asks for a reverse FQDN and that grammar
+    /// forbids the dots (ADR-0015).
+    #[test]
+    fn a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted() {
         let cfg: ClientConfig = toml::from_str(
             r#"
             [[supervisor]]
             type = "collector"
+            name = "otelcol-edge-01"
+            binary = "otelcol"
+            service_name = "io.opentelemetry.collector"
+            "#,
+        )
+        .expect("parse");
+        let block = &cfg.supervisors[0];
+        assert_eq!(block.name, "otelcol-edge-01");
+        assert_eq!(
+            block.service_name.as_deref(),
+            Some("io.opentelemetry.collector")
+        );
+        // A common key, never handed to the plugin's strict parse.
+        assert!(!block.settings.contains_key("service_name"));
+    }
+
+    /// Absent is the documented way to fall back to the program's file name. An empty string is
+    /// not the same thing — it would report "no type" as though it were one, which a Selector
+    /// could then match.
+    #[test]
+    fn an_empty_agent_type_is_refused_rather_than_treated_as_absent() {
+        let err = toml::from_str::<ClientConfig>(
             r#"
             [[supervisor]]
             type = "collector"
             name = "otelcol"
+            binary = "otelcol"
+            service_name = "  "
+            "#,
+        )
+        .expect_err("empty service_name must be refused");
+        assert!(
+            err.to_string().contains("`service_name` must not be empty"),
+            "unhelpful error: {err}"
+        );
+
+        let absent: ClientConfig = toml::from_str(
+            "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = \"otelcol\"\n",
+        )
+        .expect("parse");
+        assert_eq!(absent.supervisors[0].service_name, None);
+    }
+
     /// The Client-wide table stays — it describes the *host*, and it is what a fresh Agent carries
     /// into its first message, before there is anything for a Server to label. The block's own
     /// table is gone, and refused by name (ADR-0017).
@@ -1366,5 +1964,59 @@ mod tests {
         .expect("parses; the duplicate is a semantic error");
         assert!(cfg.check_supervisor_names().is_err());
     }
+
+    /// The file's text is reported off the host as the effective configuration, and the Server
+    /// persists what it receives — so a credential value must never survive the redaction, while
+    /// the operator's comments and layout must (they are half of what the file says).
+    #[test]
+    fn redaction_masks_credential_values_and_keeps_everything_else() {
+        let text = "# the fleet endpoint\nendpoint = \"wss://fleet:4320/v1/opamp\"\n\n\
+                    [auth]\n  bearer_token = \"s3cret\"\n\
+                    [packages]\narchive_key = \"p4ss\"\nverification_key = \"aabb\"\n";
+        let redacted = redact_secrets(text);
+        assert!(!redacted.contains("s3cret"), "{redacted}");
+        assert!(!redacted.contains("p4ss"), "{redacted}");
+        assert!(redacted.contains("  bearer_token = \"***\""), "{redacted}");
+        assert!(redacted.contains("archive_key = \"***\""), "{redacted}");
+        assert!(
+            redacted.contains("# the fleet endpoint"),
+            "comments stay: {redacted}"
+        );
+        assert!(
+            redacted.contains("endpoint = \"wss://fleet:4320/v1/opamp\""),
+            "{redacted}"
+        );
+        assert!(
+            redacted.contains("verification_key = \"aabb\""),
+            "the public half of the signing pair is no secret: {redacted}"
+        );
+
+        // A spelling the line scan cannot take apart — an inline table — is masked whole:
+        // over-redaction is the cheap failure, a leaked credential the expensive one.
+        let inline = redact_secrets("auth = { username = \"op\", password = \"hunter2\" }\n");
+        assert!(!inline.contains("hunter2"), "{inline}");
+    }
+
+    /// `load` is the single place the redaction happens, so everything downstream — the
+    /// effective-configuration report above all — can only ever see the mask.
+    #[test]
+    fn load_stashes_the_source_already_redacted() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::config_init::FILE_NAME);
+        std::fs::write(
+            &path,
+            "endpoint = \"ws://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",
+        )
+        .expect("write");
+        let cfg = ClientConfig::load(&path).expect("loads");
+        let source = cfg.source.expect("the file's text is kept");
+        assert!(!source.contains("s3cret"), "{source}");
+        assert!(source.contains("endpoint = \"ws://fleet:4320/v1/opamp\""));
+
+        // No file, no text: the defaults run and there is nothing truthful to report.
+        assert!(ClientConfig::load(&dir.path().join("absent.toml"))
+            .expect("defaults")
+            .source
+            .is_none());
+    }
 }

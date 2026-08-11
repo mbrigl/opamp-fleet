@@ -18,6 +18,7 @@ fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
 }
 
 fn spawn_client(config_path: &Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config_path)
         .stdout(Stdio::null())
@@ -56,20 +57,57 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
         command = install_stub(&dir.join("state/supervisors"), "stub"),
         marker = marker.to_string_lossy(),
     );
+    let path = dir.join("supervisor.toml");
+    std::fs::write(&path, config).expect("write supervisor.toml");
     path
 }
 
+/// ADR-0017 end to end: what the Foreign Agent is actually invoked with. The stub writes every
+/// argument it received into the marker, so this asserts on the expanded command line rather than
+/// on the substitution function — the argument has to survive all the way into `argv`, which is
+/// the only place the silent failure this prevents would show up.
+#[test]
+fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("marker");
+    // Relocated on purpose: an argument written against the default layout would be wrong here,
+    // which is exactly the drift the placeholders exist to make impossible.
+    let supervisor_dir = dir.path().join("elsewhere");
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
+         [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {command:?}\n\
+         args = [\"--touch\", {marker:?}, \"-c\", \"${{config_dir}}/agent-conf\", \"--keep\", \"${{FLB_LEVEL}}\"]\n",
         state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
         command = install_stub(&supervisor_dir, "stub"),
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, config).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for("the stub's marker file", Duration::from_secs(20), || {
         marker.exists()
     });
+    let argv = std::fs::read_to_string(&marker).expect("read the marker");
+
+    // Built the way the Client builds it — a path, so its separators are the platform's — with the
+    // rest of the argument appended as the operator wrote it, which is what expansion leaves alone.
+    let expected = format!(
+        "{}/agent-conf",
+        supervisor_dir.join("stub").join("config").display()
+    );
+    assert!(
+        argv.contains(&expected),
+        "the placeholder resolved to the relocated directory: {argv}"
+    );
+    assert!(
+        !argv.contains("${config_dir}"),
+        "nothing unexpanded reached the process: {argv}"
+    );
+    assert!(
+        argv.contains("${FLB_LEVEL}"),
+        "an unknown placeholder is the process's own business: {argv}"
     );
 
     client.kill().expect("kill the client");
@@ -95,11 +133,16 @@ fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
     std::fs::create_dir_all(program.parent().expect("a parent")).expect("create the tree");
     std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &program).expect("place the program");
 
+    let config = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\nsupervisor_dir = {supervisors:?}\n\n\
          [[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {file_name:?}\n\
          program_path = {inside:?}\nargs = [\"--touch\", {marker:?}]\n",
         state = dir.path().join("state").to_string_lossy(),
+        supervisors = supervisor_dir.to_string_lossy(),
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, config).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for("the stub's marker file", Duration::from_secs(20), || {
@@ -146,6 +189,8 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
         binary = install_stub(&dir.path().join("state/supervisors"), "otelcol"),
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for(
@@ -186,6 +231,8 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
         binary = install_stub(&dir.path().join("state/supervisors"), "otelcol"),
         marker = marker.to_string_lossy(),
     );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for(

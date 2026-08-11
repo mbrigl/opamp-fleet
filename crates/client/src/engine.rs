@@ -5,26 +5,73 @@
 //! reply to the owning Agent by `instance_uid` alone, never by connection. With one self-Agent
 //! it behaves exactly like the single-Agent Client did; with Supervisors it multiplexes them.
 
+use std::sync::{Arc, Mutex};
+
+use opamp::proto::{AgentRemoteConfig, AgentToServer, ConnectionSettingsOffers, ServerToAgent};
 use opamp::uid::InstanceUid;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
+use crate::telemetry::SamplingTarget;
 
+/// One Agent as [`Engine::with_processes`] takes it: the protocol state machine plus the handles
+/// the Engine drives its Supervisor with — all `None` for the self-Agent.
+pub struct EngineAgent {
+    pub state: AgentState,
+    /// The command side of its Managed-Process Port.
+    pub commands: Option<mpsc::Sender<ProcessCommand>>,
+    /// Fires this Supervisor's own shutdown (ADR-0017): its adapter and its Supervisor Endpoint
+    /// listen on the receiving side, so one Supervisor can be stopped — port released, process
+    /// down — while the rest of the Client runs on.
+    pub stop: Option<watch::Sender<bool>>,
+    /// The `[[supervisor]]` block name behind this Agent — what package staging and the
+    /// Supervisor-set diff are keyed by, since an Engine index stops naming a block position the
+    /// moment the set changes at runtime (ADR-0017).
+    pub block_name: Option<String>,
+}
+
+/// One Agent as the Engine carries it: its protocol state machine, the handles of its
 /// Managed-Process Port (absent for the self-Agent), and the bookkeeping of whether it owes the
 /// Server a report right now.
 struct SupervisedAgent {
     state: AgentState,
     commands: Option<mpsc::Sender<ProcessCommand>>,
+    stop: Option<watch::Sender<bool>>,
+    block_name: Option<String>,
     /// A handled reply asked for an immediate report (config outcome, demanded full state).
     owes_report: bool,
+    /// Retired by a Supervisor-set change (ADR-0017): its goodbye is sent, its adapter is gone,
+    /// and it is skipped everywhere. The slot stays — the event channel and package routing are
+    /// keyed by index, and a shifted index would misdeliver to a live neighbour.
+    retired: bool,
+}
+
+impl SupervisedAgent {
+    fn live(agent: EngineAgent) -> Self {
+        SupervisedAgent {
+            state: agent.state,
+            commands: agent.commands,
+            stop: agent.stop,
+            block_name: agent.block_name,
+            owes_report: false,
+            retired: false,
+        }
+    }
 }
 
 pub struct Engine {
     agents: Vec<SupervisedAgent>,
     /// The shared event channel every adapter reports into, tagged with the Agent's index.
     events: mpsc::Receiver<(usize, ProcessEvent)>,
+    /// The sending side of that channel, kept to start Supervisors at runtime (ADR-0017) — a
+    /// fresh adapter needs a tagged sender into the same channel.
+    event_tx: mpsc::Sender<(usize, ProcessEvent)>,
+    /// The self-Agent's received configuration awaiting the Supervisor-set apply (ADR-0017),
+    /// taken by the transport exactly once.
+    pending_self_config: Option<AgentRemoteConfig>,
     /// A connection-settings offer awaiting the transport's verification (ADR-0013). The offer
     /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
     /// pending offer — n Agents receiving the same offer verify and switch once.
@@ -32,23 +79,111 @@ pub struct Engine {
     /// Packages awaiting the transport's download and verification (ADR-0028), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
+    /// How the Client updates *itself* (ADR-0020): where its state lives, the archive key, and —
+    /// while this process is a freshly installed version — the marker it must commit. `None` when
+    /// `[self_update]` is absent, in which case the self-Agent accepts no packages anyway.
+    self_update: Option<SelfUpdateState>,
+    /// Set once the Server has answered at all. Reaching the Server is what a new version has to
+    /// do to prove itself: a binary that starts, connects, and is spoken to is running.
+    seen_server: bool,
+    /// Set once a self-update has moved the `current` pointer: the run must end for the service
+    /// manager to start the new version (ADR-0020).
+    restart_for_update: bool,
+    /// The sampling targets, shared with the own-telemetry sampler (ADR-0016), which runs beside
+    /// a transport that holds this Engine mutably for the whole of a connection.
+    sampling: Arc<Mutex<Vec<SamplingTarget>>>,
+}
+
+/// What the Engine needs to install a new version of the Client and to close out one that is on
+/// probation (ADR-0020).
+struct SelfUpdateState {
+    state_dir: std::path::PathBuf,
+    archive_key: Option<String>,
+    /// Present while this process is the new version and has not yet committed itself.
+    probation: Option<Box<crate::selfupdate::UpdateMarker>>,
 }
 
 impl Engine {
+    /// An Engine over Agents without Managed Processes. Since ADR-0020 the Client always builds
+    /// its self-Agent *and* its Supervisors through [`with_processes`](Self::with_processes), so
+    /// this is the tests' constructor — the shape it stands for no longer occurs in production.
+    #[cfg(test)]
     #[must_use]
     pub fn new(agents: Vec<AgentState>) -> Self {
+        let (event_tx, events) = mpsc::channel(1);
         Engine::with_processes(
+            agents
+                .into_iter()
+                .map(|state| EngineAgent {
+                    state,
+                    commands: None,
+                    stop: None,
+                    block_name: None,
+                })
+                .collect(),
             events,
+            event_tx,
         )
     }
 
+    /// An Engine over Supervisor-backed Agents: each with the handles of its Port, all sharing
+    /// one event channel (senders tagged by the Agent's index here). `event_tx` is the sending
+    /// side of `events`, kept for Supervisors started at runtime (ADR-0017).
     #[must_use]
     pub fn with_processes(
+        agents: Vec<EngineAgent>,
         events: mpsc::Receiver<(usize, ProcessEvent)>,
+        event_tx: mpsc::Sender<(usize, ProcessEvent)>,
     ) -> Self {
+        let engine = Engine {
+            agents: agents.into_iter().map(SupervisedAgent::live).collect(),
             events,
+            event_tx,
+            pending_self_config: None,
             pending_connection_offer: None,
             pending_package_downloads: Vec::new(),
+            self_update: None,
+            seen_server: false,
+            restart_for_update: false,
+            sampling: Arc::new(Mutex::new(Vec::new())),
+        };
+        // The Client's own Agent samples this process, and that is true from the start — only a
+        // Managed Process's pid has to wait for the process to exist.
+        engine.refresh_sampling();
+        engine
+    }
+
+    /// Arms self-update (ADR-0020): where to write the marker, how to open an encrypted archive,
+    /// and the marker this process must commit if it is itself a freshly installed version.
+    pub fn arm_self_update(
+        &mut self,
+        state_dir: std::path::PathBuf,
+        archive_key: Option<String>,
+        probation: Option<crate::selfupdate::UpdateMarker>,
+    ) {
+        self.self_update = Some(SelfUpdateState {
+            state_dir,
+            archive_key,
+            probation: probation.map(Box::new),
+        });
+    }
+
+    /// Reports a self-update that finished in a previous process (ADR-0020): the install
+    /// necessarily completes across a restart, so the terminal status is owed by whichever
+    /// version came up — the new one saying `Installed`, or the old one saying why it is back.
+    pub fn report_self_update_outcome(&mut self, outcome: &crate::selfupdate::UpdateOutcome) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
+        let hash = hex::decode(&outcome.package_hash_hex).unwrap_or_default();
+        agent.state.package_applied(
+            hash,
+            match &outcome.error {
+                None => Ok(outcome.version.clone()),
+                Some(error) => Err(error.clone()),
+            },
+        );
+        agent.owes_report = true;
     }
 
     /// Restores previously applied connection settings on every Agent (ADR-0013), so a restarted
@@ -65,6 +200,50 @@ impl Engine {
         for agent in &mut self.agents {
             agent.state.declare_capability(capability);
         }
+    }
+
+    /// What own metrics are sampled from (ADR-0016): every Agent, named as the protocol keys it, as
+    /// the operator calls it and as its type is reported, paired with the pid to sample for it — this process for the
+    /// Client's own Agent, the Managed Process for a Supervisor-backed one, and nothing while that
+    /// process is not running.
+    pub fn sampling_targets(&self) -> Vec<SamplingTarget> {
+        self.agents
+            .iter()
+            .filter_map(|agent| {
+                let pid = match agent.state.is_managed() {
+                    false => std::process::id(),
+                    true => agent.state.process_pid()?,
+                };
+                Some(SamplingTarget {
+                    uid: agent.state.uid().to_string(),
+                    instance_name: agent.state.instance_name().to_string(),
+                    service_name: agent.state.service_name().to_string(),
+                    pid,
+                })
+            })
+            .collect()
+    }
+
+    /// A handle on [`sampling_targets`](Self::sampling_targets) the metrics sampler can read while
+    /// the transport holds the Engine mutably — which it does for the whole of a connection.
+    /// Refreshed whenever a pid changes, so a Managed Process that restarts is followed.
+    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<SamplingTarget>>> {
+        self.sampling.clone()
+    }
+
+    fn refresh_sampling(&self) {
+        if let Ok(mut shared) = self.sampling.lock() {
+            *shared = self.sampling_targets();
+        }
+    }
+
+    /// The Client's own Agent's description, for the Resource its telemetry carries (ADR-0016).
+    pub fn self_description(&self) -> opamp::proto::AgentDescription {
+        self.agents
+            .iter()
+            .find(|agent| !agent.state.is_managed())
+            .map(|agent| agent.state.description())
+            .unwrap_or_default()
     }
 
     /// Asks the Server for a client certificate when it signs them and this Client needs one
@@ -112,15 +291,27 @@ impl Engine {
         }
     }
 
+    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0028),
+    /// or — for the Client's own Agent — installs it as a new version of the Client (ADR-0020).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
+    ///
     pub fn apply_package(
         &mut self,
         index: usize,
         staged: std::path::PathBuf,
         version: String,
         hash: Vec<u8>,
+        span: &tracing::Span,
     ) {
+        if index == crate::supervisor::SELF_AGENT_INDEX {
+            // Entered rather than passed on: the self-update runs here, in this task, so the
+            // staging and the probe it does become children of the install by being inside it
+            // (ADR-0016). Nothing is awaited under this guard.
+            let _install = span.enter();
+            self.apply_self_update(&staged, version, hash);
+            return;
+        }
         let Some(agent) = self.agents.get_mut(index) else {
             return;
         };
@@ -132,18 +323,86 @@ impl Engine {
                     staged,
                     version,
                     hash: hash.clone(),
+                    span: span.clone(),
                 }) {
+                    let error = "the supervisor is not accepting commands";
                     warn!(error = %e, "cannot hand the package to the supervisor");
+                    crate::telemetry::failed(span, error);
+                    agent.state.package_applied(hash, Err(error.to_string()));
                     agent.owes_report = true;
                 }
             }
             None => {
+                let error = "this agent has no process to install a package into";
+                crate::telemetry::failed(span, error);
+                agent.state.package_applied(hash, Err(error.to_string()));
                 agent.owes_report = true;
             }
         }
     }
 
+    /// Whether a self-update has moved the `current` pointer and the run must therefore end, so
+    /// the service manager restarts into the new version (ADR-0020).
+    #[must_use]
+    pub fn restart_for_update(&self) -> bool {
+        self.restart_for_update
+    }
+
+    /// Installs a verified artifact as a new version of *this Client* (ADR-0020).
+    ///
+    /// Unlike a Supervisor's install, the outcome cannot be reported from here on success: this
+    /// process is about to stop being the one that runs. Only the failure is terminal now — and it
+    /// is terminal with the previous version still current and still running.
+    fn apply_self_update(&mut self, staged: &std::path::Path, version: String, hash: Vec<u8>) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
         agent.state.package_downloaded();
+        let Some(update) = &self.self_update else {
+            // Unreachable while the capability is only declared with `[self_update]`, but a
+            // refusal that says so beats an install that should not have been offered.
+            let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+            agent
+                .state
+                .package_applied(hash, Err("self-update is not enabled".to_string()));
+            agent.owes_report = true;
+            return;
+        };
+
+        match crate::selfupdate::install(
+            &update.state_dir,
+            staged,
+            &version,
+            &hash,
+            update.archive_key.as_deref(),
+        ) {
+            Ok(crate::selfupdate::Install::Staged) => {
+                // `Installing` is already the reported status and the caller flushes it before the
+                // run ends. What comes after the restart reports the outcome.
+                let _ = std::fs::remove_file(staged);
+                self.restart_for_update = true;
+            }
+            // The version offered is the one running — which is what a freshly updated Client is
+            // told every time, since the Server keeps offering until an Agent reports a terminal
+            // status for that package. Saying `Installed` is both true and what closes the loop:
+            // reporting a failure here left the Server offering and this Client downloading, over
+            // and over, for as long as both were up.
+            Ok(crate::selfupdate::Install::AlreadyRunning) => {
+                let _ = std::fs::remove_file(staged);
+                let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+                agent.state.package_applied(hash, Ok(version));
+                agent.owes_report = true;
+            }
+            Err(e) => {
+                warn!(error = %e, "the Client's self-update failed; staying on this version");
+                let _ = std::fs::remove_file(staged);
+                let agent = &mut self.agents[crate::supervisor::SELF_AGENT_INDEX];
+                agent.state.package_applied(hash, Err(e));
+                agent.owes_report = true;
+            }
+        }
+    }
+
     /// A package download or verification failed (ADR-0028): the owning Agent reports
     /// `InstallFailed` — a rejected package is a report, not a silence.
     pub fn package_download_failed(&mut self, index: usize, hash: Vec<u8>, error: String) {
@@ -196,6 +455,7 @@ impl Engine {
     pub fn poll_reports(&mut self) -> Vec<AgentToServer> {
         self.agents
             .iter_mut()
+            .filter(|agent| !agent.retired)
             .map(|agent| {
                 agent.owes_report = false;
                 agent.state.next_report()
@@ -208,6 +468,7 @@ impl Engine {
     pub fn owed_reports(&mut self) -> Vec<AgentToServer> {
         self.agents
             .iter_mut()
+            .filter(|agent| agent.owes_report && !agent.retired)
             .map(|agent| {
                 agent.owes_report = false;
                 agent.state.next_report()
@@ -224,9 +485,27 @@ impl Engine {
             return Handled::default();
         };
         // n is the number of local Supervisors — small; a linear scan beats a map to maintain.
+        // A retired Agent (ADR-0017) said goodbye; a straggling reply for it is dropped like one
+        // for an Agent that never existed.
+        let Some(index) = self
+            .agents
+            .iter()
+            .position(|a| !a.retired && a.state.uid() == uid)
+        else {
             warn!(agent = %uid, "dropping a reply for an unknown agent");
             return Handled::default();
         };
+        // The Server answered, so this version connected and is being spoken to — which is what a
+        // freshly installed one has to manage to stop being on probation (ADR-0020). Committing
+        // here rather than on a timer means the bar is "it works", not "it survived a clock".
+        if !self.seen_server {
+            self.seen_server = true;
+            if let Some(update) = &mut self.self_update {
+                if let Some(marker) = update.probation.take() {
+                    crate::selfupdate::commit(&update.state_dir, &marker);
+                }
+            }
+        }
         let agent = &mut self.agents[index];
         let mut handled = agent.state.handle(reply);
         if handled.send_report {
@@ -243,9 +522,53 @@ impl Engine {
             self.pending_package_downloads.push((index, download));
         }
         // A stored configuration awaiting application goes to the process adapter; its
+        // ConfigApplied event closes the APPLYING → APPLIED/FAILED lifecycle. The self-Agent's
+        // goes to the Engine's pending slot instead (assigned after `agent`'s borrow ends): its
+        // configuration is the Supervisor set, which the transport applies through
+        // [`crate::reconfigure`] (ADR-0017).
+        let mut self_config = None;
         if let Some(config) = agent.state.take_pending_apply() {
+            if index == crate::supervisor::SELF_AGENT_INDEX && !agent.state.is_managed() {
+                self_config = Some(config);
+            } else {
+                match &agent.commands {
+                    Some(commands) => {
+                        // The apply's trace (ADR-0016). It opens where the configuration is handed
+                        // over and closes in the adapter, once the Managed Process is back up: the
+                        // hand-over is the start of the operation, not the whole of it, and the
+                        // phases worth timing — the stop, the restart, the health gate — all happen
+                        // on the other side of this channel.
+                        let span = tracing::info_span!(
+                            "config.apply",
+                            agent = %uid,
+                            hash = %hex::encode(&config.config_hash),
+                            otel.status_code = tracing::field::Empty,
+                            otel.status_description = tracing::field::Empty,
+                        );
+                        if let Err(e) = commands.try_send(ProcessCommand::ApplyConfig {
+                            config,
+                            span: span.clone(),
+                        }) {
+                            let error = "the supervisor is not accepting commands";
+                            warn!(agent = %uid, error = %e, "cannot hand the configuration to the supervisor");
+                            crate::telemetry::failed(&span, error);
+                            agent.state.config_applied(
+                                match e.into_inner() {
+                                    ProcessCommand::ApplyConfig { config, .. } => {
+                                        config.config_hash
+                                    }
+                                    ProcessCommand::ApplyPackage { .. }
+                                    | ProcessCommand::Restart
                                     | ProcessCommand::Shutdown
                                     | ProcessCommand::Uninstall => Vec::new(),
+                                },
+                                Err(error.to_string()),
+                            );
+                            agent.owes_report = true;
+                        }
+                    }
+                    None => {
+                        warn!(agent = %uid, "a configuration is pending but no process adapter exists")
                     }
                 }
             }
@@ -262,10 +585,81 @@ impl Engine {
                 None => warn!(agent = %uid, "a restart is pending but no process adapter exists"),
             }
         }
+        if let Some(config) = self_config {
+            self.pending_self_config = Some(config);
+        }
         handled
     }
 
+    /// The self-Agent's received configuration, taken exactly once for the Supervisor-set apply
+    /// (ADR-0017).
+    pub fn take_self_config(&mut self) -> Option<AgentRemoteConfig> {
+        self.pending_self_config.take()
+    }
+
+    /// Closes the self-Agent's `APPLYING` → `APPLIED`/`FAILED` lifecycle (ADR-0017): the verdict
+    /// of the Supervisor-set apply, where a Managed Process's `ConfigApplied` event would stand.
+    pub fn self_config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
+        agent.state.config_applied(hash, result);
+        agent.owes_report = true;
+    }
+
+    /// Refreshes what the self-Agent reports as its effective configuration — the (redacted)
+    /// text of `supervisor.toml`, which an applied Supervisor set just rewrote (ADR-0017).
+    pub fn set_self_effective_config(&mut self, source: String) {
+        let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
+            return;
+        };
+        agent
+            .state
+            .set_process_effective_config(opamp::proto::EffectiveConfig {
+                config_map: Some(opamp::proto::AgentConfigMap {
+                    config_map: std::collections::HashMap::from([(
+                        "supervisor.toml".to_string(),
                         opamp::proto::AgentConfigObject {
+                            role: String::new(),
+                            body: source.into_bytes(),
+                            content_type: String::new(),
+                        },
+                    )]),
+                }),
+            });
+        agent.owes_report = true;
+    }
+
+    /// The `[[supervisor]]` block name behind the Agent at `index` — `None` for the self-Agent.
+    /// What package staging is keyed by (ADR-0017): an Engine index stops naming a block
+    /// position once the Agent set has changed at runtime.
+    pub fn block_name(&self, index: usize) -> Option<&str> {
+        self.agents.get(index)?.block_name.as_deref()
+    }
+
+    /// The index the next added Agent will occupy — what its adapter's [`EventSender`] and its
+    /// package routing are keyed by.
+    #[must_use]
+    pub fn next_index(&self) -> usize {
+        self.agents.len()
+    }
+
+    /// The sending side of the shared event channel, for starting a Supervisor at runtime
+    /// (ADR-0017) — its Endpoint and adapter each get a tagged sender into it.
+    #[must_use]
+    pub fn events_handle(&self) -> mpsc::Sender<(usize, ProcessEvent)> {
+        self.event_tx.clone()
+    }
+
+    /// Adds a freshly started Supervisor's Agent (ADR-0017). It introduces itself with a full
+    /// snapshot on the next flush — a fresh state's first report is a full one.
+    pub fn add_supervisor(&mut self, agent: EngineAgent) {
+        let mut agent = SupervisedAgent::live(agent);
+        agent.owes_report = true;
+        self.agents.push(agent);
+        self.refresh_sampling();
+    }
+
     /// Retires the Agents whose `[[supervisor]]` blocks left the set (ADR-0017): each one's
     /// adapter stops the Managed Process within the stop budget, its Endpoint releases the port,
     /// the adapter's exit is awaited, and the goodbyes to send are returned. The slots stay (see
@@ -281,6 +675,17 @@ impl Engine {
         names: &[String],
         uninstalling: &[String],
     ) -> Vec<AgentToServer> {
+        let mut goodbyes = Vec::new();
+        for index in 0..self.agents.len() {
+            let agent = &mut self.agents[index];
+            if agent.retired
+                || !agent
+                    .block_name
+                    .as_ref()
+                    .is_some_and(|name| names.contains(name))
+            {
+                continue;
+            }
             let uninstall = agent
                 .block_name
                 .as_ref()
@@ -296,13 +701,29 @@ impl Engine {
                 if let Some(stop) = agent.stop.take() {
                     let _ = stop.send(true);
                 }
+            }
             if let Some(commands) = commands {
                 // The channel closing is how the adapter's exit — and, for an uninstall, its
                 // answered outcome — is observed.
+                self.drain_events_until_closed(&commands).await;
+            }
+            let agent = &mut self.agents[index];
+            if let Some(stop) = agent.stop.take() {
+                let _ = stop.send(true);
+            }
+            agent.retired = true;
+            goodbyes.push(agent.state.disconnect_message());
+        }
+        self.refresh_sampling();
+        goodbyes
+    }
+
     /// The connection's final messages: one `agent_disconnect` per Agent, as the Baseline
+    /// requires of the last message each Agent sends. A retired Agent already said its own.
     pub fn disconnect_messages(&mut self) -> Vec<AgentToServer> {
         self.agents
             .iter_mut()
+            .filter(|agent| !agent.retired)
             .map(|agent| agent.state.disconnect_message())
             .collect()
     }
@@ -319,13 +740,25 @@ impl Engine {
 
     /// Folds one process event into the owning Agent and marks it as owing a report.
     fn absorb(&mut self, index: usize, event: ProcessEvent) {
+        // Set when the event moved a pid: the shared sampling view is refreshed after the
+        // borrow of `agent` ends, since refreshing reads every Agent.
+        let mut refresh = false;
         let Some(agent) = self.agents.get_mut(index) else {
             warn!(index, "dropping an event for an unknown agent");
             return;
         };
+        // A retired Agent's adapter may still flush its last events (its process going down);
+        // they are nobody's news — the goodbye already went out (ADR-0017).
+        if agent.retired {
+            return;
+        }
         match event {
             ProcessEvent::Description(description) => {
                 agent.state.set_process_description(description);
+            }
+            ProcessEvent::Pid(pid) => {
+                agent.state.set_process_pid(pid);
+                refresh = true;
             }
             ProcessEvent::Health(health) => agent.state.set_process_health(health),
             ProcessEvent::EffectiveConfig(config) => {
@@ -356,16 +789,48 @@ impl Engine {
             }
         }
         agent.owes_report = true;
+        if refresh {
+            self.refresh_sampling();
+        }
     }
 
     /// Stops all Managed Processes — each adapter honours `Shutdown` within its stop budget —
     /// before the goodbyes go out.
     pub async fn shutdown_processes(&mut self) {
+        let mut stopping = Vec::new();
         for agent in &mut self.agents {
+            // The Supervisor's own shutdown fires alongside the command, so its Endpoint task
+            // winds down with its adapter rather than with this process (ADR-0017).
+            if let Some(stop) = agent.stop.take() {
+                let _ = stop.send(true);
+            }
             if let Some(commands) = agent.commands.take() {
                 let _ = commands.send(ProcessCommand::Shutdown).await;
+                stopping.push(commands);
             }
         }
+        // Each adapter drops its command receiver once its process is down; awaiting that — while
+        // draining events, which a stopping adapter may still be flushing — is what puts the
+        // goodbyes after the processes, not beside them. (The Engine itself holds an event
+        // sender for runtime-started Supervisors, so "the channel closed" can no longer stand in
+        // for "every adapter exited".)
+        for commands in stopping {
+            self.drain_events_until_closed(&commands).await;
+        }
+    }
+
+    /// Absorbs process events until `commands`' receiving side — the adapter task — is gone.
+    async fn drain_events_until_closed(&mut self, commands: &mpsc::Sender<ProcessCommand>) {
+        let closed = commands.closed();
+        tokio::pin!(closed);
+        loop {
+            tokio::select! {
+                () = &mut closed => return,
+                event = self.events.recv() => match event {
+                    Some((index, event)) => self.absorb(index, event),
+                    None => return,
+                },
+            }
         }
     }
 }

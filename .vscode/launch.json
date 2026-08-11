@@ -13,16 +13,23 @@
       "cwd": "${workspaceFolder}"
     },
     {
+      // The package is `supervisor`, the binary it produces is `supervisor` (ADR-0021):
       // `--package` takes the first, `--bin` and the filter take the second.
       "type": "lldb",
       "request": "launch",
+      "name": "Supervisor",
       "cargo": {
+        "args": ["build", "--bin", "supervisor", "--package", "client"],
+        "filter": { "name": "supervisor", "kind": "bin" }
       },
+      "args": ["--config", "config/supervisor.toml"],
       "cwd": "${workspaceFolder}"
     }
   ],
   "compounds": [
     {
+      "name": "Server + Supervisor",
+      "configurations": ["Server", "Supervisor"],
       "stopAll": true
     }
   ]

@@ -1,6 +1,7 @@
 # OpAMP Fleet
 
 [![CI](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml)
+[![Checks](https://github.com/mbrigl/opamp-fleet/actions/workflows/checks.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/checks.yml)
 
 **OpAMP Fleet** is a Rust implementation of OpenTelemetry [OpAMP](https://opentelemetry.io/docs/specs/opamp/)-based
 fleet management: an API-first **Server** that manages a fleet over the protocol and exposes an
@@ -14,6 +15,11 @@ explicit and reviewable. How much of the protocol each end implements is tracked
 link further are collected — as a backlog, not as decisions — in
 [`docs/HARDENING.md`](docs/HARDENING.md).
 
+
+> [!NOTE]
+> **This project still carries its template setup.** The one-time steps that turn the scaffold
+> into your own project are in [`TEMPLATE-SETUP.md`](TEMPLATE-SETUP.md). Delete that file and this
+> note once you are through them.
 
 ## Overview
 
@@ -156,6 +162,14 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 
 ## Getting Started
 
+> Setting the project up for the first time? The one-time steps are in
+> [`TEMPLATE-SETUP.md`](TEMPLATE-SETUP.md). Delete this paragraph together with that file.
+
+1. Open the repository in VS Code and choose **Reopen in Container**. The Dev Container and the
+   preconfigured agent extensions build automatically, and the container enables the repository's
+   git hooks ([`.githooks/`](.githooks/)): no commit on `main`, and the checks run before a push.
+   Working outside the container? Enable them yourself, once per clone:
+   `git config core.hooksPath .githooks`.
 2. Authenticate your coding agent inside the container (for Claude Code: `claude login`).
 3. Start working with the agent. Drive the work from the specification and the ADRs.
 
@@ -168,7 +182,10 @@ it (AGENTS.md links here).
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
+  advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
+- **Run the Client:** `cargo run -p client -- --config config/supervisor.toml`
 
 Both binaries read a TOML configuration file ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
@@ -181,17 +198,26 @@ and the Server for Linux.
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
+`supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
+ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
+to, not after the product inside them
+([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)) — and since
 [ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md) the program inside them and
 its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
 the **product's** name, `opamp-fleet`
 ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
+contain `-` ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)),
+and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
+`darwin_arm64`, …), so uploading a whole release under one package
 name needs no translation ([ADR-0028](docs/adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
 forgotten bump costs seconds rather than five build jobs — and the built binary must report the
 version the artifacts are named after. Each archive is also a
 ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
+[self-update](docs/manual/client.md#updating-the-client-itself).
+
 ## Usage
 
 A minimal closed control loop on one machine:
@@ -205,6 +231,7 @@ A minimal closed control loop on one machine:
    docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
    with Basic credentials
    ([ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md)).
+2. **Start a Client:** `cargo run -p client -- --config config/supervisor.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
@@ -236,10 +263,19 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4321/api/v1/configurations/ruleset
 
+# A package defines a Set (ADR-0028), identified by name, Agent type, and version, with one entry
+# per platform (ADR-0028); each Agent is offered the entry that fits it. Saving stages a draft —
+# nothing reaches the fleet until the Set is published (ADR-0027).
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
+
+# Rolling back is a publication move (ADR-0028): retract the newest version, and the fleet falls
+# back to the newest one still published under the same name.
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 ```
 
@@ -252,6 +288,11 @@ The Client registers *itself* as a native service on Linux (systemd), macOS (lau
 (SCM) — [ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md):
 
 ```console
+$ supervisor service install --config /etc/opamp/supervisor.toml     # system service (root/Administrator)
+$ supervisor service start
+$ supervisor service status
+$ supervisor service stop
+$ supervisor service uninstall                                   # never deletes layout or state
 ```
 
 - **One service per build:** the service is named after the product, `opamp-fleet`, with no suffix
@@ -273,6 +314,21 @@ The Client registers *itself* as a native service on Linux (systemd), macOS (lau
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
   control on Windows); after a crash the manager restarts the service, after an explicit stop it
   stays down.
+- **Self-update** ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)): the Client is always its own
+  Agent, so the Server can see which version each host runs. Letting the Server *replace* that
+  version is opt-in per Client and names the package it will take — anything else is refused,
+  because a package aimed at the whole fleet would otherwise be written over the Client itself:
+
+  ```toml
+  [self_update]
+  package = "supervisor"           # only this package is ever installed over this binary
+  ```
+
+  A new version is staged beside the running one under `versions/`, run once to prove it is this
+  program at the version offered, and switched to by moving `current`. The Client then exits and
+  the service manager starts the new version; one that does not reach the Server within a few
+  restarts is rolled back to its predecessor, and either outcome is reported to the Server by
+  whichever version came up.
 
 The **`Service smoke` workflow** exercises the real thing on an ephemeral runner — install, start,
 the Agent appearing in the fleet, its process killed and brought back by the manager, an explicit
@@ -296,13 +352,22 @@ service that will not start.
 ```
 TEMPLATE-SETUP.md     # one-time template setup; delete it when the project is yours
 README.md             # overview & setup for humans
+CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
+docs/GLOSSARY.md      # the vocabulary everyone uses, kept current inline
+docs/CONVENTIONS.md   # how this project writes what no check decides, kept current inline
+docs/ARCHITECTURE.md  # the system as it currently stands
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
+config/               # annotated example configuration files (server.toml, supervisor.toml)
+scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
+.githooks/            # git hooks: refuse a commit on main and a push while the checks are red
+.github/              # CI workflows, Dependabot, issue & pull request templates, code owners
+.devcontainer/        # Dev Container definition (base image + Features + observability stack)
 .vscode/              # shared editor settings
 .editorconfig         # editor-neutral formatting baseline
 .gitattributes        # line-ending normalization (LF everywhere)
@@ -314,6 +379,34 @@ rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 
 ## Dev Container
 
+The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)
+and [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml): a prebuilt base image
+with Dev Container Features and VS Code extensions layered on top — no Dockerfile. Customise it by
+adding Features, switching the base image, or adding extensions. Features are pinned by major tag
+and resolved in the committed `devcontainer-lock.json`. Extensions are listed by identifier only,
+because a published extension version cannot be repointed and a version suffix is VS Code-specific.
+
+### The observability stack comes with it
+
+The workspace container is one service in a Compose project; the other three are the development
+observability stack — Collector, ClickHouse and Grafana — declared in the same file and documented
+in [`.devcontainer/OBSERVABILITY.md`](.devcontainer/OBSERVABILITY.md). They start and stop with the
+container, and from inside it:
+
+| Reach                | at                            |
+| -------------------- | ----------------------------- |
+| Collector (OTLP/HTTP)| `http://localhost:4318`       |
+| Grafana              | `http://grafana:3000`         |
+| ClickHouse           | `clickhouse:9000` / `:8123`   |
+
+The Collector answers on `localhost` because it shares the workspace container's network namespace:
+the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0016](docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)),
+so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
+container as on the host. Grafana stays on <http://localhost:3000> from the host's browser.
+
+To run without the stack — it wants roughly 2 GB — remove the services from `runServices` in
+[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json); there is no daemon inside the
+container to start them by hand.
 
 ### Host container management
 

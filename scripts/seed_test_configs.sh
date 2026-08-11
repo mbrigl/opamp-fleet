@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #
+# Seeds one minimal test Configuration (ADR-0025) per example supervisor from config/supervisor.toml,
 #
 #
 # Two modes:
@@ -19,6 +20,7 @@
 # with a stable operator attribute ([supervisor.attributes]) and selected on that instead.
 #
 # The bodies live in config/examples/; install the processes with scripts/install_tools.sh.
+# After seeding: start the Server, uncomment the [[supervisor]] blocks in config/supervisor.toml,
 # and start the Client; each Agent then receives exactly its Configuration.
 
 set -euo pipefail

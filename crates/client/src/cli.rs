@@ -19,6 +19,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 /// The OpAMP Fleet Client command-line interface.
 #[derive(Debug, Parser)]
 #[command(
+    name = "supervisor",
     // The git-derived version baked in at build time (ADR-0011) — never clap's default, which
     // would silently report the static crate version.
     version = opamp::version::current(),
@@ -27,6 +28,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 pub struct Cli {
     // ADR-0009: the file is the whole configuration; the flag only says where it is.
     /// Path to the TOML configuration file; defaults apply if it does not exist.
+    #[arg(long, global = true, default_value = "supervisor.toml")]
     pub config: PathBuf,
     /// Overrides the configuration file's state directory. `service install` bakes this into the
     /// unit so an installed service never depends on a relative path.
@@ -104,6 +106,15 @@ pub enum Command {
     },
     // ADR-0020.
     /// Prove that this executable is an OpAMP Fleet Client and say which version.
+    ///
+    /// Run as a child process on a freshly staged binary before the `current` pointer moves to
+    /// it. Two things are being asked at once: *does it run at all* on this host — the failure
+    /// class no post-restart mechanism can catch, because a binary that cannot exec never gets
+    /// far enough to notice anything — and *is it this program*, since a package offered under
+    /// the configured name is still only a name until something answers for it. Hidden, because
+    /// it is a machine-to-machine handshake and not an operator command.
+    #[command(hide = true)]
+    SelfCheck,
 }
 
 /// Arguments for `run`.
@@ -166,6 +177,44 @@ pub struct InstallArgs {
     /// on stdin this fails rather than waiting for an answer that cannot come.
     #[arg(long)]
     pub interactive: bool,
+    // ADR-0021.
+    /// Write the configuration file with this Server endpoint instead of asking for it.
+    ///
+    /// The non-interactive half of `--interactive`, for an install driven by a packaged installer:
+    /// the MSI's endpoint dialog and a `.deb`/`.rpm` post-install both have an answer and no
+    /// terminal. An existing file is kept, never overwritten, exactly as with `--interactive`.
+    ///
+    /// Only the endpoint. A credential is not accepted here — it would stand in the process list
+    /// and in the installer log; write it into the file afterwards, or use `--interactive`.
+    #[arg(long, value_name = "URL", conflicts_with = "interactive")]
+    pub endpoint: Option<String>,
+    // ADR-0020.
+    /// Withdraw the Client's consent to be updated by the Server, in the configuration this
+    /// install writes.
+    ///
+    /// The consent stands by default (ADR-0020): without this flag the written file names the
+    /// package that carries this Client and the fleet can replace it like any other program. With
+    /// it, the file says `enabled = false` and this Client becomes the one program on the host that
+    /// has to be updated by hand. The other non-interactive half of `--interactive`, for the same
+    /// installers `--endpoint` serves — the MSI's checkbox, and a `.deb`/`.rpm` post-install.
+    ///
+    /// Only ever affects a file this install *creates*; an existing configuration is kept
+    /// untouched, as it is for every other answer here.
+    #[arg(long, conflicts_with = "interactive")]
+    pub no_self_update: bool,
+    /// Name the package that carries this Client instead of taking its Agent type.
+    ///
+    /// The name is what the consent is narrowed to — an offer under any other name is refused and
+    /// reported, never applied — and the default is the Client's own Agent type, `supervisor` since
+    /// ADR-0021, which is what a Set carrying it is keyed by anyway. Name something else only if
+    /// your Set does.
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "interactive",
+        conflicts_with = "no_self_update"
+    )]
+    pub self_update_package: Option<String>,
     // ADR-0021.
     /// Run the service as this account instead of root/`LocalSystem`, and hand this
     /// installation's files — both roots — over to it.
@@ -251,11 +300,22 @@ mod tests {
         Cli::try_parse_from(args).expect("valid CLI arguments")
     }
 
+    /// The `service install` arguments of a command line that must have them.
+    fn install(args: &[&str]) -> InstallArgs {
+        match parse(args).command {
+            Some(Command::Service {
+                action: ServiceAction::Install(install),
+            }) => install,
+            other => panic!("expected `service install`, parsed {other:?}"),
+        }
+    }
+
     #[test]
     fn bare_invocation_has_no_subcommand() {
         // No subcommand → the caller (main) defaults to `run`.
         let cli = parse(&["client"]);
         assert!(cli.command.is_none());
+        assert_eq!(cli.config, PathBuf::from("supervisor.toml"));
     }
 
     /// ADR-0021 clause 6: removed, not hidden and not accepted-and-ignored. A unit written by an
@@ -278,7 +338,9 @@ mod tests {
     #[test]
     fn todays_invocation_still_parses() {
         // The pre-ADR-0021 command line: `client --config <path>`.
+        let cli = parse(&["client", "--config", "config/supervisor.toml"]);
         assert!(cli.command.is_none());
+        assert_eq!(cli.config, PathBuf::from("config/supervisor.toml"));
     }
 
     #[test]
@@ -342,6 +404,9 @@ mod tests {
     #[test]
     fn both_roots_can_be_named() {
         let args = install(&[
+            "client",
+            "service",
+            "install",
             "--root",
             "/opt/opamp-fleet",
             "--data-root",
@@ -372,21 +437,116 @@ mod tests {
             panic!("expected service install");
         };
         assert!(args.interactive);
+        assert_eq!(args.endpoint, None);
+    }
+
+    /// ADR-0020: the consent travels on the same non-interactive path the endpoint does, and it
+    /// stands unless the install withdraws it. The two flags are mutually exclusive — naming a
+    /// package while withdrawing the consent is a contradiction, not a precedence to resolve — and
+    /// neither may ride `--interactive`, which asks instead.
+    #[test]
+    fn install_carries_the_self_update_answer_without_a_terminal() {
+        let standing = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+        ]);
+        assert!(!standing.no_self_update, "the consent stands by default");
+        assert_eq!(standing.self_update_package, None, "and takes its own name");
+
+        let withdrawn = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+            "--no-self-update",
+        ]);
+        assert!(withdrawn.no_self_update);
+
+        let named = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+            "--self-update-package",
+            "our-client",
+        ]);
+        assert_eq!(named.self_update_package.as_deref(), Some("our-client"));
+
+        for contradiction in [
+            vec![
                 "client",
                 "service",
                 "install",
+                "--no-self-update",
+                "--self-update-package",
+                "x",
+            ],
+            vec![
                 "client",
                 "service",
                 "install",
+                "--interactive",
+                "--no-self-update",
+            ],
+            vec![
                 "client",
                 "service",
                 "install",
+                "--interactive",
+                "--self-update-package",
+                "x",
+            ],
+        ] {
+            assert!(
+                super::Cli::try_parse_from(&contradiction).is_err(),
+                "{contradiction:?} must be refused rather than resolved"
+            );
+        }
+    }
+
+    /// ADR-0021 clause 42: a packaged install passes the answer it collected. The endpoint is not
+    /// validated here — the loader's own rule does that, once, in `config_init`.
+    #[test]
+    fn install_takes_an_endpoint_without_a_terminal() {
+        let told = parse(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "wss://fleet.example.com/v1/opamp",
+        ]);
         let Some(Command::Service {
             action: ServiceAction::Install(args),
+        }) = told.command
         else {
             panic!("expected service install");
         };
         assert!(!args.interactive);
+        assert_eq!(
+            args.endpoint.as_deref(),
+            Some("wss://fleet.example.com/v1/opamp")
+        );
+    }
+
+    /// The two ways of writing the first configuration cannot both be asked for: one blocks on a
+    /// terminal and the other exists precisely because there is none.
+    #[test]
+    fn an_endpoint_and_interactive_are_refused_together() {
+        let err = Cli::try_parse_from([
+            "client",
+            "service",
+            "install",
+            "--interactive",
+            "--endpoint",
+            "wss://fleet.example.com/v1/opamp",
+        ])
+        .expect_err("mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// ADR-0021: the account is named at install time and nowhere else. No password parameter
@@ -416,9 +576,16 @@ mod tests {
     /// so naming an account beside it could only contradict it.
     #[test]
     fn run_as_and_user_scope_are_refused_together() {
+        let err = Cli::try_parse_from([
+            "client",
+            "service",
+            "install",
             "--user",
             "--run-as",
             "opamp-fleet",
+        ])
+        .expect_err("mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// The default value of `--config` must not be mistaken for a path someone chose: it decides
@@ -427,12 +594,14 @@ mod tests {
     fn a_named_config_is_told_apart_from_the_default() {
         let default = parse_from(["client", "service", "install"]).expect("parse");
         assert!(!default.config_named);
+        assert_eq!(default.cli.config, PathBuf::from("supervisor.toml"));
 
         // A global argument counts from either side of the subcommand.
         for args in [
             [
                 "client",
                 "--config",
+                "/etc/opamp/supervisor.toml",
                 "service",
                 "install",
             ],
@@ -441,13 +610,26 @@ mod tests {
                 "service",
                 "install",
                 "--config",
+                "/etc/opamp/supervisor.toml",
             ],
         ] {
             let named = parse_from(args).expect("parse");
             assert!(named.config_named, "{args:?}");
+            assert_eq!(
+                named.cli.config,
+                PathBuf::from("/etc/opamp/supervisor.toml")
+            );
         }
 
         // Even spelled with the same value as the default: what counts is that it was written.
+        let same = parse_from([
+            "client",
+            "service",
+            "install",
+            "--config",
+            "supervisor.toml",
+        ])
+        .expect("parse");
         assert!(same.config_named);
     }
 

@@ -79,6 +79,18 @@ async fn main() {
         }
     };
 
+    // A credential-bearing offer with no [auth] in front of it hands that credential to anyone who
+    // connects (ADR-0022/0018/0025). Open by default is intentional; leaking a backend token by
+    // default is not — so it is surfaced loudly rather than gated, which would break zero-config.
+    let unguarded = config.unauthenticated_secret_offers();
+    if !unguarded.is_empty() {
+        tracing::warn!(
+            offers = %unguarded.join(", "),
+            "these offers hand a credential to any Agent that connects, but [auth] is unset so the \
+             OpAMP endpoint admits anyone — set [auth] to gate credential delivery (ADR-0022)"
+        );
+    }
+
     let connection_offer = match config
         .connection_offer
         .as_ref()
@@ -118,6 +130,15 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let telemetry_offer = config
+        .telemetry_offer
+        .as_ref()
+        .map(server::fleet::TelemetryOffer::from_config)
+        .unwrap_or_default();
+    if config.telemetry_offer.is_some() {
+        // ADR-0016.
+        info!("offering the fleet somewhere to send its own telemetry");
+    }
     let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
         Ok(store) => {
             if !store.is_empty() {
@@ -141,9 +162,13 @@ async fn main() {
             state
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
+                .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
+                .with_max_package_size(config.max_package_size_bytes)
                 .with_max_total_package_bytes(config.max_total_package_bytes)
+                .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs))
+                .with_max_agents(config.max_agents),
         ),
         Err(e) => {
             eprintln!("{e}");
@@ -170,6 +195,9 @@ async fn main() {
     // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let agents = server::agent_app(
+        state.clone(),
+        server::transport::Admission::new(auth, mutual_tls),
+    );
     let operator_auth = config
         .rest
         .auth
@@ -249,4 +277,7 @@ async fn main() {
             operators.expect("serve the Operator plane");
         }
     }
+    // The graceful-shutdown flush (ADR-0026): every record's current timestamp and sequence
+    // number, so the ordinary restart restores a fleet without gaps or false silence.
+    state.flush_agents();
 }

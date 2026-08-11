@@ -43,6 +43,9 @@ pub struct ServerConfig {
     /// Optional certificate authority for signing Agent CSRs (ADR-0022); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
+    /// Optional destinations for the Agents' own telemetry (ADR-0016); absent means none is
+    /// offered and no Agent reports any.
+    pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Where software packages are persisted — artifact + metadata each (ADR-0028). An empty or
     /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
     #[serde(default = "default_packages_dir")]
@@ -68,6 +71,18 @@ pub struct ServerConfig {
     /// `0` is refused at load.
     #[serde(default = "default_max_total_package_size")]
     pub max_total_package_bytes: u64,
+    /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
+    /// it stale (ADR-0026). Ignored when `[connection_offer]` names a heartbeat interval — the
+    /// period this Server asked for is a better answer than a default.
+    #[serde(default = "default_stale_after_secs")]
+    pub stale_after_secs: u64,
+    /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
+    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0022)
+    /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
+    /// anonymous flood is `[auth]` (ADR-0022) — this is the backstop while it is off. `0` is refused
+    /// at load: a fleet that can hold no Agent is a misconfiguration, not a limit.
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
 }
 
 /// The `[rest]` section (ADR-0012): the Operator plane's own listener. It is a section rather than
@@ -266,9 +281,60 @@ impl AuthConfig {
     }
 }
 
+/// The `[telemetry_offer]` section (ADR-0016): where Agents send their own telemetry.
+///
+/// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
+/// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
+/// telemetry disappears into a 404 nobody looks at.
+///
+/// **What this section says, it says about all three signals** (ADR-0016). A signal left out is
+/// offered no destination and is *stopped* on an Agent that was reporting it, and an endpoint set
+/// to the empty string is an explicit withdrawal — the one way to say "stop all three", since a
+/// Server that offers nothing at all is a Server that says nothing at all. Removing the section
+/// keeps that second meaning: it withdraws nothing, so a Server without telemetry of its own does
+/// not tear down a fleet another Server pointed at a collector.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TelemetryOfferConfig {
+    pub metrics_endpoint: Option<String>,
+    pub traces_endpoint: Option<String>,
+    pub logs_endpoint: Option<String>,
+    /// Headers sent with every signal — an access token for the receiving backend, typically.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl TelemetryOfferConfig {
+    /// Loud validation (ADR-0009): an empty section offers nothing and is never what an operator
+    /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
+    ///
+    /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
+    /// (ADR-0016), which is a thing to be said rather than a URL to be checked.
     fn check(&self) -> Result<(), String> {
+        let endpoints = [
+            ("metrics_endpoint", &self.metrics_endpoint),
+            ("traces_endpoint", &self.traces_endpoint),
+            ("logs_endpoint", &self.logs_endpoint),
+        ];
+        if endpoints.iter().all(|(_, value)| value.is_none()) {
+            return Err(
+                "a [telemetry_offer] section needs at least one of metrics_endpoint,                  traces_endpoint, or logs_endpoint"
+                    .to_string(),
+            );
+        }
+        for (key, value) in endpoints {
+            if let Some(endpoint) = value.as_ref().filter(|endpoint| !endpoint.is_empty()) {
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(format!(
+                        "[telemetry_offer] {key} must be a full OTLP/HTTP URL with path, e.g.                          https://collector.example:4318/v1/metrics"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -347,6 +413,12 @@ fn default_max_message_size() -> usize {
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
 /// enough that a certificate is not a permanent grant (ADR-0022).
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0026): one missed beat is a
+/// lost packet, and a fleet view that flickers is one nobody trusts.
+fn default_stale_after_secs() -> u64 {
+    90
+}
+
 fn default_validity_days() -> u32 {
     90
 }
@@ -362,6 +434,12 @@ fn default_max_total_package_size() -> u64 {
     crate::fleet::DEFAULT_MAX_TOTAL_PACKAGE_SIZE
 }
 
+/// Far above any real fleet, so an authenticated deployment never meets it, yet low enough that the
+/// in-memory map and its per-Agent disk mirror stay bounded under a flood of self-asserted UIDs.
+fn default_max_agents() -> usize {
+    crate::fleet::DEFAULT_MAX_AGENTS
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -372,11 +450,14 @@ impl Default for ServerConfig {
             auth: None,
             connection_offer: None,
             client_ca: None,
+            telemetry_offer: None,
             packages_dir: default_packages_dir(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
             max_total_package_bytes: default_max_total_package_size(),
+            stale_after_secs: default_stale_after_secs(),
+            max_agents: default_max_agents(),
         }
     }
 }
@@ -413,6 +494,8 @@ impl ServerConfig {
                 .check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        if let Some(telemetry) = &config.telemetry_offer {
+            telemetry
                 .check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
@@ -450,6 +533,13 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        if config.stale_after_secs == 0 {
+            return Err(format!(
+                "{}: stale_after_secs must be greater than zero — a budget of nothing would call \
+                 every Agent stale the instant it reported",
+                path.display()
+            ));
+        }
         if config.max_package_size_bytes == 0 {
             return Err(format!(
                 "{}: max_package_size_bytes must be greater than zero",
@@ -463,7 +553,44 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        if config.max_agents == 0 {
+            return Err(format!(
+                "{}: max_agents must be greater than zero — a fleet that can hold no Agent is a \
+                 misconfiguration, not a limit",
+                path.display()
+            ));
+        }
         Ok(config)
+    }
+
+    /// The configured offers that hand a credential to any Agent that asks, while `[auth]` is unset
+    /// so the OpAMP endpoint admits anyone (ADR-0022). The connection-settings offer carries an
+    /// `Authorization` value (ADR-0013) and the telemetry offer carries headers that are "typically
+    /// an access token" (ADR-0016); with no admission in front of them, a report declaring the
+    /// matching capability is answered with those secrets. Names the sections so the operator can
+    /// act. Empty when `[auth]` is set or no offer carries a secret — nothing to warn about.
+    ///
+    /// This is a warning, not a refusal: ADR-0022 keeps the endpoint open by default so a lab runs
+    /// with zero configuration, and gating the offers on admission would break that. Surfacing the
+    /// exposure is the middle ground.
+    pub fn unauthenticated_secret_offers(&self) -> Vec<&'static str> {
+        if self.auth.is_some() {
+            return Vec::new();
+        }
+        let mut offers = Vec::new();
+        if self.connection_offer.as_ref().is_some_and(|offer| {
+            offer.bearer_token.is_some() || offer.username.is_some() || offer.password.is_some()
+        }) {
+            offers.push("[connection_offer]");
+        }
+        if self
+            .telemetry_offer
+            .as_ref()
+            .is_some_and(|offer| !offer.headers.is_empty())
+        {
+            offers.push("[telemetry_offer]");
+        }
+        offers
     }
 }
 
@@ -566,13 +693,82 @@ mod tests {
         assert!(err.contains("max_total_package_bytes"), "{err}");
     }
 
+    #[test]
+    fn the_agent_ceiling_defaults_is_configurable_and_rejects_zero() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.max_agents, crate::fleet::DEFAULT_MAX_AGENTS);
+        let tightened: ServerConfig = toml::from_str("max_agents = 500").expect("parse");
+        assert_eq!(tightened.max_agents, 500);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
+        std::fs::write(&path, "max_agents = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_agents"), "{err}");
+    }
+
+    /// The three shapes `[telemetry_offer]` admits: a destination, a withdrawal, and a mistake.
+    /// The withdrawal is the one ADR-0016 adds — an empty endpoint is a thing to say, not a URL to
+    /// check — and it must not be waved through for a value that is merely wrong.
+    #[test]
+    fn an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error() {
+        let section = |body: &str| {
+            toml::from_str::<TelemetryOfferConfig>(body)
+                .expect("parse")
+                .check()
+        };
+
+        assert!(section("metrics_endpoint = \"https://otlp.example/v1/metrics\"").is_ok());
+        assert!(
+            section("metrics_endpoint = \"\"").is_ok(),
+            "an empty endpoint withdraws the signal"
+        );
+
+        let err = section("metrics_endpoint = \"collector:4318\"")
+            .expect_err("a bare host is not an OTLP/HTTP URL");
+        assert!(err.contains("metrics_endpoint"), "{err}");
+
+        let err = section("").expect_err("an empty section offers nothing");
+        assert!(err.contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_bearing_offer_without_auth_is_flagged() {
+        // A connection offer carrying a credential, no [auth]: flagged.
+        let cfg: ServerConfig =
+            toml::from_str("[connection_offer]\nbearer_token = \"a-backend-token\"\n")
+                .expect("parse");
+        assert_eq!(
+            cfg.unauthenticated_secret_offers(),
+            vec!["[connection_offer]"]
+        );
+
+        // Telemetry headers (an access token) with no [auth]: flagged too.
         let cfg: ServerConfig = toml::from_str(
+            "[telemetry_offer]\nmetrics_endpoint = \"https://otlp.example/v1/metrics\"\n\
+             [telemetry_offer.headers]\nAuthorization = \"Bearer t\"\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.unauthenticated_secret_offers(),
+            vec!["[telemetry_offer]"]
+        );
+
+        // The same offer with [auth] in front of it: nothing to warn about.
         let cfg: ServerConfig = toml::from_str(
+            "[auth]\nbearer_tokens = [\"admit\"]\n\
+             [connection_offer]\nbearer_token = \"a-backend-token\"\n",
+        )
+        .expect("parse");
+        assert!(cfg.unauthenticated_secret_offers().is_empty());
+
+        // An offer that carries no secret (just an endpoint move) is not flagged.
+        let cfg: ServerConfig =
+            toml::from_str("[connection_offer]\nendpoint = \"wss://moved.example/v1/opamp\"\n")
+                .expect("parse");
+        assert!(cfg.unauthenticated_secret_offers().is_empty());
+    }
+
     #[test]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<ServerConfig>("listne = \"0.0.0.0:1\"").is_err());
