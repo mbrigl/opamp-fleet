@@ -75,6 +75,13 @@ carries a date once its tag exists.
   which another local user could read it. The mode is now set in the open call, closing the window.
   No operator action required.
 
+- **A referenced package's private-source token is stored owner-only on the Server.** A referenced
+  source (ADR-0018) can carry headers — a bearer token for a private artifact host — that were
+  persisted in the package store at the umask default, readable by other local users on the Server
+  host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
+  design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say so.
+  **What to do:** prefer a narrowly-scoped, rotatable token for a private source.
+
 - **The Agent's state and configuration directories are kept owner-only.** The persisted state
   directory and the `config/` directory the Managed Process reads from were created at the umask
   default, and a config-map entry read by path (a `${file:...}` reference, ADR-0016) can be a

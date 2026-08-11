@@ -852,8 +852,10 @@ struct PackageSourceSpec {
     /// Hex Ed25519 signature over the artifact, checked by the Agent against its configured key.
     #[serde(default)]
     signature: Option<String>,
-    /// Headers the Agents send with the download — a token for a private source. Every targeted
-    /// Agent receives them.
+    /// Headers the Agents send with the download — a token for a private source. Two things to know
+    /// before using one: it is stored in cleartext in the package store (owner-only on disk, not
+    /// encrypted), and it is delivered to **every** Agent the package targets. Prefer a
+    /// narrowly-scoped, rotatable token over a long-lived credential.
     #[serde(default)]
     headers: std::collections::BTreeMap<String, String>,
 }

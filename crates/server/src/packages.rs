@@ -181,8 +181,10 @@ pub struct Version {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
     pub url: String,
-    /// Sent with the download — a token for a private source. It reaches every Agent the package
-    /// targets, which is the exposure the operator accepts by using one.
+    /// Sent with the download — a token for a private source. Two exposures the operator accepts by
+    /// using one: it is stored **in cleartext** in the package store (owner-only on disk, but not
+    /// encrypted), and it is delivered to **every** Agent the package targets. Prefer a
+    /// narrowly-scoped, rotatable token over a long-lived credential.
     pub headers: BTreeMap<String, String>,
 }
 
@@ -491,6 +493,15 @@ impl PackageStore {
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        // Owner-only: a referenced package's metadata carries the private source's headers — a
+        // bearer token (ADR-0018) — so the store must not be readable by other local users on the
+        // Server host. The metadata files are also written 0600 (see `write_atomic`).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("cannot restrict {}: {e}", dir.display()))?;
+        }
         // What `<name>.json` holds: the aim, the Agent type the package fits (ADR-0034), and
         // whether the fleet may have it (ADR-0043).
         let mut rollouts: BTreeMap<String, Rollout> = BTreeMap::new();
@@ -1263,8 +1274,28 @@ impl PackageStore {
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let path = self.dir.join(name);
         let temp = self.dir.join(format!("{name}.tmp"));
-        std::fs::write(&temp, bytes)
-            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        // Metadata can carry a private source's headers (a bearer token, ADR-0018), so it is written
+        // owner-only — the mode is set in the open call so the token is never briefly world-readable,
+        // and the rename onto `path` carries the mode with it, narrowing any pre-existing file too.
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temp)
+                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+            file.write_all(bytes)
+                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&temp, bytes)
+                .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        }
         std::fs::rename(&temp, &path).map_err(|e| format!("cannot persist {}: {e}", path.display()))
     }
 }
@@ -1460,6 +1491,66 @@ mod tests {
             .set_service_name(name, service_name.to_string())
             .expect("agent type");
         store.set_published(name, true).expect("publish");
+    }
+
+    /// A referenced source's headers are a private-source token (ADR-0018); the store directory and
+    /// the metadata file that holds them are owner-only on disk, so other local users on the Server
+    /// host cannot read the token.
+    #[cfg(unix)]
+    #[test]
+    fn a_referenced_sources_token_is_stored_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("store");
+        store
+            .set_source(
+                "otelcol",
+                &linux(),
+                "0.157.0",
+                false,
+                vec![0u8; 32],
+                None,
+                Source {
+                    url: "https://mirror.example/otelcol.tar.gz".to_string(),
+                    headers: BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer secret-token".to_string(),
+                    )]),
+                },
+            )
+            .expect("set source");
+
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+        assert_eq!(
+            mode(dir.path()),
+            0o700,
+            "the package store directory is owner-only"
+        );
+
+        let meta = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains('@') && n.ends_with(".json"))
+            })
+            .expect("a variant metadata file");
+        assert_eq!(
+            mode(&meta),
+            0o600,
+            "the metadata carrying the token is owner-only"
+        );
+        assert!(
+            std::fs::read_to_string(&meta)
+                .expect("read meta")
+                .contains("secret-token"),
+            "the token really is in this file"
+        );
     }
 
     /// The reach count and the offer must never disagree — the count exists to predict what an
