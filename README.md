@@ -175,6 +175,8 @@ it (AGENTS.md links here).
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
+  advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
 - **Run the Client:** `cargo run -p client -- --config config/client.toml`
 

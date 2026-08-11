@@ -72,7 +72,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Ed25519 verification of downloaded package artifacts (ADR-0015) — the same ring already vendored
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
-rustls-pemfile = "2"
 # The client-certificate CSR flow (ADR-0035): the Client produces the request, the Server signs it
 # as a local CA. Pinned to the `ring` backend — the provider ADR-0007 already installs, whose C is
 # already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
