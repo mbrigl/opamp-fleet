@@ -68,6 +68,12 @@ pub async fn download_and_verify(
     let url = resolve_url(&package.download_url, &config.endpoint)?;
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
+        // Unlike the OpAMP endpoint, an artifact URL may legitimately redirect — a mirror
+        // (ADR-0018) is often a CDN that bounces the download to signed storage — so redirects are
+        // allowed but bounded to a small chain. Integrity does not rest on where the bytes come
+        // from: the content hash (always) and the signature (when a key is configured) are checked
+        // after the download, so a redirect cannot substitute a malicious artifact.
+        .redirect(reqwest::redirect::Policy::limited(5))
         // Per-operation timeouts, not one for the whole transfer: a large artifact over a modest
         // link legitimately takes minutes, and a total timeout would abort it forever while a
         // stalled connection is what actually needs cutting.

@@ -82,6 +82,14 @@ carries a date once its tag exists.
   design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say so.
   **What to do:** prefer a narrowly-scoped, rotatable token for a private source.
 
+- **The Client's OpAMP endpoint no longer follows HTTP redirects; artifact downloads follow a bounded
+  chain.** The OpAMP endpoint is a fixed, operator-configured address, so its HTTP transport and the
+  connection-settings probe now refuse redirects — a redirect there could only bounce an
+  authenticated session elsewhere. Artifact downloads still follow redirects (a mirror is often a CDN
+  that bounces to signed storage, ADR-0018) but are now bounded to a short chain; integrity still
+  rests on the content hash and signature, never on where the bytes came from. No operator action
+  required unless an OpAMP endpoint was, unusually, served behind an HTTP redirect.
+
 - **The Agent's state and configuration directories are kept owner-only.** The persisted state
   directory and the `config/` directory the Managed Process reads from were created at the umask
   default, and a config-map entry read by path (a `${file:...}` reference, ADR-0016) can be a

@@ -234,6 +234,9 @@ pub async fn verify(
             let builder = crate::tls::trust_and_identity_for(
                 reqwest::Client::builder()
                     .use_rustls_tls()
+                    // A candidate OpAMP endpoint (ADR-0014) is verified by connecting to exactly it;
+                    // a redirect would defeat the point, so this probe never follows one.
+                    .redirect(reqwest::redirect::Policy::none())
                     .timeout(std::time::Duration::from_secs(30)),
                 config,
                 candidate_cert,

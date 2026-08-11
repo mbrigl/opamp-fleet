@@ -6,13 +6,14 @@
 use std::net::SocketAddr;
 
 use axum::body::Body;
+use axum::response::Redirect;
 use axum::routing::get;
 use axum::Router;
 use client::config::ClientConfig;
 use client::packages::{download_and_verify, PackageDownload, Progress};
 use futures_util::stream;
 
-/// A server with two oversized responses: one that declares its length, one chunked that does not.
+/// A server with the responses the download tests need.
 async fn spawn() -> SocketAddr {
     let app = Router::new()
         // A known-length body: `Content-Length` says up front it is too big.
@@ -25,7 +26,10 @@ async fn spawn() -> SocketAddr {
                 let chunks = (0..8).map(|_| Ok::<_, std::io::Error>(vec![0u8; 1024]));
                 Body::from_stream(stream::iter(chunks))
             }),
-        );
+        )
+        // A mirror that redirects the download to where the bytes actually live (the CDN pattern).
+        .route("/redirect", get(|| async { Redirect::to("/artifact") }))
+        .route("/artifact", get(|| async { vec![0u8; 4096] }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -118,6 +122,28 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
     assert!(
         !err.contains("max_artifact_size_bytes"),
         "a body under the ceiling must not be refused for size: {err}"
+    );
+}
+
+/// An artifact URL may legitimately redirect — a mirror (ADR-0018) is often a CDN that bounces the
+/// download to signed storage — so the download follows it. Reaching the artifact (and then failing
+/// only on the deliberately wrong content hash) proves the redirect was followed, not refused.
+#[tokio::test]
+async fn a_download_follows_a_redirect_to_the_mirror() {
+    let addr = spawn().await;
+    let staging = tempfile::tempdir().expect("tempdir");
+
+    let err = download_and_verify(
+        &download(format!("http://{addr}/redirect")),
+        &small_cap_config(8192),
+        staging.path(),
+        &Progress::default(),
+    )
+    .await
+    .expect_err("the wrong content hash still fails — but only after following the redirect");
+    assert!(
+        err.contains("content hash"),
+        "the redirect was followed to the artifact and streamed: {err}"
     );
 }
 
