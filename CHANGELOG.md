@@ -75,6 +75,13 @@ carries a date once its tag exists.
   which another local user could read it. The mode is now set in the open call, closing the window.
   No operator action required.
 
+- **The Agent's state and configuration directories are kept owner-only.** The persisted state
+  directory and the `config/` directory the Managed Process reads from were created at the umask
+  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0016) can be a
+  certificate or a key — so on a multi-user host that material was world-readable. The directories
+  are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
+  Process runs as the same user and still reads its own config. No operator action required.
+
 - **The artifact staging directory is kept owner-only.** A downloaded artifact is verified and then
   re-opened by the installer; the staging directory was created at the umask default, so on a
   multi-user host another local user could swap the file in that window and defeat the hash and
