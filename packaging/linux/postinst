@@ -1,11 +1,17 @@
 #!/bin/sh
 # Post-install for the `.deb` and the `.rpm` alike (ADR-0046 clauses 2 and 3).
 #
-# The package delivered `/usr/bin/opamp-fleet-client` and nothing else. The install itself — the
+# The package delivered `/usr/libexec/opamp-fleet-client` and nothing else. The install itself — the
 # versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
 # `service install` (ADR-0010), which is all this calls. No package ships a unit file: one that did
 # would know nothing of ADR-0030's service name or ADR-0020's restart policy, and there would be two
 # registrations disagreeing about which is the real one.
+#
+# What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0048),
+# laid here — so `opamp-fleet-client --version` answers for the binary the service runs, not for
+# whatever this package happened to deliver. The target names the default system root and default
+# instance (`default_root` in crates/client/src/service/manager.rs), the only root a packaged
+# install ever uses: this script calls plain `service install`.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
@@ -25,7 +31,13 @@ if command -v systemctl >/dev/null 2>&1 &&
 	running=yes
 fi
 
-/usr/bin/opamp-fleet-client service install
+/usr/libexec/opamp-fleet-client service install
+
+# `-n`: without it, ln would place the link *inside* the directory an existing link resolves to.
+# On rpm upgrades the erasure of the old package's files deletes this link again; `%posttrans`
+# (packaging/linux/posttrans) re-lays it after that erasure, which dpkg does not need — it removes
+# the obsolete `/usr/bin` file during unpack, before this runs.
+ln -sfn /var/lib/opamp-fleet/client/default/current/opamp-fleet-client /usr/bin/opamp-fleet-client
 
 if [ "$running" = yes ]; then
 	# Restart, never start. A service that was running was configured by somebody, and it has to

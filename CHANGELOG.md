@@ -19,6 +19,19 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
+  version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
+  `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer
+  ([ADR-0048](docs/adr/0048-the-packaged-cli-is-a-symlink-through-current.md)), so
+  `opamp-fleet-client --version` — and every other CLI call — answers for the binary the service
+  actually runs, even after a fleet self-update or a hand-reinstalled older package. A real removal
+  (`apt remove`, `dnf remove`) now also deletes the staged `versions/` and the `current` pointer,
+  so a later install comes up on its own binary instead of a surviving newer one; the state
+  directory and `client.toml` stay. `apt purge` deletes those too — the instance directory whole.
+  **What to do:** nothing on upgrade — the package lays the link itself. Only automation that
+  depended on the *delivered* file sitting at `/usr/bin/opamp-fleet-client` must switch to
+  `/usr/libexec/opamp-fleet-client`.
+
 - **The MSI's endpoint page comes prefilled with the development default**
   (`ws://127.0.0.1:4320/v1/opamp`) instead of empty, so a local evaluation install is a
   click-through (ADR-0049). Interactive installs only: clearing the field still means "configure

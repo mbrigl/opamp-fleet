@@ -240,7 +240,10 @@ fn plain(path: PathBuf) -> PathBuf {
 /// Stage the running executable into its version directory, write the manifest, and point
 /// `current` at it. Returns the program path to register the service with
 /// (`<root>/current/client`). Staging an already-present version replaces its contents — an
-/// idempotent re-install, never a silent mix of two builds.
+/// idempotent re-install, never a silent mix of two builds — except when the staged binary
+/// already holds these exact bytes, which is skipped rather than rewritten: `service install`
+/// can arrive through the `PATH` symlink (ADR-0048) and then *runs from* the staged file, and
+/// Linux refuses to write over a running executable (`ETXTBSY`).
 ///
 /// # Errors
 /// Returns an error if the executable cannot be read or the layout cannot be written.
@@ -254,13 +257,19 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
     let binary = dir.join(BINARY_FILENAME);
-    std::fs::write(&binary, &bytes)
-        .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot mark {} executable: {e}", binary.display()))?;
+    // Hashed off the staged file itself, never trusted from the manifest beside it: the manifest
+    // says what was staged, the file is what would run.
+    let already_staged =
+        std::fs::read(&binary).is_ok_and(|staged| hex::encode(Sha256::digest(&staged)) == sha256);
+    if !already_staged {
+        std::fs::write(&binary, &bytes)
+            .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("cannot mark {} executable: {e}", binary.display()))?;
+        }
     }
 
     let manifest = format!(
@@ -383,6 +392,63 @@ mod tests {
         assert_eq!(
             std::fs::canonicalize(layout.current()).expect("resolve current"),
             std::fs::canonicalize(&version_dir).expect("resolve version dir")
+        );
+    }
+
+    /// `service install` reached through the `PATH` symlink runs *from* the staged file
+    /// (ADR-0048); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
+    /// alone. Observed via the modification time: pinned to the epoch, it only stays there when
+    /// no write happened.
+    #[cfg(unix)]
+    #[test]
+    fn restaging_identical_bytes_leaves_the_staged_binary_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path());
+        stage_current_exe(&layout).expect("stage");
+
+        let staged = layout
+            .version_dir(&version_dir_name(opamp::version::current()))
+            .join(BINARY_FILENAME);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&staged)
+            .expect("open the staged binary");
+        file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .expect("pin the modification time");
+        drop(file);
+
+        stage_current_exe(&layout).expect("restage");
+        assert_eq!(
+            std::fs::metadata(&staged)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+            std::time::SystemTime::UNIX_EPOCH,
+            "identical bytes must not be rewritten"
+        );
+    }
+
+    /// The skip is by content, never by presence: a staged binary holding the wrong bytes — a
+    /// torn write, a tamper — is replaced, which is the idempotent re-install staging promises.
+    #[cfg(unix)]
+    #[test]
+    fn restaging_replaces_a_staged_binary_with_different_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path());
+        stage_current_exe(&layout).expect("stage");
+
+        let staged = layout
+            .version_dir(&version_dir_name(opamp::version::current()))
+            .join(BINARY_FILENAME);
+        std::fs::write(&staged, b"not-the-client").expect("tamper");
+
+        stage_current_exe(&layout).expect("restage");
+        let running =
+            std::fs::read(std::env::current_exe().expect("current exe")).expect("read own bytes");
+        assert_eq!(
+            std::fs::read(&staged).expect("read staged"),
+            running,
+            "different bytes must be replaced with the running binary's"
         );
     }
 

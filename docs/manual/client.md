@@ -137,9 +137,11 @@ file afterwards. All four rules above hold unchanged — in particular, an exist
 ### Installing from a native package
 
 A release also ships a `.deb`, an `.rpm` and an `.msi` (ADR-0046). They deliver the binary to
-`/usr/bin/opamp-fleet-client` (Windows: the folder you choose) and then run `service install`
+`/usr/libexec/opamp-fleet-client` (Windows: the folder you choose) and then run `service install`
 themselves — the layout, the unit and the SCM entry are the same ones this page describes, because
-they are made by the same command. No package ships a unit file of its own.
+they are made by the same command. No package ships a unit file of its own. What lands on `PATH` —
+`/usr/bin/opamp-fleet-client` — is a symlink through the layout's `current` pointer (ADR-0048), so
+the command you type is always the binary the service runs.
 
 ```console
 $ sudo apt install ./opamp-fleet-client_1.2.3_linux_amd64.deb
@@ -171,11 +173,14 @@ Two things to know about living with a packaged install:
 - **`dpkg -l` reports the version it *delivered*, not the one that is running.** After a fleet
   self-update ([Updating the Client itself](#updating-the-client-itself)) the service runs the binary
   under `<root>/current/`, which no package manager owns — that separation is what keeps the next
-  `apt upgrade` from silently reverting the Server's decision. `opamp-fleet-client --version` and the
-  fleet view are the truth.
-- **Removing the package stops and unregisters the service, and deletes nothing else.** The install
-  root, the state directory and `client.toml` stay, for the same reason an install never overwrites
-  a configuration: it may hold a credential you typed.
+  `apt upgrade` from silently reverting the Server's decision. `opamp-fleet-client --version` goes
+  through `current` (ADR-0048) and answers for the running binary, as does the fleet view; those two
+  are the truth.
+- **Removing the package stops and unregisters the service and uninstalls every staged version.**
+  `versions/` and the `current` pointer go with the package (ADR-0048); the state directory and
+  `client.toml` stay, for the same reason an install never overwrites a configuration: it may hold
+  a credential you typed. `apt purge` deletes those too — the instance directory whole. A reinstall
+  after a plain remove keeps the host's identity and configuration and stages its own binary fresh.
 
 macOS has no native installer; there, unpack the `.7z` and run `service install` yourself.
 

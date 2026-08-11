@@ -2,9 +2,9 @@
 # Pre-removal for the `.deb` and the `.rpm` alike (ADR-0046 clause 2).
 #
 # The mirror of the post-install: what `service install` registered, `service uninstall` removes.
-# It deliberately leaves the install root and the state directory behind — `service uninstall`
-# already does (ADR-0010), and a package that deleted a configuration holding a credential the
-# operator typed would be the overwrite ADR-0027 refused, one step later.
+# `service uninstall` itself deletes nothing (ADR-0010); the cleanup a *package* removal owes —
+# the staged versions, the `current` pointer, the PATH symlink, and on purge the instance
+# directory — happens in the post-removal (ADR-0048), after the package's own files are gone.
 #
 # An **upgrade** must fall straight through. dpkg calls `prerm upgrade <new>` and rpm `%preun 1`
 # before installing the replacement, whose post-install re-runs `service install`; unregistering
@@ -24,5 +24,7 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # Best-effort: a host whose service was never registered, or already unregistered by hand, must
-# still be able to remove the package.
-/usr/bin/opamp-fleet-client service uninstall || true
+# still be able to remove the package. The payload path, not the PATH symlink (ADR-0048): the
+# symlink resolves through a layout an operator may have already deleted by hand, while the
+# payload is the file this package guarantees to still exist at this moment.
+/usr/libexec/opamp-fleet-client service uninstall || true

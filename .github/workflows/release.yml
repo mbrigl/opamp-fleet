@@ -244,6 +244,10 @@ jobs:
           echo "$scripts"
           grep -q 'service install' <<<"$scripts"
           grep -q 'service uninstall' <<<"$scripts"
+          # ADR-0048: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
+          # ride the same silently-degrading path mechanism, so they are asserted the same way.
+          grep -q 'ln -sfn' <<<"$scripts"
+          grep -q 'rm -rf "$root/versions"' <<<"$scripts"
           # And the arch inside the package is the ecosystem's, not the file name's (ADR-0046).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 
