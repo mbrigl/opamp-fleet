@@ -1,7 +1,13 @@
+//! `opamp-package-fetch` — an operator helper that turns an agent release into package artifacts
+//! this fleet can install, and optionally uploads them (ADR-0026).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`,
+//! and `supervisor`, this fleet's own Client (ADR-0019) — and asks the
+//! operator only what it cannot know: which one, which version, which platforms, and where to send
+//! the result.
 //!
 //! Two rules shape what it produces:
 //!
@@ -17,12 +23,16 @@
 //!   opamp-package-fetch                                   # asks for everything
 //!   opamp-package-fetch --agent otelcol-contrib --version 0.158.0 --platform linux/amd64 --no-upload
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use sha2::{Digest, Sha256};
 
+/// How many release series the operator is offered. Enough to reach the release before last when
+/// one turns out badly, few enough to read without scrolling.
+const SERIES_SHOWN: usize = 3;
 
 /// The member cap a tree package is held to (ADR-0026). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
@@ -38,6 +48,7 @@ const MAX_TREE_MEMBERS: usize = 10_000;
 #[derive(Parser)]
 #[command(
     name = "opamp-package-fetch",
+    about = "Fetch an agent release and turn it into fleet package artifacts"
 )]
 struct Cli {
     /// Which agent to fetch. Omitted, it is asked for.
@@ -64,6 +75,7 @@ struct Cli {
 
 /// The agents this tool knows how to fetch. Adding one is this enum, its [`Source`], and nothing
 /// else — the rest of the tool works from what the source says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AgentKind {
     /// The OpenTelemetry Collector, core distribution.
     #[value(name = "otelcol")]
@@ -71,6 +83,9 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
+    /// This fleet's own Client — the package a Client updates *itself* from (ADR-0018, ADR-0019).
+    #[value(name = "supervisor")]
+    Supervisor,
 }
 
 /// Everything that differs between one upstream project and the next, in one place.
@@ -93,6 +108,12 @@ impl AgentKind {
                 service_name: "otelcol-contrib",
                 repo: "open-telemetry/opentelemetry-collector-releases",
             },
+            // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
+            // the artifact that updates it is fetched the way every other agent's is — and since
+            // ADR-0019 it is named and packed like one too, which is what makes that possible.
+            AgentKind::Supervisor => Source {
+                service_name: "supervisor",
+                repo: "mbrigl/opamp-fleet",
             },
         }
     }
@@ -111,6 +132,11 @@ impl AgentKind {
                 let parts: Vec<&str> = rest.split('.').collect();
                 (parts.len() == 3 && parts.iter().all(|p| numeric(p))).then(|| rest.to_string())
             }
+            // `version/1.2.3` — this project tags its releases with the prefix the release
+            // workflow creates them under (ADR-0011), and nothing else in the repository looks
+            // like that.
+            AgentKind::Supervisor => {
+                let rest = tag.strip_prefix("version/")?;
                 let parts: Vec<&str> = rest.split('.').collect();
                 (parts.len() == 3 && parts.iter().all(|p| numeric(p))).then(|| rest.to_string())
             }
@@ -123,8 +149,32 @@ impl AgentKind {
         match self {
                 format!("v{version}")
             }
+            AgentKind::Supervisor => format!("version/{version}"),
         }
     }
+
+            // Named rather than left to the release, unlike the Collectors': this is *this*
+            // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
+            // this repository decides it should — and the column's question, "does it run on the
+            // hosts I have", deserves the concrete answer where one can be given.
+            AgentKind::Supervisor => group_platforms(SUPERVISOR_PLATFORMS.iter().copied()),
+    /// The line that introduces the per-platform hints printed when the fetch is done.
+    ///
+    /// Every other agent is installed by a Supervisor, which needs a block; this fleet's own Client
+    /// is installed *by itself* over itself, and what admits that is a consent rather than a block
+    /// (ADR-0018). One sentence, so the hints below it read as the answer to it.
+    fn install_hint(self) -> &'static str {
+        match self {
+            AgentKind::Supervisor => "What a Client needs to take these:",
+            _ => "What a Supervisor needs to install these:",
+        }
+    }
+
+    /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
+            // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
+            // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
+            // of it has a default this tool could put on a Server.
+            AgentKind::Supervisor => &[],
     }
 }
 
@@ -139,6 +189,8 @@ struct Plan {
     action: Action,
     /// The artifact's file name in `--out-dir`.
     out_name: String,
+    /// What a `[[supervisor]]` block has to say to install it — or, for this fleet's own Client,
+    /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
     block_hint: String,
 }
 
@@ -199,7 +251,20 @@ async fn run(cli: Cli) -> Result<(), String> {
         Vec::new()
     };
     if available.is_empty() {
+        // For this project's own releases the likeliest reason is a known one, and saying it saves
+        // the operator a trip to the release page: everything published before ADR-0019 carries
+        // the old name and container, and a Set built from those fits no Client reporting the type
+        // `supervisor` anyway (ADR-0019).
+        let why = match agent {
+            AgentKind::Supervisor => {
+                " — a release from before the rename publishes \
+                 `opamp-fleet-client_<version>_<os>_<arch>.7z`, which is a package no Client of \
+                 this type installs"
+            }
+            _ => "",
+        };
         return Err(format!(
+            "{} {version} publishes nothing this tool can install{why}",
             source.service_name
         ));
     }
@@ -220,6 +285,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
     }
 
+    eprintln!("\nDone. {}", agent.install_hint());
     for (plan, artifact) in &produced {
         eprintln!(
             "  {}/{}  {}\n      {}",
@@ -236,6 +302,21 @@ async fn run(cli: Cli) -> Result<(), String> {
             name = source.service_name,
             version = version
         );
+        // Silent for an agent that has none — the Client's own configuration is its host's
+        // (ADR-0017), so there is nothing here to offer and nothing to apologise for.
+        if !agent.default_configurations().is_empty() {
+            eprintln!(
+                "  The default configuration ({}) is not uploaded either; an upload puts it there \
+                 when the Server has none of that name. Or seed it from config/examples/ with \
+                 scripts/seed_test_configs.sh.",
+                agent
+                    .default_configurations()
+                    .iter()
+                    .map(|c| c.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -335,6 +416,13 @@ fn upload_target(cli: &Cli) -> Result<Option<String>, String> {
 
 // ── Upstream ────────────────────────────────────────────────────────────────
 
+/// The newest version of each of the last [`SERIES_SHOWN`] release series, newest first.
+///
+/// A *series* is a `major.minor` line, and only its newest patch is offered: nobody installing
+/// 2.16 wants 2.16.3 when 2.16.5 exists, and an agent that patches often — Icinga 2 published five
+/// 2.16 patches — would otherwise fill the whole list with one line and hide every version an
+/// operator might actually be looking for. Where an agent's versions carry no patch number at all,
+/// every version is its own series and this is simply the last three.
 ///
 /// Tags rather than releases: a Collector release object carries hundreds of assets, so listing
 /// twenty of them to read their names would move megabytes to answer a question tags answer in
@@ -355,6 +443,28 @@ async fn recent_versions(agent: AgentKind, source: &Source) -> Result<Vec<String
         .collect();
     versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
     versions.dedup();
+    Ok(newest_per_series(&versions))
+}
+
+/// The newest version of each of the last [`SERIES_SHOWN`] `major.minor` series, given a list
+/// already sorted newest first — so the first version of a series encountered *is* its newest.
+fn newest_per_series(versions: &[String]) -> Vec<String> {
+    let mut newest = Vec::new();
+    let mut series_seen: Vec<Vec<u64>> = Vec::new();
+    for version in versions {
+        // A version with no minor part is its own series, which is what makes an agent that
+        // versions in two parts behave as "the last three versions" without a special case.
+        let series: Vec<u64> = version_key(version).into_iter().take(2).collect();
+        if series_seen.contains(&series) {
+            continue;
+        }
+        series_seen.push(series);
+        newest.push(version.clone());
+        if newest.len() == SERIES_SHOWN {
+            break;
+        }
+    }
+    newest
 }
 
 /// A version's parts as numbers, so `0.9.0` sorts below `0.10.0` — which it does not as text.
@@ -396,6 +506,7 @@ async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, Strin
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
             Ok(collector_plans(agent, version, assets))
         }
+        AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
     }
 }
 
@@ -437,6 +548,33 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
     plans
 }
 
+/// The platforms this project's own release publishes, in the order its build matrix states them
+/// (`.github/workflows/release.yml`). The agent menu names them
+/// ([`AgentKind::platforms`]); what is actually fetched comes from the release's assets, so this
+/// list understating a new target costs a menu line and never a download.
+const SUPERVISOR_PLATFORMS: [(&str, &str); 5] = [
+    ("linux", "amd64"),
+    ("linux", "arm64"),
+    ("darwin", "arm64"),
+    ("darwin", "amd64"),
+    ("windows", "amd64"),
+];
+
+/// This fleet's own Client, as its release publishes it: one `.tar.gz` per platform named
+/// `supervisor_<version>_<os>_<arch>` (ADR-0019), holding the binary under the name it is installed
+/// as. Nothing is repacked — the artifact *is* the package, which is the point of packing the
+/// release with this project's own packer.
+///
+/// The `.deb`, `.rpm` and `.msi` of the same release are installers for a machine to run, not
+/// artifacts a fleet distributes, so they are passed over exactly as the Collector's MSI is.
+fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
+    let package = AgentKind::Supervisor.source().service_name;
+    let prefix = format!("{package}_{version}_");
+    // One file for the whole release, written by the publish job from every artifact's own
+    // checksum — `<hash>  <name>` lines, which is the shape `ChecksumSource::Sums` looks up by.
+    let sums: Vec<String> = assets
+        .iter()
+        .filter(|(name, _)| name == "SHA256SUMS")
         .map(|(_, url)| url.clone())
         .collect();
     let mut plans = Vec::new();
@@ -453,9 +591,16 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
         let (Some(os), Some(arch)) = (normalize_os(os), normalize_arch(arch)) else {
             continue;
         };
+        plans.push(Plan {
+            os,
             arch,
+                checksum: ChecksumSource::Sums { urls: sums.clone() },
             action: Action::AsPublished,
             out_name: name.clone(),
+            // Not a `[[supervisor]]` block: a Client installs this one over itself, and what
+            // admits that is the consent in its own `supervisor.toml` (ADR-0018) — which
+            // names this very package by default, so most hosts need no line at all.
+            block_hint: format!("[self_update] package = {package:?}  (the default)"),
         });
     }
     plans.sort_by(|a, b| (&a.os, &a.arch).cmp(&(&b.os, &b.arch)));
@@ -599,6 +744,12 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
         ));
     }
 
+    let file =
+        std::fs::File::create(out).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        file,
+        flate2::Compression::default(),
+    ));
     for relative in &members {
         let full = root.join(relative);
         // Following the link is the point: `metadata` resolves, and an error means it resolves to
@@ -631,6 +782,14 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
             .append_data(&mut header, &inside, source)
             .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
     }
+    builder
+        .into_inner()
+        .map_err(|e| format!("cannot finish {}: {e}", out.display()))?
+        .finish()
+        .map_err(|e| format!("cannot finish {}: {e}", out.display()))?;
+    Ok(())
+}
+
 /// Every path under `root`, relative to it — directories included, because a tree keeps its shape.
 ///
 /// Links are followed, and that is the whole difficulty. A link to a *directory* has to be
@@ -870,6 +1029,15 @@ async fn get_json(url: &str) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("{url} did not answer JSON: {e}"))
 }
 
+fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(hasher.finalize().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -890,6 +1058,21 @@ mod tests {
         ] {
             assert_eq!(AgentKind::Otelcol.version_of_tag(other), None, "{other}");
         }
+
+        // This project's own tags carry the prefix its release workflow creates them under, and
+        // the round trip is what `--version` relies on: an operator types what the release page
+        // shows, and the tag is derived from it.
+        assert_eq!(
+            AgentKind::Supervisor.version_of_tag("version/1.2.3"),
+            Some("1.2.3".to_string())
+        );
+        for other in ["v1.2.3", "1.2.3", "version/1.2", "version/1.2.3-dev"] {
+            assert_eq!(AgentKind::Supervisor.version_of_tag(other), None, "{other}");
+        }
+        assert_eq!(
+            AgentKind::Supervisor.tag_of_version("1.2.3"),
+            "version/1.2.3"
+        );
     }
 
     /// Versions sort by their numbers: `0.9.0` is older than `0.10.0`, which as text it is not.
@@ -902,6 +1085,37 @@ mod tests {
         ];
         versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
         assert_eq!(versions, vec!["0.158.0", "0.10.0", "0.9.0"]);
+    }
+
+    /// The list offers release *series*, not tags. Icinga 2 is the agent that makes the difference
+    /// visible: five 2.16 patches would have been the entire list, so the one question an operator
+    /// asks it — which versions can I still go back to — had no answer in it. Only the newest patch
+    /// of a series is offered, because an older one of the same line is not a choice anybody makes.
+    #[test]
+    fn the_version_list_offers_the_newest_patch_of_each_recent_series() {
+        let icinga: Vec<String> = [
+            "2.16.5", "2.16.4", "2.16.3", "2.16.2", "2.16.1", "2.16.0", "2.15.2", "2.15.1",
+            "2.14.6", "2.13.10",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            super::newest_per_series(&icinga),
+            ["2.16.5", "2.15.2", "2.14.6"]
+        );
+
+        // An agent that versions in two parts has no patch to collapse, so every version is its own
+        // series and the list is simply the last three (GLPI tags `1.15`, `1.14`, …).
+        let glpi: Vec<String> = ["1.15", "1.14", "1.13", "1.12"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(super::newest_per_series(&glpi), ["1.15", "1.14", "1.13"]);
+
+        // Fewer series than asked for is the whole list, not an error — a young repository has
+        // nothing else to offer.
+        let young: Vec<String> = ["0.2.1", "0.2.0"].map(str::to_string).to_vec();
+        assert_eq!(super::newest_per_series(&young), ["0.2.1"]);
+        assert!(super::newest_per_series(&[]).is_empty());
     }
 
     fn asset(name: &str) -> (String, String) {
@@ -945,11 +1159,76 @@ mod tests {
         );
     }
 
+    /// This project's own release is fetched like any other agent's (ADR-0019): the `.tar.gz` per
+    /// platform is the package, the installers beside it are not, and the one `SHA256SUMS` the
+    /// publish job writes is what every artifact is verified against.
+    #[test]
+    fn the_supervisor_takes_the_archives_of_its_own_release_and_not_the_installers() {
+        let assets = vec![
+            asset("supervisor_1.2.3_linux_amd64.tar.gz"),
+            asset("supervisor_1.2.3_linux_amd64.deb"),
+            asset("supervisor_1.2.3_linux_amd64.rpm"),
+            asset("supervisor_1.2.3_linux_arm64.tar.gz"),
+            asset("supervisor_1.2.3_darwin_arm64.tar.gz"),
+            asset("supervisor_1.2.3_darwin_amd64.tar.gz"),
+            asset("supervisor_1.2.3_windows_amd64.tar.gz"),
+            asset("supervisor_1.2.3_windows_amd64.msi"),
+            asset("supervisor_1.1.0_linux_amd64.tar.gz"),
+            asset("SHA256SUMS"),
+        ];
+
+        let plans = supervisor_plans("1.2.3", &assets);
+        let platforms: Vec<String> = plans
             .iter()
             .map(|p| format!("{}/{}", p.os, p.arch))
             .collect();
         assert_eq!(
             platforms,
+            vec![
+                "darwin/amd64",
+                "darwin/arm64",
+                "linux/amd64",
+                "linux/arm64",
+                "windows/amd64",
+            ],
+            "an installer is not an artifact a fleet distributes, and another release's archive              is not this version"
+        );
+        // The menu promises exactly these, so a target added to the workflow and not to the list
+        // is caught here rather than by an operator who cannot find their platform.
+        let promised: Vec<String> = SUPERVISOR_PLATFORMS
+            .iter()
+            .map(|(os, arch)| format!("{os}/{arch}"))
+            .collect();
+        let mut promised_sorted = promised.clone();
+        promised_sorted.sort();
+        assert_eq!(platforms, promised_sorted);
+
+        for plan in &plans {
+            assert!(
+                matches!(plan.action, Action::AsPublished),
+                "the release is packed by this project's own packer; repacking it would only                  break the published hash"
+            );
+            match &plan.sources[0].checksum {
+                ChecksumSource::Sums { urls } => {
+                    assert_eq!(urls.len(), 1, "one file holds every artifact's line");
+                    assert!(urls[0].ends_with("SHA256SUMS"), "{urls:?}");
+                }
+                other => panic!(
+                    "the release publishes sums, not {:?}",
+                    std::mem::discriminant(other)
+                ),
+            }
+            assert!(
+                plan.block_hint.contains("[self_update]"),
+                "a Client takes this one over itself, so the hint is its consent and not a                  [[supervisor]] block: {:?}",
+                plan.block_hint
+            );
+        }
+
+        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0017).
+        assert!(AgentKind::Supervisor.default_configurations().is_empty());
+    }
+
     /// The checksum layout changed at 0.158.0, so which one a release uses is read from its assets
     /// rather than derived from its version.
     #[test]
@@ -1130,6 +1409,24 @@ mod tests {
             "the operator is told what the Server refused, not that it could not be reached: {error}"
         );
     }
+    /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
+    /// is storable: the name follows the ADR-0019 grammar the Server enforces (which admits no dot,
+    /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
+    /// aimed at something — by Selector or by Agent type — rather than at the whole fleet.
+    /// the only way an agent could reach a Server with a package and nothing to run. The Client's
+    /// own package is the one exemption, and it is stated below rather than skipped.
+            if matches!(agent, AgentKind::Supervisor) {
+                // The one package nothing supervises. A Client reads `supervisor.toml` on its own
+                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0017), so
+                // there is no body this tool could put on a Server — and an offer needs none: the
+                // consent that admits this package is already in that file (ADR-0018).
+                assert!(
+                    defaults.is_empty(),
+                    "{service_name} is the Client itself; a Configuration for it would be a \
+                     decision this test has not been told about"
+                );
+                continue;
+            }
         client::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
