@@ -15,7 +15,22 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.2.2]
+## [0.2.3]
+
+### Changed
+
+- **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
+  Configurations each manage from their own tab; the active tab lives in the URL hash
+  (`#packages`), so a reload — or a link handed to a colleague — comes back to it, and each tab
+  carries its count. The fleet table shows one line per Agent (columns now: Name, Version,
+  Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
+  Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
+  capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
+  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0039) — the forget chip
+  in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
+  No operator action required.
+
+## [0.2.2] - 2026-08-11
 
 ### Added
 
@@ -30,15 +45,6 @@ carries a date once its tag exists.
   are now visible to anyone who can read the fleet API.
 
 ### Changed
-
-- **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
-  Configurations each manage from their own tab; the active tab lives in the URL hash
-  (`#packages`), so a reload — or a link handed to a colleague — comes back to it, and each tab
-  carries its count. The fleet table shows one line per Agent (columns now: Name, Version,
-  Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
-  Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
-  capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
-  of gray. No operator action required.
 
 - **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
   version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;

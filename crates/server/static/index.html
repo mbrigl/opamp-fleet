@@ -159,7 +159,20 @@
       .filters input::placeholder { color: var(--muted); font-family: var(--mono); }
 
       .table-wrap { overflow-x: auto; }
-      table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+      /* Fixed layout: the table is exactly as wide as its container and never wider — content
+         wraps or ellipsizes inside its column instead of growing a horizontal scrollbar. The
+         narrow columns are sized in px for the one kind of value they hold; Name gets a share of
+         the whole; what remains is split between the columns whose content is genuinely
+         elastic (Operating System is px too — its values repeat from a small set). The wrap's
+         overflow-x stays as the fallback for windows too narrow for any division. */
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; table-layout: fixed; }
+      th[data-key="name"] { width: 16%; }
+      th[data-key="version"] { width: 70px; }
+      th[data-key="os"] { width: 130px; }
+      th.col-network { width: 136px; }
+      th[data-key="config"] { width: 110px; }
+      th[data-key="seq"] { width: 50px; }
+      th[data-key="seen"] { width: 88px; }
       thead th {
         text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border);
         color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; user-select: none;
@@ -167,7 +180,10 @@
       thead th.sortable { cursor: pointer; }
       thead th.sortable:hover { color: var(--text); }
       th .arrow { opacity: .55; font-size: 10px; }
-      tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      /* overflow hidden: under the fixed layout a value that fits no line of its column — one
+         overlong chip, an unbroken token — is clipped at the cell's edge rather than written
+         across the neighbour; the full value stays in the cell's own tooltip or details. */
+      tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
       tbody tr:last-child td { border-bottom: 0; }
       /* An agent is a row — and, when it is the current one, the rows under it that carry its
          sets. The separator then belongs after the last of them, or the agent would read as
@@ -190,9 +206,20 @@
       .sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 2px; }
       /* The UID is long and rarely read, but must be selectable when it is: one line, its own text
          selection, and a size that keeps it under the name rather than beside it. */
-      .uid { font-size: 11px; opacity: 0.75; white-space: nowrap; user-select: all; }
+      .uid { font-size: 11px; opacity: 0.75; white-space: nowrap; user-select: all; overflow: hidden; text-overflow: ellipsis; }
 
       .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      /* The ✕ riding inside the Disconnected badge: a small solid disc in the badge's own colors
+         inverted, so it reads as a control rather than dissolving into the label beside it. */
+      .pill .forget-btn {
+        cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border-radius: 50%; font-size: 11px; font-weight: 700;
+        background: var(--soft-red-fg); color: var(--soft-red-bg);
+      }
+      .pill .forget-btn:hover { filter: brightness(1.15); }
+      /* Sized for its widest state — "Disconnected" with the ✕ — so the column does not breathe
+         when an Agent's connection flips; the Stale pill wraps below rather than widening it. */
+      th.status, td.status { width: 180px; min-width: 180px; }
       .pill.solid-green { background: var(--ok-bg); color: var(--ok-fg); }
       /* The badge that heads a detail row. The accent, because these rows exist only under the
          current Agent — the same violet that marks its row as the one being looked at. */
@@ -203,7 +230,7 @@
       .pill.red { background: var(--soft-red-bg); color: var(--soft-red-fg); }
       .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
-      .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -349,13 +376,13 @@
               <th class="sortable" data-key="name">Name <span class="arrow"></span></th>
               <th class="sortable" data-key="version">Version <span class="arrow"></span></th>
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
-              <th>Network</th>
+              <th class="col-network">Network</th>
               <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
               <th>Matched configs</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
-              <th class="sortable" data-key="connected">Status <span class="arrow"></span></th>
+              <th class="sortable status" data-key="connected">Status <span class="arrow"></span></th>
             </tr>
           </thead>
           <tbody id="agents"></tbody>
@@ -471,9 +498,15 @@
         // Disconnected is soft red, not gray: a link that is down is a finding, not an absence —
         // but soft, because behind a Gateway it can be routine (ADR-0038); FAILED keeps the
         // stronger reading as the one hard error in the row.
+        //
+        // The badge carries a ✕: a disconnected row is where forgetting is usually decided, so
+        // the remedy rides on the diagnosis. A shortcut, not the rule — the details keep the
+        // forget chip for *every* Agent, because whether one may be forgotten is a question about
+        // silence and not about this flag (ADR-0039): an Agent behind a Gateway reads Connected
+        // however dead its host is, and must stay forgettable.
         const base = a.connected
           ? `<span class="pill solid-green"><span class="dot"></span>Connected</span>`
-          : `<span class="pill red"><span class="dot"></span>Disconnected</span>`;
+          : `<span class="pill red"><span class="dot"></span>Disconnected<span class="forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕</span></span>`;
         return a.stale
           ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
           : base;
@@ -612,7 +645,7 @@
             <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
-            <td>${statusPill(a)}</td>
+            <td class="status">${statusPill(a)}</td>
           </tr>`;
           // Everything about an agent that is a *set* rather than a value goes under its row
           // rather than into a column of its own: a column has to be as wide as its widest cell,
