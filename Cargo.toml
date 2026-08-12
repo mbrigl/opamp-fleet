@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # `tokio-rs/tracing`'s own appender, so the rotation lives beside the logging stack rather than
 # being hand-written inside the component whose job is to explain failures.
 tracing-appender = "0.2"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
 # Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0007) — and,
