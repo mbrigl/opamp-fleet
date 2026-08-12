@@ -1,6 +1,6 @@
 # ADR-0056: The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-12
 - **Deciders:** Markus Brigl
 
