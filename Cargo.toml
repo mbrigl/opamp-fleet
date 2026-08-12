@@ -97,7 +97,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = ["
 # memory of the Agent's process — are still experimental upstream. Taking them from here anyway is
 # the point: an experimental name that moves becomes a compile error on the next version bump,
 # where a string literal would quietly keep emitting the old one.
-opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
+opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
 opentelemetry-appender-tracing = "0.31"
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
