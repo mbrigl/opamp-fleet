@@ -68,6 +68,11 @@ Agent comes up, connects, and reports `no process installed` — a Supervisor wi
 plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, so the first
 version arrives the same way every later one does.
 
+**The block does not have to be written on the host either.** A Configuration typed
+`opamp-fleet-client` (ADR-0012) whose body carries this `[[supervisor]]` block rolls the block
+itself out to every matching Client, which writes it into its own `client.toml` and starts the
+Supervisor (ADR-0019) — the walkthrough's remaining steps are the same either way.
+
 ## 2. Build the artifact
 
 `opamp-package-sign pack` writes the two containers the Client can open, with the member named the
@@ -196,12 +201,18 @@ pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from st
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
+       -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
        http://127.0.0.1:4320/api/v1/configurations/promtail-conf
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"published": true}' \
+       http://127.0.0.1:4320/api/v1/configurations/promtail-conf/publication
 ```
 
-The Configuration's name and the file name in the argument are the same string. Change the
-Configuration and the Supervisor rewrites the file and restarts the process so it re-reads it.
+The first call only stores a draft — saving never distributes (ADR-0028); the second releases it,
+and the `service_name` keeps the body away from every Agent that is not a promtail, whatever the
+Selector says (ADR-0012). The Configuration's name and the file name in the argument are the same
+string. Change the Configuration and publish again: the Supervisor rewrites the file and restarts
+the process so it re-reads it.
 
 ## 7. Watch it land
 

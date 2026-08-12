@@ -1,6 +1,6 @@
 # ADR-0026: The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 

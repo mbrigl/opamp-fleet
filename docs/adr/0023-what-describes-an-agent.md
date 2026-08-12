@@ -1,6 +1,6 @@
 # ADR-0023: What describes an Agent — `service.name` carries the type, `service.instance.name` the operator's name
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 

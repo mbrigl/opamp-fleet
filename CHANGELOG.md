@@ -15,7 +15,48 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.2.4]
+## [0.2.5]
+
+### Changed
+
+- **Saving a Configuration no longer distributes it** ([ADR-0028](docs/adr/0028-a-package-is-published-before-it-is-offered.md)).
+  `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
+  `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
+  published Configuration stages the change (`pending_changes: true`) until the next publication.
+  In the bundled UI the button that used to read *Save & distribute* is now *Save*, and *Publish*
+  is what changes the fleet. Retracting (`{"published": false}`) removes the entry from every
+  composed config map, which matching Agents apply.
+  **What to do:** Configurations stored before the upgrade load as published and stay in force —
+  running fleets are untouched. Scripts that `PUT` a Configuration and expect delivery need the
+  one extra publication call.
+
+- **A configuration offered to the Client's own Agent now means something — its Supervisor set**
+  ([ADR-0019](docs/adr/0019-supervisor-directory-programs-and-supervisor-set.md)). A
+  Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
+  stops what left the set, writes the blocks into its own `client.toml` (preserving the
+  operator's comments and everything outside them), and starts what arrived — unchanged
+  Supervisors are not touched. Every other top-level key in the offered document is ignored: the
+  endpoint, credentials, and state directory can never arrive over the wire. Previously the
+  Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
+  **What to do:** state whom your Configurations are for
+  (`service_name`, [ADR-0012](docs/adr/0012-selector-targeted-configurations-and-rest-api.md)). An
+  *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
+  body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
+  `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
+  configurations, and a fleet that never publishes a `opamp-fleet-client`-typed Configuration
+  keeps running its locally written blocks.
+
+### Added
+
+- **A Configuration can state the Agent type it is for**
+  ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-rest-api.md)). The optional
+  `service_name` field is compared raw against the `service.name` an Agent reports, before the
+  Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
+  currently reports as suggestions.
+  **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
+  field over a `service.name` Selector pair when creating new ones.
+
+## [0.2.4] - 2026-08-12
 
 ### Added
 

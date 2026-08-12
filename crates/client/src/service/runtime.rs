@@ -219,10 +219,10 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             let transport = async {
                 match config.transport()? {
                     TransportKind::WebSocket => {
-                        transport::ws::run(&mut engine, &config, &mut shutdown).await
+                        transport::ws::run(&mut engine, &mut config, &mut shutdown).await
                     }
                     TransportKind::Http => {
-                        transport::http::run(&mut engine, &config, &mut shutdown).await
+                        transport::http::run(&mut engine, &mut config, &mut shutdown).await
                     }
                 }
             };

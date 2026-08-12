@@ -1,6 +1,6 @@
 # ADR-0021: A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 

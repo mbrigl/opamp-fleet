@@ -1,6 +1,6 @@
 # ADR-0016: What a package is, and how the Server — not the host — aims it at Agents
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-05
 - **Deciders:** Markus Brigl
 

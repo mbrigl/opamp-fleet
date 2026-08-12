@@ -97,6 +97,13 @@ impl Plugin for CommandPlugin {
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
     }
+
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
+        let _: CommandSettings = settings
+            .try_into()
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
