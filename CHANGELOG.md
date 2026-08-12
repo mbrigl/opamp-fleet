@@ -15,7 +15,34 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.2.3]
+## [0.2.4]
+
+### Added
+
+- **The Client's own configuration is visible in the fleet view.** The Client's own Agent now
+  reports its `client.toml` as its effective configuration — previously the column stayed empty
+  for every Client. Credential values (`[auth]`'s `bearer_token` and `password`, `[packages]`'s
+  `archive_key`) are masked as `***` before the file leaves the host, since the Server persists
+  what it receives. In the fleet table, clicking an Effective-config cell opens the whole
+  configuration in a dialog.
+  **What to do:** nothing. Note that the redacted file is now part of the Agent record the Server
+  stores under `agents/`.
+
+### Changed
+
+- **The Linux service executes from `/opt`.** A default system install's executable layout —
+  `versions/` and the `current` pointer — now lives at `/opt/opamp-fleet/client/<instance>`
+  instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
+  systemd start it (`status=203/EXEC`); `client.toml` and `state/` stay at
+  `/var/lib/opamp-fleet/client/<instance>`, and `--root` still puts everything under the one
+  directory it names ([ADR-0029](docs/adr/0029-the-linux-service-executes-from-opt.md)).
+  **What to do:** nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit
+  against `/opt`, restarts the service if it was running, moves no data, and cleans the orphaned
+  binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
+  `opamp-fleet-client service install` once after the update, then delete the leftover
+  `versions/` and `current` under `/var/lib/opamp-fleet/client/<instance>`.
+
+## [0.2.3] - 2026-08-12
 
 ### Added
 

@@ -11,4 +11,4 @@
 # the deb's link is never at risk and cargo-deb is not given this file.
 set -e
 
-ln -sfn /var/lib/opamp-fleet/client/default/current/opamp-fleet-client /usr/bin/opamp-fleet-client
+ln -sfn /opt/opamp-fleet/client/default/current/opamp-fleet-client /usr/bin/opamp-fleet-client

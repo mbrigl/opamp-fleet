@@ -257,6 +257,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 }
                 if let Some(handle) = gateway.take() {
                     handle.abort();
+                    // The listener is only released once the task has unwound; binding the new
+                    // one before that races an "address already in use" that nothing retries.
+                    let _ = handle.await;
                 }
                 gateway = spawn_gateway(&config, &shutdown);
                 if config.heartbeat_interval_secs > 0 {
