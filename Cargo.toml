@@ -26,7 +26,7 @@ serde_json = "1"
 toml = "1"
 # Format-preserving TOML editing (ADR-0056): rewriting `client.toml`'s `[[supervisor]]` blocks
 # must not destroy the operator's comments and layout in the rest of the file.
-toml_edit = "0.23"
+toml_edit = "0.25"
 futures-util = "0.3"
 tracing = "0.1"
 # `registry` is what a layered subscriber composes on: the OTLP log bridge needs a reloadable slot
