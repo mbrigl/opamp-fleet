@@ -15,6 +15,19 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.4]
+
+### Added
+
+- **The Client's own configuration is visible in the fleet view.** The Client's own Agent now
+  reports its `client.toml` as its effective configuration — previously the column stayed empty
+  for every Client. Credential values (`[auth]`'s `bearer_token` and `password`, `[packages]`'s
+  `archive_key`) are masked as `***` before the file leaves the host, since the Server persists
+  what it receives. In the fleet table, clicking an Effective-config cell opens the whole
+  configuration in a dialog.
+  **What to do:** nothing. Note that the redacted file is now part of the Agent record the Server
+  stores under `agents/`.
+
 ## [0.2.3] - 2026-08-12
 
 ### Added

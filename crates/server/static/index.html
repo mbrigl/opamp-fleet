@@ -233,6 +233,14 @@
       .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
       .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .cfg.cfg-open { cursor: pointer; }
+      .cfg.cfg-open:hover { color: var(--text); }
+      /* The full effective configuration is a document, not a cell: the truncated column opens it
+         whole in a dialog, where it scrolls inside its own box. */
+      .cfg-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; padding: 16px 18px; width: min(760px, 92vw); }
+      .cfg-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+      .cfg-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+      .cfg-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -422,6 +430,16 @@
       </div>
       </div>
     </div>
+
+    <!-- The whole effective configuration, opened from its truncated column. A native <dialog>:
+         the browser supplies the backdrop and the Esc-to-close, nothing here reinvents them. -->
+    <dialog id="config-dialog" class="cfg-dialog">
+      <div class="cfg-dialog-head">
+        <strong id="config-dialog-title"></strong>
+        <button id="config-dialog-close" class="btn btn-ghost">Close</button>
+      </div>
+      <pre id="config-dialog-body" class="cfg-full"></pre>
+    </dialog>
 
     <script>
       const $ = (id) => document.getElementById(id);
@@ -673,7 +691,7 @@
             <td>${networkOf(a)}</td>
             <td>${configPill(a)}</td>
             <td>${matchedConfigs(a)}</td>
-            <td><pre class="cfg" title="${esc(a.effective_config)}">${esc(a.effective_config) || "—"}</pre></td>
+            <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
             <td class="status">${statusPill(a)}</td>
@@ -773,6 +791,16 @@
           render();
           return;
         }
+        const cfg = e.target.closest(".cfg-open");
+        if (cfg) {
+          const agent = agents.find((x) => x.instance_uid === cfg.dataset.uid);
+          if (agent && agent.effective_config) {
+            $("config-dialog-title").textContent = `${displayName(agent) || "agent"} — effective configuration`;
+            $("config-dialog-body").textContent = agent.effective_config;
+            $("config-dialog").showModal();
+          }
+          return;
+        }
         const toggle = e.target.closest(".cap-toggle");
         if (toggle) {
           const uid = toggle.dataset.uid;
@@ -790,6 +818,12 @@
         e.preventDefault();
         currentAgent = currentAgent === tr.dataset.uid ? null : tr.dataset.uid;
         render();
+      });
+      $("config-dialog-close").addEventListener("click", () => $("config-dialog").close());
+      // A click on the backdrop closes too: the dialog's own box catches clicks inside it, so a
+      // click that reaches the <dialog> element itself can only have hit the backdrop.
+      $("config-dialog").addEventListener("click", (e) => {
+        if (e.target === $("config-dialog")) $("config-dialog").close();
       });
       // Reflects the current selection in the bar above the table.
       function renderSelection() {

@@ -77,6 +77,24 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     if let Some(self_update) = &config.self_update {
         self_state.accept_packages_named(self_update.package.clone());
     }
+    // The self-Agent's effective configuration is its own file — `client.toml` is what this
+    // Client runs (a file that fails to load fails startup), so the fleet view can finally answer
+    // it. The text was redacted at load; without it, echoing a stored offer would say nothing
+    // about this Client. No file means the defaults run, and there is nothing truthful to show.
+    if let Some(source) = &config.source {
+        self_state.set_process_effective_config(opamp::proto::EffectiveConfig {
+            config_map: Some(opamp::proto::AgentConfigMap {
+                config_map: std::collections::HashMap::from([(
+                    "client.toml".to_string(),
+                    opamp::proto::AgentConfigFile {
+                        role: String::new(),
+                        body: source.clone().into_bytes(),
+                        content_type: String::new(),
+                    },
+                )]),
+            }),
+        });
+    }
     agents.push((self_state, None));
 
     for (block_index, block) in config.supervisors.iter().enumerate() {
@@ -357,5 +375,40 @@ mod tests {
             panic!("a block without a program must not start");
         };
         assert!(err.contains("needs a `command`"), "{err}");
+    }
+
+    /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:
+    /// the first report carries `client.toml`'s (redacted) text, which is what fills the fleet
+    /// view's empty column for every Client.
+    #[tokio::test]
+    async fn the_self_agent_reports_its_file_as_the_effective_configuration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let path = dir.path().join("client.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "# written by the operator\nendpoint = \"ws://127.0.0.1:1/v1/opamp\"\n\
+                 state_dir = {state:?}\n[auth]\nbearer_token = \"s3cret\"\n",
+                state = dir.path().join("state").to_string_lossy(),
+            ),
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("load");
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+
+        let reports = engine.poll_reports();
+        let effective = reports[SELF_AGENT_INDEX]
+            .effective_config
+            .as_ref()
+            .expect("the first report is a full one and carries the effective configuration");
+        let map = &effective.config_map.as_ref().expect("map").config_map;
+        let body = String::from_utf8(map["client.toml"].body.clone()).expect("utf-8");
+        assert!(body.contains("# written by the operator"), "{body}");
+        assert!(body.contains("endpoint = \"ws://127.0.0.1:1/v1/opamp\""));
+        assert!(
+            !body.contains("s3cret"),
+            "a credential must never leave the host: {body}"
+        );
     }
 }

@@ -25,7 +25,10 @@ Server sends them, reports back what they are doing, and can replace their binar
 
 - **Presents one or more Agents to the Server.** The Client is always its own Agent, whether or not
   it supervises anything, so the Server can see which version each host runs. Each configured
-  Supervisor is an additional Agent. All of them share one connection.
+  Supervisor is an additional Agent. All of them share one connection. The Client's own Agent
+  reports `client.toml` itself as its effective configuration — with credential values (`[auth]`'s
+  `bearer_token` and `password`, `[packages]`'s `archive_key`) masked as `***`, since the Server
+  persists what it receives.
 - **Supervises processes** (ADR-0011): starts them, watches them, restarts them on a configuration
   change or a Server-issued restart command, stops them gracefully on shutdown.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
