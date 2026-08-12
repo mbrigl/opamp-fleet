@@ -102,7 +102,7 @@ opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_ex
 opentelemetry-appender-tracing = "0.31"
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
 # three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # The built-in root store, for the one case the transports' own defaults cannot cover: a Client
 # presenting a client certificate (ADR-0035) to a Server with a publicly trusted one, which needs
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
