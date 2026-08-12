@@ -143,10 +143,10 @@ fn report(uid: &InstanceUid) -> AgentToServer {
 /// A reqwest client that trusts `pki`'s CA and, given an identity, presents it as a client
 /// certificate.
 fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
+    client::tls::install_ring_provider();
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
-        .tls_built_in_root_certs(false)
-        .add_root_certificate(reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca"));
+        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")]);
     if let Some((cert, key)) = identity {
         let mut pem = key.into_bytes();
         pem.extend_from_slice(cert.as_bytes());

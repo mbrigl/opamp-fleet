@@ -74,6 +74,8 @@ async fn spawn_full(
     limit: usize,
     stale_after: std::time::Duration,
 ) -> TestServer {
+    // What main() does at startup: without a process provider, reqwest refuses to build a client.
+    server::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
@@ -215,6 +217,7 @@ pub async fn distribute_with_role(
 /// The same real router with own-telemetry destinations to offer (ADR-0036).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: server::fleet::TelemetryOffer) -> TestServer {
+    server::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))

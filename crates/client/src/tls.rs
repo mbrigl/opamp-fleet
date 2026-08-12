@@ -14,6 +14,17 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::config::ClientConfig;
 
+/// Installs the process-wide rustls provider — ring, never a system library (ADR-0007) — once;
+/// later calls are no-ops. The binary calls it at startup. Tests that build an HTTP client call
+/// it themselves: reqwest's `rustls-no-provider` feature refuses to build one without a process
+/// provider, which is the very guarantee that keeps aws-lc-rs and its cmake out of this build.
+pub fn install_ring_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // A concurrent second install can still lose the race; losing to the same provider is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 /// The Server-issued client certificate, in the state directory beside the connection settings —
 /// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0035).
 pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
@@ -138,9 +149,9 @@ pub fn trust(
         std::fs::read(ca_file).map_err(|e| format!("cannot read {}: {e}", ca_file.display()))?;
     let ca = reqwest::Certificate::from_pem(&pem)
         .map_err(|e| format!("cannot parse {}: {e}", ca_file.display()))?;
-    Ok(builder
-        .tls_built_in_root_certs(false)
-        .add_root_certificate(ca))
+    // The configured CA *replaces* the built-in roots (`tls_certs_only`), exactly as the
+    // WebSocket transport's rustls config does — a `[tls] ca_file` says whom to trust, whole.
+    Ok(builder.tls_certs_only([ca]))
 }
 
 /// Applies both halves — trust and this Client's own identity — to a reqwest builder: what the

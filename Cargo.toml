@@ -26,7 +26,7 @@ serde_json = "1"
 toml = "1"
 # Format-preserving TOML editing (ADR-0056): rewriting `client.toml`'s `[[supervisor]]` blocks
 # must not destroy the operator's comments and layout in the rest of the file.
-toml_edit = "0.23"
+toml_edit = "0.25"
 futures-util = "0.3"
 tracing = "0.1"
 # `registry` is what a layered subscriber composes on: the OTLP log bridge needs a reloadable slot
@@ -68,7 +68,7 @@ libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0007).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # The Client's plain-HTTP(S) polling transport (ADR-0007); `json` serves the REST-API tests.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "json"] }
 # TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0007).
 # The provider is installed once at each binary's startup.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -92,17 +92,17 @@ x509-parser = "0.18"
 # schema. `http-proto` is the OTLP/HTTP protobuf encoding the Baseline's destination_endpoint
 # requires; `reqwest-client` replaces the default *blocking* client, which would stall a tokio
 # worker; `grpc-tonic` is deliberately absent, since the schema permits no gRPC destination here.
-opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
-opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
+opentelemetry = { version = "0.32", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.32", features = ["trace", "metrics", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
 # Metric and attribute names from the standard rather than string literals of our own (ADR-0036).
 # `semconv_experimental` is needed because the *process* metrics the Baseline points at — CPU and
 # memory of the Agent's process — are still experimental upstream. Taking them from here anyway is
 # the point: an experimental name that moves becomes a compile error on the next version bump,
 # where a string literal would quietly keep emitting the old one.
-opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
+opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
-opentelemetry-appender-tracing = "0.31"
+opentelemetry-appender-tracing = "0.32"
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
 # three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

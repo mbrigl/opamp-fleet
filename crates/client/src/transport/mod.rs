@@ -206,6 +206,7 @@ mod tests {
     /// like a stuck install. Driven by a server that trickles the artifact out.
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
+        crate::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
 

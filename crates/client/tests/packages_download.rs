@@ -15,6 +15,8 @@ use futures_util::stream;
 
 /// A server with the responses the download tests need.
 async fn spawn() -> SocketAddr {
+    // What main() does at startup: without a process provider, reqwest refuses to build a client.
+    client::tls::install_ring_provider();
     let app = Router::new()
         // A known-length body: `Content-Length` says up front it is too big.
         .route("/known", get(|| async { vec![0u8; 4096] }))
