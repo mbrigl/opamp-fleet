@@ -3,8 +3,11 @@
 //! ```text
 //! <root>/versions/opamp-fleet-client-<MAJOR.MINOR.PATCH>-<hash>/opamp-fleet-client
 //! <root>/current -> versions/opamp-fleet-client-…/   # symlink (Unix) / junction (Windows)
-//! <root>/state/                                      # default per-instance state
 //! ```
+//!
+//! The default per-instance state directory is [`STATE_DIR_NAME`] under the *data* root — the
+//! same directory as this layout's root everywhere except Linux system installs, where the
+//! layout executes from `/opt` while data stays in `/var/lib` (ADR-0053).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
@@ -34,6 +37,11 @@ pub const COMPONENT: &str = "opamp-fleet-client";
 
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
+
+/// The per-instance state directory's name under its root (ADR-0010) — the *data* root, which
+/// ADR-0053 places beside the configuration rather than inside the executable layout on Linux
+/// system installs.
+pub const STATE_DIR_NAME: &str = "state";
 
 /// The install layout rooted at an operator-chosen directory (never a fixed path).
 #[derive(Debug, Clone)]
@@ -69,12 +77,6 @@ impl Layout {
     #[must_use]
     pub fn current_binary(&self) -> PathBuf {
         self.current().join(BINARY_FILENAME)
-    }
-
-    /// `<root>/state` — the default per-instance state directory (ADR-0010).
-    #[must_use]
-    pub fn state_dir(&self) -> PathBuf {
-        self.root.join("state")
     }
 
     /// Point `current` at `version_dir`.
@@ -310,7 +312,6 @@ mod tests {
         let layout = Layout::new("/opt/x");
         assert_eq!(layout.versions_dir(), PathBuf::from("/opt/x/versions"));
         assert_eq!(layout.current(), PathBuf::from("/opt/x/current"));
-        assert_eq!(layout.state_dir(), PathBuf::from("/opt/x/state"));
         assert!(layout.current_binary().starts_with("/opt/x/current"));
     }
 

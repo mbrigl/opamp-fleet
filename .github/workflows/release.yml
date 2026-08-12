@@ -247,7 +247,11 @@ jobs:
           # ADR-0048: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          grep -q 'rm -rf "$root/versions"' <<<"$scripts"
+          # The executable layout the removal takes back lives under /opt since ADR-0053; the
+          # pre-ADR-0053 leftovers under the data root are cleaned by the same scriptlet.
+          # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
+          grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
+          grep -qF 'rm -rf "$data_root/versions"' <<<"$scripts"
           # And the arch inside the package is the ecosystem's, not the file name's (ADR-0046).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 

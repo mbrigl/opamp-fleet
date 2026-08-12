@@ -81,7 +81,7 @@ $ opamp-fleet-client service uninstall      # deregisters; never deletes the ins
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
-| `--root <dir>` | `service install` | The install root. Defaults to the platform's data directory for the scope and instance — Linux `/var/lib/opamp-fleet/client/<instance>`, macOS `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`. No path is ever fixed. |
+| `--root <dir>` | `service install` | The install root: everything — the executable layout, `client.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start — ADR-0053); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service (ADR-0027). See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it (ADR-0046) — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
 
@@ -260,6 +260,12 @@ against, and the default state directory:
 
 Because the service runs `<root>/current/opamp-fleet-client`, switching versions never re-registers
 the service.
+
+On a **Linux system install without `--root`**, the picture above spans two directories
+(ADR-0053): `versions/` and `current` live under `/opt/opamp-fleet/client/<instance>` — SELinux
+never lets systemd execute a binary labeled for `/var/lib` — while `client.toml` and `state/`
+stay under `/var/lib/opamp-fleet/client/<instance>`. An explicit `--root` keeps everything under
+the one directory it names.
 
 After a crash the service manager restarts the service; after an explicit stop it stays down. Known
 platform gaps, tracked in ADR-0010: on macOS `service status` is advisory and `install` does not

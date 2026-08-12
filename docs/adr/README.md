@@ -81,4 +81,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟡 proposed |
 | [0051](0051-agent-records-persist-across-a-server-restart.md) | Agent records persist behind a storage port — filesystem by default, connectedness runtime-only | 🟡 proposed |
 | [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟡 proposed |
+| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟡 proposed |
 

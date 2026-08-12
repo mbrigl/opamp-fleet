@@ -284,10 +284,14 @@ $ opamp-fleet-client service uninstall                                   # never
 - **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
   independent service (`opamp-fleet-client-<name>`) with its own configuration, install root,
   and state — several differently-configured Clients coexist on one host.
-- **Install root:** `--root <dir>` overrides the per-platform default (Linux:
-  `/var/lib/opamp-fleet/client/<instance>`); nothing is ever installed to a fixed path. The
-  root holds `versions/opamp-fleet-client-<version>-<commit>/`, the `current` pointer the service runs
-  from, and the default `state/` directory.
+- **Install root:** `--root <dir>` puts everything under one directory; nothing is ever installed
+  to a fixed path. Without it, a Linux system install splits the defaults: the executable layout —
+  `versions/opamp-fleet-client-<version>-<commit>/` and the `current` pointer the service runs
+  from — lives at `/opt/opamp-fleet/client/<instance>`, while `client.toml` and the default
+  `state/` directory stay at `/var/lib/opamp-fleet/client/<instance>` (SELinux never lets systemd
+  execute a binary under `/var/lib` —
+  [ADR-0053](docs/adr/0053-the-linux-service-executes-from-opt.md)). macOS, Windows, and user
+  scope keep one default directory for everything.
 - **Scope:** `--user` targets the user-level manager (development); the default is a system
   service that starts at boot.
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
@@ -318,7 +322,10 @@ doing and nothing else asserts it. The test is `crates/client/tests/service_smok
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
 (`journalctl -u opamp-fleet-client` on Linux, Console/`log show` on macOS), the Agent in
-the fleet UI, and a second `--instance` beside the first. Known platform gaps (tracked in the ADR):
+the fleet UI, a second `--instance` beside the first, and an **SELinux-enforcing host** (Fedora,
+RHEL, or SUSE 16 with `getenforce` answering `Enforcing`): the `.rpm` install must start —
+a service dying with `status=203/EXEC` and an AVC denial in `ausearch -m avc` is the failure
+ADR-0053 exists to prevent. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
 `<state_dir>/logs` on every platform (ADR-0041), which is where to look when the manager shows a

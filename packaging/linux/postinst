@@ -9,9 +9,12 @@
 #
 # What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0048),
 # laid here — so `opamp-fleet-client --version` answers for the binary the service runs, not for
-# whatever this package happened to deliver. The target names the default system root and default
-# instance (`default_root` in crates/client/src/service/manager.rs), the only root a packaged
-# install ever uses: this script calls plain `service install`.
+# whatever this package happened to deliver. The targets name the default system roots and default
+# instance (`default_layout_root` and `default_root` in crates/client/src/service/manager.rs), the
+# only roots a packaged install ever uses: this script calls plain `service install`. They are two
+# roots since ADR-0053 — the executable layout under `/opt`, because SELinux never lets systemd
+# execute a binary labeled `var_lib_t`; the configuration and state under `/var/lib`, where data
+# belongs and where every managed host already has them.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
@@ -33,11 +36,19 @@ fi
 
 /usr/libexec/opamp-fleet-client service install
 
+# One-time migration (ADR-0053): releases before it staged the executable layout under the data
+# root, where SELinux enforcing hosts never let it start. `service install` above has re-registered
+# the unit against the `/opt` layout, so what remains under `/var/lib` is orphaned binaries — the
+# configuration and state beside them stay untouched. A host installed after ADR-0053 has neither
+# path and this removes nothing.
+rm -rf /var/lib/opamp-fleet/client/default/versions
+rm -f /var/lib/opamp-fleet/client/default/current
+
 # `-n`: without it, ln would place the link *inside* the directory an existing link resolves to.
 # On rpm upgrades the erasure of the old package's files deletes this link again; `%posttrans`
 # (packaging/linux/posttrans) re-lays it after that erasure, which dpkg does not need — it removes
 # the obsolete `/usr/bin` file during unpack, before this runs.
-ln -sfn /var/lib/opamp-fleet/client/default/current/opamp-fleet-client /usr/bin/opamp-fleet-client
+ln -sfn /opt/opamp-fleet/client/default/current/opamp-fleet-client /usr/bin/opamp-fleet-client
 
 if [ "$running" = yes ]; then
 	# Restart, never start. A service that was running was configured by somebody, and it has to

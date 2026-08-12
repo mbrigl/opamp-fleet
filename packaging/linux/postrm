@@ -6,10 +6,11 @@
 # different: the operator asked this host to stop being managed, and what the package flow created
 # it cleanly takes back —
 #
-#   remove:  the PATH symlink, every staged version and the `current` pointer. The state
-#            directory and `client.toml` stay: the instance identity and a credential the
-#            operator typed are not binaries, and a reinstall picks them back up.
-#   purge:   (dpkg only) all of the above and the instance directory itself — state, logs and
+#   remove:  the PATH symlink and the executable layout — every staged version and the `current`
+#            pointer, which since ADR-0053 live under `/opt`. The data root stays: the instance
+#            identity and a credential the operator typed are not binaries, and a reinstall picks
+#            them back up.
+#   purge:   (dpkg only) all of the above and the data root itself — state, logs and
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.
 #
@@ -17,23 +18,24 @@
 # post-install re-lays the link; rpm's `%postun` gets the count of remaining instances, where `1`
 # means a replacement is installed. Cleaning up there would undo the successor's work.
 #
-# The paths name the default system root and default instance (`default_root` in
-# crates/client/src/service/manager.rs) — the only root a packaged install ever uses. A second
-# instance (`--instance prod`) is a manual install and is deliberately not touched.
+# The paths name the default system roots and default instance (`default_layout_root` and
+# `default_root` in crates/client/src/service/manager.rs) — the only roots a packaged install ever
+# uses. A second instance (`--instance prod`) is a manual install and is deliberately not touched.
 #
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path
 # is an operator's (or an older package's) binary, and deleting somebody else's file on the way
 # out is how uninstalls earn distrust.
 set -e
 
-root=/var/lib/opamp-fleet/client/default
+layout_root=/opt/opamp-fleet/client/default
+data_root=/var/lib/opamp-fleet/client/default
 
 case "${1-}" in
 # dpkg: a real removal, keeping state and configuration.
 remove) ;;
 # dpkg: leave nothing.
 purge)
-	rm -rf "$root"
+	rm -rf "$data_root"
 	;;
 # rpm: no instance remains.
 0) ;;
@@ -43,5 +45,12 @@ esac
 if [ -L /usr/bin/opamp-fleet-client ]; then
 	rm -f /usr/bin/opamp-fleet-client
 fi
-rm -rf "$root/versions"
-rm -f "$root/current"
+rm -rf "$layout_root"
+# The layout's parents are the package flow's too — but only while empty, and never `/opt`
+# itself: a second instance's layout, or anything else somebody put there, stays.
+rmdir /opt/opamp-fleet/client /opt/opamp-fleet 2>/dev/null || true
+# Hosts upgraded across ADR-0053 had these cleaned by `postinst`; hosts removing an older
+# install directly still carry the pre-ADR-0053 layout beside their data — binaries, so a
+# remove-level cleanup takes them too.
+rm -rf "$data_root/versions"
+rm -f "$data_root/current"

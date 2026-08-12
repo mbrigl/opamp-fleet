@@ -230,18 +230,45 @@ impl ServiceControl for NativeService {
     }
 }
 
-/// The default install root for a scope and instance — the platform's data directory, per
-/// instance so any number of instances coexist (ADR-0010). `--root` overrides it; no path is
-/// ever fixed.
+/// The default *data* root for a scope and instance — the platform's data directory, per
+/// instance so any number of instances coexist (ADR-0010): where `client.toml` and the state
+/// directory live. `--root` overrides it; no path is ever fixed.
 ///
 /// # Errors
 /// Returns an error if the platform's base directory cannot be determined from the environment.
 pub fn default_root(level: ServiceLevel, instance: &InstanceName) -> Result<PathBuf, String> {
-    let base = default_base(level)?;
-    Ok(base
-        .join("opamp-fleet")
+    Ok(per_instance(default_base(level)?, instance))
+}
+
+/// The default root of the executable layout — `versions/` and the `current` pointer — for a
+/// scope and instance.
+///
+/// On Linux at system scope this is **not** the data root: a binary staged under `/var/lib`
+/// carries the SELinux type `var_lib_t`, which systemd may never execute — the service would
+/// register cleanly and then die at its first start with `status=203/EXEC` on every enforcing
+/// host (Fedora, RHEL, SUSE 16). The layout therefore lives under `/opt`, whose `usr_t` label
+/// is an entrypoint type systemd runs third-party services from, and which every version the
+/// self-update stages later inherits (ADR-0053). Everywhere else — macOS, Windows, and every
+/// user scope — layout and data share [`default_root`].
+///
+/// # Errors
+/// Returns an error if the platform's base directory cannot be determined from the environment.
+pub fn default_layout_root(
+    level: ServiceLevel,
+    instance: &InstanceName,
+) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    if level == ServiceLevel::System {
+        return Ok(per_instance(PathBuf::from("/opt"), instance));
+    }
+    default_root(level, instance)
+}
+
+/// `<base>/opamp-fleet/client/<instance>` — one product, one component, one instance.
+fn per_instance(base: PathBuf, instance: &InstanceName) -> PathBuf {
+    base.join("opamp-fleet")
         .join("client")
-        .join(instance.as_str()))
+        .join(instance.as_str())
 }
 
 #[cfg(target_os = "linux")]
@@ -371,5 +398,28 @@ mod tests {
         assert_eq!(root, PathBuf::from("/var/lib/opamp-fleet/client/prod"));
         let user = default_root(ServiceLevel::User, &instance("prod")).expect("user root");
         assert!(user.ends_with("opamp-fleet/client/prod"));
+    }
+
+    /// ADR-0053: a system service's binary must not live under `/var/lib` — SELinux's
+    /// `var_lib_t` is no entrypoint type, and the service would fail its first start with
+    /// `status=203/EXEC` on every enforcing host. The executable layout defaults to `/opt`;
+    /// the data root stays where ADR-0010 put it, so an upgrade moves no state. User scope
+    /// has no such constraint and keeps one root for both.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_system_layout_executes_from_opt() {
+        let layout =
+            default_layout_root(ServiceLevel::System, &instance("prod")).expect("layout root");
+        assert_eq!(layout, PathBuf::from("/opt/opamp-fleet/client/prod"));
+        assert_ne!(
+            layout,
+            default_root(ServiceLevel::System, &instance("prod")).expect("data root"),
+            "the split is the fix: data stays in /var/lib, the binary executes from /opt"
+        );
+        assert_eq!(
+            default_layout_root(ServiceLevel::User, &instance("prod")).expect("user layout"),
+            default_root(ServiceLevel::User, &instance("prod")).expect("user data"),
+            "a user service runs in the user's own domain — one root for both"
+        );
     }
 }
