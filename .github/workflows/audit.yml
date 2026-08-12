@@ -44,7 +44,7 @@ jobs:
       # up. On a PR/push the failing check is already visible, so this is scheduled-only.
       - name: Open an issue when the scheduled audit fails
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const label = 'security-audit';
