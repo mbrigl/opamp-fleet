@@ -1,14 +1,14 @@
-# OpAMP Fleet Client configuration (ADR-0008). Every setting is optional; the values shown are the
+# OpAMP Fleet Client configuration. Every setting is optional; the values shown are the
 # defaults. Start with: cargo run -p client -- --config config/client.toml
 
-# The Server's OpAMP endpoint. The URL scheme selects the transport (ADR-0007):
+# The Server's OpAMP endpoint. The URL scheme selects the transport:
 #   ws:// or wss://    → WebSocket (the default: Server pushes changes within seconds)
 #   http:// or https:// → plain HTTP polling (see poll_interval_secs)
 endpoint = "ws://127.0.0.1:4320/v1/opamp"
 
 # The Agent's service.instance.name — the operator's name for *this* Client, shown in the fleet UI
 # and matchable by a Selector. Its service.name is the constant type `opamp-fleet-client`, the same
-# on every host, which is what a package or Configuration aimed at every Client matches (ADR-0033).
+# on every host, which is what a package or Configuration aimed at every Client matches.
 name = "opamp-fleet-client"
 
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
@@ -24,17 +24,17 @@ heartbeat_interval_secs = 30
 max_message_size_bytes = 67108864
 
 # Where the Client persists its instance_uid, the received remote configuration, and any
-# Server-offered connection settings (ADR-0014). Persisted connection settings override
+# Server-offered connection settings. Persisted connection settings override
 # endpoint, [auth], and the intervals above; delete <state_dir>/connection-settings.pb to revert.
-# A package for the Client itself (ADR-0020) is streamed to <state_dir>/packages/ first, so this
+# A package for the Client itself is streamed to <state_dir>/packages/ first, so this
 # directory needs room for one agent binary.
 state_dir = "client-state"
 
-# The Client's own log on disk (ADR-0041), written **only while it runs as a service** — in the
+# The Client's own log on disk, written **only while it runs as a service** — in the
 # foreground it goes to stderr alone, because somebody is reading it there. It exists because the
 # Windows SCM discards a service's stderr, so a Client installed there had no readable log at all;
 # on Linux and macOS it duplicates what journalctl and `log show` already keep, so that "where are
-# the logs" has one answer on every platform. This is not the own-telemetry of ADR-0036: that needs
+# the logs" has one answer on every platform. This is not the Client's own telemetry: that needs
 # a Server it can already reach, which is exactly what a start-up failure does not have.
 # It is the machine's — nothing here ever arrives from the Server.
 # [logging]
@@ -42,7 +42,7 @@ state_dir = "client-state"
 # dir = "/var/log/opamp"    # default: <state_dir>/logs, which survives updates and `uninstall`
 # keep = 7                  # daily files kept, then deleted. A bound, not a switch: 0 is refused
 
-# Where the per-Supervisor directories live (ADR-0021); the default is <state_dir>/supervisors.
+# Where the per-Supervisor directories live; the default is <state_dir>/supervisors.
 # Each Supervisor owns everything under its own directory — its identity, the received
 # configuration, its program/, and the artifact staging its updates go through:
 #
@@ -52,13 +52,13 @@ state_dir = "client-state"
 # noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
 # supervisor_dir = "/opt/opamp-fleet/supervisors"
 
-# Operator-defined attributes (ADR-0012), reported by every Agent this Client presents so the
+# Operator-defined attributes, reported by every Agent this Client presents so the
 # Server's Selectors can target them. A [[supervisor]] block may add its own [supervisor.attributes]
 # table, which overrides these per key.
 # [attributes]
 # env = "prod"
 
-# Optional Gateway Mode (ADR-0037): this Client stands at a network boundary, accepts OpAMP from
+# Optional Gateway Mode: this Client stands at a network boundary, accepts OpAMP from
 # other Clients, and folds them onto a small pool of upstream connections. It composes with the
 # [[supervisor]] blocks below — a host may supervise its own processes and gateway for others.
 #
@@ -78,7 +78,7 @@ state_dir = "client-state"
 # key_file = "gateway-key.pem"
 # client_ca_file = "client-ca.pem"
 
-# Optional TLS (ADR-0007, ADR-0035). Every key is optional on its own, so this section may carry a
+# Optional TLS. Every key is optional on its own, so this section may carry a
 # trust override, a client identity, or both.
 # [tls]
 # ca_file = "ca.pem"          # replaces the built-in roots — the private-CA deployment
@@ -88,7 +88,7 @@ state_dir = "client-state"
 # The identity above is the one an operator provisions — including the BOOTSTRAP certificate a
 # fresh host enrols with. A certificate the Server issued outranks it: the Client stores that pair
 # in <state_dir> as client-cert.pem and client-key.pem and prefers it, the same way persisted
-# connection settings outrank the endpoint written here (ADR-0014). Deleting the stored pair
+# connection settings outrank the endpoint written here. Deleting the stored pair
 # reverts to this one.
 #
 # Enrolment needs nothing here. When the Server declares that it signs (a [client_ca] section in
@@ -97,35 +97,35 @@ state_dir = "client-state"
 # the same way once the certificate is two thirds through its life. So the useful order is: let the
 # fleet enrol, then have the Server require certificates.
 
-# Optional package verification (ADR-0015). With a key set, every Server-offered package MUST
+# Optional package verification. With a key set, every Server-offered package MUST
 # carry a valid Ed25519 signature over its artifact; without it, an unsigned package installs on
 # its content hash alone and a signed one is refused. A [[supervisor]] block takes package
-# delivery by naming its program with a bare file name (ADR-0021, see the blocks below); *which*
-# artifact it then receives is the Server's decision, expressed as that package's Selector
-# (ADR-0017), never a key in this file.
+# delivery by naming its program with a bare file name (see the blocks below); *which*
+# artifact it then receives is the Server's decision, expressed as that package's Selector —
+# never a key in this file.
 # Generate a key and sign artifacts with the `opamp-package-sign` helper
 # (cargo run -p client --bin opamp-package-sign -- keygen): its keygen output is this value.
 # [packages]
 # verification_key = "<hex-encoded Ed25519 public key>"
-# archive_key = "the key an encrypted .7z was packed with"   # (ADR-0018) opens an encrypted
+# archive_key = "the key an encrypted .7z was packed with"   # opens an encrypted
 #                          # artifact. One secret for the fleet — a single archive serves every
 #                          # Agent — and never the [auth] credential, which the Server rotates on
-#                          # its own (ADR-0014): a rotation would leave every archive unopenable.
+#                          # its own: a rotation would leave every archive unopenable.
 #                          # The Server never learns this key; the artifact stays encrypted
 #                          # wherever it is stored and is opened only on the host that runs it.
 
-# Consent for the Server to replace *this Client's own* binary (ADR-0020). Absent — the default —
+# Consent for the Server to replace *this Client's own* binary. Absent — the default —
 # the Client's Agent declares no package capability at all and no offer can reach it.
 #
-# Unlike a [[supervisor]], which only consents while the Server picks the artifact (ADR-0017), the
+# Unlike a [[supervisor]], which only consents while the Server picks the artifact, the
 # Client must NAME its package: an offer under any other name is refused and reported, never
 # applied. This is one of two independent guards, and it is the one on this side of the wire — the
-# Server will not offer a package built for another Agent type either (ADR-0034), and this Client's
+# Server will not offer a package built for another Agent type either, and this Client's
 # own type is the constant `opamp-fleet-client`. Neither replaces the other: an operator who typed a
 # Collector artifact as `opamp-fleet-client` gets past the Server, and this name is what is left.
 #
 # What happens on an accepted offer: the artifact is verified like any other, staged as a new
-# version *beside* the running one in the ADR-0010 install layout, and proved by running
+# version *beside* the running one in the versioned install layout, and proved by running
 # `client self-check` on it before the `current` pointer moves. The process then exits and asks the
 # service manager to restart it — it does not restart itself. A marker in state_dir carries the
 # outcome across that restart: the new version commits itself once it reaches the Server, and one
@@ -133,7 +133,7 @@ state_dir = "client-state"
 # [self_update]
 # package = "opamp-fleet-client"
 
-# Optional authentication toward the Server (ADR-0013): exactly one scheme — bearer_token, or
+# Optional authentication toward the Server: exactly one scheme — bearer_token, or
 # username and password together. The Authorization header rides every plain-HTTP request and
 # the WebSocket upgrade. Without TLS the credentials travel in cleartext; pair with wss:// or
 # https:// beyond the loopback.
@@ -143,14 +143,14 @@ state_dir = "client-state"
 # username = "fleet"
 # password = "a-strong-password"
 
-# ── Supervisor Mode (ADR-0003, ADR-0011) ────────────────────────────────────────
+# ── Supervisor Mode ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above. The three blocks below show the three
 # ways a Managed Process is brought into the fleet.
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — is also
-# what decides whether the Server may update it (ADR-0021), because replacing a program means
+# what decides whether the Server may update it, because replacing a program means
 # writing in the directory it sits in:
 #
 #   a bare file name    the program lives in <supervisor_dir>/<name>/program/, a directory this
@@ -161,10 +161,10 @@ state_dir = "client-state"
 # Anything in between — ./x, bin/x — fails at startup rather than being guessed at. Note that a
 # bare name is NOT searched for in $PATH; it names a file in that one directory.
 #
-# Every block reports two names, and they answer different questions (ADR-0033):
+# Every block reports two names, and they answer different questions:
 #
 #   name           service.instance.name — *which* Agent this is. Yours, unique per block, also the
-#                  directory name, so it follows the ADR-0010 grammar (lowercase, digits, '-').
+#                  directory name, so it follows the usual name grammar (lowercase, digits, '-').
 #                  A Managed Process can never overwrite it.
 #   service_name   service.name — *what* this Agent is, the Agent type. Optional. A Managed Process
 #                  that reports its own type wins over it (a Collector with the opampextension
@@ -196,13 +196,13 @@ state_dir = "client-state"
 # type = "collector"
 # name = "otelcol-contrib"
 # binary = "otelcol-contrib"  # bare, so it lives in this Supervisor's program/ directory and
-#                          # takes binary updates from the Server (ADR-0015, ADR-0017, ADR-0021):
+#                          # takes binary updates from the Server:
 #                          # the artifact the Server selects for this Agent is verified, swapped
 #                          # over it, health-gated on apply_grace_secs, and rolled back if it will
 #                          # not stay up. *Which* artifact is the Server's decision — give the
 #                          # Set a Selector there (PUT /api/v1/packages/<name>/<type>/<version>/
 #                          # selector), so a rollout is aimed centrally instead of from this file.
-#                          # An artifact that is a .tar.gz is unpacked here (ADR-0018): the member
+#                          # An artifact that is a .tar.gz is unpacked here: the member
 #                          # whose file name matches this one is what gets installed, so an
 #                          # upstream release can be uploaded exactly as published.
 #                          # Put the first copy there yourself; every later one arrives by package.
@@ -216,7 +216,7 @@ state_dir = "client-state"
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
 # the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
 # Every received config-map entry is written to <supervisor_dir>/<name>/config/ under its
-# Configuration's name (ADR-0012) and passed as its own --config; a change restarts the collector.
+# Configuration's name and passed as its own --config; a change restarts the collector.
 # The absolute path here is the other half of the rule above: this Collector came from the
 # machine's package manager, so the Server never writes over it — it is supervised, not updated.
 # [[supervisor]]
@@ -229,14 +229,14 @@ state_dir = "client-state"
 # 3. Any other process — a Foreign Agent under a generic "command" Custom Supervisor. The
 # process speaks no OpAMP, so the Supervisor observes it from the outside (spawn, exit,
 # restart). Every received config-map entry is written to <supervisor_dir>/<name>/config/
-# under its Configuration's name (ADR-0012); point the program's own flag at that file and
+# under its Configuration's name; point the program's own flag at that file and
 # the Supervisor restarts the process on a change so it re-reads it. Named by an absolute
 # path here, so it is the machine's program: installed and updated by whatever put it there,
 # never by the Server. A bare file name instead would put it in this Supervisor's own
-# program/ directory and consent to package delivery (ADR-0021), like `binary` above.
+# program/ directory and consent to package delivery, like `binary` above.
 #
 # args, working_dir and env values may use two placeholders naming this Supervisor's own
-# directories (ADR-0022), so nothing has to be kept in sync with state_dir or supervisor_dir:
+# directories, so nothing has to be kept in sync with state_dir or supervisor_dir:
 #
 #   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
 #   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
@@ -244,7 +244,7 @@ state_dir = "client-state"
 # Any other ${...} is passed to the process untouched, so an agent's own variable syntax keeps
 # working — which also means a misspelled placeholder is handed over rather than refused. The
 # program itself (command, binary) is never substituted: its written form is what decides package
-# consent (ADR-0021), and that must be readable in this file.
+# consent, and that must be readable in this file.
 # [[supervisor]]
 # type = "command"
 # name = "my-agent"
@@ -252,7 +252,7 @@ state_dir = "client-state"
 # args = ["--config", "${config_dir}/my-agent-conf"]
 # working_dir = "/var/lib/my-agent"     # optional
 # version_args = ["--version"]          # what it reports as service.version
-# [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)
+# [supervisor.attributes]               # optional attributes for this Agent
 # role = "edge"
 # [supervisor.env]                      # optional environment for the process
 # LOG_LEVEL = "info"

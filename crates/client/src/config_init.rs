@@ -256,8 +256,8 @@ pub fn ask() -> Result<Answers, String> {
 pub fn render(answers: &Answers) -> String {
     let mut out = String::new();
     out.push_str(
-        "# OpAMP Fleet Client configuration (ADR-0008), written by\n\
-         # `opamp-fleet-client service install` (ADR-0027). It is an ordinary file from here on:\n\
+        "# OpAMP Fleet Client configuration, written by\n\
+         # `opamp-fleet-client service install`. It is an ordinary file from here on:\n\
          # edit it by hand, and restart the service to apply.\n\n",
     );
     out.push_str(&format!("endpoint = {}\n", toml_string(&answers.endpoint)));
@@ -265,8 +265,8 @@ pub fn render(answers: &Answers) -> String {
 
     if let Some(auth) = &answers.auth {
         out.push_str(
-            "\n# Authentication toward the Server (ADR-0013). The Server may rotate this\n\
-             # credential on its own (ADR-0014); the rotated value lives in the state directory\n\
+            "\n# Authentication toward the Server. The Server may rotate this\n\
+             # credential on its own; the rotated value lives in the state directory\n\
              # and wins over what stands here.\n[auth]\n",
         );
         match auth {
@@ -282,7 +282,7 @@ pub fn render(answers: &Answers) -> String {
 
     if let Some(ca) = &answers.ca_file {
         out.push_str(
-            "\n# Trust for the Server's certificate (ADR-0007): this bundle *replaces* the\n\
+            "\n# Trust for the Server's certificate: this bundle *replaces* the\n\
              # built-in webpki roots.\n[tls]\n",
         );
         out.push_str(&format!(
@@ -293,7 +293,7 @@ pub fn render(answers: &Answers) -> String {
 
     if let Some(package) = &answers.self_update_package {
         out.push_str(
-            "\n# Consent for the Server to replace this Client's own binary (ADR-0020). The name\n\
+            "\n# Consent for the Server to replace this Client's own binary. The name\n\
              # is the whole of the protection: an offer under any other name is refused and\n\
              # reported, never applied. Remove this section to withdraw the consent.\n\
              [self_update]\n",
@@ -308,13 +308,13 @@ pub fn render(answers: &Answers) -> String {
          # max_message_size_bytes = 67108864\n\
          # state_dir = \"/absolute/path\"     # an absolute path here is what the service unit\n\
          #                                  # carries; otherwise the install root's state/ is used\n\
-         # supervisor_dir = \"/opt/opamp-fleet/supervisors\"   # (ADR-0021)\n\
+         # supervisor_dir = \"/opt/opamp-fleet/supervisors\"\n\
          \n\
-         # Machine-level attributes the Server's Selectors match on (ADR-0012):\n\
+         # Machine-level attributes the Server's Selectors match on:\n\
          # [attributes]\n\
          # env = \"prod\"\n\
          \n\
-         # Processes this Client manages (ADR-0011) are added by hand, one [[supervisor]] block\n\
+         # Processes this Client manages are added by hand, one [[supervisor]] block\n\
          # each; see docs/manual/client.md for the blocks and what each key means.\n",
     );
     out
