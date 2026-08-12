@@ -89,6 +89,13 @@ impl Plugin for CollectorPlugin {
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
     }
+
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
+        let _: CollectorSettings = settings
+            .try_into()
+            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

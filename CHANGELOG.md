@@ -30,6 +30,22 @@ carries a date once its tag exists.
   running fleets are untouched. Scripts that `PUT` a Configuration and expect delivery need the
   one extra publication call.
 
+- **A configuration offered to the Client's own Agent now means something — its Supervisor set**
+  ([ADR-0056](docs/adr/0056-the-client-accepts-its-supervisor-set-from-the-server.md)). A
+  Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
+  stops what left the set, writes the blocks into its own `client.toml` (preserving the
+  operator's comments and everything outside them), and starts what arrived — unchanged
+  Supervisors are not touched. Every other top-level key in the offered document is ignored: the
+  endpoint, credentials, and state directory can never arrive over the wire. Previously the
+  Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
+  **What to do:** state whom your Configurations are for
+  (`service_name`, [ADR-0054](docs/adr/0054-a-configuration-may-state-the-agent-type-it-is-for.md)). An
+  *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
+  body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
+  `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
+  configurations, and a fleet that never publishes a `opamp-fleet-client`-typed Configuration
+  keeps running its locally written blocks.
+
 ### Added
 
 - **A Configuration can state the Agent type it is for**

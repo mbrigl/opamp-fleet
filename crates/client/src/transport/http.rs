@@ -21,7 +21,7 @@ use opamp::endpoint::PROTOBUF_CONTENT_TYPE;
 
 pub async fn run(
     engine: &mut Engine,
-    config: &ClientConfig,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<RunOutcome, String> {
     let mut builder = reqwest::Client::builder()
@@ -129,12 +129,17 @@ pub async fn run(
                 }
             }
             // A package offer (ADR-0015): download and verify; the outcome rides the owed reports.
+            let endpoint = config.endpoint.clone();
             let mut sink = PollSink {
                 client: &client,
-                endpoint: &config.endpoint,
+                endpoint: &endpoint,
                 limit,
             };
             crate::transport::process_package_downloads(engine, config, &mut sink).await;
+            // The self-Agent's configuration is its Supervisor set (ADR-0056): apply it — stop
+            // what left, rewrite `client.toml`, start what arrived — and send the retired
+            // Agents' goodbyes; the outcome rides the owed reports below.
+            crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await;
             reports = engine.owed_reports();
             if engine.restart_for_update() {
                 // Send the owed `Installing` and stop: the pointer already points at the new

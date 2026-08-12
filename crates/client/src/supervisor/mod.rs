@@ -14,16 +14,16 @@ pub mod process;
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 
-use crate::config::ClientConfig;
-use crate::engine::Engine;
-use crate::service::runtime::Shutdown;
+use crate::config::{ClientConfig, SupervisorBlock};
+use crate::engine::{Engine, EngineAgent};
+use crate::service::runtime::{shutdown_channel, Shutdown};
 use crate::storage::Storage;
 
 use agent::AgentState;
-use ports::{EventSender, Plugin, SupervisorContext};
+use ports::{EventSender, Plugin, ProcessEvent, SupervisorContext};
 
 /// The Engine index of the Client's own Agent (ADR-0020). It is built first, so a Supervisor's
 /// index is its block's position plus this.
@@ -48,15 +48,6 @@ fn registry() -> Vec<Box<dyn Plugin>> {
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
 /// unknown plugin, or a plugin rejects its settings — startup fails loudly, nothing runs half.
 pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine, String> {
-    // Heartbeats are a Client-wide choice: enabled (interval > 0) every Agent declares the
-    // capability; disabled none does — an undeclared capability must never be exercised.
-    let declare_heartbeat = |mut state: AgentState| {
-        if config.heartbeat_interval_secs > 0 {
-            state.declare_capability(opamp::proto::AgentCapabilities::ReportsHeartbeat);
-        }
-        state
-    };
-    let plugins = registry();
     let (event_tx, events) = mpsc::channel(64);
     let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
 
@@ -67,6 +58,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     let storage = Storage::new(config.state_dir.clone())
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     let mut self_state = declare_heartbeat(
+        config,
         AgentState::new(config.name.clone(), storage)
             .map_err(|e| format!("cannot restore the agent state: {e}"))?
             .with_attributes(config.agent_attributes(None))
@@ -95,127 +87,213 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             }),
         });
     }
-    agents.push((self_state, None));
+    agents.push(EngineAgent {
+        state: self_state,
+        commands: None,
+        stop: None,
+        block_name: None,
+    });
 
     for (block_index, block) in config.supervisors.iter().enumerate() {
         // The event channel is keyed by position in `agents`, and the self-Agent holds 0.
         let index = block_index + SELF_AGENT_OFFSET;
-        let plugin = plugins
-            .iter()
-            .find(|p| p.kind() == block.kind)
-            .ok_or_else(|| {
-                let known: Vec<&str> = plugins.iter().map(|p| p.kind()).collect();
-                format!(
-                    "supervisor {:?}: unknown type {:?} (known: {})",
-                    block.name,
-                    block.kind,
-                    known.join(", ")
-                )
-            })?;
-
-        let supervisor_dir = config.supervisor_dir(&block.name);
-        let storage = Storage::new(supervisor_dir.clone())
-            .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
-        let config_dir = storage.config_dir();
-
-        // The program's path is taken out of the settings and resolved here, not in the plugin:
-        // the rule that derives package consent from it (ADR-0021) belongs to the core, and a
-        // plugin that parsed its own key could disagree with the Agent's declared capability.
-        let mut settings = block.settings.clone();
-        let key = plugin.program_key();
-        let raw = settings
-            .remove(key)
-            .ok_or_else(|| format!("supervisor {:?}: needs a `{key}`", block.name))?;
-        let raw = raw.as_str().ok_or_else(|| {
-            format!(
-                "supervisor {:?}: `{key}` must be a path, not {}",
-                block.name,
-                raw.type_str()
-            )
-        })?;
-        let program = crate::config::resolve_program(
-            key,
-            std::path::Path::new(raw),
-            block.program_path.as_deref(),
-            &supervisor_dir,
-            &block.name,
-        )?;
-        // What a package replaces: one file, or — when the block says where the program sits
-        // inside the package — the whole tree under this Supervisor's `program/` (ADR-0023).
-        let install = match block.program_path.as_ref() {
-            Some(program_path) => crate::supervisor::process::InstallTarget::Tree {
-                root: supervisor_dir.join(crate::config::PROGRAM_DIR),
-                program_path: program_path.clone(),
-            },
-            None => crate::supervisor::process::InstallTarget::Binary(program.path.clone()),
-        };
-
-        // The Agent type this Supervisor presents until — and unless — its Managed Process reports
-        // one of its own (ADR-0033). The program's file name is the fallback because it is what
-        // the operator already wrote in this very block: read from configuration, never parsed out
-        // of a program's output, where a name has no grammar to recognise it by.
-        let service_name = block.service_name.clone().unwrap_or_else(|| {
-            program
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-        let mut state = declare_heartbeat(
-            AgentState::supervised(block.name.clone(), service_name, storage)
-                .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
-                .with_attributes(config.agent_attributes(Some(block)))
-                .with_namespace(config.service_namespace.clone()),
-        );
-        // Owning the directory the program sits in *is* the consent (ADR-0021): a Supervisor that
-        // has it takes whichever top-level package the Server selects for it (ADR-0015, ADR-0017).
-        // Logged either way — the consent is now derived rather than written, and an operator who
-        // changes a path should not have to infer what it did to the fleet.
-        if program.owned {
-            // What the target itself needs — for a tree that is its root and nothing below it,
-            // since the live tree arrives by renaming a directory over that name (ADR-0023).
-            install.prepare()?;
-            state.accept_packages();
-            info!(
-                supervisor = %block.name,
-                program = %program.path.display(),
-                "packages accepted: the program is this supervisor's own"
-            );
-        } else {
-            info!(
-                supervisor = %block.name,
-                program = %program.path.display(),
-                "packages declined: the program is named by an absolute path"
-            );
-        }
-
-        // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
-        // unconditionally, before the process starts — a taken port fails startup, not later.
-        endpoint::start(
-            block.name.clone(),
-            block.endpoint_port,
-            EventSender::new(index, event_tx.clone()),
-            shutdown.clone(),
-            config.max_message_size_bytes,
-        )?;
-
-        let commands = plugin.start(SupervisorContext {
-            name: block.name.clone(),
-            supervisor_dir,
-            config_dir,
-            program: program.path,
-            install,
-            stop_timeout: Duration::from_secs(block.stop_timeout_secs),
-            apply_grace: Duration::from_secs(block.apply_grace_secs),
-            archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
-            settings,
-            events: EventSender::new(index, event_tx.clone()),
-            shutdown: shutdown.clone(),
-        })?;
-        agents.push((state, Some(commands)));
+        agents.push(start_supervisor(config, block, index, &event_tx, shutdown)?);
     }
-    Ok(Engine::with_processes(agents, events))
+    Ok(Engine::with_processes(agents, events, event_tx))
+}
+
+/// Heartbeats are a Client-wide choice: enabled (interval > 0) every Agent declares the
+/// capability; disabled none does — an undeclared capability must never be exercised.
+fn declare_heartbeat(config: &ClientConfig, mut state: AgentState) -> AgentState {
+    if config.heartbeat_interval_secs > 0 {
+        state.declare_capability(opamp::proto::AgentCapabilities::ReportsHeartbeat);
+    }
+    state
+}
+
+/// Validates one `[[supervisor]]` block exactly as [`start_supervisor`] would read it — plugin
+/// known, program key present and well-shaped, plugin settings parsing strictly — without
+/// touching the filesystem or starting anything (ADR-0056). What an offered Supervisor set is
+/// checked against before any running process is stopped.
+///
+/// # Errors
+/// Returns the same error `start_supervisor` would fail with, naming the block.
+pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<(), String> {
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
+    let (settings, _) = take_program(config, block, plugin)?;
+    plugin.check(&block.name, settings)
+}
+
+/// Start one Supervisor at `index`: its state restored, its Endpoint bound, its adapter task
+/// running. Used at startup for every configured block and at runtime for a block an applied
+/// Supervisor set added or changed (ADR-0056).
+///
+/// # Errors
+/// Returns an error when the block's state cannot be restored, its Endpoint port cannot be
+/// bound, or its plugin rejects the settings.
+pub fn start_supervisor(
+    config: &ClientConfig,
+    block: &SupervisorBlock,
+    index: usize,
+    event_tx: &mpsc::Sender<(usize, ProcessEvent)>,
+    shutdown: &Shutdown,
+) -> Result<EngineAgent, String> {
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
+
+    let supervisor_dir = config.supervisor_dir(&block.name);
+    let storage = Storage::new(supervisor_dir.clone())
+        .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
+    let config_dir = storage.config_dir();
+
+    let (settings, program) = take_program(config, block, plugin)?;
+    // What a package replaces: one file, or — when the block says where the program sits
+    // inside the package — the whole tree under this Supervisor's `program/` (ADR-0023).
+    let install = match block.program_path.as_ref() {
+        Some(program_path) => crate::supervisor::process::InstallTarget::Tree {
+            root: supervisor_dir.join(crate::config::PROGRAM_DIR),
+            program_path: program_path.clone(),
+        },
+        None => crate::supervisor::process::InstallTarget::Binary(program.path.clone()),
+    };
+
+    // The Agent type this Supervisor presents until — and unless — its Managed Process reports
+    // one of its own (ADR-0033). The program's file name is the fallback because it is what
+    // the operator already wrote in this very block: read from configuration, never parsed out
+    // of a program's output, where a name has no grammar to recognise it by.
+    let service_name = block.service_name.clone().unwrap_or_else(|| {
+        program
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    });
+    let mut state = declare_heartbeat(
+        config,
+        AgentState::supervised(block.name.clone(), service_name, storage)
+            .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
+            .with_attributes(config.agent_attributes(Some(block)))
+            .with_namespace(config.service_namespace.clone()),
+    );
+    // Owning the directory the program sits in *is* the consent (ADR-0021): a Supervisor that
+    // has it takes whichever top-level package the Server selects for it (ADR-0015, ADR-0017).
+    // Logged either way — the consent is now derived rather than written, and an operator who
+    // changes a path should not have to infer what it did to the fleet.
+    if program.owned {
+        // What the target itself needs — for a tree that is its root and nothing below it,
+        // since the live tree arrives by renaming a directory over that name (ADR-0023).
+        install.prepare()?;
+        state.accept_packages();
+        info!(
+            supervisor = %block.name,
+            program = %program.path.display(),
+            "packages accepted: the program is this supervisor's own"
+        );
+    } else {
+        info!(
+            supervisor = %block.name,
+            program = %program.path.display(),
+            "packages declined: the program is named by an absolute path"
+        );
+    }
+
+    // Each Supervisor stops on its own channel (ADR-0056): the Client-wide shutdown is forwarded
+    // into it, and retiring the Supervisor fires it alone — its Endpoint releases the port and
+    // its adapter stops the Managed Process while the rest of the Client runs on.
+    let (stop_tx, stop) = shutdown_channel();
+    forward_shutdown(shutdown.clone(), stop_tx.clone());
+
+    // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0003): bound
+    // unconditionally, before the process starts — a taken port fails startup, not later.
+    endpoint::start(
+        block.name.clone(),
+        block.endpoint_port,
+        EventSender::new(index, event_tx.clone()),
+        stop.clone(),
+        config.max_message_size_bytes,
+    )?;
+
+    let commands = plugin.start(SupervisorContext {
+        name: block.name.clone(),
+        supervisor_dir,
+        config_dir,
+        program: program.path,
+        install,
+        stop_timeout: Duration::from_secs(block.stop_timeout_secs),
+        apply_grace: Duration::from_secs(block.apply_grace_secs),
+        archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
+        settings,
+        events: EventSender::new(index, event_tx.clone()),
+        shutdown: stop,
+    })?;
+    Ok(EngineAgent {
+        state,
+        commands: Some(commands),
+        stop: Some(stop_tx),
+        block_name: Some(block.name.clone()),
+    })
+}
+
+/// Forwards the Client-wide shutdown into one Supervisor's own channel, so its adapter and
+/// Endpoint stop on whichever fires first — the operator stopping the Client, or the Supervisor
+/// being retired (ADR-0056).
+fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
+    tokio::spawn(async move {
+        global.requested().await;
+        let _ = stop_tx.send(true);
+    });
+}
+
+fn find_plugin<'a>(
+    plugins: &'a [Box<dyn Plugin>],
+    block: &SupervisorBlock,
+) -> Result<&'a dyn Plugin, String> {
+    plugins
+        .iter()
+        .find(|p| p.kind() == block.kind)
+        .map(|p| p.as_ref())
+        .ok_or_else(|| {
+            let known: Vec<&str> = plugins.iter().map(|p| p.kind()).collect();
+            format!(
+                "supervisor {:?}: unknown type {:?} (known: {})",
+                block.name,
+                block.kind,
+                known.join(", ")
+            )
+        })
+}
+
+/// Takes the program key out of the block's settings and resolves it (ADR-0021) — the rule that
+/// derives package consent belongs to the core, and a plugin that parsed its own key could
+/// disagree with the Agent's declared capability. Returns the remaining plugin settings and the
+/// resolved program.
+fn take_program(
+    config: &ClientConfig,
+    block: &SupervisorBlock,
+    plugin: &dyn Plugin,
+) -> Result<(toml::Table, crate::config::Program), String> {
+    let mut settings = block.settings.clone();
+    let key = plugin.program_key();
+    let raw = settings
+        .remove(key)
+        .ok_or_else(|| format!("supervisor {:?}: needs a `{key}`", block.name))?;
+    let raw = raw.as_str().ok_or_else(|| {
+        format!(
+            "supervisor {:?}: `{key}` must be a path, not {}",
+            block.name,
+            raw.type_str()
+        )
+    })?;
+    let program = crate::config::resolve_program(
+        key,
+        std::path::Path::new(raw),
+        block.program_path.as_deref(),
+        &config.supervisor_dir(&block.name),
+        &block.name,
+    )?;
+    Ok((settings, program))
 }
 
 #[cfg(test)]

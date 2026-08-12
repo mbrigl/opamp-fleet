@@ -39,7 +39,7 @@ enum Served {
 
 pub async fn run(
     engine: &mut Engine,
-    config: &ClientConfig,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<RunOutcome, String> {
     // Trust and identity in one configuration: a private CA when one is configured, and this
@@ -127,7 +127,7 @@ pub async fn run(
 async fn serve(
     mut socket: Socket,
     engine: &mut Engine,
-    config: &ClientConfig,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Served {
     let limit = config.max_message_size_bytes;
@@ -275,6 +275,15 @@ async fn serve(
                         if engine.restart_for_update() {
                             return Served::RestartForUpdate;
                         }
+                        // The self-Agent's configuration is its Supervisor set (ADR-0056):
+                        // apply it — stop what left, rewrite `client.toml`, start what arrived —
+                        // send the retired Agents' goodbyes, and flush the outcome.
+                        let mut sink = FrameSink { socket: &mut socket, limit };
+                        if crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await
+                            && send_all(&mut socket, engine.owed_reports(), limit).await.is_err()
+                        {
+                            return Served::ConnectionLost;
+                        }
                     }
                     Message::Close(_) => return Served::ConnectionLost,
                     // tungstenite answers pings on the next write; text frames are not OpAMP.
@@ -388,7 +397,7 @@ mod tests {
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
         let state = AgentState::new("limit-test".to_string(), storage).expect("agent state");
         let mut engine = Engine::new(vec![state]);
-        let config = ClientConfig {
+        let mut config = ClientConfig {
             endpoint: format!("ws://{addr}/v1/opamp"),
             max_message_size_bytes: LIMIT,
             heartbeat_interval_secs: 0,
@@ -399,7 +408,7 @@ mod tests {
             .await
             .expect("connect");
 
-        let outcome = serve(socket, &mut engine, &config, &mut shutdown).await;
+        let outcome = serve(socket, &mut engine, &mut config, &mut shutdown).await;
         assert!(
             matches!(outcome, Served::ConnectionLost),
             "an oversized message ends the connection"

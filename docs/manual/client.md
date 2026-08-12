@@ -482,6 +482,33 @@ Two plugin types ship today (ADR-0011): `collector` for an OpenTelemetry Collect
 for any other process — a **Foreign Agent** that speaks no OpAMP. A new kind of process means a new
 plugin, not a change to the core.
 
+### The Server can manage the set
+
+The `[[supervisor]]` blocks are the fleet-manageable half of `client.toml` (ADR-0056). A
+Configuration typed for the Client itself — `service_name = "opamp-fleet-client"` (ADR-0054) —
+carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
+
+- **Only the blocks are read.** Every other top-level key in the offered document is ignored —
+  the endpoint, the credential, the state directory stay the host's, and can never arrive over
+  the wire. You may publish a full `client.toml`-shaped document; exactly its supervisor half
+  takes effect. A duplicate `name` fails the offer, as it would fail the file.
+- **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
+  merged file is written, changed and added ones are started from it. An unchanged Supervisor's
+  process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
+- **`client.toml` stays the single truth.** The blocks are written into the file itself,
+  surgically: your comments, ordering, and formatting outside them survive. A Client restarting
+  offline starts the Server-delivered set, because it is in its file.
+- **The outcome is a status, not a silence.** The Client acknowledges `APPLYING`, then `APPLIED`
+  once the file is written and the starts are issued — or `FAILED` with the reason when the
+  offer does not parse, a block does not validate against this host's globals, or the write
+  fails (then nothing is applied and the running set stays in force). A body that is not TOML —
+  say, a Collector YAML published fleet-wide with no type — is refused the same way, which is
+  one more reason to state whom a Configuration is for (ADR-0054).
+
+A Client whose Server never publishes such a Configuration runs its locally written blocks
+exactly as before. Note that once one applied, the Server's set is authoritative: a later local
+edit to the blocks stands only until the next publication overwrites it.
+
 ### Keys every block accepts
 
 | Key | Default | Meaning |

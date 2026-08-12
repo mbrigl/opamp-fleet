@@ -68,6 +68,11 @@ Agent comes up, connects, and reports `no process installed` — a Supervisor wi
 plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, so the first
 version arrives the same way every later one does.
 
+**The block does not have to be written on the host either.** A Configuration typed
+`opamp-fleet-client` (ADR-0054) whose body carries this `[[supervisor]]` block rolls the block
+itself out to every matching Client, which writes it into its own `client.toml` and starts the
+Supervisor (ADR-0056) — the walkthrough's remaining steps are the same either way.
+
 ## 2. Build the artifact
 
 `opamp-package-sign pack` writes the two containers the Client can open, with the member named the

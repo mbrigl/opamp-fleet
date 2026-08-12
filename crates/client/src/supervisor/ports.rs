@@ -174,6 +174,15 @@ pub trait Plugin {
     /// # Errors
     /// Returns an error when the settings do not parse — startup fails loudly, nothing spawns.
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
+
+    /// The strict settings parse [`start`](Self::start) performs, without the side effects
+    /// (ADR-0056): what validates an offered Supervisor set *before* any running process is
+    /// touched. `settings` is the block's table with the program key already taken out, exactly
+    /// as `start` receives it.
+    ///
+    /// # Errors
+    /// Returns an error when the settings do not parse.
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
 }
 
 #[cfg(test)]

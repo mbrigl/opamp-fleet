@@ -68,8 +68,9 @@ pub async fn process_package_downloads<S: ReportSink>(
         let progress = crate::packages::Progress::default();
         let started = std::time::Instant::now();
         // Each Agent stages into its own directory (ADR-0021), so the Supervisor's install is a
-        // rename beside the download rather than a copy across filesystems.
-        let staging_dir = config.staging_dir(index);
+        // rename beside the download rather than a copy across filesystems. Keyed by the block
+        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0056).
+        let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
             crate::packages::download_and_verify(&package, config, &staging_dir, &progress);
         tokio::pin!(download);
@@ -99,6 +100,25 @@ pub async fn process_package_downloads<S: ReportSink>(
                 engine.package_download_failed(index, hash, e);
             }
         }
+    }
+    true
+}
+
+/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0056) — if one is
+/// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
+/// so the caller flushes the owed status reports.
+pub async fn process_self_configuration<S: ReportSink>(
+    engine: &mut Engine,
+    config: &mut ClientConfig,
+    shutdown: &crate::service::runtime::Shutdown,
+    sink: &mut S,
+) -> bool {
+    let Some(offer) = engine.take_self_config() else {
+        return false;
+    };
+    let goodbyes = crate::reconfigure::apply(engine, config, offer, shutdown).await;
+    if !goodbyes.is_empty() {
+        let _ = sink.send(goodbyes).await;
     }
     true
 }
