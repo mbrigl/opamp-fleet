@@ -15,7 +15,7 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.2.4]
+## [0.2.4] - 2026-08-12
 
 ### Added
 

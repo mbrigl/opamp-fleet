@@ -406,7 +406,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "client"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "axum",
  "axum-server",
@@ -1521,9 +1521,9 @@ checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-integer"
-version = "0.1.46"
+version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
 dependencies = [
  "num-traits",
 ]
@@ -1579,7 +1579,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opamp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "flate2",
  "git2",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "axum",
  "axum-server",
