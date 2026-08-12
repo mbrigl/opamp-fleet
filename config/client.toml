@@ -226,12 +226,14 @@ state_dir = "client-state"
 # service_name = "otelcol"   # without the extension nothing reports a type, so state one here;
 #                            # left out, the program's file name ("otelcol") is used anyway.
 
-# 3. Any other process — a Foreign Agent under the example "command" Custom Supervisor. Fluent
-# Bit speaks no OpAMP and reads its configuration from a file: point -c at the written entry file
-# (named after the Configuration on the Server, here "fluent-bit-conf") and the Supervisor
-# restarts the process on a change so it re-reads it. Named by an absolute path here, so it is
-# the machine's program: installed and updated by whatever put it there. Block 5 below is the
-# same agent delivered by the Server instead.
+# 3. Any other process — a Foreign Agent under a generic "command" Custom Supervisor. The
+# process speaks no OpAMP, so the Supervisor observes it from the outside (spawn, exit,
+# restart). Every received config-map entry is written to <supervisor_dir>/<name>/config/
+# under its Configuration's name (ADR-0012); point the program's own flag at that file and
+# the Supervisor restarts the process on a change so it re-reads it. Named by an absolute
+# path here, so it is the machine's program: installed and updated by whatever put it there,
+# never by the Server. A bare file name instead would put it in this Supervisor's own
+# program/ directory and consent to package delivery (ADR-0021), like `binary` above.
 #
 # args, working_dir and env values may use two placeholders naming this Supervisor's own
 # directories (ADR-0022), so nothing has to be kept in sync with state_dir or supervisor_dir:
@@ -245,74 +247,12 @@ state_dir = "client-state"
 # consent (ADR-0021), and that must be readable in this file.
 # [[supervisor]]
 # type = "command"
-# name = "fluent-bit"
-# command = "/opt/fluent-bit/bin/fluent-bit"
-# args = ["-c", "${config_dir}/fluent-bit-conf"]
-# working_dir = "/var/lib/fluent-bit"   # optional
+# name = "my-agent"
+# command = "/opt/my-agent/bin/my-agent"
+# args = ["--config", "${config_dir}/my-agent-conf"]
+# working_dir = "/var/lib/my-agent"     # optional
+# version_args = ["--version"]          # what it reports as service.version
 # [supervisor.attributes]               # optional attributes for this Agent (ADR-0012)
 # role = "edge"
 # [supervisor.env]                      # optional environment for the process
-# FLB_LOG_LEVEL = "info"
-
-# 4. A single-file Foreign Agent the SERVER delivers. Same plugin as 3, one difference that
-# changes who owns the program: the bare file name puts it in <supervisor_dir>/<name>/program/,
-# a directory this Client creates and owns, so this Agent declares AcceptsPackages and the
-# Server's artifact is installed over it (ADR-0021). Fluent Bit above cannot do this — it is an
-# executable plus the shared objects it loads, and exactly one archive member is ever installed
-# (ADR-0018); a single static binary can.
-#
-# Nothing has to be put on the host first. Until a package arrives the Supervisor reports
-# "no process installed" and keeps running, so the first version and every later one take the
-# same path — build the artifact, create the Set, upload the entry, publish it (ADR-0052):
-#
-#   opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
-#   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
-#   curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "prod"}}' \
-#        http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0
-#   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-#        "http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
-#   curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-#        http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0/publication
-#
-# The Agent type in the path is not optional (ADR-0034, ADR-0052): a Set reaches only Agents whose
-# service.name equals it, and the type is part of its identity. For this block that is "promtail" —
-# the program's file name, since no service_name is set above. Aiming is still the Selector's job,
-# and still optional.
-#
-# The archive must hold the member "promtail" — the program's own file name, which is what this
-# block configures and what the Supervisor looks for. `pack` names it after the file it packs;
-# use --program-name when an upstream release names it otherwise. Only .tar.gz and .7z are
-# opened: anything else is taken to *be* the program, so a .zip would be written over the binary
-# unopened. An encrypted .7z (`pack --format 7z --archive-key ...`) needs [packages] archive_key
-# above, and the Server never learns that key.
-# [[supervisor]]
-# type = "command"
-# name = "promtail"
-# command = "promtail"                  # bare: this Supervisor's own program/, takes packages
-# args = ["-config.file=${config_dir}/promtail-conf"]
-# version_args = ["--version"]          # what it reports as service.version
-
-# 5. An agent that is MORE THAN ONE FILE, delivered by the Server (ADR-0023). Fluent Bit is an
-# executable plus the shared objects it loads, so the single member of block 4 is not enough:
-# `program_path` says where the program sits *inside* the package, and the whole archive is then
-# unpacked into <supervisor_dir>/<name>/program/tree/, keeping its own structure.
-#
-# The path is matched from its end, so the version-named directory an upstream release wraps
-# everything in — fluent-bit-3.1.0/bin/fluent-bit — needs no mention here and the value keeps
-# being right at the next release. Write more of the path only if it matches several members.
-#
-#   opamp-package-sign sha256 fluent-bit-3.1.0.tar.gz   # or pack a tree yourself
-#   curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-#        http://<server>:4320/api/v1/packages/fluent-bit/fluent-bit/3.1.0
-#   curl -X PUT --data-binary @fluent-bit-3.1.0.tar.gz \
-#        http://<server>:4320/api/v1/packages/fluent-bit/fluent-bit/3.1.0/entries/linux/amd64
-#
-# The tree that was running is kept as program/tree.rollback until the new one has survived
-# apply_grace_secs, and put back whole if it has not. A .tar.gz carries its own file modes and is
-# the right format here; a .7z is opened too, but only the program is made executable.
-# [[supervisor]]
-# type = "command"
-# name = "fluent-bit-managed"
-# command = "fluent-bit"                # bare: consent, exactly as everywhere else (ADR-0021)
-# program_path = "bin/fluent-bit"       # where the program sits inside the package
-# args = ["-c", "${config_dir}/fluent-bit-conf"]
+# LOG_LEVEL = "info"
