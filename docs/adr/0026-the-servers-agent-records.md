@@ -1,12 +1,13 @@
 # ADR-0026: The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one
 
-- **Status:** 🟢 accepted
+- **Status:** 🟡 proposed
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 
-The Server keeps one record per Agent. This decision settles two things about it: when the record
-says an Agent has gone quiet (**stale**, beside connectedness and never instead of it), and how an
-operator drops a record (**forget**, which reaches no host).
+The Server keeps one record per Agent. This decision settles three things about it: when the record
+says an Agent has gone quiet (**stale**, beside connectedness and never instead of it), how an
+operator drops a record (**forget**, which reaches no host), and how the records **persist across a
+restart** behind a storage port, with connectedness runtime-only.
 
 ## Context
 
@@ -52,15 +53,15 @@ nothing can remove.
 Staleness (point 1) makes that visible without making it actionable. An Agent that
 stops reporting shows `stale`, which is the right diagnosis and, for a host that is never coming
 back, a permanent one. The fleet view accumulates rows describing things that no longer exist, and
-the operator's only remedy is to restart the Server.
+the operator has no remedy.
 
 **Four forces shape what "forget" may mean here.**
 
-- **The record is memory, not storage.** The fleet is a `HashMap<InstanceUid, AgentRecord>` behind a
-  mutex ([`fleet.rs`](../../crates/server/src/fleet.rs)) and nothing writes it to disk — unlike
-  Configurations and packages, which persist. A Server restart therefore *already* forgets every
-  Agent, and the connected ones reappear within one exchange. Whatever this decision builds is not a
-  new capability so much as the ability to aim an existing one at a single row.
+- **The record is what the Server learned, and nothing else.** The fleet is a
+  `HashMap<InstanceUid, AgentRecord>` behind a mutex ([`fleet.rs`](../../crates/server/src/fleet.rs)),
+  persisted per Agent behind a storage port (point 14). Dropping a record from both
+  leaves the Server as if it had never heard from that Agent, and a connected one reappears within
+  one exchange.
 
 - **The record holds the gates that stop re-offering.** `remote_config_status`,
   `connection_settings_status`, `package_statuses`, and `sequence_num` are what let the Server say
@@ -82,6 +83,63 @@ the operator's only remedy is to restart the Server.
   ([ADR-0013](0013-agent-admission-on-the-opamp-endpoint.md)). Nothing this Server
   holds can stop one particular Agent from connecting again. An operation that implied otherwise
   would be lying about a security property.
+
+### A restart that erases the fleet
+
+Without persistence, of everything the Server holds, the fleet itself is the one thing a restart
+erases. Configurations persist as one JSON file each
+([ADR-0012](0012-selector-targeted-configurations-and-rest-api.md)), packages as
+artifact-plus-metadata pairs ([ADR-0015](0015-package-delivery-for-managed-processes.md)), labels as
+one file per Agent ([ADR-0023](0023-what-describes-an-agent.md)) — but the Agent records live in a
+`HashMap<InstanceUid, AgentRecord>` behind a mutex ([`fleet.rs`](../../crates/server/src/fleet.rs)),
+and an in-memory map writes nothing to disk. The requirement answered here is that the Server's whole
+state — Agents, packages, Configurations — survives a restart, with only each Agent's *status*
+(connected or disconnected) determined dynamically; and that the storage itself is **replaceable**:
+filesystem by default, but a database or an external store must be pluggable without touching the
+rest of the implementation.
+
+**What a restart loses without persistence.**
+
+- **The inventory.** `GET /api/v1/agents` starts empty. A WebSocket Agent reappears within one
+  reconnect, a plain-HTTP Agent only at its next poll, and an Agent that is *not currently
+  reporting* — a laptop that is off, a host mid-maintenance, a machine the operator is
+  investigating precisely because it went quiet — vanishes without trace. The fleet view's answer
+  to "which build is on that host" ([ADR-0009](0009-version-baking-comparison-and-display.md))
+  is gone exactly when the host cannot repeat it.
+- **The re-offer gates, for one exchange each.** `sequence_num`, `remote_config_status`,
+  `connection_settings_status`, and `package_statuses` are what let the Server stay quiet toward an
+  Agent that already runs what it should. After a restart every report arrives "unknown", the
+  Server demands `ReportFullState`, and the whole fleet re-describes itself at once — harmless, but
+  a stampede that grows with the fleet.
+- **Queued operator intent.** A restart requested through `POST .../restart` but not yet delivered
+  (`restart_pending`) is silently dropped.
+
+**Staleness and forgetting stand as decided.** `stale` is *derived, never stored*
+(point 1), and that is the model persistence extends to connectedness: status is
+computed from evidence, not persisted. Forgetting drops the record, reaches no host, and is refused
+while the Agent still reports (points 7 to 10); persistence only adds a
+store deletion to its mechanics.
+
+**Three facts about the record and its storage shape what "persist" can mean.**
+
+- `connected` and `owner` are facts about live connections. A connection identifier (`ConnId`) is
+  minted per process run and means nothing across a restart; a restored `connected: true` would be
+  the fleet view asserting something it cannot know — the exact defect staleness exists to avoid.
+- The report-derived fields are protobuf messages (`AgentDescription`, `ComponentHealth`,
+  `RemoteConfigStatus`, `PackageStatuses`, …) generated by prost from the pinned Baseline schema
+  ([ADR-0006](0006-proto-vendoring-and-codegen.md)), and they carry no serde implementations. Any
+  persistence format either re-mirrors them by hand — a second schema free to drift from the wire —
+  or uses the encoding whose evolution rules the Baseline already governs: protobuf itself.
+- The store's access pattern is deliberately narrow. The fleet is loaded whole at startup and held
+  in memory; at runtime the store only ever receives writes and deletions for single Agents. No
+  query, no partial read, no iteration — which is what makes a small, backend-agnostic interface
+  possible at all.
+
+**Write frequency is the known scale trap.** Elastic Fleet persists every check-in to its
+`.fleet-agents` index — an agent is "offline" when `last_checkin` was not updated for two minutes —
+and at 250 000 endpoints that is a sustained 8 333 document updates per second against one index,
+a load its own maintainers document as a problem. A heartbeat exists to change nothing; a
+persistence design that writes on every one converts the fleet's idle rhythm into steady disk churn.
 
 ## Decision
 
@@ -128,8 +186,8 @@ We will add **`DELETE /api/v1/agents/{instance_uid}`**, which makes the Server f
 about one Agent — no more and no less — and refuse when the Agent is still reporting.
 
 7. **It removes the record, and that is the whole of it.** The `AgentRecord` is dropped from the
-   fleet map and the row disappears from `GET /api/v1/agents`. Nothing is written to disk because
-   nothing was: this is exactly what a Server restart does to every Agent, aimed at one.
+   fleet map and from the store (point 19), and the row disappears from
+   `GET /api/v1/agents`.
 
 8. **It reaches no host.** No process is stopped, no configuration withdrawn, no package removed, no
    credential revoked — the fourth force says there is none to revoke. The word in the API
@@ -171,7 +229,7 @@ about one Agent — no more and no less — and refuse when the Agent is still r
 
 12. **Nothing expires on its own.** No retention timer, no inactivity sweep, no `ephemeral` marking.
    Forgetting is one explicit act by one operator on one Agent, which keeps the property of point
-   1 that the fleet view stores nothing and runs no timers. An automatic policy is a
+   1 that staleness is stored nowhere and no timer runs. An automatic policy is a
    genuinely different decision — it needs a duration, a scope, and an answer for the Agent that is
    merely on holiday — and it belongs with the retention question
    [ADR-0010](0010-client-os-service.md) deferred.
@@ -182,6 +240,81 @@ about one Agent — no more and no less — and refuse when the Agent is still r
    carries `connected` and `stale`, and the rule of point 10 is deliberately not either
    of them. The Server holds the one rule and answers `409` with the reason, which the UI shows — one
    place to be right rather than two places to drift apart.
+
+### Persistence across a restart
+
+We will **persist each Agent record behind a storage port with a filesystem adapter as the
+default**, and restore the fleet from the port at startup, while **connectedness stays
+runtime-only**: a restored Agent is disconnected until a live connection or report says otherwise.
+
+14. **The store is a port, not a module.** A small trait — `AgentStore: Send + Sync` — is the only
+   thing the fleet logic knows about persistence, mirroring the hexagonal cut the Client already
+   made ([ADR-0011](0011-supervisor-mode-core-and-plugins.md)). Its surface is the access
+   pattern the context names, and nothing more:
+
+   - `load() -> Result<HashMap<InstanceUid, PersistedAgent>, String>` — once, at startup;
+   - `put(uid, &PersistedAgent)` — create or replace one record;
+   - `remove(uid)` — forget one record;
+   - `rekey(old, new, &PersistedAgent)` — the identity reassignment, one operation so an adapter
+     with atomic rename or transactions can make it one step.
+
+   The port speaks the **typed record** (`PersistedAgent`: the scalars plus the prost message
+   types), never an encoding: what bytes or rows a backend turns that into is the adapter's own
+   business. The Server crate already builds as a library, so `AppState` takes the store as a
+   `Box<dyn AgentStore>`; the binary wires the default adapter, and a database or external-store
+   implementation is a new adapter plus one wiring line — the rest of the implementation is,
+   by construction, unaffected.
+
+15. **The default adapter is the filesystem: one JSON file per Agent,
+   `<config_dir>/agents/<instance_uid>.json`.** It follows the `LabelStore` pattern
+   ([`labels.rs`](../../crates/server/src/labels.rs)): the directory is created on open, every file
+   is loaded at startup, writes go through a temp file and an atomic rename, `rekey` is a write
+   plus a remove, and a file that does not parse fails startup loudly rather than being skipped
+   ([ADR-0008](0008-toml-configuration.md)'s principle — a fleet that silently lost members is
+   worse than one that refuses to start). It nests under `config_dir` beside `labels/`, so no new
+   configuration knob is added. **The envelope format is this adapter's, not the port's:** scalars
+   and the effective-config text stay readable JSON, the wire-typed fields are stored as protobuf
+   bytes base64-inline — the one encoding whose compatibility rules the Baseline already defines,
+   so a field upstream adds round-trips unread instead of breaking a hand-mirrored schema. The
+   envelope carries a `version` field so a future shape change can migrate deliberately.
+
+16. **Everything report-derived or operator-queued persists; everything connection-scoped does
+   not.** Persisted: `sequence_num`, `capabilities`, `description`, `health`, `effective_config`,
+   `remote_config_status`, `connection_settings_status`, `package_statuses`,
+   `available_components`, `transport` (the last one used, informational), `last_seen_ms`, and
+   `restart_pending` — the queued restart is operator intent and survives like any other. Not
+   persisted: `connected` and `owner`; a restored record is disconnected with no owning connection.
+   Labels are also not duplicated into the record: the `LabelStore` remains their single authority,
+   and the restore fills the record's mirror from it exactly as a new record does.
+
+17. **The write discipline lives above the port, so no backend can get it wrong.** The fleet layer
+   keeps a hash of each record's last-written durable state and calls `put` only when that state
+   changed; a report that changes nothing durable — the common heartbeat — reaches no adapter at
+   all. `last_seen_ms` is deliberately outside the dirty comparison (it changes on every report)
+   and rides along with whatever write happens; in addition, the Server flushes records whose
+   timestamp moved on graceful shutdown, so the ordinary restart restores current last-seen
+   values. After a crash, a record's last-seen is as of its last durable change — approximate,
+   visibly paired with `connected: false`, and corrected by the Agent's next report.
+
+18. **Status stays dynamic, exactly as required.** `connected` is set by live evidence only;
+   `stale` and the forget-gate's silence keep being derived on read from `last_seen_ms`
+   (points 1 and 10). The restored row asserts only what is known: what the
+   Agent last reported, and that no connection carries it *now*.
+
+19. **Forgetting an Agent removes it from the store; rekeying moves it.** `DELETE
+   /api/v1/agents/{uid}` drops the record *and* calls `remove` — forgetting that left a stored record
+   behind would be the "remembering under another name" the alternatives below reject. When the
+   Server reassigns an identity (`RequestInstanceUid`, or the duplicate-UID rekey), the persisted
+   record follows through `rekey`. The refusal gate (point 10) and the reach-no-host
+   guarantee (point 8) are untouched.
+
+20. **Stored records are treated as secret-bearing, whatever the backend.** A reported effective
+   configuration is whatever the Managed Process runs, credentials included, and
+   `package_statuses` may carry download headers. The port's contract states it; the filesystem
+   adapter answers with an owner-only directory — the same reasoning that keeps the package
+   store's credential-bearing metadata owner-only
+   ([ADR-0017](0017-package-artifacts.md)) — and a database or external adapter must
+   answer with its own access control.
 
 ## Alternatives considered
 
@@ -246,6 +379,56 @@ about one Agent — no more and no less — and refuse when the Agent is still r
   worry point 8 raises is answered in the description and the UI label, not by bending
   the method.
 
+### For persistence
+
+- **Keep the fleet in memory.** Rejected: it is the requirement's stated gap, and the losses in the
+  context — the inventory above all — are real operator costs, not aesthetics.
+- **A concrete filesystem store, no port** — the `LabelStore` pattern as-is, which is how every
+  other store is built. The simplest thing that persists, and the strongest YAGNI candidate.
+  Rejected because the second implementation is not speculative here: the requirement itself names
+  a database and an external store as implementations that must be possible without touching the
+  rest — and retrofitting a port under a concrete store rewrites exactly the call sites the port
+  exists to protect. The port is kept to four operations so the abstraction costs little more than
+  the concrete store would.
+- **A generic key-value port (`uid → bytes`) instead of a typed one.** One trait that every future
+  store (Configurations, labels) could share, and adapters become trivial blob stores. Rejected:
+  it decides the encoding *above* the port, so every backend stores the same opaque envelope — a
+  database implementation degenerates into a blob table, and an external store cannot map records
+  to its own schema. The typed port keeps the encoding where the requirement wants the freedom:
+  in the adapter.
+- **An embedded database as the default (SQLite; Bindplane's bbolt-then-Postgres path).** One
+  file, transactions, indexed queries. Rejected as the *default*: it adds a dependency and a
+  second storage idiom to a Server whose idiom is file-per-item JSON, three times over — for data
+  that is small, per-Agent, and loaded whole at startup. The port is precisely what lets a
+  deployment that outgrows files add that adapter later; Bindplane's own trajectory (bbolt
+  deprecated, Postgres for scale) is an argument for the *port*, not for shipping a database now.
+- **Persist every report, heartbeats included (Elastic Fleet's model).** The most accurate
+  `last_seen_ms` money can buy. Rejected: it is write amplification with near-zero information
+  gain, documented as a scale problem by the system that does it (8 333 writes/second at 250 000
+  agents), and the value it buys — an exact rather than approximate last-seen after a *crash* —
+  is marginal next to the shutdown flush of point 17.
+- **One snapshot file for the whole fleet, written periodically.** Fewer files, one loader.
+  Rejected: every change rewrites the world or waits for a timer, a crash loses the tail, and
+  forget/rekey become read-modify-write of a shared file instead of one record's operation.
+- **Serde derives on the generated protobuf types** (prost-build `type_attribute`). Fully readable
+  files. Rejected: it welds the on-disk format to prost's generated field names, so an upstream
+  rename or the codegen's evolution breaks every stored record at parse time — and JSON of
+  generated types drops unknown fields anyway, so it is no better at surviving schema motion than
+  protobuf bytes, which are governed by compatibility rules designed for exactly this.
+- **Persist only the inventory (description and friends) and drop the re-offer gates.** Smaller
+  records, and the gates rebuild from the Agent's first full report anyway. Rejected: it keeps the
+  restart stampede — every Agent is demanded `ReportFullState` and every gate is rebuilt by
+  round-trip — when persisting four more fields makes a restart invisible to the fleet, which is
+  the requirement's plain intent ("only status is dynamic").
+- **One repository port over all four stores now** (Agents, Configurations, labels, packages).
+  The consistent end state if a database backend is ever to hold everything. Rejected *here*:
+  packages are not a record store — artifacts are streamed to disk, staged, rolled back
+  ([ADR-0015](0015-package-delivery-for-managed-processes.md), [ADR-0016](0016-what-a-package-is-and-how-it-is-aimed.md))
+  — so that port is a much wider design, and folding it into this decision settles a broad
+  question through a narrow case (the mistake point 12 declines for retention). The
+  pattern decided here is deliberately the template; extending it to the other stores is named as a
+  follow-up by topic.
+
 ## Sources / Prior art
 
 - [ADR-0025](0025-gateway-mode.md) — names the staleness gap as the follow-up and explains why the
@@ -263,6 +446,9 @@ about one Agent — no more and no less — and refuse when the Agent is still r
   different operation from the one decided here, and one this project cannot perform per Agent
   (fourth force). As with Gateway Mode, the absence of an oracle is the finding: this decision
   carries its own justification.
+
+  The protocol's own recovery for lost server state (`ReportFullState`) is what makes persistence an
+  optimisation of truth and cost rather than a correctness requirement.
 
 - The Server's existing `last_seen_ms` and per-connection `connected`
   ([`fleet.rs`](../../crates/server/src/fleet.rs)) — both already recorded; staleness reads one
@@ -283,10 +469,36 @@ about one Agent — no more and no less — and refuse when the Agent is still r
   project does not have, and claiming the shape without the mechanism would be the lie point
   8 avoids.
 
+- **[Elastic Fleet](https://www.elastic.co/docs/reference/fleet/monitor-elastic-agent)** — the
+  closest model to the persistence decided: the agent inventory is persisted (the `.fleet-agents`
+  index) and *offline* is **derived** from `last_checkin` against a timeout, never stored. Also the
+  cautionary half: [fleet-server issue #749](https://github.com/elastic/fleet-server/issues/749)
+  documents the write load of persisting every 30-second check-in at scale, which is what the
+  dirty-check of point 17 exists to avoid.
+- **[Bindplane Bolt Store](https://bindplane.com/docs/advanced-setup/backup-and-disaster-recovery/bolt-store)**
+  and **[Postgres Store](https://docs.bindplane.com/how-to-guides/postgres/postgres-store)** — a
+  fleet server whose agent records live behind exactly the abstraction point 14 decides:
+  one store interface, two interchangeable backends (bbolt, deprecated in favour of Postgres for
+  production), selected by configuration and invisible to the rest of the server. Prior art both for
+  the port and for not shipping the database as the default.
+- **[Ports and adapters / hexagonal architecture](https://alistair.cockburn.us/hexagonal-architecture/)**
+  (Cockburn) — the pattern behind point 14, already this project's vocabulary on the
+  Client side ([ADR-0011](0011-supervisor-mode-core-and-plugins.md)).
+- **[opamp-go example server](https://github.com/open-telemetry/opamp-go)** — the reference
+  implementation this project already tracks for interoperability ([ADR-0027](0027-interoperability-against-opamp-go.md))
+  keeps its agent map in memory; it is an example, not a product, and offers no persistence design
+  to follow.
+
 - This repository: [ADR-0012](0012-selector-targeted-configurations-and-rest-api.md) (the
   REST API and its OpenAPI contract), [ADR-0013](0013-agent-admission-on-the-opamp-endpoint.md) (fleet-wide membership, not
   per-Agent identity), [ADR-0015](0015-package-delivery-for-managed-processes.md) (the package
   re-offer gate and the Client-side idempotence that makes it harmless).
+
+- This repository, for persistence: [ADR-0012](0012-selector-targeted-configurations-and-rest-api.md),
+  [ADR-0015](0015-package-delivery-for-managed-processes.md), and
+  [ADR-0023](0023-what-describes-an-agent.md) (the file-per-item store idiom the default adapter
+  reuses); [ADR-0006](0006-proto-vendoring-and-codegen.md) (why the wire types have no serde and why
+  protobuf bytes are the stable encoding).
 
 ## Consequences
 
@@ -302,6 +514,19 @@ about one Agent — no more and no less — and refuse when the Agent is still r
 - Positive: forgetting cannot damage a running fleet. It touches no host, and point 10
   keeps it away from any Agent still reporting; the worst case is a row that briefly disappears and
   comes back complete.
+
+- Positive: the fleet view survives a restart. Every Agent the Server knew — including the ones not
+  currently reporting, which are exactly the ones that cannot re-announce themselves — keeps its
+  row, its last-reported build, health, and configuration state, shown honestly as disconnected.
+- Positive: a Server restart becomes invisible to the fleet. Restored `sequence_num` and gate
+  hashes mean a reconnecting Agent's compressed heartbeat is accepted in place of a fleet-wide
+  `ReportFullState` stampede, and nothing is re-offered that already runs.
+- Positive: storage is a deployment choice, not an architecture change. A database or external
+  store is a new adapter behind a four-operation trait plus its wiring; the fleet logic, the REST
+  API, and the transports never learn which one is running. The port also hands the tests an
+  in-memory fake for free.
+- Positive: a queued restart survives the Server restarting, and forgetting an Agent frees the
+  store as well as the row.
 
 - Negative / trade-offs: an Agent that declares no heartbeat is never stale, by design. That is
   the honest position — it promised nothing — but an operator who wants the signal has to configure
@@ -334,13 +559,38 @@ about one Agent — no more and no less — and refuse when the Agent is still r
   expires by itself (point 12), so a large autoscaled deployment accumulates rows, and
   has a manual remedy that does not scale to hundreds of them.
 
+- Negative / trade-offs: a port with one shipped adapter is surface carried ahead of its second
+  user. Accepted deliberately — the requirement names that second user — and bounded by keeping
+  the trait at four operations and the write discipline outside it.
+- Negative / trade-offs: the store's footprint is unbounded and grows with every Agent ever seen.
+  The manual forget is also the only way to free it, and the deferred retention policy gains
+  weight — an autoscaled fleet accumulates records exactly as it accumulates rows.
+- Negative / trade-offs: after a crash (not a graceful stop), a restored `last_seen_ms` dates from
+  the Agent's last durable change, not its last heartbeat. An idle-but-alive Agent can briefly read
+  as silent — and therefore forgettable — until its next report corrects it; the window is one
+  heartbeat interval for a live Agent.
+- Negative / trade-offs: the default adapter's files are only half human-readable — scalars and
+  the effective-config text are plain, the wire-typed fields are base64 protobuf. An operator can
+  see *that* a record exists and delete it by hand, but not edit what the Agent reported; that is
+  arguably correct (the Server should not invent reports), but it is a difference from the fully
+  readable Configuration files.
+- Negative / trade-offs: a corrupt record in the default adapter fails startup, consistent with
+  every other store's loud-failure principle — the remedy (delete the named file) costs that Agent
+  one `ReportFullState`, which is what an in-memory fleet's restart costs the whole fleet.
+
 - Follow-ups: acting on staleness — an alert, a webhook, a REST filter — is deliberately not part of
   this. The field exists first; what reads it is a decision with a user behind it.
 
 - Follow-ups: an automatic retention policy for Agents nobody claims — a duration, whether it is
-  fleet-wide or targeted, and how an Agent on a long holiday is spared — which is the question point
-  12 declines to settle here and which meets the version-directory retention ADR-0010
-  deferred; a bulk or filtered form of forgetting, if a deployment ever needs to forget more rows than
-  a person wants to click; and the operator authentication for the REST API that ADR-0013
-  leaves open — the forget endpoint is not more dangerous than the ones beside it, but it
-  is one more thing an unauthenticated caller can do.
+  fleet-wide or targeted, and how an Agent on a long holiday is spared, now with storage attached —
+  which is the question point 12 declines to settle here and which meets the
+  version-directory retention ADR-0010 deferred; a bulk or filtered form of forgetting, if a
+  deployment ever needs to forget more rows than a person wants to click; and the operator
+  authentication for the REST API that ADR-0013 leaves open — the forget endpoint is
+  not more dangerous than the ones beside it, but it is one more thing an unauthenticated caller can
+  do.
+- Follow-ups: a configuration surface for selecting and parameterising a storage backend (a
+  `[storage]` section), which only earns its keep once a second adapter exists; extending the
+  port pattern to the Configuration, label, and package stores, each a decision of its own; and
+  observability of the store itself — a count and byte size in a health or status surface, should
+  the footprint ever need watching.

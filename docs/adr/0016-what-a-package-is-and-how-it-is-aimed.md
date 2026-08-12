@@ -1,8 +1,19 @@
 # ADR-0016: What a package is, and how the Server — not the host — aims it at Agents
 
-- **Status:** 🟢 accepted
+- **Status:** 🟡 proposed
 - **Date:** 2026-08-05
 - **Deciders:** Markus Brigl
+
+This decision supersedes the **structural** decisions of
+[ADR-0017](0017-package-artifacts.md) point 6 (the `(name, os, arch)` store key, the
+per-variant version, the per-variant history) and [ADR-0017](0017-package-artifacts.md)
+points 14 and 16 (the type as a mutable attribute set after upload, and the untyped-inert state).
+Everything those ADRs *guarantee* survives and is strengthened: the platform vocabulary,
+canonicalisation, and mandatory platform fit (ADR-0017 points 8–12), the type fit and its raw
+comparison (ADR-0017 points 15, 17, 18), file-or-source entries
+([ADR-0017](0017-package-artifacts.md)), and the publication gate
+([ADR-0028](0028-a-package-is-published-before-it-is-offered.md)) — whose one asymmetry this
+decision removes.
 
 ## Context
 
@@ -32,33 +43,41 @@ that are available on the Server **for this Agent**"* — the offer is per-Agent
 `all_packages_hash` gates re-offering per Agent as well. The Server already composes a per-Agent
 remote configuration this way; a single global package offer has no reason to exist.
 
-### Undoing a rollout
+### The missing object: the release
 
-A rollout can be aimed, watched, and — when the new binary will not stay up — undone by the Agent
-itself: the Supervisor restores the binary it replaced and reports `InstallFailed` (ADR-0015). The
-other kind of undo is the one an operator asks for an hour later: *the new version starts fine and
-behaves badly, put the fleet back.*
+A package model grown by accretion shows its seams. A package as a *name* carries a Selector, an
+Agent type, and a publication state; under the name sit per-platform variants, each with **its own
+version** and its own one-step history. Four properties arrive over up to four requests, and three
+consequences follow:
 
-A store that keeps **one** package per name answers that only by producing the old artifact again —
-a new upload or a new source replaces what was there, and nothing remembers what it was. So an
-operator either re-uploads the file they hope they still have, or re-points the source at the
-previous release. Neither is hard, and for a **referenced** package (ADR-0017) it is genuinely
-cheap: the previous URL and its checksum are both on the release page, so a rollback is two fields.
-There is also a shape that works without any change: keep `otelcol-0.156` and `otelcol-0.157` as
-separate packages and move the Selector between them.
+- **"Which version is this package at" has up to five answers.** With the version on the variant
+  (ADR-0017), `linux-amd64` can hold `3.1.0` while `windows-amd64` still holds `3.0.0` — sometimes a
+  rollout in progress, sometimes a forgotten upload, and the model cannot tell the two apart. A
+  release is one version across five artifacts; such a store has no object that *is* that release.
+- **A late type creates an untyped state that exists only to be inert.** ADR-0017 put the type on a
+  sub-resource because the *artifact* upload was the wrong place for it — five uploads could
+  disagree. The price is a window in which a package exists untyped, a state whose only meaning is
+  "not finished", plus a rule (offered to nobody) to make that window safe. The window is an
+  artifact of the request choreography, not of the domain.
+- **Replacing bytes in place is the one path around the publication gate.** ADR-0028 stages new
+  packages but lets an upload *replace* the artifact of a published package and distribute
+  immediately — a deliberate asymmetry ("the ordinary in-place upgrade"), with the workaround
+  "retract first" for anyone who wants staging. In-place replacement is also what forces a hidden
+  history: because a new version *overwrites* the old one, the store must secretly remember what it
+  destroyed, one step deep, per variant.
 
-So this is not a capability gap. It is three smaller things:
+The requirement reorganises the model around the object that was missing — the release. A package
+defines a **Set**. Each Set is identified by **name, Agent type, and version**, and may define a
+Selector. A Set holds **one or more entries**, each identified by **os and arch**, with no two
+entries for the same combination. An entry carries **either an uploaded file or a source with its
+SHA-256**, and optionally a signature. **Saving a Set does not make it available to any Client** —
+publication stays its own act.
 
-- **It is not one action.** "Put it back" requires the operator to know what "back" was, at the
-  moment they are least calm.
-- **It is not recorded.** Nothing on the Server says what this package was before, so nobody can
-  answer "what changed here?" without external notes.
-- **It is asymmetric.** A referenced package rolls back from public information; an uploaded one
-  rolls back only if someone kept the file.
-
-The protocol has no objection: a `PackageAvailable` is *"an offer from the Server to the Agent to
-install a new package or initiate an **upgrade or downgrade** of a package that the Agent already
-has"*. A rollback is not a special mechanism — it is the ordinary offer, naming the older artifact.
+The wire imposes one constraint and one freedom. `PackagesAvailable` maps a package *name* to one
+offered version and hash per Agent — so whatever the store holds, offer resolution must reduce
+"every Set named `otelcol`" to at most one per Agent. And the Baseline leaves the offered set
+entirely to the Server ("the packages that are available on the Server **for this Agent**"), so
+holding many versions and offering one is conformant, exactly as holding drafts is (ADR-0028).
 
 ## Decision
 
@@ -101,41 +120,107 @@ from a file on each host.
    holding two packages could never have a Selector set on either. It also forbids the
    fleet-wide-plus-canary shape outright, which is the whole point.
 
-4. **The Selector is set through its own sub-resource**,
-   `PUT /api/v1/packages/{name}/selector`, with the same JSON shape a Configuration uses. The
-   artifact upload keeps its contract (`PUT /api/v1/packages/{name}?version=…` with the artifact as
-   the body); a package without a Selector behaves exactly as one with an empty Selector, so no
-   stored package and no generated client breaks.
+4. **The Selector is set through its own sub-resource**, `PUT …/selector` beneath the
+   Set's resource (point 10), with the same JSON shape a Configuration uses. A Set
+   without a Selector behaves exactly as one with an empty Selector.
 
-### One step back
+### A package is a versioned Set
 
-We will have the package store remember **exactly one** previous version per package, and add
-`POST /api/v1/packages/{name}/rollback`, which makes it the current one again.
+We will make the **Set** the unit the package store holds, identified by **(name, Agent type,
+version)**, immutable in its bytes while published, and offered to nobody until published.
 
-5. **One step, not a catalogue.** Replacing a package's artifact — by upload or by
-   source — moves the descriptor it replaces into `previous`. A rollback swaps `current` and
-   `previous`, so the thing rolled back *from* becomes the next `previous` and pressing the button
-   twice returns to where it started. That is what one button should mean.
+5. **Identity is the triple, stated at creation, never edited.** A Set is created as one
+   document — name, Agent type, version, and optionally a Selector — and the triple is its key:
+   creating "the same Set again" addresses the same resource, and a new version is a **new Set**,
+   never a mutation of an old one. There is no moment where a Set exists untyped, and no inert
+   state to explain; ADR-0017's objection to stating the type at upload (it was per-artifact five
+   times) does not apply, because here it is per-Set once. Name follows the ADR-0010 grammar;
+   version and Agent type are bounded to a conservative token grammar (printable, no path
+   separators, no `@`) so the triple embeds losslessly in file names and URLs. The type is compared
+   **raw** against the reported `service.name` (ADR-0017 point 15).
 
-6. **What is remembered costs what it costs.** For a referenced package it is a URL, a
-   checksum, a version and any headers — nothing measurable. For an uploaded one the previous
-   artifact file is kept alongside the current one, so a package occupies at most twice its size.
-   Bounded, and the bound is the reason for keeping one rather than many: an agent binary is
-   hundreds of megabytes, and a Server that accumulates every version an operator ever pushed
-   becomes an artifact registry by accident. A fleet that wants a catalogue should point at one —
-   which is exactly what a referenced package does.
+6. **Entries are a map keyed by Platform, so a duplicate is unrepresentable.** A Set
+   holds one entry per canonical `(os, arch)` pair (ADR-0017's vocabulary and alias table,
+   unchanged). Writing an entry for a pair the Set already holds *replaces* that entry — while the
+   Set is a draft. Each entry is **either** an uploaded artifact (the Server computes and stores its
+   SHA-256) **or** a source reference (URL, mandatory SHA-256, optional headers — ADR-0017
+   unchanged), and either way an optional Ed25519 signature. One entry suffices for a Set to be
+   publishable; five platforms are five entries under one identity, which is what makes a release
+   one object.
 
-7. **A rollback changes only what is offered, never whom.** The Selector belongs to the
-   package and is untouched: which Agents a package reaches is a separate decision from which bytes
-   they get, and mixing the two would make an undo do more than it says.
+7. **A saved Set reaches nobody; publication is per Set; published bytes are
+   immutable.** Every Set is created a draft, and — closing ADR-0028's asymmetry — there is no
+   in-place upgrade to exempt: the "ordinary version bump" is a new Set, staged like everything
+   else. Publishing a Set with no entries is refused (`409`): a Set *contains one or more entries*
+   by definition, and the empty state exists only while an operator is still assembling one. While
+   a Set is published its entries cannot be written or deleted (`409`; retract first): the fleet is
+   installing those bytes, and a hash that changes under an offer is the confusion the publication
+   gate exists to prevent. The **Selector stays editable in every state** — aim is not bytes, and
+   moving a published Set between rings is precisely how a rollout proceeds (point
+   3).
 
-8. **The fleet view shows what "back" is.** A rollback button that does not say what it
-   will install is a dare, so the package list carries the previous version and, for a referenced
-   package, its source. An operator sees `0.157.0 ← 0.156.0` before choosing.
+8. **Offer resolution: fit, aim, then version — at most one Set per name per Agent.**
+   For one Agent, the candidates are the published Sets whose Agent type equals the reported
+   `service.name`, holding an entry for the reported platform, whose Selector matches
+   (fit-before-aim, ADR-0017/0031 and point 1, all unchanged). Among candidates
+   *sharing a name*, the most specific Selector wins (point 3's rule, ranking Sets);
+   among equally specific candidates the **greater version** wins, compared as ADR-0009 compares
+   versions; a tie that version comparison cannot break (equal, or not versions at all) is a
+   conflict — offer nothing under that name, and surface it (`package_conflict`), as ambiguous
+   targeting is surfaced. The winner is offered under the Set's name with the Set's version and the
+   fitting entry's hash — **nothing changes on the wire or in the Client**.
 
-9. **A package with no previous version cannot be rolled back**, and the API says so
-   (`409`) rather than silently doing nothing. That is the state of every package at its first
-   upload.
+   Greater-version-wins is what makes rollouts and rollbacks publication moves: publish `3.1.0`
+   beside a fleet-wide `3.0.0` with a canary Selector and the ring gets `3.1.0` while everyone
+   else keeps `3.0.0`; widen the Selector to finish the rollout; retract `3.1.0` and the fleet
+   falls back to `3.0.0` — one step back, except the step is any published version and the record
+   of what "back" is, is the store itself.
+
+9. **The store holds Sets, one directory each.** The filesystem layout is
+   `<packages_dir>/<name>@<version>@<type>/` holding `set.json` (identity, Selector, publication
+   state, and every entry's metadata) and one `<os>-<arch>.bin` per uploaded entry — the grammar
+   of point 5 is what makes the directory name parse back unambiguously, as ADR-0017's
+   `@` trick did for variants. There is no `.previous.bin` and no hidden history: earlier versions
+   are kept openly, as Sets.
+
+10. **The REST resource is the triple.** The package routes address
+   `/api/v1/packages/{name}/{agent_type}/{version}`: `PUT` creates the Set (body: Selector,
+   optional), entry routes beneath it write bytes (`PUT …/entries/{os}/{arch}`, body the artifact,
+   optional `signature=<hex>`) or a source (`PUT …/entries/{os}/{arch}/source`, body as ADR-0017),
+   `PUT …/selector` and `PUT …/publication` keep their shapes, `DELETE` removes an entry or the
+   Set. `GET /api/v1/packages` lists Sets grouped by name, each with its entries, reach, and
+   publication state. There is no `/type` and no `/rollback` route — the first is identity, the
+   second is a publication move. The OpenAPI document follows, as it must (ADR-0012).
+
+11. **The bundled UI supports the model from the start, as a master–detail view.** The
+   Packages tab is **one table of Sets** — one row per Set, showing its identity (name, Agent type,
+   version), publication state, the platforms it holds, and its reach. Selecting a row makes that
+   Set the *current* record and shows it in a **detail form**; while nothing is current, the form
+   is not visible. **Create** opens the form empty to define a new Set — the only moment the
+   identity fields are writable (point 5); on an existing Set the form offers exactly
+   what the API offers: the Selector always, the entries while the Set is a draft — each entry
+   removable in place, and a new one addable in place through its own **Add** action, so
+   assembling a five-platform release is five adds on one draft rather than five saves. **OK**
+   persists the form's changes through the REST routes (including an entry still sitting in the
+   editor) and **Cancel** discards them; both conclude the form — the current record is let go and
+   the form leaves the screen, a failed save alone keeping it open beside its message. Delete
+   stands alone on the form's left, Cancel and OK conclude it on the right; **Delete** removes the
+   current Set, after which nothing is current and the form hides. One thing is deliberately *not*
+   in the form at all: the publication state. Publishing and retracting are their own control, a
+   per-row button in the table beside the Set's state, because the publication gate's seam — the press
+   that releases a rollout is never the press that carries the bytes — is the reason the gate
+   works, and a publication flag folded into "save" would be armed by the same click that edits a
+   Selector. The form enforces no rule of its own: what it greys out is what the Server answers
+   `409` to, one rule, rendered.
+
+12. **An existing store is migrated at first open — loudly where it cannot be.** Each
+   stored package becomes one Set per distinct variant version, carrying the entries that share
+   that version and the package's Selector, type, and publication state; a remembered previous
+   version (the one-step `previous` slot) becomes an **unpublished** Set of that version, so
+   nothing an operator could roll back to is lost. A stored package with **no Agent type cannot
+   become a Set** — the type is identity — and fails startup naming the file, ADR-0017 point 13's
+   rule: it was inert before and would be unrepresentable now, and inventing a type would aim bytes
+   this Server cannot judge.
 
 ## Alternatives considered
 
@@ -159,11 +244,6 @@ We will have the package store remember **exactly one** previous version per pac
   in the other — a distinction a reader has to know rather than see. Config keys are read under
   pressure; this one would be read wrong.
 
-- **Split the upload into metadata and artifact** (`PUT /api/v1/packages/{name}` for JSON including
-  the Selector, `PUT /api/v1/packages/{name}/file` for the bytes). Rejected for now: it is the
-  tidier REST shape and mirrors Configurations better, but it breaks the published v1 contract for a
-  gain that a sub-resource delivers additively. Worth revisiting if the package model grows further.
-
 - **Refuse an overlapping Selector at the API.** Rejected on contact with the code, which is the
   honest reason: with every existing package carrying an empty Selector, the first `PUT` is always
   refused, and there is no order in which two packages can be narrowed — the store cannot leave the
@@ -174,26 +254,42 @@ We will have the package store remember **exactly one** previous version per pac
   those hosts were chosen. A Selector over reported attributes survives re-identification and is
   self-documenting — and it is already the project's vocabulary.
 
-- **Re-upload or re-point instead of rolling back.** The honest baseline, and it is why the one-step
-  rollback is small. It costs an operator two fields for a referenced package, and for an uploaded
-  one it costs whatever it costs to still have the file. Rejected because the moment it matters is
-  an incident, and an incident is exactly when "find the old artifact" is worst — but it is a close
-  call, and without the rollback nothing is broken.
-- **Keep every version, with a retention policy.** The complete answer, and a much larger one: it
-  needs a version key on every package, a listing per package, garbage collection, and disk
-  accounting nobody asked for. It also turns the Server into a small artifact registry, which the
-  specification does not ask it to be. Rejected in favour of the one step that answers the actual
-  question; a fleet with a registry already has referenced packages.
-- **Model rollback as a Selector move between per-version packages.** Works without code, and is
-  genuinely good practice: `otelcol-0.156` and `otelcol-0.157` side by side, the Selector deciding.
-  Rejected as *the* answer because it makes every rollout a two-package dance and leaves the fleet's
-  state spread across package names — but it stays a perfectly reasonable way to work, and this
-  decision does not take it away.
-- **Roll back automatically when health degrades after an install.** Tempting, and far more than an
-  undo button: it needs a definition of "degrades" that is not "the process exited" (that case is
-  already handled by the apply grace), a window over which to judge it, and a way to stop a flapping
-  fleet from oscillating between two versions. Rejected as a different decision with its own risks,
-  not as a bad idea.
+- **Keep the accreted model and only add the missing staging** (make in-place replacement stage
+  too — ADR-0028's rejected stricter reading). Smallest change, and it fixes only one of the three
+  seams: versions stay per-variant, the untyped window stays, and rollback stays a hidden single
+  step. Rejected: the requirement is the reorganisation, and each seam traces to the same root —
+  the store has no object for a release.
+- **Version per variant** (ADR-0017's shape). It permits a per-platform rollout of different
+  versions under one name without multiple Sets. Rejected: multiple Sets express that case
+  explicitly (two Sets, two Selectors) — and the implicit form is indistinguishable from a
+  half-finished upload, which is the ambiguity operators actually hit.
+- **Identity without the Agent type** — `(name, version)`, type as an attribute. One fewer path
+  segment, and two Sets differing only by type are odd. Rejected: the requirement names the triple;
+  the type is as constitutive of "what is this artifact" as the version (ADR-0017's whole point),
+  and an attribute is editable — retyping published bytes to a different kind of Agent is exactly
+  the mistake immutable identity forecloses.
+- **Refuse every same-specificity tie instead of greater-version-wins.** Simpler rule, no version
+  ordering needed, fully explicit. Rejected, narrowly: it makes the natural end state of every
+  rollout — old and new both published fleet-wide — a conflict that stops offers entirely, so
+  operators must retract the old version at the precise moment they finish a rollout, and the
+  rollback target vanishes with it. Greater-version-wins keeps the old version harmlessly
+  published as the standing fallback; the tie rule still catches genuinely incomparable versions.
+- **Mutable entries on published Sets** (in-place replacement). Rejected: it is the hole in
+  ADR-0028's gate, restated; with cheap versioned Sets the ordinary upgrade has a first-class shape,
+  and immutability is what lets an operator read a published Set's hash as a fact.
+- **A Set may be published empty.** Rejected: the requirement says one or more entries, and an
+  empty published Set is an offer of nothing that still occupies a name and a version.
+- **Keep exactly one previous version per package** (a hidden `previous` slot and a `/rollback`
+  route). It bounds disk at twice a package's size. Rejected: versions are first-class Sets, and a
+  rollback is a publication move over any published version, not a hidden single step.
+- **Automatic pruning of superseded Sets.** Keeping one version bounds disk; Sets do not. Rejected
+  *here*: retention is the same broad question ADR-0026 deferred for Agents and ADR-0010 for version
+  directories, and deciding it as a footnote would repeat the mistake those ADRs declined. Deleting a
+  Set is one request; the follow-up names the policy question.
+- **Encode the triple as one opaque Set ID** (a hash) instead of three path segments. Robust
+  against any character in any field. Rejected: the ID would appear in URLs, file names, and the
+  UI while meaning nothing to a human; a bounded token grammar (point 5) buys the same
+  safety and keeps `otelcol@3.1.0@otelcol-contrib` readable in a directory listing.
 
 ## Sources / Prior art
 
@@ -204,15 +300,25 @@ We will have the package store remember **exactly one** previous version per pac
   *for this Agent*), which is both the constraint resolution satisfies and the licence for holding
   what is not offered.
 
-- [OpAMP specification § PackageAvailable (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
-  — *"an offer from the Server to the Agent to install a new package or initiate an upgrade or
-  downgrade of a package that the Agent already has"*: a downgrade is the ordinary offer, so nothing
-  on the wire changes for a rollback.
-
 - [`opamp-go`](https://github.com/open-telemetry/opamp-go) — checked as the behavioural oracle: its
   example Server only logs `PackagesAvailable`/`ServerProvidedAllPackagesHash` and never offers a
   package, so there is no upstream targeting behaviour to copy. The model is ours to choose, within
   what the protocol already provides.
+
+- **[OCI Image Index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)** —
+  already ADR-0017's model, and an even closer fit for Sets: one *reference* (name + tag ≈ name +
+  version) resolves to a manifest list with one entry per required `platform` object, each naming
+  its digest — a Set with entries, almost field for field. Registries also settle point
+  7's rule: a pushed manifest's digest is immutable; moving consumers is done by moving
+  references (tags/publication), not by rewriting bytes.
+- **[Debian repository format](https://wiki.debian.org/DebianRepository/Format)** /
+  **[RPM repositories](https://rpm-software-management.github.io/)** — a released package is
+  `(name, version, architecture)` with per-file checksums and detached signatures, and a *suite*
+  (stable/testing) decides availability separately from presence in the pool: presence is not
+  publication, which is ADR-0028's gate and point 7 in thirty-year-old production form.
+- **[BindPlane rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/rollouts)**
+  — staged versions released by an explicit act, already ADR-0028's source; the versioned-Set
+  shape extends the same separation from configurations to artifacts.
 
 - [ADR-0012](0012-selector-targeted-configurations-and-rest-api.md) — the Selector semantics
   this reuses verbatim (every pair must equal a reported attribute; an empty Selector matches all),
@@ -220,11 +326,11 @@ We will have the package store remember **exactly one** previous version per pac
 - [ADR-0015](0015-package-delivery-for-managed-processes.md) — the delivery, verification, and
   health-gating this leaves untouched; only *who is offered what* is decided here.
 
-- [ADR-0015](0015-package-delivery-for-managed-processes.md) — the Agent-side rollback the one-step
-  rollback is deliberately *not*: that one restores a binary that would not start, within seconds,
-  without an operator. This one is a decision a human makes later, about a binary that runs.
-- [ADR-0017](0017-package-artifacts.md) — referenced packages, which make the previous
-  version free to remember and, for many fleets, already make rolling back a two-field edit.
+- This repository: [ADR-0017](0017-package-artifacts.md) (file-or-source entries, kept),
+  [ADR-0009](0009-version-baking-comparison-and-display.md) (the version
+  comparison point 8 ranks by), [ADR-0017](0017-package-artifacts.md) (structure superseded,
+  guarantees kept), [ADR-0028](0028-a-package-is-published-before-it-is-offered.md) (the gate,
+  kept and closed).
 
 ## Consequences
 
@@ -260,19 +366,42 @@ We will have the package store remember **exactly one** previous version per pac
 - Follow-ups: a bulk restart across a selected set of Agents, which the fleet view's unused
   checkboxes already suggest.
 
-- Positive: undoing a rollout is one action that names what it will do, instead of a search for an
-  artifact during an incident.
-- Positive: the Server can answer "what was here before?", which is the smallest useful form of a
-  rollout record.
-- Negative / trade-offs: an uploaded package occupies up to twice its size on the Server. For a
-  fleet with several large packages that is real disk, and there is no setting to opt out — keeping
-  the previous version is the whole feature.
-- Negative / trade-offs: "one step" is a promise that will be tested. The first time someone rolls
-  back twice expecting to reach a version from last week, they will find themselves back where they
-  started. The fleet view showing exactly one previous version is what has to make that obvious.
-- Negative / trade-offs: a rollback is a new offer like any other, so it travels at the speed of the
-  control loop — Agents pick it up on their next exchange, and one that is offline stays on the new
-  version until it returns. Nothing here makes an undo faster than a rollout.
-- Follow-ups: a rollout record worth the name — who changed a package, when, and to what — which is
-  a broader question than packages and would touch Configurations too. And automatic rollback on
-  post-install health, which needs its own definition of failure.
+- Positive: **a release is one object.** Five platforms' artifacts under one identity, staged
+  together, published together, with one version — the ambiguity "rollout in progress or forgotten
+  upload?" stops being representable.
+- Positive: **the publication gate has no exception left.** Nothing an operator saves — new Set,
+  new entry, replaced draft entry — reaches any Client until the publication act, and published
+  bytes cannot change underneath the fleet.
+- Positive: **rollback is visible and multi-step.** The store openly holds every version; falling
+  back is retracting a Set, the target is any version still published, and the fleet view can show
+  the whole ladder.
+- Positive: no untyped state, no late-typing window, and the type can never disagree with itself
+  across platforms.
+- Positive: the UI ships the model in the same change, and its master–detail shape mirrors the
+  store one to one — the table is the Set list, the form is one Set, and every constraint the form
+  shows (frozen identity, entries locked while published) is the Server's own rule, not a second
+  implementation of it.
+- Negative / trade-offs: **the largest package-API break yet** — every route under
+  `/api/v1/packages` changes shape, `/type` and `/rollback` disappear, and every script and the
+  bundled UI must follow. Pre-1.0, and the alternative is carrying two models; but ADR-0017 called
+  its four route changes the largest break since ADR-0012, and this is larger.
+- Negative / trade-offs: **disk is unbounded by design.** One remembered version would cap a
+  package at twice its size; Sets accumulate until deleted, which is the "artifact registry by
+  accident" that cap was meant to prevent — accepted knowingly, because the registry role is now
+  explicit and manual deletion is one request, with retention named as the follow-up.
+- Negative / trade-offs: **greater-version-wins puts semantics on the version string.** Two
+  equally aimed Sets are ordered by ADR-0009 comparison, so a fleet whose versions are not
+  comparable (Foreign Agents numbering freely) falls to the conflict rule and must keep Selectors
+  disjoint or publication exclusive. The rule is mechanical but it is one more thing the manual
+  must state plainly.
+- Negative / trade-offs: adding a platform to a published Set means retract → add → republish — a
+  window in which the Set reaches nobody. Rare (a release is normally built whole), and the
+  alternative (mutable published Sets) reopens the gate; but it is a real two-minute cost on a
+  case in-place upload handles in one request.
+- Negative / trade-offs: migration turns each package into as many Sets as it had distinct
+  variant versions, and an untyped stored package **fails startup** until the file is removed —
+  ADR-0017's medicine, applied once more, with the same operator cost.
+- Follow-ups: a retention policy for superseded Sets (by topic, with the Agent-record and
+  version-directory retention questions it joins); surfacing the version ladder per name in the
+  bundled UI; and extending the ADR-0026 storage-port pattern to this store once that ADR's
+  precedent stands.

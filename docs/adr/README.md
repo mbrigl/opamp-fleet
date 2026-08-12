@@ -44,7 +44,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0013](0013-agent-admission-on-the-opamp-endpoint.md) | Agent admission on the OpAMP endpoint — optional proofs, each enforced once configured, proving fleet membership | 🟢 accepted |
 | [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
 | [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |
-| [0016](0016-what-a-package-is-and-how-it-is-aimed.md) | What a package is, and how the Server — not the host — aims it at Agents | 🟢 accepted |
+| [0016](0016-what-a-package-is-and-how-it-is-aimed.md) | What a package is, and how the Server — not the host — aims it at Agents | 🟡 proposed |
 | [0017](0017-package-artifacts.md) | A package's artifacts — an uploaded archive or a URL the Agents fetch, unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
 | [0018](0018-client-self-update.md) | The Client updates itself — its own Agent, a staged version, a restart it does not issue, and a consent that names its package | 🟢 accepted |
 | [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟢 accepted |
@@ -54,7 +54,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0023](0023-what-describes-an-agent.md) | What describes an Agent — `service.name` carries the type, `service.instance.name` the operator's name | 🟡 proposed |
 | [0024](0024-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK, to the destinations the Server offers | 🟢 accepted |
 | [0025](0025-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
-| [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
+| [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟡 proposed |
 | [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
 | [0028](0028-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | 🟢 accepted |
 
