@@ -153,15 +153,23 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.healthy);
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
-    // The operator distributes a fleet-wide Configuration; the Server pushes it over the socket.
+    // The operator distributes a fleet-wide Configuration — saved, then published, because
+    // saving alone stages a draft (ADR-0055); the Server pushes the release over the socket.
     state
-        .put_configuration(server::configs::Configuration {
-            name: "fleet".to_string(),
-            selector: Default::default(),
-            body: "receivers: {}\n".to_string(),
-            role: String::new(),
-        })
-        .expect("distribute the fleet configuration");
+        .save_configuration(
+            "fleet",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the fleet configuration");
+    state
+        .set_configuration_published("fleet", true)
+        .expect("publish the fleet configuration")
+        .expect("the configuration exists");
 
     // Every Agent acknowledges APPLIED and is in sync; the processes restarted on the files. The
     // fleet-wide Configuration has an empty Selector, so it reaches the Client's own Agent too —
@@ -252,13 +260,20 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.non_identifying_attributes.contains_key("role"));
 
     state
-        .put_configuration(server::configs::Configuration {
-            name: "edge-extra".to_string(),
-            selector: [("role".to_string(), "edge".to_string())].into(),
-            body: "processors: {}\n".to_string(),
-            role: String::new(),
-        })
-        .expect("distribute the targeted configuration");
+        .save_configuration(
+            "edge-extra",
+            server::configs::Revision {
+                selector: [("role".to_string(), "edge".to_string())].into(),
+                body: "processors: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the targeted configuration");
+    state
+        .set_configuration_published("edge-extra", true)
+        .expect("publish the targeted configuration")
+        .expect("the configuration exists");
     wait_until("the stub to apply both entries", || {
         let snapshot = state.snapshot();
         let stub = view(&snapshot, "stub")?;

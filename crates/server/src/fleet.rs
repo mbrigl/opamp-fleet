@@ -28,7 +28,7 @@ use utoipa::ToSchema;
 use crate::agent_store::{AgentStore, FsAgentStore, PersistedAgent};
 use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
-use crate::configs::{ConfigStore, Configuration, DesiredConfig};
+use crate::configs::{ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::PackageStore;
 
@@ -521,14 +521,38 @@ impl AppState {
         &self.configs
     }
 
-    /// Creates or replaces a Configuration, persists it, and wakes every WebSocket loop — the
-    /// matching Agents are offered the change without being asked.
-    pub fn put_configuration(&self, config: Configuration) -> Result<(), String> {
-        let name = config.name.clone();
-        self.configs.put(config)?;
+    /// Creates a Configuration or replaces its draft revision, and persists it. **Saving only
+    /// saves** (ADR-0055): nothing is offered and no WebSocket loop wakes — the fleet keeps
+    /// running the published revision, if any, until [`Self::set_configuration_published`]
+    /// releases the draft.
+    pub fn save_configuration(
+        &self,
+        name: &str,
+        revision: Revision,
+    ) -> Result<Configuration, String> {
+        let config = self.configs.put_draft(name, revision)?;
+        info!(configuration = %name, "configuration draft stored — nothing distributed");
+        Ok(config)
+    }
+
+    /// Releases a Configuration's draft to the fleet as one snapshot, or retracts the published
+    /// revision (ADR-0055), and wakes every WebSocket loop either way — this, not saving, is the
+    /// moment the fleet changes. `Ok(None)` when no Configuration of that name exists.
+    pub fn set_configuration_published(
+        &self,
+        name: &str,
+        published: bool,
+    ) -> Result<Option<Configuration>, String> {
+        let Some(config) = self.configs.set_published(name, published)? else {
+            return Ok(None);
+        };
         self.push.send_modify(|rev| *rev += 1);
-        info!(configuration = %name, "configuration stored and distributed");
-        Ok(())
+        if published {
+            info!(configuration = %name, "configuration published and distributed");
+        } else {
+            info!(configuration = %name, "configuration retracted — its entry leaves every composed map");
+        }
+        Ok(Some(config))
     }
 
     /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so

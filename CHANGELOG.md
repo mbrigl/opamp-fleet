@@ -15,6 +15,31 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.5]
+
+### Changed
+
+- **Saving a Configuration no longer distributes it** ([ADR-0055](docs/adr/0055-a-configuration-is-published-before-it-is-offered.md)).
+  `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
+  `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
+  published Configuration stages the change (`pending_changes: true`) until the next publication.
+  In the bundled UI the button that used to read *Save & distribute* is now *Save*, and *Publish*
+  is what changes the fleet. Retracting (`{"published": false}`) removes the entry from every
+  composed config map, which matching Agents apply.
+  **What to do:** Configurations stored before the upgrade load as published and stay in force —
+  running fleets are untouched. Scripts that `PUT` a Configuration and expect delivery need the
+  one extra publication call.
+
+### Added
+
+- **A Configuration can state the Agent type it is for**
+  ([ADR-0054](docs/adr/0054-a-configuration-may-state-the-agent-type-it-is-for.md)). The optional
+  `service_name` field is compared raw against the `service.name` an Agent reports, before the
+  Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
+  currently reports as suggestions.
+  **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
+  field over a `service.name` Selector pair when creating new ones.
+
 ## [0.2.4] - 2026-08-12
 
 ### Added

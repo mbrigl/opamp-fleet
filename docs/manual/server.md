@@ -214,20 +214,40 @@ host out even with a valid credential: a Client switched off longer than its val
 
 ## Configurations: what the fleet runs
 
-A **Configuration** is a name, a body of text, an optional **Selector**, and an optional **role**.
+A **Configuration** is a name, a body of text, an optional **Agent type**, an optional
+**Selector**, and an optional **role**.
 
 **Names** become file names here, config-map keys on the wire, and entry files on every Client
 — including Windows ones. The grammar is therefore narrow: 1–32 characters, lowercase letters,
 digits, and `-`, not starting or ending with `-`, and not a Windows reserved device name (`con`,
 `nul`, `com1`, …).
 
+**Saving never distributes** (ADR-0055). `PUT` stores a **draft** — complete, aimed, and offered
+to nobody. Releasing it is its own act, `PUT …/publication` with `{"published": true}`, which
+promotes the draft as one snapshot; editing a published Configuration stages the change the same
+way (the fleet keeps the published revision, and the API answers `pending_changes: true`) until
+the next publication. `{"published": false}` retracts — and unlike retracting a package, that is
+**not** inert: the entry leaves every composed config map, matching Agents apply the removal and
+restart; only an Agent left matching nothing keeps running what it runs.
+
+**The type decides whom it can reach at all** (ADR-0054). `service_name`, when set, must equal
+the `service.name` the Agent reports — compared raw, before the Selector. Unset means every type,
+which for a Collector body is rarely what you want: every Agent a Client presents accepts remote
+configuration, so an untyped fleet-wide body reaches Foreign Agents and the Client's own Agent
+too. (A Selector pair `service.name=…` still works; the field is the visible, first-class way to
+say the same thing.)
+
 **The Selector decides who gets it.** Each `key=value` pair must equal an attribute the Agent
-reported — identifying or non-identifying, both are matched. An empty Selector targets every Agent.
+reported — identifying or non-identifying, both are matched. An empty Selector targets every
+Agent of the type (or every Agent, if no type is set either).
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
+       -d '{"service_name": "otelcol-contrib", "selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
        http://127.0.0.1:4320/api/v1/configurations/linux-prod
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"published": true}' \
+       http://127.0.0.1:4320/api/v1/configurations/linux-prod/publication
 ```
 
 **Several Configurations may match one Agent.** It receives all of them, as named entries in one
@@ -247,13 +267,13 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
 ```
 
-**Nothing is sent twice.** The Server composes the entries an Agent should run, hashes them, and
-compares that hash to what the Agent reports. Equal hashes mean nothing crosses the wire. This is
-why saving an unchanged Configuration is free, and why a role change *does* reach the fleet: the
-role is part of the hash.
+**Nothing is sent twice.** The Server composes the **published** entries an Agent should run,
+hashes them, and compares that hash to what the Agent reports. Equal hashes mean nothing crosses
+the wire. This is why re-publishing an unchanged Configuration is free, and why a role change
+*does* reach the fleet once published: the role is part of the hash.
 
-**How a change travels.** Over WebSocket the Server pushes it within a second; over plain HTTP it
-rides the Agent's next poll. The Agent then reports the configuration back as applied or failed,
+**How a change travels.** Publication is the moment it starts — over WebSocket the Server pushes
+it within a second; over plain HTTP it rides the Agent's next poll. The Agent then reports the configuration back as applied or failed,
 with the hash it applied — visible on the Agent's row as `remote_config_status`, `remote_config_error`,
 and `in_sync`.
 
@@ -421,9 +441,10 @@ show.
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout rings without touching the host](#labels-rollout-rings-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
-| `GET /api/v1/configurations` | Every Configuration. |
+| `GET /api/v1/configurations` | Every Configuration: its draft, plus `published` and `pending_changes`. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
-| `PUT /api/v1/configurations/{name}` | Create or replace it. Body: `{"selector": {…}, "body": "…", "role": "…"}` — `selector` and `role` may be omitted. |
+| `PUT /api/v1/configurations/{name}` | Create it, or replace its draft. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing** (ADR-0055). |
+| `PUT /api/v1/configurations/{name}/publication` | Body `{"published": true}` releases the draft to the fleet as one snapshot — the moment a change starts travelling. `{"published": false}` retracts: the entry leaves every composed config map, which matching Agents apply. |
 | `DELETE /api/v1/configurations/{name}` | Remove it. Agents that matched it stop matching; they keep running what they last applied. |
 | `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
 | `PUT /api/v1/packages/{name}` | Upload an artifact. See above for the query parameters. |

@@ -281,18 +281,23 @@
 
       <div id="panel-configurations" class="tab-panel">
       <section id="config-card" class="card config">
-        <h2>Configurations — each targets the Agents its Selector matches; an empty Selector targets every Agent</h2>
+        <h2>Configurations — each targets the Agents of its type that its Selector matches; saving stages a draft, publishing releases it</h2>
         <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
-          <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent)" autocomplete="off" />
+          <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
+                 title="Compared raw for equality against the service.name the agents report, before the selector (ADR-0054). Empty means every type — which for a collector body is rarely what you want." />
+          <datalist id="config-type-options"></datalist>
+          <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent of the type)" autocomplete="off" />
           <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
-        <textarea id="config" placeholder="The configuration body to distribute…"></textarea>
+        <textarea id="config" placeholder="The configuration body — saved as a draft, distributed only when published…"></textarea>
         <div class="config-actions">
-          <button id="save" class="btn btn-primary">Save &amp; distribute</button>
+          <button id="save" class="btn btn-primary" title="Save the form as this Configuration's draft. Nothing is distributed by this press (ADR-0055); a published revision keeps being offered untouched until Publish.">Save</button>
+          <button id="config-publish" class="btn btn-ghost" title="Release the saved draft to the fleet as one snapshot — this, not saving, is the moment the fleet changes.">Publish</button>
           <button id="delete" class="btn btn-ghost">Delete</button>
+          <span id="config-state" class="sub"></span>
           <span id="config-error" class="err"></span>
         </div>
       </section>
@@ -874,7 +879,9 @@
         renderSelection();
       });
 
-      // Configurations editor (ADR-0012): name + selector + body, PUT/DELETE per Configuration.
+      // Configurations editor (ADR-0012): name + type + selector + body, PUT/DELETE per
+      // Configuration. A PUT stores a draft; the Publish button is what changes the fleet
+      // (ADR-0055), and the type limits whom a published Configuration can reach (ADR-0054).
       let configurations = [];
       let selectedName = null;
 
@@ -888,14 +895,31 @@
         }
         return selector;
       }
+      // The publication state, spelled the same way everywhere: a draft was never released, a
+      // pending edit is saved but not in force — the answer to "I saved and nothing changed".
+      const configState = (c) => !c.published ? "draft" : c.pending_changes ? "pending changes" : "published";
       function renderConfigList() {
         $("config-count").textContent = configurations.length;
-        $("config-list").innerHTML = configurations.map((c) =>
-          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${c.role ? "role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : "top-level configuration"}">${esc(c.name)}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
-        ).join("") || `<span class="chip">none yet</span>`;
+        $("config-list").innerHTML = configurations.map((c) => {
+          const state = configState(c);
+          const marker = state === "published" ? "" : ` · ${state === "draft" ? "📝 draft" : "✎ pending"}`;
+          return `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${state === "draft" ? "never published — offered to nobody" : state === "pending changes" ? "the saved draft differs from the published revision the fleet runs" : "the published revision is in force"}${c.role ? " · role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : ""}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}${marker}</span>`;
+        }).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#config-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectConfig(chip.dataset.name));
         });
+      }
+      // The action row follows the selected Configuration: what the second button does, and the
+      // state line beside it.
+      function renderConfigActions() {
+        const config = configurations.find((c) => c.name === selectedName);
+        const publish = $("config-publish");
+        publish.disabled = !config;
+        publish.textContent = config && config.published && !config.pending_changes ? "Retract" : "Publish";
+        publish.title = config && config.published && !config.pending_changes
+          ? "Withdraw the published revision. NOT inert: the entry leaves every composed config map and matching agents apply the removal; only an agent matching nothing else keeps running unchanged."
+          : "Release the saved draft to the fleet as one snapshot — this, not saving, is the moment the fleet changes.";
+        $("config-state").textContent = config ? configState(config) : "";
       }
       function selectConfig(name) {
         const config = configurations.find((c) => c.name === name);
@@ -903,24 +927,27 @@
         selectedName = name;
         configDirty = false;
         $("config-name").value = config.name;
+        $("config-type").value = config.service_name || "";
         $("config-selector").value = selectorText(config.selector);
         $("config-role").value = config.role || "";
         $("config").value = config.body;
         $("config-error").textContent = "";
         renderConfigList();
+        renderConfigActions();
       }
       $("config").addEventListener("input", () => { configDirty = true; });
       $("save").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
+        const type = $("config-type").value.trim();
         const role = $("config-role").value.trim();
         let selector;
         try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          // An empty role is left out entirely rather than sent as "": absent is what the
-          // resource means by top-level configuration.
-          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}) }),
+          // An empty role or type is left out entirely rather than sent as "": absent is what
+          // the resource means by top-level configuration and by every-type.
+          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}), ...(type ? { service_name: type } : {}) }),
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
@@ -929,6 +956,26 @@
         $("config-error").textContent = "";
         configDirty = false;
         selectedName = name;
+        await refreshConfigs();
+        refreshAgents();
+      });
+      $("config-publish").addEventListener("click", async () => {
+        const config = configurations.find((c) => c.name === selectedName);
+        if (!config) return;
+        // Publish releases the saved draft; on a clean published Configuration the same button
+        // retracts — with the ADR-0055 warning, because retraction actively reconfigures.
+        const retract = config.published && !config.pending_changes;
+        if (retract && !confirm(`Retract "${config.name}"?\n\nIts entry leaves every composed config map: matching agents apply the removal and restart. Only an agent matching nothing else keeps running unchanged.`)) return;
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(config.name)}/publication`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ published: !retract }),
+        });
+        if (!res.ok) {
+          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          return;
+        }
+        $("config-error").textContent = "";
         await refreshConfigs();
         refreshAgents();
       });
@@ -942,7 +989,7 @@
         }
         $("config-error").textContent = "";
         selectedName = null;
-        $("config-name").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
+        $("config-name").value = ""; $("config-type").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
         await refreshConfigs();
         refreshAgents();
       });
@@ -959,6 +1006,10 @@
         $("selector-options").innerHTML = [...pairs].sort().map((p) =>
           `<span class="chip clickable" data-pair="${esc(p)}">${esc(p)}</span>`
         ).join("") || `<span class="chip">no agents reporting yet</span>`;
+        // The types the fleet currently reports, as suggestions for the type input (ADR-0054) —
+        // so limiting a Configuration to a type is a pick, not a remembered spelling.
+        const types = [...new Set(agents.map((a) => a.service_name).filter(Boolean))].sort();
+        $("config-type-options").innerHTML = types.map((t) => `<option value="${esc(t)}"></option>`).join("");
         document.querySelectorAll("#selector-options .clickable").forEach((chip) => {
           chip.addEventListener("click", () => {
             const input = $("config-selector");
@@ -1375,9 +1426,10 @@
       async function refreshConfigs() {
         try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }
         renderConfigList();
+        renderConfigActions();
         if (selectedName && !configDirty) {
           const selected = configurations.find((c) => c.name === selectedName);
-          if (selected) { $("config").value = selected.body; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
+          if (selected) { $("config").value = selected.body; $("config-type").value = selected.service_name || ""; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
         }
       }
 
