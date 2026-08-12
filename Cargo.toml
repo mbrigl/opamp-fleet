@@ -89,7 +89,7 @@ x509-parser = "0.18"
 # schema. `http-proto` is the OTLP/HTTP protobuf encoding the Baseline's destination_endpoint
 # requires; `reqwest-client` replaces the default *blocking* client, which would stall a tokio
 # worker; `grpc-tonic` is deliberately absent, since the schema permits no gRPC destination here.
-opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry = { version = "0.32", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
 # Metric and attribute names from the standard rather than string literals of our own (ADR-0036).
