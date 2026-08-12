@@ -99,7 +99,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = ["
 # where a string literal would quietly keep emitting the old one.
 opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
-opentelemetry-appender-tracing = "0.31"
+opentelemetry-appender-tracing = "0.32"
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
 # three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
