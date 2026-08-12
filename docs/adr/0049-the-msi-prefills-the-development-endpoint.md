@@ -1,6 +1,6 @@
 # ADR-0049: The MSI's endpoint dialog is prefilled with the development default — interactively only
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 

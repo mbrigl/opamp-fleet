@@ -1,6 +1,6 @@
 # ADR-0050: Agents report the host's network addresses, CPU model, and OS build
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 

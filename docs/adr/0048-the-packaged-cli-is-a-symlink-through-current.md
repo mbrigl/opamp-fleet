@@ -1,6 +1,6 @@
 # ADR-0048: The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 

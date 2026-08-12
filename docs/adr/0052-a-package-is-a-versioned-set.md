@@ -1,6 +1,6 @@
 # ADR-0052: A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 

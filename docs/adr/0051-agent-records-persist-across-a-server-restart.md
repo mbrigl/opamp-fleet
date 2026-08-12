@@ -1,6 +1,6 @@
 # ADR-0051: Agent records persist behind a storage port — filesystem by default, connectedness runtime-only
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 

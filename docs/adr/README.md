@@ -76,10 +76,12 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0045](0045-the-version-helper-lives-in-the-shared-crate.md) | The single version helper lives in `crates/opamp`, so both ends report one number | 🟢 accepted |
 | [0046](0046-a-release-ships-native-installers.md) | A release also ships native installers — `.deb`, `.rpm`, and an `.msi` that asks for the install root and the endpoint | 🟢 accepted |
 | [0047](0047-admission-is-a-fleet-wide-trust-boundary.md) | Admission is a fleet-wide trust boundary — `instance_uid` is self-asserted, and there is no authorization between Agents | 🟢 accepted |
-| [0048](0048-the-packaged-cli-is-a-symlink-through-current.md) | The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it | 🟡 proposed |
-| [0049](0049-the-msi-prefills-the-development-endpoint.md) | The MSI's endpoint dialog is prefilled with the development default — interactively only | 🟡 proposed |
-| [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟡 proposed |
-| [0051](0051-agent-records-persist-across-a-server-restart.md) | Agent records persist behind a storage port — filesystem by default, connectedness runtime-only | 🟡 proposed |
-| [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟡 proposed |
-| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟡 proposed |
+| [0048](0048-the-packaged-cli-is-a-symlink-through-current.md) | The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it | 🟢 accepted |
+| [0049](0049-the-msi-prefills-the-development-endpoint.md) | The MSI's endpoint dialog is prefilled with the development default — interactively only | 🟢 accepted |
+| [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟢 accepted |
+| [0051](0051-agent-records-persist-across-a-server-restart.md) | Agent records persist behind a storage port — filesystem by default, connectedness runtime-only | 🟢 accepted |
+| [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟢 accepted |
+| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟢 accepted |
+| [0054](0054-a-configuration-may-state-the-agent-type-it-is-for.md) | A Configuration may state the Agent type it is for — and then reaches no Agent of another | 🟢 accepted |
+| [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | 🟢 accepted |
 
