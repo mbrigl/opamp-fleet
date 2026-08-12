@@ -108,7 +108,7 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
 utoipa = "5"
