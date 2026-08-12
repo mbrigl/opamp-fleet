@@ -17,7 +17,39 @@ carries a date once its tag exists.
 
 ## [0.2.3]
 
+### Added
+
+- **The fleet survives a Server restart.** Agent records now persist — one JSON file per Agent
+  under `<config_dir>/agents/`, behind a storage port a database or external store can replace
+  ([ADR-0051](docs/adr/0051-agent-records-persist-across-a-server-restart.md)). After a restart
+  every Agent the Server knew keeps its row, its last-reported build, health, and configuration
+  state, shown as disconnected until it reports again; a reconnecting Agent's compressed heartbeat
+  is accepted without a fleet-wide `ReportFullState`, and a queued restart survives. Only
+  connectedness stays runtime-only — it is derived from live evidence, never restored. A heartbeat
+  writes nothing to disk; a graceful stop (Ctrl-C/SIGINT) flushes current timestamps.
+  **What to do:** nothing. Note that forgetting an Agent (`DELETE /api/v1/agents/{uid}`) is now
+  also what frees its stored record, and that reported effective configurations — which may embed
+  credentials — now persist under the owner-only `agents/` directory.
+
 ### Changed
+
+- **A package is now a versioned Set, and the package API changed shape for it.** A Set is
+  identified by *name, Agent type, and version* — stated at creation, never edited; it may define
+  a Selector, holds one entry per platform (an upload, or a source URL + sha256, optionally
+  signed), and **saving never distributes**: every Set is a draft until
+  `PUT …/publication` releases it, and a published Set's entries are immutable
+  ([ADR-0052](docs/adr/0052-a-package-is-a-versioned-set.md)). Among Sets of one name the most
+  specific Selector wins and, at equal specificity, the greater version — so a canary ring is one
+  Selector edit, and a rollback is retracting the newest version (the hidden one-step history of
+  ADR-0019 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
+  routes moved to `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}`
+  beneath; `…/type` and `…/rollback` are gone. The Packages tab is now a master–detail view: a
+  table of Sets, a detail form for the selected one (Create/OK/Cancel/Delete, publish as its own
+  button), hidden while nothing is selected.
+  **What to do:** rewrite any script against the old package routes (see `config/server.toml` and
+  the release notes for the new upload loop). The store migrates itself at first start — one Set
+  per stored variant version — **except** a package that never got an Agent type: the Server
+  refuses to start and names the file; delete it or re-create it as a Set.
 
 - **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
   Configurations each manage from their own tab; the active tab lives in the URL hash

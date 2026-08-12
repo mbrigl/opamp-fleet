@@ -92,25 +92,19 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    // The Set's identity states the Agent type it is built for (ADR-0052, ADR-0034): the
+    // Supervisor below names its program `managed-agent` and sets no `service_name`, so that file
+    // name is the type it reports.
+    let set = server::packages::SetId::new("myagent", "managed-agent", "2.0.0").expect("set id");
     store
-        .put(
-            "myagent".to_string(),
-            this_host(),
-            "2.0.0".to_string(),
-            false,
-            Some(signature),
-            artifact.clone(),
-        )
-        .expect("put package");
-    // The Agent type this artifact is built for (ADR-0034): the Supervisor below names its program
-    // `managed-agent` and sets no `service_name`, so that file name is the type it reports. Without
-    // this the package is inert — which is the decision, not an accident of the test.
+        .create_or_update(&set, Default::default(), false)
+        .expect("create set");
     store
-        .set_service_name("myagent", "managed-agent".to_string())
-        .expect("agent type");
-    // And released (ADR-0043): storing the artifact stages the package, so without this it is a
-    // draft and reaches nobody — which is the decision, not an accident of the test.
-    store.set_published("myagent", true).expect("publish");
+        .put_entry(&set, &this_host(), Some(signature), artifact.clone())
+        .expect("put entry");
+    // And released (ADR-0043): saving stages the Set, so without this it is a draft and reaches
+    // nobody — which is the decision, not an accident of the test.
+    store.set_published(&set, true).expect("publish");
 
     let (addr, state, dir) = spawn_server(store).await;
 

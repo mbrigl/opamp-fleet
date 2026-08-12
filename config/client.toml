@@ -174,8 +174,8 @@ state_dir = "client-state"
 # Aim at the type to reach every Agent of a kind, at the instance name to reach exactly one:
 #
 #   curl -X PUT -H 'Content-Type: application/json' \
-#        -d '{"selector": {"service.name": "otelcol-contrib"}}' \
-#        http://<server>:4320/api/v1/packages/otelcol/selector
+#        -d '{"selector": {"service.instance.name": "edge-01"}}' \
+#        http://<server>:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/selector
 
 # 1. A Collector WITH the opampextension — it reports its own description, health, and
 # effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
@@ -200,8 +200,8 @@ state_dir = "client-state"
 #                          # the artifact the Server selects for this Agent is verified, swapped
 #                          # over it, health-gated on apply_grace_secs, and rolled back if it will
 #                          # not stay up. *Which* artifact is the Server's decision — give the
-#                          # package a Selector there (PUT /api/v1/packages/<name>/selector), so a
-#                          # rollout is aimed centrally instead of from this file.
+#                          # Set a Selector there (PUT /api/v1/packages/<name>/<type>/<version>/
+#                          # selector), so a rollout is aimed centrally instead of from this file.
 #                          # An artifact that is a .tar.gz is unpacked here (ADR-0018): the member
 #                          # whose file name matches this one is what gets installed, so an
 #                          # upstream release can be uploaded exactly as published.
@@ -263,20 +263,21 @@ state_dir = "client-state"
 #
 # Nothing has to be put on the host first. Until a package arrives the Supervisor reports
 # "no process installed" and keeps running, so the first version and every later one take the
-# same path — build the artifact, upload it, type it, aim it:
+# same path — build the artifact, create the Set, upload the entry, publish it (ADR-0052):
 #
 #   opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
 #   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
-#   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-#        "http://<server>:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig"
-#   curl -X PUT -H 'Content-Type: application/json' -d '{"service_name": "promtail"}' \
-#        http://<server>:4320/api/v1/packages/promtail/type
 #   curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "prod"}}' \
-#        http://<server>:4320/api/v1/packages/promtail/selector
+#        http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0
+#   curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
+#        "http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
+#   curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+#        http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0/publication
 #
-# The type step is not optional (ADR-0034): a package reaches only Agents whose service.name equals
-# it, and one with no type reaches nobody. For this block that is "promtail" — the program's file
-# name, since no service_name is set above. Aiming is still the Selector's job, and still optional.
+# The Agent type in the path is not optional (ADR-0034, ADR-0052): a Set reaches only Agents whose
+# service.name equals it, and the type is part of its identity. For this block that is "promtail" —
+# the program's file name, since no service_name is set above. Aiming is still the Selector's job,
+# and still optional.
 #
 # The archive must hold the member "promtail" — the program's own file name, which is what this
 # block configures and what the Supervisor looks for. `pack` names it after the file it packs;
@@ -301,8 +302,10 @@ state_dir = "client-state"
 # being right at the next release. Write more of the path only if it matches several members.
 #
 #   opamp-package-sign sha256 fluent-bit-3.1.0.tar.gz   # or pack a tree yourself
+#   curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+#        http://<server>:4320/api/v1/packages/fluent-bit/fluent-bit/3.1.0
 #   curl -X PUT --data-binary @fluent-bit-3.1.0.tar.gz \
-#        "http://<server>:4320/api/v1/packages/fluent-bit?version=3.1.0"
+#        http://<server>:4320/api/v1/packages/fluent-bit/fluent-bit/3.1.0/entries/linux/amd64
 #
 # The tree that was running is kept as program/tree.rollback until the new one has survived
 # apply_grace_secs, and put back whole if it has not. A .tar.gz carries its own file modes and is

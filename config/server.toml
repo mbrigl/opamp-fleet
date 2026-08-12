@@ -93,33 +93,36 @@ stale_after_secs = 90
 # [telemetry_offer.headers]
 # Authorization = "Bearer a-telemetry-token"
 
-# Where software packages are persisted (ADR-0015): one artifact + metadata pair each. Upload a
-# package with PUT /api/v1/packages/{name}?version=<v> (artifact as the body, optional Ed25519
-# signature=<hex>) — or, instead of uploading, point it at an artifact hosted elsewhere with
-# PUT /api/v1/packages/{name}/source (ADR-0018: url + sha256 + version, optional headers for a
-# private source); the Server stores only that reference and never downloads it.
+# Where software packages are persisted (ADR-0015, organised as Sets by ADR-0052): one directory
+# per Set, holding its metadata and one artifact per platform. A Set is identified by its NAME,
+# the AGENT TYPE it is built for, and its VERSION — stated at creation, never edited; a new
+# version is a new Set. The type is compared raw against the `service.name` the Agents report
+# (ADR-0034), so spell it exactly — a Client updating itself is typed `opamp-fleet-client`.
 #
-# Then say which kind of Agent it is built for with
-# PUT /api/v1/packages/{name}/type — body {"service_name": "<the service.name its Agents report>"}
-# (ADR-0034). THIS IS WHAT ARMS THE PACKAGE: until it is set the artifact is stored and offered to
-# nobody, whatever its Selector says, and the Server logs it by name at startup. The value is
-# compared raw, so spell it exactly as the Agents report it — a Client updating itself is typed
-# `opamp-fleet-client`.
+# Create a Set (always a draft) with
+# PUT /api/v1/packages/{name}/{agent_type}/{version} — body {"selector": {...}, "addon": false}.
+# Then store one entry per platform: upload an artifact with
+# PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body,
+# optional Ed25519 signature=<hex>), or point the entry at an artifact hosted elsewhere with
+# PUT .../entries/{os}/{arch}/source (ADR-0018: url + sha256, optional headers for a private
+# source); the Server stores only that reference and never downloads it. No two entries share a
+# platform — writing one again replaces it, while the Set is a draft.
 #
-# Then aim the package with PUT /api/v1/packages/{name}/selector (ADR-0017): the Server
-# offers it to the Agents its Selector matches, among those that accept packages. An empty
-# Selector targets every Agent of that type; a narrower one wins for the Agents it names, which is
-# how a rollout starts on part of the fleet.
+# Aim the Set with its Selector (ADR-0017), editable in every state via PUT .../selector: an empty
+# Selector targets every Agent of the Set's type; among Sets of one name the most specific
+# Selector wins, and among equally specific ones the greater version — so a canary ring is one
+# Selector edit, and finishing the rollout is widening it.
 #
-# Finally release it with PUT /api/v1/packages/{name}/publication — body {"published": true}
-# (ADR-0043). AN UPLOAD ONLY STAGES A PACKAGE: it is a draft, stored and offered to nobody until
-# this call, so five platforms' artifacts can be uploaded and released together and no half-
-# described package ever reaches the fleet. {"published": false} withdraws the offer again;
-# nothing is uninstalled, an Agent keeps running what it installed. Replacing the artifact of an
-# already published package distributes on upload, as before — stage a replacement by retracting
-# first. The
-# download endpoint sits on the unauthenticated REST plane — the content hash and signature are
-# what protect an installed binary, so sign packages and configure the key on the Client.
+# Finally release it with PUT .../publication — body {"published": true} (ADR-0043). SAVING NEVER
+# DISTRIBUTES: a Set is a draft, offered to nobody, until this call — and publishing an empty Set
+# is refused. While a Set is published its entries are immutable (retract it to change them, or
+# create the next version as its own Set). {"published": false} withdraws the offer; nothing is
+# uninstalled, and the fleet falls back to the newest version still published under the same name
+# — which is what a rollback is now: a publication move, not a hidden history (ADR-0052 replaces
+# ADR-0019's one-step rollback).
+#
+# The download endpoint sits on the unauthenticated REST plane — the content hash and signature
+# are what protect an installed binary, so sign packages and configure the key on the Client.
 packages_dir = "fleet-packages"
 
 # The largest package artifact the REST API accepts on upload. A package is a program, not a

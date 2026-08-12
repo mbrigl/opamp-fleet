@@ -126,13 +126,18 @@ version)**, immutable in its bytes while published, and offered to nobody until 
    *current* record and shows it in a **detail form**; while nothing is current, the form is not
    visible. **Create** opens the form empty to define a new Set — the only moment the identity
    fields are writable (point 1); on an existing Set the form offers exactly what the API offers:
-   the Selector always, the entries while the Set is a draft. **OK** persists the form's changes
-   through the REST routes and **Cancel** discards them back to the stored state; **Delete** in
-   the form removes the current Set, after which nothing is current and the form hides. One thing
-   is deliberately *not* saved by OK: the publication state. Publishing and retracting stay their
-   own button in the detail form, because ADR-0043 point 7's seam — the press that releases a
-   rollout is never the press that carries the bytes — is the reason the gate works, and a
-   publication flag folded into "save" would be armed by the same click that edits a Selector.
+   the Selector always, the entries while the Set is a draft — each entry removable in place, and
+   a new one addable in place through its own **Add** action, so assembling a five-platform
+   release is five adds on one draft rather than five saves. **OK** persists the form's changes
+   through the REST routes (including an entry still sitting in the editor) and **Cancel**
+   discards them; both conclude the form — the current record is let go and the form leaves the
+   screen, a failed save alone keeping it open beside its message. Delete stands alone on the
+   form's left, Cancel and OK conclude it on the right; **Delete** removes the current Set, after
+   which nothing is current and the form hides. One thing is deliberately *not* in the form at all: the publication state.
+   Publishing and retracting are their own control, a per-row button in the table beside the
+   Set's state, because ADR-0043 point 7's seam — the press that releases a rollout is never the
+   press that carries the bytes — is the reason the gate works, and a publication flag folded
+   into "save" would be armed by the same click that edits a Selector.
    The form enforces no rule of its own: what it greys out is what the Server answers `409` to,
    one rule, rendered.
 

@@ -238,25 +238,18 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let artifact = std::fs::read(&client).expect("read the client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    // The Client's own Agent reports the constant type `opamp-fleet-client` (ADR-0033), and a Set
+    // reaches only Agents of its type — the type is part of its identity (ADR-0052).
+    let set = server::packages::SetId::new("opamp-fleet-client", "opamp-fleet-client", &version)
+        .expect("set id");
     store
-        .put(
-            "opamp-fleet-client".to_string(),
-            this_host(),
-            version.clone(),
-            false,
-            None,
-            artifact,
-        )
-        .expect("put the package");
-    // The Client's own Agent reports the constant type `opamp-fleet-client` (ADR-0033), and a
-    // package reaches only Agents of its type (ADR-0034).
+        .create_or_update(&set, Default::default(), false)
+        .expect("create set");
     store
-        .set_service_name("opamp-fleet-client", "opamp-fleet-client".to_string())
-        .expect("agent type");
+        .put_entry(&set, &this_host(), None, artifact)
+        .expect("put entry");
     // And released, or it is a draft the fleet never sees (ADR-0043).
-    store
-        .set_published("opamp-fleet-client", true)
-        .expect("publish");
+    store.set_published(&set, true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -338,25 +331,20 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let artifact = std::fs::read(&client).expect("read the client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    store
-        .put(
-            "otelcol".to_string(),
-            this_host(),
-            version,
-            false,
-            None,
-            artifact,
-        )
-        .expect("put the package");
     // Typed so that it *does* reach the Client, which is the only way this test can still test what
     // it is named for. ADR-0034 makes the Server refuse to send a package of another type, but the
     // two guards are independent by design — so the case exercised here is the one where the
     // Server's guard does not fire: an operator uploads a Collector artifact and mistypes its
     // agent type as the Client's. The Client's name check (ADR-0020) is then all that is left.
+    let set =
+        server::packages::SetId::new("otelcol", "opamp-fleet-client", &version).expect("set id");
     store
-        .set_service_name("otelcol", "opamp-fleet-client".to_string())
-        .expect("agent type");
-    store.set_published("otelcol", true).expect("publish");
+        .create_or_update(&set, Default::default(), false)
+        .expect("create set");
+    store
+        .put_entry(&set, &this_host(), None, artifact)
+        .expect("put entry");
+    store.set_published(&set, true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");

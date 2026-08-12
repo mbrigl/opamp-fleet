@@ -249,12 +249,20 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
 
-# A package holds one artifact per platform (ADR-0031); each Agent is offered the one that fits it.
+# A package defines a Set (ADR-0052), identified by name, Agent type, and version, with one entry
+# per platform (ADR-0031); each Agent is offered the entry that fits it. Saving stages a draft —
+# nothing reaches the fleet until the Set is published (ADR-0043).
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64"
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 
-# One step back (ADR-0019): re-offer the version this artifact replaced. 409 when there is none.
-$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/rollback?os=linux&arch=amd64"
+# Rolling back is a publication move (ADR-0052): retract the newest version, and the fleet falls
+# back to the newest one still published under the same name.
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or

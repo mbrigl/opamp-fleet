@@ -410,23 +410,6 @@ async fn a_cross_site_state_changing_post_is_refused() {
         403,
         "a client with no fetch metadata is not a CSRF"
     );
-
-    // The rollback route is guarded the same way (package delivery is not even configured here, but
-    // the guard decides first).
-    let cross_rollback = client
-        .post(url(
-            server.addr,
-            "/api/v1/packages/otelcol/rollback?os=linux&arch=amd64",
-        ))
-        .header("sec-fetch-site", "cross-site")
-        .send()
-        .await
-        .expect("rollback");
-    assert_eq!(
-        cross_rollback.status(),
-        403,
-        "a cross-site rollback is refused"
-    );
 }
 
 /// The fleet as the REST API shows it.

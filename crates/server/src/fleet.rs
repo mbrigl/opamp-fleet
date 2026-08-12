@@ -25,6 +25,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
+use crate::agent_store::{AgentStore, FsAgentStore, PersistedAgent};
 use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
 use crate::configs::{ConfigStore, Configuration, DesiredConfig};
@@ -113,6 +114,48 @@ impl AgentRecord {
         }
         crate::labels::effective_description(self.description.as_ref(), &self.labels)
             .map(Cow::Owned)
+    }
+
+    /// What of this record survives a restart (ADR-0051): everything report-derived or
+    /// operator-queued, never what a live connection knows.
+    fn to_persisted(&self) -> PersistedAgent {
+        PersistedAgent {
+            sequence_num: self.sequence_num,
+            capabilities: self.capabilities,
+            description: self.description.clone(),
+            health: self.health.clone(),
+            effective_config: self.effective_config.clone(),
+            remote_config_status: self.remote_config_status.clone(),
+            connection_settings_status: self.connection_settings_status.clone(),
+            package_statuses: self.package_statuses.clone(),
+            available_components: self.available_components.clone(),
+            transport: self.transport,
+            last_seen_ms: self.last_seen_ms,
+            restart_pending: self.restart_pending,
+        }
+    }
+
+    /// A restored record is **disconnected with no owning connection** until live evidence says
+    /// otherwise — connectedness is runtime-only (ADR-0051). The labels mirror is filled from
+    /// the `LabelStore`, which stays their single authority.
+    fn from_persisted(persisted: PersistedAgent, labels: BTreeMap<String, String>) -> AgentRecord {
+        AgentRecord {
+            sequence_num: persisted.sequence_num,
+            capabilities: persisted.capabilities,
+            description: persisted.description,
+            health: persisted.health,
+            effective_config: persisted.effective_config,
+            remote_config_status: persisted.remote_config_status,
+            transport: persisted.transport,
+            connected: false,
+            last_seen_ms: persisted.last_seen_ms,
+            restart_pending: persisted.restart_pending,
+            available_components: persisted.available_components,
+            connection_settings_status: persisted.connection_settings_status,
+            package_statuses: persisted.package_statuses,
+            owner: None,
+            labels,
+        }
     }
 }
 
@@ -240,6 +283,12 @@ impl PackageOffering {
 /// WebSocket loops subscribe to.
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
+    /// Where Agent records survive a restart (ADR-0051) — the port, never a concrete backend:
+    /// the filesystem adapter is merely what [`AppState::new`] wires by default.
+    agent_store: Box<dyn AgentStore>,
+    /// Each persisted record's durable digest as last written — the dirty check that keeps a
+    /// heartbeat from reaching any storage backend (ADR-0051). Locked strictly after `fleet`.
+    written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     configs: ConfigStore,
     /// The operator's labels on Agents (ADR-0042), which join what a Selector matches. Persisted
     /// beside the Configurations, because they are the same kind of thing: intent about the fleet
@@ -275,9 +324,21 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds the state, restoring every persisted Configuration from `config_dir`. A store that
-    /// cannot be opened (or holds an unparsable file) fails startup loudly.
+    /// Builds the state on the default storage adapter — one JSON file per Agent under
+    /// `<config_dir>/agents/` (ADR-0051) — restoring every persisted Configuration and Agent
+    /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     pub fn new(config_dir: PathBuf) -> Result<Self, String> {
+        let store = FsAgentStore::open(config_dir.join("agents"))?;
+        Self::with_agent_store(config_dir, Box::new(store))
+    }
+
+    /// Builds the state on any Agent-record backend (ADR-0051). The port is the only thing the
+    /// fleet logic knows about persistence, so a database or an external store is an
+    /// implementation of [`AgentStore`] plus this one wiring call.
+    pub fn with_agent_store(
+        config_dir: PathBuf,
+        agent_store: Box<dyn AgentStore>,
+    ) -> Result<Self, String> {
         let labels = LabelStore::open(config_dir.join("labels"))?;
         let configs = ConfigStore::open(config_dir)?;
         let restored = configs.list().len();
@@ -287,8 +348,24 @@ impl AppState {
                 "restored the Configuration store"
             );
         }
+        // Every restored Agent comes back disconnected — what it last reported is knowledge,
+        // whether it is still there is not (ADR-0051) — and in the ring its labels put it in.
+        let mut fleet = HashMap::new();
+        let mut written = HashMap::new();
+        for (uid, persisted) in agent_store.load()? {
+            written.insert(uid, persisted.durable_digest());
+            fleet.insert(
+                uid,
+                AgentRecord::from_persisted(persisted, labels.get(&uid)),
+            );
+        }
+        if !fleet.is_empty() {
+            info!(agents = fleet.len(), "restored the fleet");
+        }
         Ok(AppState {
-            fleet: Mutex::new(HashMap::new()),
+            fleet: Mutex::new(fleet),
+            agent_store,
+            written: Mutex::new(written),
             configs,
             labels,
             push: watch::channel(0).0,
@@ -464,6 +541,8 @@ impl AppState {
             return Err(RestartError::NoCapability);
         }
         record.restart_pending = true;
+        // Operator intent survives a Server restart like any other durable state (ADR-0051).
+        self.persist_if_dirty(uid, record);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "restart requested");
@@ -506,17 +585,18 @@ impl AppState {
         self.labels.get(uid)
     }
 
-    /// How many Agents in the fleet each stored package would actually reach today.
+    /// How many Agents in the fleet each stored Set would actually reach today, keyed by the
+    /// Set's identity (`name@version@type`).
     ///
-    /// A package is inert until its Agent type is set (ADR-0034), it only reaches hosts it has an
-    /// artifact for (ADR-0031), and its Selector narrows it further (ADR-0017) — three ways to
-    /// target nobody, none of which announces itself. A typo in a `service_name` is not a rejected
-    /// upload; it is a rollout that silently arrives nowhere, and there is no canonicalisation that
-    /// would catch it. Counting is what turns that into something an operator can see.
+    /// A Set only fits Agents of its type (ADR-0034), only hosts it has an entry for (ADR-0031),
+    /// and its Selector narrows it further (ADR-0017) — three ways to target nobody, none of which
+    /// announces itself. A typo in the Agent type is not a rejected upload; it is a rollout that
+    /// silently arrives nowhere, and there is no canonicalisation that would catch it. Counting is
+    /// what turns that into something an operator can see.
     ///
-    /// It answers for the fleet *as reported so far*: a package aimed at hosts that have not
-    /// connected yet legitimately reaches nobody, which is why this is a count to be read rather
-    /// than an error to be raised.
+    /// It answers for the fleet *as reported so far*: a Set aimed at hosts that have not connected
+    /// yet legitimately reaches nobody, which is why this is a count to be read rather than an
+    /// error to be raised.
     pub fn package_reach(&self) -> BTreeMap<String, usize> {
         let mut reach = BTreeMap::new();
         let Some(store) = self.packages() else {
@@ -525,8 +605,8 @@ impl AppState {
         let fleet = self.fleet.lock().expect("fleet lock");
         for record in fleet.values() {
             let effective = record.effective_description();
-            for name in store.offered_names(effective.as_deref()) {
-                *reach.entry(name).or_insert(0) += 1;
+            for id in store.offered_ids(effective.as_deref()) {
+                *reach.entry(id.to_string()).or_insert(0) += 1;
             }
         }
         reach
@@ -556,6 +636,9 @@ impl AppState {
             return Err(ForgetError::StillReporting);
         }
         fleet.remove(uid);
+        // Forgetting that left a stored record behind would be the "remembering under another
+        // name" ADR-0039 rejected — the record leaves the store with the row (ADR-0051).
+        self.unpersist(uid);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "agent forgotten");
@@ -571,6 +654,7 @@ impl AppState {
             return None;
         }
         record.restart_pending = false;
+        self.persist_if_dirty(uid, record);
         Some(restart_command(uid, self.capabilities()))
     }
 
@@ -583,6 +667,53 @@ impl AppState {
             info!(configuration = %name, "configuration deleted");
         }
         Ok(deleted)
+    }
+
+    /// Persists one record when — and only when — its durable content changed since it was last
+    /// written (ADR-0051). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// along on whatever write happens, so the common heartbeat reaches no storage backend at
+    /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
+    /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
+    /// one that refuses reports.
+    fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) {
+        let persisted = record.to_persisted();
+        let digest = persisted.durable_digest();
+        let mut written = self.written.lock().expect("written lock");
+        if written.get(uid) == Some(&digest) {
+            return;
+        }
+        match self.agent_store.put(uid, &persisted) {
+            Ok(()) => {
+                written.insert(*uid, digest);
+            }
+            Err(e) => warn!(agent = %uid, error = %e, "cannot persist the agent record"),
+        }
+    }
+
+    /// Drops one record from the store and the dirty-check ledger — the storage half of
+    /// forgetting (ADR-0039, extended by ADR-0051) and of an identity reassignment.
+    fn unpersist(&self, uid: &InstanceUid) {
+        if let Err(e) = self.agent_store.remove(uid) {
+            warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
+        }
+        self.written.lock().expect("written lock").remove(uid);
+    }
+
+    /// Writes every record's current state, timestamps and sequence numbers included — the
+    /// graceful-shutdown flush (ADR-0051) that lets the ordinary restart restore a fleet whose
+    /// `last_seen` is current and whose next compressed report is accepted without a gap.
+    pub fn flush_agents(&self) {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let mut written = self.written.lock().expect("written lock");
+        for (uid, record) in fleet.iter() {
+            let persisted = record.to_persisted();
+            match self.agent_store.put(uid, &persisted) {
+                Ok(()) => {
+                    written.insert(*uid, persisted.durable_digest());
+                }
+                Err(e) => warn!(agent = %uid, error = %e, "cannot flush the agent record"),
+            }
+        }
     }
 
     /// The control loop for one report, shared by both transports (ADR-0007): update what we know,
@@ -622,6 +753,9 @@ impl AppState {
             let new_uid = InstanceUid::default();
             if let Some(record) = fleet.remove(&uid) {
                 fleet.insert(new_uid, record);
+                // The persisted record follows the identity (ADR-0051): the old key leaves the
+                // store now, the new one is written by the dirty check at this exchange's end.
+                self.unpersist(&uid);
             }
             info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
             identification = Some(AgentIdentification {
@@ -770,6 +904,9 @@ impl AppState {
                     }
                     Err(e) => {
                         warn!(agent = %uid, error = %e, "refused a certificate signing request");
+                        // The report's updates above are already in the record, so they are
+                        // persisted even though the CSR is refused (ADR-0051).
+                        self.persist_if_dirty(&uid, record);
                         return Processed {
                             reply: bad_request(&e),
                             uid: Some(uid),
@@ -813,12 +950,17 @@ impl AppState {
                 != 0
         {
             record.restart_pending = false;
+            self.persist_if_dirty(&uid, record);
             return Processed {
                 reply: restart_command(&uid, self.capabilities()),
                 uid: Some(uid),
                 disconnected: false,
             };
         }
+
+        // Everything this report changed is in the record now; persist it if it moved the
+        // durable state (ADR-0051) — a heartbeat did not, and writes nothing.
+        self.persist_if_dirty(&uid, record);
 
         // The config offer — composed from the Configurations whose Selectors match this Agent
         // (ADR-0012), gated by the hash comparison, and only toward an Agent that both said
@@ -1016,173 +1158,121 @@ impl AppState {
         })
     }
 
-    /// Creates or replaces a package (ADR-0015) from a streamed upload, persists it, and wakes
-    /// every WebSocket loop so a matching connected Agent is offered it now.
-    pub fn put_package(
-        &self,
-        name: String,
-        platform: crate::packages::Platform,
-        version: String,
-        addon: bool,
-        signature: Option<Vec<u8>>,
-        staged: &std::path::Path,
-    ) -> Result<(), String> {
-        let store = self
+    /// The store, or the error every package route answers when delivery is not configured.
+    fn package_store(&self) -> Result<&PackageStore, String> {
+        Ok(self
             .packages
             .as_ref()
             .ok_or("package delivery is not configured on this Server")?
-            .store();
-        let tag = format!("{}-{}", platform.os, platform.arch);
-        store.put_staged(name.clone(), platform, version, addon, signature, staged)?;
+            .store())
+    }
+
+    /// Creates a Set as a draft, or updates an existing one's Selector and kind (ADR-0052), and
+    /// wakes every WebSocket loop — a Selector move on a published Set changes whom it reaches,
+    /// and those Agents should learn of it now rather than at their next poll.
+    pub fn create_package_set(
+        &self,
+        id: &crate::packages::SetId,
+        selector: BTreeMap<String, String>,
+        addon: bool,
+    ) -> Result<(), String> {
+        self.package_store()?
+            .create_or_update(id, selector, addon)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, platform = %tag, "package stored and offered");
+        info!(set = %id, "package set stored");
         Ok(())
     }
 
-    /// Where an upload for one platform of `name` is streamed before it becomes an artifact.
-    pub fn package_staging_path(
+    /// Stores one streamed upload as an entry of a draft Set (ADR-0052). No push: a draft reaches
+    /// nobody until it is published, so there is nothing to tell the fleet yet.
+    pub fn put_package_entry(
         &self,
-        name: &str,
+        id: &crate::packages::SetId,
         platform: &crate::packages::Platform,
-    ) -> Result<std::path::PathBuf, String> {
-        self.packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store()
-            .staging_path(name, platform)
+        signature: Option<Vec<u8>>,
+        staged: &std::path::Path,
+    ) -> Result<(), String> {
+        self.package_store()?
+            .put_staged(id, platform, signature, staged)?;
+        info!(set = %id, platform = %format!("{}-{}", platform.os, platform.arch), "package entry stored");
+        Ok(())
     }
 
-    /// Points a package at an artifact hosted elsewhere (ADR-0018) and wakes every WebSocket loop,
-    /// so a targeted Agent is offered the new address now rather than at its next poll.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_package_source(
+    /// Where an upload for one entry is streamed before it becomes an artifact.
+    pub fn package_staging_path(
         &self,
-        name: &str,
+        id: &crate::packages::SetId,
         platform: &crate::packages::Platform,
-        version: &str,
-        addon: bool,
+    ) -> Result<std::path::PathBuf, String> {
+        self.package_store()?.staging_path(id, platform)
+    }
+
+    /// Points one entry of a draft Set at an artifact hosted elsewhere (ADR-0018, per ADR-0052).
+    pub fn set_package_entry_source(
+        &self,
+        id: &crate::packages::SetId,
+        platform: &crate::packages::Platform,
         content_hash: Vec<u8>,
         signature: Option<Vec<u8>>,
         source: crate::packages::Source,
     ) -> Result<(), String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        store.set_source(
-            name,
-            platform,
-            version,
-            addon,
-            content_hash,
-            signature,
-            source,
-        )?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, "package now referenced from its source");
+        self.package_store()?
+            .set_entry_source(id, platform, content_hash, signature, source)?;
+        info!(set = %id, "package entry now referenced from its source");
         Ok(())
     }
 
-    /// Puts one platform's artifact back to the version it replaced (ADR-0019) and wakes every
-    /// WebSocket loop, so the Agents it reaches are offered the restored version now.
-    pub fn rollback_package(
+    /// Deletes one entry of a draft Set; `Ok(false)` when the Set or entry does not exist.
+    pub fn delete_package_entry(
         &self,
-        name: &str,
-        platform: &crate::packages::Platform,
-    ) -> Result<(), String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        store.rollback(name, platform)?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, "package rolled back one step");
-        Ok(())
-    }
-
-    /// Deletes one platform's artifact; `Ok(false)` when the package holds none for it.
-    pub fn delete_package_variant(
-        &self,
-        name: &str,
+        id: &crate::packages::SetId,
         platform: &crate::packages::Platform,
     ) -> Result<bool, String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        let deleted = store.delete_variant(name, platform)?;
+        let deleted = self.package_store()?.delete_entry(id, platform)?;
         if deleted {
-            self.push.send_modify(|rev| *rev += 1);
-            info!(package = %name, "package artifact deleted");
+            info!(set = %id, "package entry deleted");
         }
         Ok(deleted)
     }
 
-    /// Sets a package's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
-    /// change newly targets is offered it now rather than at its next poll. It aims every platform
-    /// of the package at once, because the aim belongs to the name (ADR-0031).
+    /// Sets a Set's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
+    /// change newly targets is offered it now rather than at its next poll.
     pub fn set_package_selector(
         &self,
-        name: &str,
+        id: &crate::packages::SetId,
         selector: BTreeMap<String, String>,
     ) -> Result<(), String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        store.set_selector(name, selector)?;
+        self.package_store()?.set_selector(id, selector)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, "package selector changed");
+        info!(set = %id, "package selector changed");
         Ok(())
     }
 
-    /// Sets the Agent type a package is built for (ADR-0034), waking every WebSocket loop: this is
-    /// what arms an untyped package, so the Agents it now fits should learn of it at once rather
-    /// than on their next poll.
-    pub fn set_package_service_name(&self, name: &str, service_name: String) -> Result<(), String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        store.set_service_name(name, service_name.clone())?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, service_name = %service_name, "package agent type changed");
-        Ok(())
-    }
-
-    /// Releases a package to the fleet, or retracts it (ADR-0043), waking every WebSocket loop.
+    /// Releases a Set to the fleet, or retracts it (ADR-0043), waking every WebSocket loop.
     ///
     /// This is the moment a rollout starts, so the Agents it reaches should learn of it at once
-    /// rather than on their next poll — the same reason arming a package pushes. Retracting pushes
-    /// too: an Agent mid-exchange should not be handed an offer that was just withdrawn.
-    pub fn set_package_published(&self, name: &str, published: bool) -> Result<(), String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        store.set_published(name, published)?;
+    /// rather than on their next poll. Retracting pushes too: an Agent mid-exchange should not be
+    /// handed an offer that was just withdrawn — and with greater-version-wins resolution
+    /// (ADR-0052), retracting the newest version is what rolls the fleet back to the one still
+    /// published beneath it.
+    pub fn set_package_published(
+        &self,
+        id: &crate::packages::SetId,
+        published: bool,
+    ) -> Result<(), String> {
+        self.package_store()?.set_published(id, published)?;
         self.push.send_modify(|rev| *rev += 1);
-        info!(package = %name, published, "package publication changed");
+        info!(set = %id, published, "package publication changed");
         Ok(())
     }
 
-    /// Deletes a package; `Ok(false)` when none of that name exists.
-    pub fn delete_package(&self, name: &str) -> Result<bool, String> {
-        let store = self
-            .packages
-            .as_ref()
-            .ok_or("package delivery is not configured on this Server")?
-            .store();
-        let deleted = store.delete(name)?;
+    /// Deletes a Set; `Ok(false)` when none of that identity exists. Wakes the loops because
+    /// deleting a published Set withdraws its offer with it.
+    pub fn delete_package_set(&self, id: &crate::packages::SetId) -> Result<bool, String> {
+        let deleted = self.package_store()?.delete_set(id)?;
         if deleted {
             self.push.send_modify(|rev| *rev += 1);
-            info!(package = %name, "package deleted");
+            info!(set = %id, "package set deleted");
         }
         Ok(deleted)
     }
@@ -1844,6 +1934,141 @@ mod tests {
             owner: None,
             labels: BTreeMap::new(),
         }
+    }
+
+    /// A full report for the persistence tests: description, capabilities, and a sequence number.
+    fn report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer {
+        AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num,
+            capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+            agent_description: Some(AgentDescription {
+                identifying_attributes: vec![opamp::attributes::string_attr(
+                    "service.name",
+                    "otelcol",
+                )],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0051: the fleet survives a restart — the record is restored with everything the Agent
+    /// reported, shown honestly as disconnected until live evidence says otherwise.
+    #[test]
+    fn the_fleet_is_restored_disconnected_after_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        }
+        let state = AppState::new(dir).expect("reopened state");
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.len(), 1, "the row survived the restart");
+        assert_eq!(snapshot[0].service_name, "otelcol");
+        assert!(
+            !snapshot[0].connected,
+            "connectedness is runtime-only and never restored"
+        );
+    }
+
+    /// ADR-0051: a restored sequence number means the next compressed heartbeat is accepted in
+    /// place of a fleet-wide ReportFullState stampede.
+    #[test]
+    fn a_restored_agent_is_not_demanded_a_full_report() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+            state.flush_agents();
+        }
+        let state = AppState::new(dir).expect("reopened state");
+        let heartbeat = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: 2,
+            ..Default::default()
+        };
+        let processed = state.process(heartbeat, Transport::WebSocket, Some(1));
+        assert_eq!(
+            processed.reply.flags & ServerToAgentFlags::ReportFullState as u64,
+            0,
+            "no gap: the restored record carries the sequence"
+        );
+    }
+
+    /// ADR-0051: a heartbeat exists to change nothing, and it reaches no storage backend — the
+    /// stored record still carries the durable state's write, not the heartbeat's.
+    #[test]
+    fn a_heartbeat_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone()).expect("state");
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        let path = dir.join("agents").join(format!("{uid}.json"));
+        let written = std::fs::read_to_string(&path).expect("the report was persisted");
+        let heartbeat = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: 2,
+            ..Default::default()
+        };
+        state.process(heartbeat, Transport::WebSocket, Some(1));
+        let after = std::fs::read_to_string(&path).expect("still persisted");
+        assert_eq!(written, after, "the heartbeat performed no write");
+    }
+
+    /// ADR-0051 with ADR-0039: forgetting removes the stored record with the row — nothing
+    /// remembers under another name.
+    #[test]
+    fn forgetting_an_agent_removes_its_stored_record() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone())
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90));
+        let mut goodbye = report(&uid, 1);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process(goodbye, Transport::WebSocket, Some(1));
+        let path = dir.join("agents").join(format!("{uid}.json"));
+        assert!(path.exists(), "the record was persisted");
+        assert!(
+            state.forget_agent(&uid).is_ok(),
+            "forgettable: disconnected"
+        );
+        assert!(!path.exists(), "forgetting frees the store too");
+    }
+
+    /// ADR-0051: the persisted record follows a reassigned identity — one record, one file.
+    #[test]
+    fn a_rekeyed_agent_moves_its_stored_record() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone()).expect("state");
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let processed = state.process(rekey, Transport::WebSocket, Some(1));
+        let new_uid = processed.uid.expect("the new identity");
+        assert!(!dir.join("agents").join(format!("{uid}.json")).exists());
+        assert!(dir.join("agents").join(format!("{new_uid}.json")).exists());
+    }
+
+    /// ADR-0051: a queued restart is operator intent and survives the Server restarting.
+    #[test]
+    fn a_queued_restart_survives_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            let mut msg = report(&uid, 1);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            state.process(msg, Transport::WebSocket, Some(1));
+            assert!(state.request_restart(&uid).is_ok(), "queued");
+        }
+        let state = AppState::new(dir).expect("reopened state");
+        let fleet = state.fleet.lock().expect("fleet lock");
+        assert!(fleet[&uid].restart_pending, "the intent was restored");
     }
 
     /// ADR-0029: the fleet table shows the release, and the build stays reachable beside it. A

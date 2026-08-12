@@ -155,7 +155,10 @@ async fn main() {
     if mutual_tls {
         info!("the OpAMP endpoint requires a client certificate");
     }
-    let app = server::app(state, server::transport::Admission::new(auth, mutual_tls));
+    let app = server::app(
+        state.clone(),
+        server::transport::Admission::new(auth, mutual_tls),
+    );
 
     match &config.tls {
         Some(tls) => {
@@ -192,4 +195,7 @@ async fn main() {
                 .expect("serve");
         }
     }
+    // The graceful-shutdown flush (ADR-0051): every record's current timestamp and sequence
+    // number, so the ordinary restart restores a fleet without gaps or false silence.
+    state.flush_agents();
 }
