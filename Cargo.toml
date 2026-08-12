@@ -57,7 +57,7 @@ sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256
 # never writes a path the archive chose.
 tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0013).
-base64 = "0.22"
+base64 = "0.23"
 # Constant-time credential comparison on the Server (ADR-0013).
 constant_time_eq = "0.4"
 # kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0011). Unix-only.
