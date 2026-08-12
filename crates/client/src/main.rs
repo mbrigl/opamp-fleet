@@ -148,9 +148,19 @@ fn install(
     // and swung `current` at it and only then failed (ADR-0010: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
 
-    let root = match &args.root {
-        Some(root) => absolute(root)?,
-        None => manager::default_root(level, &instance)?,
+    // Two roots, one flag: the executable layout and the instance's data default to different
+    // places on Linux (ADR-0053 — systemd may not execute from `/var/lib` under SELinux), while
+    // an explicit `--root` keeps ADR-0010's meaning and puts everything under the one directory
+    // the operator named — whose labeling is then the operator's business.
+    let (layout_root, data_root) = match &args.root {
+        Some(root) => {
+            let root = absolute(root)?;
+            (root.clone(), root)
+        }
+        None => (
+            manager::default_layout_root(level, &instance)?,
+            manager::default_root(level, &instance)?,
+        ),
     };
 
     // Everything baked into the unit is absolute: a service's working directory is `/` or
@@ -160,7 +170,7 @@ fn install(
     let config_path = if config_named {
         absolute(config_path)?
     } else {
-        root.join(config_init::FILE_NAME)
+        data_root.join(config_init::FILE_NAME)
     };
 
     if args.interactive {
@@ -183,13 +193,13 @@ fn install(
     // that a file just answered into existence is held to the same rule as any other.
     let config = ClientConfig::load(&config_path)?;
 
-    let layout = layout::Layout::new(&root);
+    let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;
 
     let state_dir = if config.state_dir.is_absolute() {
         config.state_dir.clone()
     } else {
-        layout.state_dir()
+        data_root.join(layout::STATE_DIR_NAME)
     };
 
     manager::install(&manager::InstallSpec {

@@ -47,7 +47,9 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry-semantic-conventions.workspace = true
 opentelemetry-appender-tracing.workspace = true
-sysinfo.workspace = true
+# `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
+# `host.mac` (ADR-0050).
+sysinfo = { workspace = true, features = ["network"] }
 # The downstream OpAMP endpoint of Gateway Mode (ADR-0037): a WebSocket upgrade and a plain-HTTP
 # POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
 # it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
@@ -97,7 +99,11 @@ runs, lays out the versioned install root and registers the systemd service."""
 depends = "$auto"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
-assets = [["target/release/opamp-fleet-client", "usr/bin/", "755"]]
+#
+# `usr/libexec`, not `usr/bin` (ADR-0048): what an operator invokes on PATH is the symlink the
+# maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
+# binary the service runs. The payload itself stays off PATH.
+assets = [["target/release/opamp-fleet-client", "usr/libexec/", "755"]]
 maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
@@ -105,13 +111,19 @@ name = "opamp-fleet-client"
 # One `Release`, forever: ADR-0026 releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
-    { source = "target/release/opamp-fleet-client", dest = "/usr/bin/opamp-fleet-client", mode = "755" },
+    { source = "target/release/opamp-fleet-client", dest = "/usr/libexec/opamp-fleet-client", mode = "755" },
 ]
-# These two resolve against this manifest's directory. A path that does *not* resolve is silently
+# These resolve against this manifest's directory. A path that does *not* resolve is silently
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
 # landed in the package is the script and not its file name.
+#
+# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0048): on an upgrade, rpm erases the *old*
+# package's files after the new `%post` has run, which deletes the link `%post` just created — the
+# transaction scriptlet runs after that erasure, so its link is the one that survives.
 post_install_script = "../../packaging/linux/postinst"
 pre_uninstall_script = "../../packaging/linux/prerm"
+post_uninstall_script = "../../packaging/linux/postrm"
+post_trans_script = "../../packaging/linux/posttrans"
 
 [dev-dependencies]
 tempfile = "3"

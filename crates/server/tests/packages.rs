@@ -1,5 +1,5 @@
-//! Package delivery (ADR-0015): the REST upload + download endpoints, and the hash-gated
-//! `PackagesAvailable` offer toward capable Agents.
+//! Package delivery (ADR-0015, reorganised into Sets by ADR-0052): the REST Set + entry routes,
+//! and the hash-gated `PackagesAvailable` offer toward capable Agents.
 
 mod support;
 
@@ -56,59 +56,53 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
 }
 
 /// The platform the test fleet reports (see `support::full_report`), and therefore the only one
-/// an artifact may be stored under for these Agents to be offered it (ADR-0031).
-const HOST: &str = "os=linux&arch=amd64";
+/// an entry may be stored under for these Agents to be offered it (ADR-0031).
+const HOST: &str = "linux/amd64";
 
-async fn upload(server: &TestServer, name: &str, version: &str, artifact: &[u8]) {
-    upload_for(server, name, HOST, version, artifact).await;
+/// The base of one Set's routes: `/api/v1/packages/<name>/<type>/<version>` (ADR-0052) — the
+/// identity is the path, stated at creation and never edited.
+fn set_url(server: &TestServer, name: &str, version: &str) -> String {
+    format!(
+        "http://{}/api/v1/packages/{name}/{}/{version}",
+        server.addr,
+        support::AGENT_TYPE
+    )
 }
 
-async fn upload_for(
+/// `PUT /api/v1/packages/{name}/{type}/{version}` — creates the Set, as a draft.
+async fn create_set(server: &TestServer, name: &str, version: &str) {
+    let response = reqwest::Client::new()
+        .put(set_url(server, name, version))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(response.status(), 200, "creating the set should succeed");
+}
+
+/// `PUT …/entries/{os}/{arch}` — stores one platform's artifact into a draft Set.
+async fn upload_entry(
     server: &TestServer,
     name: &str,
-    platform: &str,
     version: &str,
+    platform: &str,
     artifact: &[u8],
-) {
-    let response = reqwest::Client::new()
+) -> reqwest::Response {
+    reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/{name}?version={version}&{platform}",
-            server.addr
+            "{}/entries/{platform}",
+            set_url(server, name, version)
         ))
         .body(artifact.to_vec())
         .send()
         .await
-        .expect("put package");
-    assert_eq!(response.status(), 200, "upload should succeed");
-    // An uploaded artifact is inert until it says which kind of Agent it is for (ADR-0034), so the
-    // helper arms it for the type the scaffolded fleet reports. Tests about the fit itself set it
-    // themselves, or deliberately leave it unset.
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{}/api/v1/packages/{name}/type",
-            server.addr
-        ))
-        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
-        .send()
-        .await
-        .expect("put agent type");
-    assert_eq!(
-        response.status(),
-        200,
-        "setting the agent type should succeed"
-    );
-    // And it is a draft until it is released (ADR-0043), so the helper releases it too. Tests about
-    // the publication gate itself upload without this helper, or retract afterwards.
-    publish(server, name, true).await;
+        .expect("put entry")
 }
 
-/// `PUT /api/v1/packages/{name}/publication` — what starts a rollout, and what withdraws it.
-async fn publish(server: &TestServer, name: &str, published: bool) {
+/// `PUT …/publication` — what starts a rollout, and what withdraws it.
+async fn publish(server: &TestServer, name: &str, version: &str, published: bool) {
     let response = reqwest::Client::new()
-        .put(format!(
-            "http://{}/api/v1/packages/{name}/publication",
-            server.addr
-        ))
+        .put(format!("{}/publication", set_url(server, name, version)))
         .json(&serde_json::json!({ "published": published }))
         .send()
         .await
@@ -116,59 +110,67 @@ async fn publish(server: &TestServer, name: &str, published: bool) {
     assert_eq!(response.status(), 200, "publishing should succeed");
 }
 
-/// ADR-0019 through the API: the rollback is one action that says what it will do, it refuses
-/// rather than silently doing nothing when there is nothing to go back to, and the restored
-/// artifact is what the fleet is then offered.
-#[tokio::test]
-async fn a_package_rolls_back_to_the_version_it_replaced() {
-    let (server, _scratch) = spawn_with_packages().await;
-    let client = reqwest::Client::new();
-    let rollback = || {
-        client
-            .post(format!(
-                "http://{}/api/v1/packages/otelcol/rollback?{HOST}",
-                server.addr
-            ))
-            .send()
-    };
+/// Create + upload + publish in one go: the ordinary path a released Set takes.
+async fn upload(server: &TestServer, name: &str, version: &str, artifact: &[u8]) {
+    create_set(server, name, version).await;
+    let response = upload_entry(server, name, version, HOST, artifact).await;
+    assert_eq!(response.status(), 200, "upload should succeed");
+    publish(server, name, version, true).await;
+}
 
-    upload(&server, "otelcol", "0.156.0", b"old-binary").await;
-    assert_eq!(
-        rollback().await.expect("rollback").status(),
-        409,
-        "a package at its first upload has nothing to go back to"
-    );
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).to_vec()
+}
 
-    upload(&server, "otelcol", "0.157.0", b"new-binary").await;
-    let listed: serde_json::Value = client
-        .get(format!("http://{}/api/v1/packages", server.addr))
+/// `PUT …/selector` — how an operator aims a Set, in any state.
+async fn set_selector(
+    server: &TestServer,
+    name: &str,
+    version: &str,
+    pairs: &[(&str, &str)],
+) -> reqwest::Response {
+    let selector: std::collections::BTreeMap<&str, &str> = pairs.iter().copied().collect();
+    reqwest::Client::new()
+        .put(format!("{}/selector", set_url(server, name, version)))
+        .json(&serde_json::json!({ "selector": selector }))
         .send()
         .await
-        .expect("list")
-        .json()
-        .await
-        .expect("json");
-    // A version belongs to one platform's artifact, not to the package: the name has as many
-    // versions as it has variants (ADR-0031).
-    assert_eq!(listed[0]["variants"][0]["os"], "linux");
-    assert_eq!(listed[0]["variants"][0]["arch"], "amd64");
-    assert_eq!(listed[0]["variants"][0]["version"], "0.157.0");
-    assert_eq!(
-        listed[0]["variants"][0]["previous_version"], "0.156.0",
-        "the list says what a rollback would put back"
-    );
+        .expect("put selector")
+}
 
-    let response = rollback().await.expect("rollback");
-    assert_eq!(response.status(), 200);
-    let rolled: serde_json::Value = response.json().await.expect("json");
-    assert_eq!(rolled["variants"][0]["version"], "0.156.0");
-    assert_eq!(rolled["variants"][0]["previous_version"], "0.157.0");
+/// ADR-0052 in place of ADR-0019: versions are first-class Sets, and the rollback is a publication
+/// move — retract the newest published version and the fleet falls back to the one still
+/// published beneath it, without anyone producing an old artifact again.
+#[tokio::test]
+async fn retracting_the_newest_version_rolls_the_fleet_back() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "0.156.0", b"old-binary").await;
+    upload(&server, "otelcol", "0.157.0", b"new-binary").await;
 
-    // The restored artifact is what is served — so it is what the fleet installs.
-    let served = client
+    let uid = InstanceUid::default();
+    let server_ref = &server;
+    let offered = |sequence: u64| async move {
+        let mut report = full_report(&uid, "collector", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server_ref, &report)
+            .await
+            .packages_available
+            .expect("an offer")
+    };
+
+    // Both versions are published and equally aimed: the greater one wins.
+    assert_eq!(offered(1).await.packages["otelcol"].version, "0.157.0");
+
+    // The rollback: one request, naming the version it withdraws. The old Set is still published,
+    // so the fleet falls back to it — and its artifact is still here to serve.
+    publish(&server, "otelcol", "0.157.0", false).await;
+    let fallback = offered(2).await;
+    assert_eq!(fallback.packages["otelcol"].version, "0.156.0");
+    let served = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file?{HOST}",
-            server.addr
+            "{}/file?os=linux&arch=amd64",
+            set_url(&server, "otelcol", "0.156.0")
         ))
         .send()
         .await
@@ -177,23 +179,10 @@ async fn a_package_rolls_back_to_the_version_it_replaced() {
         .await
         .expect("bytes");
     assert_eq!(served.as_ref(), b"old-binary");
-
-    assert_eq!(
-        client
-            .post(format!(
-                "http://{}/api/v1/packages/nothing-here/rollback?{HOST}",
-                server.addr
-            ))
-            .send()
-            .await
-            .expect("rollback")
-            .status(),
-        404
-    );
 }
 
 #[tokio::test]
-async fn an_uploaded_package_is_offered_downloaded_and_gated() {
+async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "collector", 1);
@@ -220,19 +209,20 @@ async fn an_uploaded_package_is_offered_downloaded_and_gated() {
     let available = &offer.packages["otelcol"];
     assert_eq!(available.version, "1.2.3");
     let file = available.file.as_ref().expect("a downloadable file");
-    // download_base was empty, so the URL is a path the Client resolves against its endpoint.
+    // download_base was empty, so the URL is a path the Client resolves against its endpoint —
+    // and it names the whole identity, so two versions never serve each other's bytes.
     assert_eq!(
-        file.download_url, "/api/v1/packages/otelcol/file?os=linux&arch=amd64",
-        "the download names the platform, because the name alone no longer names one file"
+        file.download_url,
+        format!(
+            "/api/v1/packages/otelcol/{}/1.2.3/file?os=linux&arch=amd64",
+            support::AGENT_TYPE
+        )
     );
     assert_eq!(file.content_hash, sha256(b"the-new-binary"));
 
     // The artifact downloads byte-for-byte.
     let downloaded = reqwest::Client::new()
-        .get(format!(
-            "http://{}/api/v1/packages/otelcol/file?{HOST}",
-            server.addr
-        ))
+        .get(format!("http://{}{}", server.addr, file.download_url))
         .send()
         .await
         .expect("download")
@@ -279,8 +269,17 @@ async fn no_offer_without_the_capability() {
     );
 }
 
+/// An entry belongs to a Set: uploading toward an identity nobody created is a 404, not a package
+/// conjured out of a URL (ADR-0052 — the identity is stated at creation).
+#[tokio::test]
+async fn an_entry_needs_its_set_first() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let response = upload_entry(&server, "otelcol", "1.0.0", HOST, b"bytes").await;
+    assert_eq!(response.status(), 404);
+}
+
 /// A package is a *program*: an `otelcol-contrib` binary weighs hundreds of megabytes, so the
-/// upload route must not be bounded by the framework's 2 MiB default, and the artifact must reach
+/// entry route must not be bounded by the framework's 2 MiB default, and the artifact must reach
 /// the Agent unchanged whatever its size.
 #[tokio::test]
 async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact() {
@@ -295,8 +294,8 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
 
     let downloaded = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file?{HOST}",
-            server.addr
+            "{}/file?os=linux&arch=amd64",
+            set_url(&server, "otelcol", "1.2.3")
         ))
         .send()
         .await
@@ -312,7 +311,6 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
     let bytes = downloaded.bytes().await.expect("bytes");
     assert_eq!(bytes.len(), artifact.len());
     assert_eq!(bytes.as_ref(), artifact.as_slice(), "byte-identical");
-    assert_eq!(sha256(&artifact).len(), 32);
 }
 
 /// The upload limit is a configured bound, not an accident of the framework: past it the API
@@ -327,7 +325,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
             .with_packages(Some(PackageOffering::new(store, String::new())))
             .with_max_package_size(4096),
     );
-    let app = server::app(state, server::transport::Admission::open());
+    let app = server::app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -335,49 +333,25 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });
+    let server = TestServer {
+        addr,
+        state,
+        _dir: dir,
+    };
 
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{addr}/api/v1/packages/otelcol?version=1.0.0&{HOST}"
-        ))
-        .body(vec![0u8; 8192])
-        .send()
-        .await
-        .expect("put package");
+    create_set(&server, "otelcol", "1.0.0").await;
+    let response = upload_entry(&server, "otelcol", "1.0.0", HOST, &vec![0u8; 8192]).await;
     assert_eq!(response.status(), 413);
-}
-
-fn sha256(bytes: &[u8]) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes).to_vec()
-}
-
-/// A helper mirroring how an operator aims a rollout: name the package, then set its Selector.
-async fn set_selector(
-    server: &TestServer,
-    name: &str,
-    pairs: &[(&str, &str)],
-) -> reqwest::Response {
-    let selector: std::collections::BTreeMap<&str, &str> = pairs.iter().copied().collect();
-    reqwest::Client::new()
-        .put(format!(
-            "http://{}/api/v1/packages/{name}/selector",
-            server.addr
-        ))
-        .json(&serde_json::json!({ "selector": selector }))
-        .send()
-        .await
-        .expect("put selector")
 }
 
 /// The point of ADR-0017: an artifact reaches the Agents its Selector matches and no others, so a
 /// binary rollout can be tried on part of the fleet first.
 #[tokio::test]
-async fn a_selector_aims_a_package_at_part_of_the_fleet() {
+async fn a_selector_aims_a_set_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
     upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
     assert_eq!(
-        set_selector(&server, "otelcol", &[("os.type", "linux")])
+        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
             .await
             .status(),
         200
@@ -425,13 +399,13 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     upload(&server, "otelcol", "2.0.0", b"for-linux").await;
     upload(&server, "otelcol-win", "2.0.0", b"for-windows").await;
     assert_eq!(
-        set_selector(&server, "otelcol", &[("os.type", "linux")])
+        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
             .await
             .status(),
         200
     );
     assert_eq!(
-        set_selector(&server, "otelcol-win", &[("os.type", "windows")])
+        set_selector(&server, "otelcol-win", "2.0.0", &[("os.type", "windows")])
             .await
             .status(),
         200
@@ -448,7 +422,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     assert_eq!(
         offer.packages.len(),
         1,
-        "only the package this Agent's Selector matches"
+        "only the Set this Agent's Selector matches"
     );
 
     // Echoing exactly that aggregate settles it — the Server must not keep re-offering.
@@ -478,19 +452,19 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     );
 }
 
-/// The canary shape an operator actually wants: a fleet-wide package, plus a narrower one for the
-/// hosts a rollout starts on. The more specific Selector wins for those hosts, and the fleet-wide
-/// one keeps serving everyone else.
+/// The canary shape an operator actually wants, now inside one name (ADR-0052): the fleet-wide
+/// version and the canary version are two Sets of the same package, the narrower Selector wins for
+/// the ring, and widening it finishes the rollout because the greater version wins the tie.
 #[tokio::test]
-async fn a_narrower_selector_overrides_the_fleet_wide_package_for_the_agents_it_names() {
+async fn a_canary_ring_is_one_selector_edit_across_two_versions_of_one_name() {
     let (server, _scratch) = spawn_with_packages().await;
     upload(&server, "otelcol", "2.0.0", b"the-fleet-binary").await;
-    upload(&server, "otelcol-canary", "3.0.0", b"the-canary-binary").await;
-    // otelcol keeps the empty Selector: everyone. The canary names one attribute.
+    upload(&server, "otelcol", "3.0.0", b"the-canary-binary").await;
     assert_eq!(
         set_selector(
             &server,
-            "otelcol-canary",
+            "otelcol",
+            "3.0.0",
             &[("service.instance.name", "canary-host")]
         )
         .await
@@ -498,7 +472,7 @@ async fn a_narrower_selector_overrides_the_fleet_wide_package_for_the_agents_it_
         200
     );
 
-    async fn offered_to(server: &TestServer, name: &str) -> Vec<String> {
+    async fn version_offered_to(server: &TestServer, name: &str) -> String {
         let uid = InstanceUid::default();
         let mut report = full_report(&uid, name, 1);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
@@ -506,25 +480,32 @@ async fn a_narrower_selector_overrides_the_fleet_wide_package_for_the_agents_it_
             .await
             .packages_available
             .expect("an offer");
-        let mut names: Vec<String> = offer.packages.keys().cloned().collect();
-        names.sort();
-        names
+        offer.packages["otelcol"].version.clone()
     }
 
     assert_eq!(
-        offered_to(&server, "canary-host").await,
-        ["otelcol-canary"],
-        "the named host gets the canary, and only it"
+        version_offered_to(&server, "canary-host").await,
+        "3.0.0",
+        "the named host gets the canary version"
     );
     assert_eq!(
-        offered_to(&server, "ordinary-host").await,
-        ["otelcol"],
-        "everyone else keeps the fleet-wide package"
+        version_offered_to(&server, "ordinary-host").await,
+        "2.0.0",
+        "everyone else keeps the fleet-wide version"
     );
+
+    // The rollout finishes: widening the canary Selector to everyone lets the greater version win.
+    assert_eq!(
+        set_selector(&server, "otelcol", "3.0.0", &[])
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(version_offered_to(&server, "finished-host").await, "3.0.0");
 }
 
-/// Two equally specific Selectors reaching one Agent is the one case with no defensible answer:
-/// the Server offers neither and says so in the fleet view, rather than picking at random.
+/// Two equally specific Selectors on *different names* reaching one Agent is still the one case
+/// with no defensible answer: the Server offers neither and says so in the fleet view.
 #[tokio::test]
 async fn equally_specific_selectors_offer_nothing_and_are_reported() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -532,7 +513,7 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
     upload(&server, "otelcol-next", "3.0.0", b"two").await;
     // Both name exactly one attribute, and both match the Agent below.
     assert_eq!(
-        set_selector(&server, "otelcol", &[("os.type", "linux")])
+        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
             .await
             .status(),
         200
@@ -541,6 +522,7 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
         set_selector(
             &server,
             "otelcol-next",
+            "3.0.0",
             &[("os.description", "Testix 1.0 LTS")]
         )
         .await
@@ -568,10 +550,10 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
     );
 }
 
-/// ADR-0018: a package may live somewhere else. The Server stores the reference, offers that
+/// ADR-0018: an entry may live somewhere else. The Server stores the reference, offers that
 /// address verbatim with the operator's checksum and headers, and has nothing of its own to serve.
 #[tokio::test]
-async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
+async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
     let (server, _scratch) = spawn_with_packages().await;
 
     // A source the probe can reach: a tiny server standing in for a release page.
@@ -592,36 +574,22 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
 
     let url = format!("http://{source_addr}/releases/otelcol.tar.gz");
     let digest = sha256(b"the-artifact-we-never-see");
+    create_set(&server, "otelcol", "0.157.0").await;
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/otelcol/source",
-            server.addr
+            "{}/entries/{HOST}/source",
+            set_url(&server, "otelcol", "0.157.0")
         ))
         .json(&serde_json::json!({
             "url": url,
             "sha256": hex::encode(&digest),
-            "version": "0.157.0",
-            "os": "linux",
-            "arch": "amd64",
             "headers": { "Authorization": "Bearer release-token" }
         }))
         .send()
         .await
         .expect("put source");
     assert_eq!(response.status(), 200);
-    // A referenced package is armed the same way an uploaded one is (ADR-0034) — the type belongs
-    // to the name, and where the bytes live has nothing to do with which Agents they are for.
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{}/api/v1/packages/otelcol/type",
-            server.addr
-        ))
-        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
-        .send()
-        .await
-        .expect("put agent type");
-    assert_eq!(response.status(), 200);
-    publish(&server, "otelcol", true).await;
+    publish(&server, "otelcol", "0.157.0", true).await;
 
     // The offer names the source, carries the operator's hash, and passes the headers on.
     let uid = InstanceUid::default();
@@ -646,8 +614,8 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
     // And this Server has nothing to hand out: it never downloaded the artifact.
     let local = reqwest::Client::new()
         .get(format!(
-            "http://{}/api/v1/packages/otelcol/file?{HOST}",
-            server.addr
+            "{}/file?os=linux&arch=amd64",
+            set_url(&server, "otelcol", "0.157.0")
         ))
         .send()
         .await
@@ -664,6 +632,7 @@ async fn a_referenced_package_is_offered_from_its_source_and_not_from_here() {
 #[tokio::test]
 async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not() {
     let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, "otelcol", "1.0.0").await;
 
     // A source that answers 404 — the shape of a mistyped release path.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -683,18 +652,16 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
         }
     });
 
+    let server_ref = &server;
     let put_source = |url: String| async move {
         reqwest::Client::new()
             .put(format!(
-                "http://{}/api/v1/packages/otelcol/source",
-                server.addr
+                "{}/entries/{HOST}/source",
+                set_url(server_ref, "otelcol", "1.0.0")
             ))
             .json(&serde_json::json!({
                 "url": url,
                 "sha256": hex::encode(sha256(b"x")),
-                "version": "1.0.0",
-                "os": "linux",
-                "arch": "amd64"
             }))
             .send()
             .await
@@ -714,75 +681,72 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
     assert_eq!(unreachable.status(), 200);
 }
 
-/// ADR-0034 through the API: an uploaded artifact reaches nobody until it says which kind of Agent
-/// it is for, and then it reaches only that kind — whatever its Selector does or does not say.
+/// ADR-0052 in place of ADR-0034's late typing: the Agent type is identity, stated at creation —
+/// there is no untyped state — and a Set built for another type is never a candidate, whatever
+/// its Selector says.
 #[tokio::test]
-async fn a_package_is_inert_until_it_names_its_agent_type_and_then_fits_only_that_type() {
+async fn a_set_reaches_only_agents_of_its_type() {
     let (server, _scratch) = spawn_with_packages().await;
 
-    // Uploaded and nothing else. No Selector, which before ADR-0034 meant the whole fleet.
+    // A Set for a different kind of Agent, complete and published.
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/otelcol?version=2.0.0&{HOST}",
+            "http://{}/api/v1/packages/promtail/promtail/1.0.0",
+            server.addr
+        ))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(response.status(), 200);
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/promtail/promtail/1.0.0/entries/{HOST}",
             server.addr
         ))
         .body(b"the-binary".to_vec())
         .send()
         .await
-        .expect("put package");
+        .expect("put entry");
     assert_eq!(response.status(), 200);
-    // Released straight away, so that the only gate moving through this test is the type: what is
-    // asserted below is ADR-0034's, not ADR-0043's.
-    publish(&server, "otelcol", true).await;
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/packages/promtail/promtail/1.0.0/publication",
+            server.addr
+        ))
+        .json(&serde_json::json!({ "published": true }))
+        .send()
+        .await
+        .expect("publish");
+    assert_eq!(response.status(), 200);
 
-    let offered_now = || async {
-        let uid = InstanceUid::default();
-        let mut report = full_report(&uid, "edge-01", 1);
-        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-        exchange(&server, &report).await.packages_available
-    };
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     assert!(
-        offered_now().await.is_none(),
-        "an untyped package is inert, not fleet-wide"
-    );
-
-    let set_type = |service_name: &'static str| async move {
-        reqwest::Client::new()
-            .put(format!(
-                "http://{}/api/v1/packages/otelcol/type",
-                server.addr
-            ))
-            .json(&serde_json::json!({ "service_name": service_name }))
-            .send()
+        exchange(&server, &report)
             .await
-            .expect("put agent type")
-    };
-
-    // An empty type is refused where it is written, rather than silently disarming the package.
-    assert_eq!(set_type("").await.status(), 400);
-
-    // Typed for something else: still nothing, and the Selector never got a say.
-    assert_eq!(set_type("promtail").await.status(), 200);
-    assert!(
-        offered_now().await.is_none(),
-        "a package built for another type is not a candidate"
+            .packages_available
+            .is_none(),
+        "a Set built for another type is not a candidate"
     );
 
-    // Typed for what this fleet reports: offered, and the view says so.
-    let armed = set_type(support::AGENT_TYPE).await;
-    assert_eq!(armed.status(), 200);
-    let view: serde_json::Value = armed.json().await.expect("json");
-    assert_eq!(view["service_name"], support::AGENT_TYPE);
-    let offer = offered_now().await.expect("an offer");
+    // The same artifact under this fleet's type reaches it.
+    upload(&server, "otelcol", "1.0.0", b"the-binary").await;
+    let mut report = full_report(&uid, "edge-01", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
     assert!(offer.packages.contains_key("otelcol"));
 }
 
-/// The silent no-op ADR-0034 named: a package can target nobody through a mistyped Agent type, a
-/// platform the fleet does not run, or a Selector that matches no one — and none of the three is an
-/// upload error, so without a count nothing says it. The number is the Server's own resolution, so
-/// it cannot claim a reach the fleet does not get.
+/// The silent no-op ADR-0034 named: a Set can target nobody through a mistyped Agent type, a
+/// platform the fleet does not run, or a Selector that matches no one — and none of the three is
+/// a rejected upload, so without a count nothing says it.
 #[tokio::test]
-async fn a_package_says_how_many_agents_it_reaches() {
+async fn a_set_says_how_many_agents_it_reaches() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     exchange(&server, &support::full_report(&uid, "one", 1)).await;
@@ -805,12 +769,12 @@ async fn a_package_says_how_many_agents_it_reaches() {
             .expect("array")
             .iter()
             .find(|p| p["name"] == name)
-            .unwrap_or_else(|| panic!("no package {name} in the list"))["targeted_agents"]
+            .unwrap_or_else(|| panic!("no set {name} in the list"))["targeted_agents"]
             .as_i64()
             .expect("targeted_agents")
     }
 
-    // Uploaded and armed for the type this fleet reports: it reaches the one Agent there is.
+    // Uploaded under the type this fleet reports: it reaches the one Agent there is.
     upload(&server, "otelcol", "1.0.0", b"binary").await;
     assert_eq!(reach(&server, "otelcol").await, 1);
 
@@ -825,46 +789,26 @@ async fn a_package_says_how_many_agents_it_reaches() {
     // A Selector that matches nobody: still stored, still valid, reaching no one — the case that
     // was invisible before.
     assert_eq!(
-        set_selector(&server, "otelcol", &[("env", "prod")])
+        set_selector(&server, "otelcol", "1.0.0", &[("env", "prod")])
             .await
             .status(),
         200
     );
     assert_eq!(reach(&server, "otelcol").await, 0);
 
-    // An artifact for a platform this fleet does not run reaches nobody either.
-    upload_for(
-        &server,
-        "fluentbit",
-        "os=windows&arch=amd64",
-        "2.0.0",
-        b"exe",
-    )
-    .await;
+    // An entry for a platform this fleet does not run reaches nobody either.
+    create_set(&server, "fluentbit", "2.0.0").await;
+    let response = upload_entry(&server, "fluentbit", "2.0.0", "windows/amd64", b"exe").await;
+    assert_eq!(response.status(), 200);
+    publish(&server, "fluentbit", "2.0.0", true).await;
     assert_eq!(reach(&server, "fluentbit").await, 0);
-
-    // Both packages are stored and both reach nobody — which is exactly the state an operator
-    // needs shown, because nothing about the store itself looks wrong.
-    let all = list(&server).await;
-    let counts: Vec<(&str, i64)> = all
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|p| {
-            (
-                p["name"].as_str().expect("name"),
-                p["targeted_agents"].as_i64().expect("count"),
-            )
-        })
-        .collect();
-    assert_eq!(counts, [("fluentbit", 0), ("otelcol", 0)]);
 }
 
 /// ADR-0042 reaches packages, not just Configurations — which is the case it exists for. A binary
 /// rollout starts on the hosts an operator moved into the canary ring, and moving one in needs no
 /// access to that host.
 #[tokio::test]
-async fn a_label_aims_a_package_at_part_of_the_fleet() {
+async fn a_label_aims_a_set_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
     let canary = InstanceUid::default();
     let rest = InstanceUid::default();
@@ -873,13 +817,13 @@ async fn a_label_aims_a_package_at_part_of_the_fleet() {
 
     upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
     assert_eq!(
-        set_selector(&server, "otelcol", &[("rollout", "canary")])
+        set_selector(&server, "otelcol", "2.0.0", &[("rollout", "canary")])
             .await
             .status(),
         200
     );
 
-    // Nobody reports `rollout`, so the aimed package reaches no one — and the count says so.
+    // Nobody reports `rollout`, so the aimed Set reaches no one — and the count says so.
     async fn reach(server: &TestServer) -> i64 {
         let list: serde_json::Value = reqwest::Client::new()
             .get(format!("http://{}/api/v1/packages", server.addr))
@@ -930,11 +874,11 @@ async fn a_label_aims_a_package_at_part_of_the_fleet() {
     );
 }
 
-/// ADR-0043 through the API, from the operator's side: an upload stages a package, the release is
-/// its own request, and the retraction is one too. What the fleet sees follows each of them on the
-/// next exchange, and the view says which state the package is in throughout.
+/// ADR-0052 through the API, from the operator's side: every saved Set is a draft, publishing an
+/// empty one is refused, releasing and retracting are their own requests, and a published Set's
+/// entries are immutable while its Selector stays editable.
 #[tokio::test]
-async fn an_uploaded_package_is_a_draft_until_it_is_published_and_can_be_retracted() {
+async fn a_set_is_a_draft_until_published_and_immutable_while_published() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     exchange(&server, &full_report(&uid, "edge-01", 1)).await;
@@ -961,65 +905,80 @@ async fn an_uploaded_package_is_a_draft_until_it_is_published_and_can_be_retract
             .expect("array")
             .iter()
             .find(|p| p["name"] == name)
-            .unwrap_or_else(|| panic!("no package {name}"))
+            .unwrap_or_else(|| panic!("no set {name}"))
             .clone()
     }
 
-    // Uploaded and typed for the type this fleet reports — everything but the release.
-    let response = reqwest::Client::new()
+    // An empty Set cannot be published: it contains one or more entries by definition.
+    create_set(&server, "otelcol", "2.0.0").await;
+    let empty = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/otelcol?version=2.0.0&{HOST}",
-            server.addr
+            "{}/publication",
+            set_url(&server, "otelcol", "2.0.0")
         ))
-        .body(b"the-binary".to_vec())
+        .json(&serde_json::json!({ "published": true }))
         .send()
         .await
-        .expect("put package");
-    assert_eq!(response.status(), 200);
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{}/api/v1/packages/otelcol/type",
-            server.addr
-        ))
-        .json(&serde_json::json!({ "service_name": support::AGENT_TYPE }))
-        .send()
-        .await
-        .expect("put agent type");
+        .expect("publish");
+    assert_eq!(empty.status(), 409, "an empty set cannot be published");
+
+    let response = upload_entry(&server, "otelcol", "2.0.0", HOST, b"the-binary").await;
     assert_eq!(response.status(), 200);
 
     let staged = view(&server, "otelcol").await;
-    assert_eq!(staged["published"], false, "an upload stages the package");
+    assert_eq!(staged["published"], false, "saving stages the set");
     assert_eq!(
         staged["targeted_agents"], 1,
         "and its aim can be checked before it starts, which is what staging is for"
     );
     assert!(
         offered_now(&server, &uid, 2).await.is_none(),
-        "a draft reaches nobody, however complete the rest of it is"
+        "a draft reaches nobody, however complete it is"
     );
 
     // The release is its own act, and the fleet has the package on the next exchange.
-    publish(&server, "otelcol", true).await;
+    publish(&server, "otelcol", "2.0.0", true).await;
     assert_eq!(view(&server, "otelcol").await["published"], true);
     let offer = offered_now(&server, &uid, 3)
         .await
         .expect("the released package");
     assert!(offer.packages.contains_key("otelcol"));
 
+    // While published, the bytes are frozen: writing or deleting an entry answers 409 —
+    // the Server's rule, which is exactly what the UI renders as a greyed-out control.
+    let frozen = upload_entry(&server, "otelcol", "2.0.0", HOST, b"other-bytes").await;
+    assert_eq!(frozen.status(), 409, "published entries are immutable");
+    let frozen_delete = reqwest::Client::new()
+        .delete(format!(
+            "{}/entries/{HOST}",
+            set_url(&server, "otelcol", "2.0.0")
+        ))
+        .send()
+        .await
+        .expect("delete entry");
+    assert_eq!(frozen_delete.status(), 409);
+    // The Selector is not bytes, and stays editable.
+    assert_eq!(
+        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
+            .await
+            .status(),
+        200
+    );
+
     // And it is reversible: retracting stops the offer. Nothing here uninstalls anything — an
     // Agent that already took it keeps running it (ADR-0017).
-    publish(&server, "otelcol", false).await;
+    publish(&server, "otelcol", "2.0.0", false).await;
     assert_eq!(view(&server, "otelcol").await["published"], false);
     assert!(
         offered_now(&server, &uid, 4).await.is_none(),
         "a retracted package is not handed to an Agent that has not taken it"
     );
 
-    // Releasing a package that does not exist is a 404, not a package conjured out of a name.
+    // Releasing a Set that does not exist is a 404, not a Set conjured out of a URL.
     let missing = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/nosuch/publication",
-            server.addr
+            "{}/publication",
+            set_url(&server, "nosuch", "1.0.0")
         ))
         .json(&serde_json::json!({ "published": true }))
         .send()
@@ -1034,21 +993,20 @@ async fn an_uploaded_package_is_a_draft_until_it_is_published_and_can_be_retract
 #[tokio::test]
 async fn a_source_url_aimed_at_an_internal_address_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, "otelcol", "1.0.0").await;
 
+    let server_ref = &server;
     let put_source = |url: &str| {
         let url = url.to_string();
         async move {
             reqwest::Client::new()
                 .put(format!(
-                    "http://{}/api/v1/packages/otelcol/source",
-                    server.addr
+                    "{}/entries/{HOST}/source",
+                    set_url(server_ref, "otelcol", "1.0.0")
                 ))
                 .json(&serde_json::json!({
                     "url": url,
                     "sha256": hex::encode(sha256(b"x")),
-                    "version": "1.0.0",
-                    "os": "linux",
-                    "arch": "amd64"
                 }))
                 .send()
                 .await
@@ -1096,14 +1054,8 @@ async fn the_package_store_has_a_total_size_ceiling() {
     };
 
     // The first artifact fits under the ceiling.
-    let first = reqwest::Client::new()
-        .put(format!(
-            "http://{addr}/api/v1/packages/one?version=1.0.0&{HOST}"
-        ))
-        .body(vec![0u8; 8 * 1024])
-        .send()
-        .await
-        .expect("put one");
+    create_set(&server, "one", "1.0.0").await;
+    let first = upload_entry(&server, "one", "1.0.0", HOST, &vec![0u8; 8 * 1024]).await;
     assert_eq!(
         first.status(),
         200,
@@ -1112,18 +1064,11 @@ async fn the_package_store_has_a_total_size_ceiling() {
 
     // A second distinct name would take the store past the ceiling — refused, and nothing is left
     // staged for it.
-    let second = reqwest::Client::new()
-        .put(format!(
-            "http://{addr}/api/v1/packages/two?version=1.0.0&{HOST}"
-        ))
-        .body(vec![0u8; 8 * 1024])
-        .send()
-        .await
-        .expect("put two");
+    create_set(&server, "two", "1.0.0").await;
+    let second = upload_entry(&server, "two", "1.0.0", HOST, &vec![0u8; 8 * 1024]).await;
     assert_eq!(
         second.status(),
         507,
         "the second upload is refused: it would exceed the store ceiling"
     );
-    let _ = server;
 }

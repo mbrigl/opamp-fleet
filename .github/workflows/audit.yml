@@ -8,6 +8,8 @@ name: Security audit
 # a dependency nobody has touched — the whole reason an audit is worth running on a clock.
 on:
   push:
+    branches:
+      - main
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"

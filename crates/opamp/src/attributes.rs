@@ -12,7 +12,7 @@
 //! that quietly matches nothing, or a package that reaches nobody. As constants it is a name the
 //! compiler knows. That is the whole reason they live here rather than in each end.
 
-use crate::proto::{any_value, AnyValue, KeyValue};
+use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
 /// (ADR-0033). A package is matched against it (ADR-0034).
@@ -114,6 +114,25 @@ pub fn string_attr(key: &str, value: &str) -> KeyValue {
     }
 }
 
+/// One attribute carrying a string array — the shape the conventions give `host.ip` and
+/// `host.mac`. The wire keeps the typed original; a viewer decides how to render it.
+#[must_use]
+pub fn string_array_attr(key: &str, values: &[String]) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                values: values
+                    .iter()
+                    .map(|value| AnyValue {
+                        value: Some(any_value::Value::StringValue(value.clone())),
+                    })
+                    .collect(),
+            })),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +153,26 @@ mod tests {
                 value: None,
             },
         ]
+    }
+
+    #[test]
+    fn a_string_array_attribute_carries_each_value_typed() {
+        let attr = string_array_attr("host.ip", &["10.0.0.7".into(), "192.168.1.140".into()]);
+        assert_eq!(attr.key, "host.ip");
+        let Some(any_value::Value::ArrayValue(list)) =
+            attr.value.as_ref().and_then(|v| v.value.as_ref())
+        else {
+            panic!("expected an array value");
+        };
+        let values: Vec<_> = list
+            .values
+            .iter()
+            .filter_map(|v| match v.value.as_ref() {
+                Some(any_value::Value::StringValue(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, ["10.0.0.7", "192.168.1.140"]);
     }
 
     #[test]

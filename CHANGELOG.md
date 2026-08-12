@@ -15,6 +15,126 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.4] - 2026-08-12
+
+### Added
+
+- **The Client's own configuration is visible in the fleet view.** The Client's own Agent now
+  reports its `client.toml` as its effective configuration — previously the column stayed empty
+  for every Client. Credential values (`[auth]`'s `bearer_token` and `password`, `[packages]`'s
+  `archive_key`) are masked as `***` before the file leaves the host, since the Server persists
+  what it receives. In the fleet table, clicking an Effective-config cell opens the whole
+  configuration in a dialog.
+  **What to do:** nothing. Note that the redacted file is now part of the Agent record the Server
+  stores under `agents/`.
+
+### Changed
+
+- **The Linux service executes from `/opt`.** A default system install's executable layout —
+  `versions/` and the `current` pointer — now lives at `/opt/opamp-fleet/client/<instance>`
+  instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
+  systemd start it (`status=203/EXEC`); `client.toml` and `state/` stay at
+  `/var/lib/opamp-fleet/client/<instance>`, and `--root` still puts everything under the one
+  directory it names ([ADR-0053](docs/adr/0053-the-linux-service-executes-from-opt.md)).
+  **What to do:** nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit
+  against `/opt`, restarts the service if it was running, moves no data, and cleans the orphaned
+  binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
+  `opamp-fleet-client service install` once after the update, then delete the leftover
+  `versions/` and `current` under `/var/lib/opamp-fleet/client/<instance>`.
+
+## [0.2.3] - 2026-08-12
+
+### Added
+
+- **The fleet survives a Server restart.** Agent records now persist — one JSON file per Agent
+  under `<config_dir>/agents/`, behind a storage port a database or external store can replace
+  ([ADR-0051](docs/adr/0051-agent-records-persist-across-a-server-restart.md)). After a restart
+  every Agent the Server knew keeps its row, its last-reported build, health, and configuration
+  state, shown as disconnected until it reports again; a reconnecting Agent's compressed heartbeat
+  is accepted without a fleet-wide `ReportFullState`, and a queued restart survives. Only
+  connectedness stays runtime-only — it is derived from live evidence, never restored. A heartbeat
+  writes nothing to disk; a graceful stop (Ctrl-C/SIGINT) flushes current timestamps.
+  **What to do:** nothing. Note that forgetting an Agent (`DELETE /api/v1/agents/{uid}`) is now
+  also what frees its stored record, and that reported effective configurations — which may embed
+  credentials — now persist under the owner-only `agents/` directory.
+
+### Changed
+
+- **A package is now a versioned Set, and the package API changed shape for it.** A Set is
+  identified by *name, Agent type, and version* — stated at creation, never edited; it may define
+  a Selector, holds one entry per platform (an upload, or a source URL + sha256, optionally
+  signed), and **saving never distributes**: every Set is a draft until
+  `PUT …/publication` releases it, and a published Set's entries are immutable
+  ([ADR-0052](docs/adr/0052-a-package-is-a-versioned-set.md)). Among Sets of one name the most
+  specific Selector wins and, at equal specificity, the greater version — so a canary ring is one
+  Selector edit, and a rollback is retracting the newest version (the hidden one-step history of
+  ADR-0019 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
+  routes moved to `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}`
+  beneath; `…/type` and `…/rollback` are gone. The Packages tab is now a master–detail view: a
+  table of Sets, a detail form for the selected one (Create/OK/Cancel/Delete, publish as its own
+  button), hidden while nothing is selected.
+  **What to do:** rewrite any script against the old package routes (see `config/server.toml` and
+  the release notes for the new upload loop). The store migrates itself at first start — one Set
+  per stored variant version — **except** a package that never got an Agent type: the Server
+  refuses to start and names the file; delete it or re-create it as a Set.
+
+- **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
+  Configurations each manage from their own tab; the active tab lives in the URL hash
+  (`#packages`), so a reload — or a link handed to a colleague — comes back to it, and each tab
+  carries its count. The fleet table shows one line per Agent (columns now: Name, Version,
+  Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
+  Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
+  capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
+  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0039) — the forget chip
+  in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
+  No operator action required.
+
+## [0.2.2] - 2026-08-11
+
+### Added
+
+- **Agents report the host's network addresses, CPU model, and OS build.** Every Agent a Client
+  presents now carries the OpenTelemetry `host.ip` and `host.mac` attributes — loopback excluded,
+  deduplicated, IPv6 in RFC 5952 form, MACs hyphen-separated uppercase — plus
+  `host.cpu.model.name` and, where the platform stamps one, `os.build_id`. The fleet table gains a
+  **Network** column — the first address of each kind at a glance, the full lists in the tooltip
+  and the attribute chips — and everything stays searchable like any other reported attribute
+  ([ADR-0050](docs/adr/0050-agents-report-host-network-addresses.md)). Addresses are re-read on
+  each description, so a DHCP move shows up. No operator action required; note that host addresses
+  are now visible to anyone who can read the fleet API.
+
+### Changed
+
+- **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
+  version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
+  `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer
+  ([ADR-0048](docs/adr/0048-the-packaged-cli-is-a-symlink-through-current.md)), so
+  `opamp-fleet-client --version` — and every other CLI call — answers for the binary the service
+  actually runs, even after a fleet self-update or a hand-reinstalled older package. A real removal
+  (`apt remove`, `dnf remove`) now also deletes the staged `versions/` and the `current` pointer,
+  so a later install comes up on its own binary instead of a surviving newer one; the state
+  directory and `client.toml` stay. `apt purge` deletes those too — the instance directory whole.
+  **What to do:** nothing on upgrade — the package lays the link itself. Only automation that
+  depended on the *delivered* file sitting at `/usr/bin/opamp-fleet-client` must switch to
+  `/usr/libexec/opamp-fleet-client`.
+
+- **The MSI's endpoint page comes prefilled with the development default**
+  (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
+  click-through (ADR-0049). Interactive installs only: clearing the field still means "configure
+  later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
+  install (`/qn`) without one still writes no configuration — unattended deployments are
+  unaffected.
+
+### Fixed
+
+- **The Windows MSI installs.** Every install from the `.msi` failed at the end of the progress
+  bar with "A program run as part of the setup did not finish as expected" (error 1722) and rolled
+  back. The custom action running `service install` quoted `[INSTALLFOLDER]` directly, and a
+  directory property always resolves with a trailing backslash — which the C runtime reads as
+  escaping the closing quote, so the root argument swallowed the rest of the command line and the
+  install staged into an impossible path. The failed installs rolled back cleanly and left nothing
+  behind; no cleanup is needed — install this version's `.msi`.
+
 ## [0.2.1] - 2026-08-11
 
 ### Fixed
