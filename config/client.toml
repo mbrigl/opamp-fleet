@@ -179,7 +179,11 @@ state_dir = "client-state"
 
 # 1. A Collector WITH the opampextension — it reports its own description, health, and
 # effective configuration to the Supervisor Endpoint. The extension ships only in the Contrib
-# distribution, hence otelcol-contrib. Pin endpoint_port and make sure the configuration the
+# distribution, hence otelcol-contrib. Prebuilt distributions are published at
+# https://github.com/open-telemetry/opentelemetry-collector-releases/releases — one .tar.gz per
+# platform, uploadable as a package exactly as published; the binary inside is named after the
+# distribution (otelcol-contrib, otelcol), which is why `binary` below says the same.
+# Pin endpoint_port and make sure the configuration the
 # Server distributes carries the extension pointing at it:
 #
 #   extensions:

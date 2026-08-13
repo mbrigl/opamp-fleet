@@ -498,7 +498,7 @@ knowing by name:
 | `matched_configurations`, `desired_hash` | What it should be running. |
 | `remote_config_status`, `remote_config_error`, `in_sync` | What it reports about the last configuration it was sent. |
 | `effective_config` | What it says it is actually running. |
-| `healthy`, `health_status`, `connected`, `transport`, `last_seen_ms` | Liveness. |
+| `healthy`, `health_status`, `health_error`, `connected`, `transport`, `last_seen_ms` | Liveness — and `connected` alone is not it. A Supervisor whose Managed Process will not start is still `connected` (the Supervisor lives); `healthy: false` with `health_status` (`no process installed`, `awaiting configuration`, …) and the reason in `health_error` is where that shows. The UI's *Health* column renders exactly these three. |
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
 | `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |

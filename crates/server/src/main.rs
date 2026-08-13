@@ -44,9 +44,7 @@ async fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0007): ring, never a system library.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install the rustls ring provider");
+    server::tls::install_ring_provider();
 
     let config_path = parse_args();
     let config = match ServerConfig::load(&config_path) {

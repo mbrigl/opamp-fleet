@@ -259,6 +259,7 @@ mod tests {
     /// never reaches the network, so no server has to refuse it.
     #[tokio::test]
     async fn an_oversized_report_is_never_sent() {
+        crate::tls::install_ring_provider();
         let report = AgentToServer {
             instance_uid: vec![9; 512],
             ..Default::default()
@@ -280,6 +281,7 @@ mod tests {
     /// with the limit applied as the body arrives instead of after it is buffered whole.
     #[tokio::test]
     async fn an_oversized_response_is_discarded() {
+        crate::tls::install_ring_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

@@ -1448,6 +1448,9 @@ pub struct AgentView {
     pub connected: bool,
     pub healthy: bool,
     pub health_status: String,
+    /// Why the Agent is unhealthy — `ComponentHealth.last_error`, which the Baseline says SHOULD
+    /// be set when `healthy` is false. Empty when the Agent is healthy or gave no reason.
+    pub health_error: String,
     pub effective_config: String,
     pub remote_config_status: String,
     pub remote_config_error: String,
@@ -1680,6 +1683,11 @@ impl AgentView {
                 .health
                 .as_ref()
                 .map(|h| h.status.clone())
+                .unwrap_or_default(),
+            health_error: record
+                .health
+                .as_ref()
+                .map(|h| h.last_error.clone())
                 .unwrap_or_default(),
             effective_config: record.effective_config.clone().unwrap_or_default(),
             remote_config_status: status_name.to_string(),

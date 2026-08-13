@@ -20,6 +20,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The real Server on an ephemeral port.
 async fn spawn_server() -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
+    // What main() does at startup: without a process provider, reqwest refuses to build a client.
+    client::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("state"));
     let app = server::app(state.clone(), server::transport::Admission::open());
