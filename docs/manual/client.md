@@ -531,7 +531,8 @@ path decides, ADR-0021).
 | Key | Meaning |
 |---|---|
 | `binary` | The Collector program. See [Which programs take updates](#which-programs-take-updates). |
-| `args` | Extra arguments, appended **after** the `--config` flags the Supervisor builds. |
+| `args` | Extra arguments, appended **after** the `--config` flags the Supervisor builds — with [placeholder expansion](#path-placeholders). |
+| `[supervisor.env]` | Additional environment for the Collector process — the natural home for a value the config reads as `${env:VAR}`, e.g. a per-host endpoint. Expanded through the same placeholders. |
 
 The Supervisor writes every received config-map entry into its own `config/` directory under the
 Configuration's name and passes each **unroled** entry as its own `--config`; a `supplementary`
@@ -646,8 +647,8 @@ accepted.
 A Foreign Agent is told where its configuration is *through its own command line*, and an absolute
 path written there drifts the moment `supervisor_dir` moves or the Supervisor is renamed —
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
-(ADR-0022) close that, in a `command` Supervisor's `args`, `working_dir`, and `[supervisor.env]`
-values:
+(ADR-0022) close that, in a Supervisor's operator-written strings — a `command`'s `args`,
+`working_dir`, and `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`:
 
 | Placeholder | Expands to |
 |---|---|

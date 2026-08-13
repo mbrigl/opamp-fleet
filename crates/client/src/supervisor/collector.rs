@@ -8,6 +8,9 @@
 //! and effective configuration to the Supervisor Endpoint; one without it is observed from the
 //! outside. Either way it is the same plugin (goal 16 versus plain supervision).
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -24,6 +27,41 @@ struct CollectorSettings {
     /// Extra arguments, appended after the `--config` flags.
     #[serde(default)]
     args: Vec<String>,
+    /// Additional environment for the Collector process. Environment is not a `command`-only
+    /// feature — a Collector's config reads `${env:VAR}` too — so it is honoured here just as the
+    /// command plugin honours it, values expanded through the same placeholders (ADR-0022).
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+/// The Collector's process spec: one `--config` per written entry, then the operator's extra args,
+/// with its environment. `None` until a configuration exists — the Collector does not run on
+/// nothing. Extracted from the build closure so the environment threading has a regression test.
+fn collector_spec(
+    program: &Path,
+    config_dir: &Path,
+    extra_args: &[String],
+    env: &[(String, String)],
+) -> Option<ProcessSpec> {
+    // Only the entries that *are* configuration: supplementary content (ADR-0016) sits in the same
+    // directory for the Collector to read by path, and handing it over as `--config` is exactly
+    // what the role exists to prevent.
+    let entries = crate::storage::config_entries(config_dir);
+    if entries.is_empty() {
+        return None;
+    }
+    let mut args = Vec::with_capacity(entries.len() * 2 + extra_args.len());
+    for entry in entries {
+        args.push("--config".to_string());
+        args.push(entry.to_string_lossy().into_owned());
+    }
+    args.extend(extra_args.iter().cloned());
+    Some(ProcessSpec {
+        program: program.to_path_buf(),
+        args,
+        env: env.to_vec(),
+        working_dir: None,
+    })
 }
 
 pub struct CollectorPlugin;
@@ -37,11 +75,20 @@ impl Plugin for CollectorPlugin {
         "binary"
     }
 
-    fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        let settings: CollectorSettings = ctx
-            .settings
+    fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
+        // Taken out rather than consumed with `ctx`, because the placeholder expansion below is a
+        // method on the context and needs it whole.
+        let settings: CollectorSettings = std::mem::take(&mut ctx.settings)
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        // Everything the operator wrote about *where* things are goes through the placeholders
+        // (ADR-0022) — the same for the Collector's extra args and its environment as for a command.
+        let extra_args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
+        let env: Vec<(String, String)> = settings
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), ctx.expand(v)))
+            .collect();
         let config_dir = ctx.config_dir;
         let binary = ctx.program;
         let install = ctx.install;
@@ -63,28 +110,7 @@ impl Plugin for CollectorPlugin {
             }),
             events: ctx.events,
             commands: command_rx,
-            build: Box::new(move || {
-                // Only the entries that *are* configuration: supplementary content (ADR-0016)
-                // sits in the same directory for the Collector to read by path, and handing it
-                // over as `--config` is exactly what the role exists to prevent.
-                let entries = crate::storage::config_entries(&config_dir);
-                if entries.is_empty() {
-                    // No configuration yet — the Collector does not run on nothing.
-                    return None;
-                }
-                let mut args = Vec::with_capacity(entries.len() * 2 + settings.args.len());
-                for entry in entries {
-                    args.push("--config".to_string());
-                    args.push(entry.to_string_lossy().into_owned());
-                }
-                args.extend(settings.args.iter().cloned());
-                Some(ProcessSpec {
-                    program: binary.clone(),
-                    args,
-                    env: Vec::new(),
-                    working_dir: None,
-                })
-            }),
+            build: Box::new(move || collector_spec(&binary, &config_dir, &extra_args, &env)),
         };
         tokio::spawn(runner.run(ctx.shutdown));
         Ok(commands)
@@ -112,5 +138,55 @@ mod tests {
 
         let typo: toml::Table = toml::from_str("arg = [\"--x\"]").expect("table");
         assert!(typo.try_into::<CollectorSettings>().is_err());
+    }
+
+    /// `[supervisor.env]` is accepted on a collector block — environment is not a `command`-only
+    /// feature.
+    #[test]
+    fn env_parses() {
+        let table: toml::Table =
+            toml::from_str("[env]\nOTLP_HTTP_ENDPOINT = \"127.0.0.1:4318\"\n").expect("table");
+        let settings: CollectorSettings = table.try_into().expect("settings");
+        assert_eq!(
+            settings.env.get("OTLP_HTTP_ENDPOINT").map(String::as_str),
+            Some("127.0.0.1:4318")
+        );
+    }
+
+    /// The regression for the bug this fixes: the built spec must carry the environment, not the
+    /// empty vector the collector plugin used to hardcode. A configuration entry has to exist first,
+    /// since the Collector does not run on nothing.
+    #[test]
+    fn the_spec_carries_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Empty config directory: no spec at all.
+        assert!(collector_spec(Path::new("otelcol"), dir.path(), &[], &[]).is_none());
+
+        // One written configuration entry (a plain, non-dot file), and an environment to pass.
+        std::fs::write(dir.path().join("fleet"), b"service: {}\n").expect("write entry");
+        let env = vec![(
+            "OTLP_HTTP_ENDPOINT".to_string(),
+            "127.0.0.1:4318".to_string(),
+        )];
+        let spec = collector_spec(
+            Path::new("otelcol"),
+            dir.path(),
+            &["--feature-gates=x".to_string()],
+            &env,
+        )
+        .expect("a spec once a configuration exists");
+
+        assert_eq!(
+            spec.env, env,
+            "the operator's environment reaches the process"
+        );
+        assert!(
+            spec.args.iter().any(|a| a == "--config"),
+            "the written entry is passed as --config"
+        );
+        assert!(
+            spec.args.iter().any(|a| a == "--feature-gates=x"),
+            "extra args follow the --config flags"
+        );
     }
 }
