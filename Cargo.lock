@@ -2412,6 +2412,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
+ "x509-parser",
 ]
 
 [[package]]

@@ -514,7 +514,10 @@
       // selection survives the two-second refresh instead of being wiped mid-decision.
       const selectedAgents = new Set();
 
-      const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      // Escapes every character that can break out of HTML text or an attribute value — including
+      // ' and ` so the safety does not depend on every attribute staying double-quoted. Agent-
+      // reported strings (names, attributes, health text) flow through here before reaching the DOM.
+      const esc = (s) => (s ?? "").toString().replace(/[&<>"'`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
       function ago(ms) {
         const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
         if (s < 60) return s + "s ago";

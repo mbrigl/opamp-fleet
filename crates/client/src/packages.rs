@@ -52,6 +52,32 @@ pub fn resolve_url(download_url: &str, endpoint: &str) -> Result<String, String>
     Ok(format!("{http_scheme}://{host_port}{path}"))
 }
 
+/// Refuses an offered package name that is not a safe file-name token, before it is ever joined
+/// into the staging path. The Server validates a package name to letters, digits, `.`, `_`, `+`,
+/// and `-` (`validate_identity_token`) before it stores one, so a name outside that set is not a
+/// package the Server would legitimately offer — it is a malicious or non-conforming peer steering
+/// the staged file out of this Agent's own directory: a `/`, a `\`, or a lone `..` in the name
+/// would make `staging_dir.join(format!("{name}.staged"))` land somewhere else, with bytes the
+/// offering peer controls and *before* verification. Refused rather than sanitized: rewriting a bad
+/// name could collide two distinct packages onto one staged file, and a name this shape is a signal
+/// something is wrong, not a typo to paper over.
+fn ensure_safe_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(format!(
+            "the package name must be 1–64 characters, not {name:?}"
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+    {
+        return Err(format!(
+            "the package name {name:?} may hold only letters, digits, '.', '_', '+', and '-'"
+        ));
+    }
+    Ok(())
+}
+
 /// Downloads the artifact to a file and verifies it (ADR-0015). Returns the path of the verified
 /// artifact, ready for the Supervisor to swap over the Managed Process's binary.
 ///
@@ -65,6 +91,9 @@ pub async fn download_and_verify(
     staging_dir: &Path,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
+    // First, before any URL is resolved or a byte is written: the staged path is built from this
+    // name, and a name that could escape the staging directory is refused outright.
+    ensure_safe_package_name(&package.name)?;
     let url = resolve_url(&package.download_url, &config.endpoint)?;
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
@@ -324,6 +353,69 @@ mod tests {
             content_hash,
             signature,
         }
+    }
+
+    /// A package name is a file-name token, not a path: the safe set mirrors what the Server
+    /// validates before it stores one, and anything that could steer the staged file elsewhere —
+    /// a separator, a lone `..`, an empty or over-long name — is refused.
+    #[test]
+    fn a_traversing_package_name_is_refused() {
+        assert!(ensure_safe_package_name("otelcol").is_ok());
+        assert!(ensure_safe_package_name("otelcol-contrib_1.2.3+build").is_ok());
+
+        for bad in [
+            "",
+            "../../../../etc/cron.d/x",
+            "a/b",
+            "a\\b",
+            "with space",
+            "nul\0byte",
+        ] {
+            assert!(
+                ensure_safe_package_name(bad).is_err(),
+                "expected {bad:?} to be refused"
+            );
+        }
+        assert!(
+            ensure_safe_package_name(&"x".repeat(65)).is_err(),
+            "too long"
+        );
+        // A lone `..` is within the mirrored charset (only '.' bytes) and cannot traverse: the
+        // staged name always gets a `.staged` suffix, so it joins as `...staged`, an ordinary file
+        // inside the staging directory — not the parent. A separator is what escapes, and that is
+        // refused above.
+        assert!(ensure_safe_package_name("..").is_ok());
+    }
+
+    /// End to end at the sink: a traversing name is refused by `download_and_verify` before any URL
+    /// is resolved or a byte is written, so nothing lands outside the staging directory — and the
+    /// error is the one the caller reports as a failed package status.
+    #[tokio::test]
+    async fn download_refuses_to_stage_a_traversing_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir");
+        let escape_target = dir.path().join("x.staged"); // where `../x` would land
+
+        let config: ClientConfig = toml::from_str("").expect("config");
+        let mut package = offer(Sha256::digest(b"x").to_vec(), Vec::new());
+        package.name = "../x".to_string();
+
+        let err = download_and_verify(&package, &config, &staging, &Progress::default())
+            .await
+            .expect_err("a traversing name is refused");
+        assert!(err.contains("package name"), "got {err}");
+        assert!(
+            !escape_target.exists(),
+            "nothing was written outside the staging directory"
+        );
+        assert!(
+            std::fs::read_dir(&staging)
+                .expect("read staging")
+                .next()
+                .is_none(),
+            "nothing was staged"
+        );
     }
 
     #[test]
