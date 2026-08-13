@@ -30,6 +30,25 @@ const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// hundred files; a hundred thousand empty ones is a way to spend an afternoon creating inodes.
 const MAX_TREE_MEMBERS: usize = 10_000;
 
+/// Adds one member's declared (uncompressed) size to a running total and refuses the archive if the
+/// total passes `limit`. The point is *when* it is checked: from the tar header, before the entries
+/// iterator advances past the member and so before that member's data is decompressed. A `.tar.gz`
+/// is capped only by its compressed size on download (`max_artifact_size_bytes`), and gzip reaches
+/// ~1000×, so listing or skipping members to find one — which decompresses each member in full —
+/// is a decompression bomb unless the *read* is bounded too. `copy_within` bounds what is written;
+/// this bounds what is read to reach a member or to validate the tree. Checked with the same
+/// [`MAX_UNPACKED_BYTES`] ceiling, so a member whose header alone claims more is rejected before a
+/// byte of it inflates.
+fn accrue_within(total: &mut u64, member_size: u64, limit: u64) -> Result<(), String> {
+    *total = total.saturating_add(member_size);
+    if *total > limit {
+        return Err(format!(
+            "the archive decompresses to more than {limit} bytes — refusing it as a decompression bomb"
+        ));
+    }
+    Ok(())
+}
+
 /// How a `.7z` says "Unix mode" — 7-Zip's own convention, which this module both reads and writes.
 ///
 /// The format carries *Windows* attributes. p7zip stashed the Unix `st_mode` in the high 16 bits
@@ -241,6 +260,14 @@ fn extract_7z_within(
     let password = key.map(sevenz_rust2::Password::from).unwrap_or_default();
     let mut reader = sevenz_rust2::ArchiveReader::open(archive, password).map_err(open_7z_error)?;
 
+    // Reaching the wanted member decodes the ones before it in a solid archive, so bound the total
+    // decompression from the header's declared sizes before any decoding starts — a bomb hidden
+    // ahead of the target is refused here rather than inflated to find it.
+    let mut declared: u64 = 0;
+    for entry in &reader.archive().files {
+        accrue_within(&mut declared, entry.size, limit)?;
+    }
+
     // The callback's error type is the crate's, and a member past the limit is no fault of the
     // archive format — so the outcome travels out here instead of being dressed as a 7z error.
     let mut outcome: Result<u64, String> = Err(String::new());
@@ -308,6 +335,7 @@ fn extract_tar_gz_within(
     // Kept for the error message: an operator who named the wrong member is best served by being
     // told what the archive actually holds.
     let mut seen: Vec<String> = Vec::new();
+    let mut decompressed: u64 = 0;
     for entry in entries {
         let mut entry = entry.map_err(|e| format!("cannot read the archive: {e}"))?;
         let path = entry
@@ -319,6 +347,12 @@ fn extract_tar_gz_within(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if name != member {
+            // Reaching the wanted member means skipping this one, and skipping decompresses it in
+            // full to find the next header. Bound that read from the header before it inflates, so
+            // a bomb hidden ahead of the target cannot spend the CPU it hoped to. The matched
+            // member below is bounded by `copy_within` as it is written, which also catches a
+            // header that lies small and then streams big.
+            accrue_within(&mut decompressed, entry.header().size().unwrap_or(0), limit)?;
             if seen.len() < 8 && !name.is_empty() {
                 seen.push(name);
             }
@@ -377,7 +411,7 @@ fn extract_tree_tar_gz_within(
     dest: &Path,
     limit: u64,
 ) -> Result<TreeSummary, String> {
-    let members = list_tar_gz(archive)?;
+    let members = list_tar_gz(archive, limit)?;
     let prefix = locate_program(&members, program_path)?;
 
     let file =
@@ -432,16 +466,20 @@ fn extract_tree_tar_gz_within(
 
 /// Reads every member path of a `.tar.gz`, validating each — the pass that decides whether the
 /// archive may be unpacked at all, before a byte of it is written.
-fn list_tar_gz(archive: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, String> {
     let file =
         File::open(archive).map_err(|e| format!("cannot read {}: {e}", archive.display()))?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut members = Vec::new();
+    let mut decompressed: u64 = 0;
     for entry in tar
         .entries()
         .map_err(|e| format!("cannot read the archive: {e}"))?
     {
         let entry = entry.map_err(|e| format!("cannot read the archive: {e}"))?;
+        // Bound the decompression this listing forces before advancing past the member, so a bomb
+        // cannot inflate to fill CPU while the tree is merely being validated.
+        accrue_within(&mut decompressed, entry.header().size().unwrap_or(0), limit)?;
         let kind = entry.header().entry_type();
         // A symbolic or hard link is a member that names a path *outside* itself, which is the one
         // thing the sanitizer above cannot check by looking at where the member goes.
@@ -486,7 +524,7 @@ pub fn extract_tree_7z(
     dest: &Path,
     key: Option<&str>,
 ) -> Result<TreeSummary, String> {
-    let members = list_7z(archive, key)?;
+    let members = list_7z(archive, key, MAX_UNPACKED_BYTES)?;
     let prefix = locate_program(&members, program_path)?;
 
     let password = key.map(sevenz_rust2::Password::from).unwrap_or_default();
@@ -552,7 +590,11 @@ pub fn extract_tree_7z(
 }
 
 /// Reads every member of a `.7z`, validating each — the counterpart to [`list_tar_gz`].
-fn list_7z(archive: &Path, key: Option<&str>) -> Result<Vec<std::path::PathBuf>, String> {
+fn list_7z(
+    archive: &Path,
+    key: Option<&str>,
+    limit: u64,
+) -> Result<Vec<std::path::PathBuf>, String> {
     // Attribute bits a member may not carry. A reparse point is a symbolic link by another name;
     // the unix-extension bit puts a mode in the high half, and a mode may say link too.
     use unix_attributes::{EXTENSION, REPARSE_POINT, S_IFLNK, S_IFMT};
@@ -560,7 +602,12 @@ fn list_7z(archive: &Path, key: Option<&str>) -> Result<Vec<std::path::PathBuf>,
     let password = key.map(sevenz_rust2::Password::from).unwrap_or_default();
     let reader = sevenz_rust2::ArchiveReader::open(archive, password).map_err(open_7z_error)?;
     let mut members = Vec::new();
+    let mut decompressed: u64 = 0;
     for entry in &reader.archive().files {
+        // The declared uncompressed sizes come from the 7z header, read here without decompressing
+        // anything — so a bomb is refused before the extraction that follows this listing decodes a
+        // byte of it.
+        accrue_within(&mut decompressed, entry.size, limit)?;
         if entry.is_anti_item {
             return Err(format!(
                 "the archive holds an anti-item ({:?}), which deletes rather than installs",
@@ -855,6 +902,62 @@ mod tests {
         );
     }
 
+    /// The unit of the bomb guard: sizes accrue and the ceiling is `>`, so a total exactly at the
+    /// limit passes and the first byte over is refused — the same rule the listing and skip paths
+    /// apply from the header before decompressing.
+    #[test]
+    fn the_decompression_budget_refuses_only_past_the_limit() {
+        let mut total = 0;
+        assert!(accrue_within(&mut total, 600, 1024).is_ok());
+        assert!(
+            accrue_within(&mut total, 424, 1024).is_ok(),
+            "exactly at the limit is fine"
+        );
+        let err = accrue_within(&mut total, 1, 1024).expect_err("one byte past is refused");
+        assert!(err.contains("decompression bomb"), "{err}");
+        // A single member whose header alone claims more than the ceiling: refused before its data.
+        let mut fresh = 0;
+        assert!(accrue_within(&mut fresh, u64::MAX, 1024).is_err());
+    }
+
+    /// A member whose declared size lies ahead of the wanted one is refused before it is skipped —
+    /// so a bomb hidden in front of the target cannot be decompressed just to walk past it. Proven
+    /// with a small `limit`: the junk member alone exceeds it, and extraction stops before the
+    /// target it precedes.
+    #[test]
+    fn a_bomb_ahead_of_the_target_is_refused_before_it_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = tar_gz(
+            dir.path(),
+            &[("junk", &[0u8; 4096]), ("otelcol", b"the-program")],
+        );
+        let out_path = dir.path().join("out");
+        let mut out = File::create(&out_path).expect("create");
+
+        let err = extract_tar_gz_within(&archive, "otelcol", &mut out, 1024)
+            .expect_err("the junk member trips the budget before the target is reached");
+        assert!(err.contains("decompression bomb"), "{err}");
+    }
+
+    /// The tree listing bounds decompression the same way: an archive whose members sum past the
+    /// budget is refused while it is merely being validated, before extraction decodes anything.
+    #[test]
+    fn a_tree_whose_members_exceed_the_budget_is_refused_on_listing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = tar_gz(
+            dir.path(),
+            &[
+                ("app/bin/fluent-bit", &[0u8; 3072]),
+                ("app/lib/big.so", &[0u8; 3072]),
+            ],
+        );
+        let dest = dir.path().join("dest");
+
+        let err = extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 4096)
+            .expect_err("the members sum past the budget");
+        assert!(err.contains("decompression bomb"), "{err}");
+    }
+
     // ── Trees (ADR-0023) ────────────────────────────────────────────────────────
 
     /// A release as agents actually ship: the program, the shared objects it loads, and a data
@@ -1113,9 +1216,10 @@ mod tests {
         let err = extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 4096)
             .expect_err("past the total limit");
 
-        assert!(err.contains("limit"), "{err}");
-        // No member is anywhere near the budget on its own, so a per-member bound would have let
-        // the whole tree through.
+        // Caught while the tree is listed — before extraction decodes anything — because the
+        // declared sizes already sum past the budget. No member is near the budget on its own, so a
+        // per-member bound would have let the whole tree through.
+        assert!(err.contains("decompression bomb"), "{err}");
         extract_tree_tar_gz_within(&archive, Path::new("bin/fluent-bit"), &dest, 16 * 1024)
             .expect("the same tree fits in a budget that admits all of it");
     }
