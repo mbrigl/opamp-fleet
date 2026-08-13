@@ -71,7 +71,12 @@ version arrives the same way every later one does.
 **The block does not have to be written on the host either.** A Configuration typed
 `opamp-fleet-client` (ADR-0054) whose body carries this `[[supervisor]]` block rolls the block
 itself out to every matching Client, which writes it into its own `client.toml` and starts the
-Supervisor (ADR-0056) — the walkthrough's remaining steps are the same either way.
+Supervisor (ADR-0056) — the walkthrough's remaining steps are the same either way. A
+Server-delivered block may name its program **only by a bare file name** — one this Client owns and
+updates from signed packages (ADR-0057); a block that names an absolute path is refused, because
+that would let the Server spawn a machine binary that never passed through package signing. An
+absolute-path Supervisor is the operator's to write in `client.toml` on the host, not the Server's
+to push.
 
 ## 2. Build the artifact
 

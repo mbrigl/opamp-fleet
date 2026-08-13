@@ -623,9 +623,14 @@ because replacing a program means writing in the directory it sits in. The same 
 
 | What you write | What it means |
 |---|---|
-| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates.** |
-| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. |
+| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates**, and it is the **only** shape a Server may deliver (ADR-0057). |
+| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. Only an operator may write it in `client.toml`; a Server-delivered block that names one is refused. |
 | anything else — `./x`, `bin/x` | A startup error, rather than a guess. |
+
+A block a Server pushes as part of a Supervisor set (ADR-0056) is held to the first row alone: it
+may name only a program this Client owns, so a delivered Supervisor can run only signed, packaged
+programs — never an arbitrary machine binary. An absolute-path Supervisor stays the operator's to
+write on the host.
 
 Two things to know about a bare name: it is **not** searched for in `$PATH` — it names a file in that
 one directory, and you put the first copy there yourself; every later one arrives by package. And on

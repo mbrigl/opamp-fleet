@@ -125,6 +125,19 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     plugin.check(&block.name, settings)
 }
 
+/// The program a block resolves to (path plus whether this Client owns its directory), for callers
+/// that must inspect ownership rather than just spawn it. The Supervisor-set apply uses it to keep
+/// a Server-delivered block to a Client-owned program (ADR-0057).
+pub fn resolve_block_program(
+    config: &ClientConfig,
+    block: &SupervisorBlock,
+) -> Result<crate::config::Program, String> {
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
+    let (_, program) = take_program(config, block, plugin)?;
+    Ok(program)
+}
+
 /// Start one Supervisor at `index`: its state restored, its Endpoint bound, its adapter task
 /// running. Used at startup for every configured block and at runtime for a block an applied
 /// Supervisor set added or changed (ADR-0056).
