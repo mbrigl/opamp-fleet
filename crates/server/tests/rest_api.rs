@@ -695,6 +695,57 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     );
 }
 
+/// A Supervisor whose Managed Process will not start still reads Connected — truthfully, the
+/// Supervisor lives — so the reported health is the only place an operator can see that nothing
+/// is actually running. The view must carry it whole: the flag, the Agent's own status string,
+/// and the reason (`ComponentHealth.last_error`, which the Baseline says SHOULD be set when
+/// unhealthy).
+#[tokio::test]
+async fn the_view_carries_the_reported_health_and_its_reason() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+
+    // Before any health report, the view claims nothing either way.
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], false);
+    assert_eq!(view["health_status"], "");
+    assert_eq!(view["health_error"], "");
+
+    // The Supervisor's process would not start: unhealthy, with the situation and the reason.
+    let mut unhealthy = support::full_report(&uid, "host", 2);
+    unhealthy.capabilities |= opamp::proto::AgentCapabilities::ReportsHealth as u64;
+    unhealthy.health = Some(opamp::proto::ComponentHealth {
+        healthy: false,
+        status: "no process installed".to_string(),
+        last_error: "cannot spawn otelcol: No such file or directory".to_string(),
+        ..Default::default()
+    });
+    report(&client, server.addr, &unhealthy).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], false);
+    assert_eq!(view["health_status"], "no process installed");
+    assert_eq!(
+        view["health_error"],
+        "cannot spawn otelcol: No such file or directory"
+    );
+
+    // The process came up: the finding clears with the next report.
+    let mut healthy = support::full_report(&uid, "host", 3);
+    healthy.capabilities |= opamp::proto::AgentCapabilities::ReportsHealth as u64;
+    healthy.health = Some(opamp::proto::ComponentHealth {
+        healthy: true,
+        status: "running".to_string(),
+        ..Default::default()
+    });
+    report(&client, server.addr, &healthy).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], true);
+    assert_eq!(view["health_status"], "running");
+    assert_eq!(view["health_error"], "");
+}
+
 /// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
 /// (ADR-0039) does not undo them: a host that comes back is in the ring it was put in.
 #[tokio::test]

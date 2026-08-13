@@ -426,6 +426,7 @@
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
+              <th class="sortable" data-key="health">Health <span class="arrow"></span></th>
               <th class="sortable status" data-key="connected">Status <span class="arrow"></span></th>
             </tr>
           </thead>
@@ -539,6 +540,9 @@
       const sortVal = {
         name: displayName,
         connected: (a) => (a.connected ? 1 : 0),
+        // Unhealthy first, then never-reported, then healthy: the sort exists to bring trouble
+        // to the top, and an Agent that reports nothing sits between finding and all-clear.
+        health: (a) => (a.healthy ? 2 : a.health_status || a.health_error ? 0 : 1),
         config: (a) => a.remote_config_status,
         version: (a) => a.service_version,
         os: (a) => a.os,
@@ -564,6 +568,21 @@
         return a.stale
           ? `${base}<span class="pill amber" title="nothing heard for longer than this Agent's heartbeat budget">Stale</span>`
           : base;
+      }
+      // The third fact beside the two the Status pill carries (ADR-0038): Connected says a
+      // connection is open, Stale says the Agent stopped talking — and this pill says whether
+      // what the connection carries is actually running. A Supervisor whose Managed Process
+      // will not start is exactly the case that needs the split: its row reads Connected,
+      // truthfully — the Supervisor lives — and only the health says the process does not.
+      // The red pill wears the Agent's own status string ("no process installed", …): the
+      // Baseline defines no status values, so the Agent's words are the most an operator can
+      // be told. Gray when no health was ever reported — absence of a report is not a finding,
+      // and a Foreign Agent that never promised ReportsHealth must not read as broken.
+      function healthPill(a) {
+        if (a.healthy) return `<span class="pill green">Healthy</span>`;
+        if (a.health_status || a.health_error)
+          return `<span class="pill red">${esc(a.health_status) || "Unhealthy"}</span>${a.health_error ? `<div class="err">${esc(a.health_error)}</div>` : ""}`;
+        return `<span class="pill gray">—</span>`;
       }
       function configPill(a) {
         if (a.remote_config_status === "FAILED")
@@ -671,7 +690,7 @@
           .concat(Object.entries(a.labels || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
-        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.transport]
+        const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.health_error, a.healthy ? "healthy" : "", a.transport]
           .concat(a.matched_configurations || []).concat(attrs).concat(a.capabilities || []).concat(pkgs)
           .join(" ").toLowerCase();
         return hay.includes(filterText);
@@ -699,6 +718,7 @@
             <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
+            <td>${healthPill(a)}</td>
             <td class="status">${statusPill(a)}</td>
           </tr>`;
           // Everything about an agent that is a *set* rather than a value goes under its row
@@ -707,7 +727,7 @@
           const detailRow = ([label, chips], i, all) => `
           <tr class="detail${i === all.length - 1 ? " last" : ""}">
             <td class="chk"></td>
-            <td colspan="10"><div class="chips" style="padding: 2px 0 6px">
+            <td colspan="11"><div class="chips" style="padding: 2px 0 6px">
               <span class="pill violet">${label}</span>
               ${chips || `<span class="chip">none</span>`}
             </div></td>

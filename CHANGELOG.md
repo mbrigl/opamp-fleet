@@ -15,6 +15,18 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.6]
+
+### Added
+
+- **The fleet table shows each Agent's reported health.** A new *Health* column carries the
+  Agent's own status string (e.g. `no process installed`) with the reported reason beneath it,
+  so a Supervisor whose Managed Process will not start is visible at a glance instead of hiding
+  behind a green *Connected* — which only ever said the connection is open. Agents that report
+  no health show a neutral `—`. For API consumers, `GET /api/v1/agents` gains `health_error`
+  (`ComponentHealth.last_error`) beside the existing `healthy` and `health_status`.
+  **What to do:** nothing — the column and field appear on upgrade.
+
 ## [0.2.5] - 2026-08-12
 
 ### Changed
