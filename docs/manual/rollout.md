@@ -114,12 +114,26 @@ archive_key = "…the same value…"
 ```
 
 Already have an upstream release? Then it is already a `.tar.gz` and needs no repacking — that is
-the point of ADR-0018. Check what it holds and whether the member name matches your block:
+the point of ADR-0018. The OpenTelemetry Collector, for instance, publishes its distributions on
+the [collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+one artifact per platform named `<distribution>_<version>_<os>_<arch>.tar.gz`:
+
+```console
+$ curl -LO https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.109.0/otelcol-contrib_0.109.0_linux_amd64.tar.gz
+```
+
+Check what it holds and whether the member name matches your block:
 
 ```console
 $ tar tzf otelcol-contrib_0.109.0_linux_amd64.tar.gz
 $ opamp-package-sign sha256 otelcol-contrib_0.109.0_linux_amd64.tar.gz
 ```
+
+The member is named after the **distribution** — `otelcol-contrib` in the Contrib archive,
+`otelcol` in the core one — so the receiving `[[supervisor]]` block must name its program the
+same way (`command = "otelcol-contrib"`, or `binary = …` for a `collector` block), or the
+install fails with *"the archive holds no member named …"*. Repack with `--program-name` when
+you want a different name on disk.
 
 ## 3. Sign it (optional, but decide fleet-wide)
 

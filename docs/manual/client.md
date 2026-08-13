@@ -538,6 +538,13 @@ Configuration's name and passes each **unroled** entry as its own `--config`; a 
 entry is written but never passed (ADR-0016). A change restarts the Collector so it re-reads them.
 The version is probed once with `--version`, so even a Collector without the extension reports one.
 
+Prebuilt Collector distributions are published on the
+[collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+one `.tar.gz` per platform — ready to upload as a package as they are; the
+[rollout walkthrough](rollout.md#2-build-the-artifact) shows the download and what to check before
+uploading. Mind the member name: the binary inside is called after the distribution
+(`otelcol-contrib`, `otelcol`), and `binary` must say the same.
+
 A Collector **with** the `opampextension` reports its own description, health, and effective
 configuration through the Supervisor Endpoint instead of being watched from outside. The extension
 ships only in the Contrib distribution. Pin `endpoint_port` and make sure the configuration the
