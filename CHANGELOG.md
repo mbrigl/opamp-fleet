@@ -27,6 +27,41 @@ carries a date once its tag exists.
   (`ComponentHealth.last_error`) beside the existing `healthy` and `health_status`.
   **What to do:** nothing — the column and field appear on upgrade.
 
+### Security
+
+- **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
+  ([ADR-0057](docs/adr/0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md)).
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0056) is now refused
+  (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
+  that would let the Server spawn a machine binary that never passed through package signing. A
+  bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
+  Supervisor an operator writes in `client.toml` by hand.
+  **What to do:** if you deliver a Supervisor set over the wire, name each program with a bare file
+  name (delivered by package); machine binaries stay in the host's local `client.toml`.
+
+- **The Server bounds how many Agent records it holds** — a new `max_agents` in `server.toml`
+  (default 100 000). A report bearing a *new* `instance_uid` past the ceiling is answered
+  `Unavailable` (retry later) instead of admitted, so a peer minting fresh self-asserted UIDs
+  (ADR-0047) cannot exhaust memory and disk; Agents already known keep reporting.
+  **What to do:** nothing for a normal fleet. A very large deployment can raise `max_agents`; the
+  real defence against an anonymous flood is `[auth]` (ADR-0013), and this is the backstop while it
+  is off.
+
+- **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
+  `[connection_offer]` credential (ADR-0014) or `[telemetry_offer]` headers (ADR-0036) are handed
+  to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
+  peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
+  unchanged.
+  **What to do:** set `[auth]` to gate credential delivery, or accept the exposure knowingly.
+
+- **Hardening, no operator action.** A Server-offered package whose name could escape the staging
+  directory is refused (path traversal); `client.toml` keeps its `0600` mode when a Supervisor set
+  is rewritten, so the OpAMP credential is not left world-readable; archive listing and member
+  skipping are bounded against a decompression bomb; the certificate the Server issues to an Agent
+  is forced to a client-auth leaf regardless of what the CSR requested (no CA certificate from a
+  crafted request); and the bundled UI escapes `'` and `` ` `` so agent-reported strings cannot
+  break out of an HTML attribute.
+
 ## [0.2.5] - 2026-08-12
 
 ### Changed
