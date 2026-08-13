@@ -38,3 +38,4 @@ reqwest.workspace = true
 [dev-dependencies]
 tokio-tungstenite.workspace = true
 tempfile = "3"
+x509-parser = "0.18"

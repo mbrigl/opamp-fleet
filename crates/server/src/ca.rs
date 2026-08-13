@@ -10,7 +10,10 @@
 //! (`transport::Admission`): a CSR that arrives has already proved everything the endpoint asks of
 //! any other message, and that is the approval the specification's flow calls for.
 
-use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair};
+use rcgen::{
+    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 
 use crate::config::ClientCaConfig;
 
@@ -46,6 +49,14 @@ impl ClientCa {
     /// it dies the moment the Server re-keys that Agent through `AgentIdentification` — an outage
     /// of the Server's own making (ADR-0035).
     ///
+    /// What the request may *not* dictate is the shape of the certificate. `rcgen` carries the
+    /// CSR's `basicConstraints`, `keyUsage`, `extendedKeyUsage`, and SANs into the signed output,
+    /// so a request asking for `CA:TRUE` would otherwise be handed a certificate that chains to the
+    /// fleet CA and can mint more — a privilege this Server never means to grant. Enrolment issues
+    /// one thing only: a client-authentication leaf. So the constraints are overwritten here rather
+    /// than trusted from the request — forced to a non-CA cert with `clientAuth` and a plain
+    /// signing key usage, and any requested SANs dropped, before it is signed.
+    ///
     /// # Errors
     /// A request that cannot be parsed, or that this CA cannot sign, is an error the caller turns
     /// into the Baseline's `ServerErrorResponse` of type `BadRequest`.
@@ -54,6 +65,11 @@ impl ClientCa {
             .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
         request.params.not_before = rcgen::date_time_ymd(1975, 1, 1);
         request.params.not_after = not_after(self.validity_days)?;
+        // Never trust the request for the certificate's powers: force a client-auth leaf.
+        request.params.is_ca = IsCa::ExplicitNoCa;
+        request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        request.params.subject_alt_names.clear();
         let certificate = request
             .signed_by(&self.issuer)
             .map_err(|e| format!("cannot sign the certificate signing request: {e}"))?;
@@ -108,12 +124,63 @@ mod tests {
         }
     }
 
+    /// A request that asks for the powers of a CA — `basicConstraints: CA`, a name of its own, and
+    /// a wider extended key usage.
+    fn hostile_csr() -> String {
+        let key = KeyPair::generate().expect("client key");
+        let mut params =
+            rcgen::CertificateParams::new(vec!["edge-01".to_string()]).expect("client params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.subject_alt_names.push(rcgen::SanType::DnsName(
+            "evil.example".try_into().expect("san"),
+        ));
+        params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("csr pem")
+    }
+
     #[test]
     fn signs_a_request_into_a_certificate() {
         let issued = client_ca(90).sign(&csr("edge-01")).expect("issued");
         assert!(issued.starts_with("-----BEGIN CERTIFICATE-----"));
         // What came back is a certificate, not the request echoed back.
         assert!(!issued.contains("CERTIFICATE REQUEST"));
+    }
+
+    /// A CSR asking for CA powers is signed into a plain client-auth leaf: the request does not get
+    /// to choose the certificate's powers (a CA cert chaining to the fleet CA could mint more). The
+    /// issued certificate must be non-CA, carry only `clientAuth`, and none of the CSR's SANs.
+    #[test]
+    fn the_request_cannot_dictate_the_certificates_powers() {
+        let issued = client_ca(90).sign(&hostile_csr()).expect("issued");
+        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
+        let cert = pem.parse_x509().expect("der");
+
+        // Absent basic constraints means non-CA, which is fine; present, it must say non-CA.
+        if let Some(bc) = cert
+            .basic_constraints()
+            .expect("basic constraints readable")
+        {
+            assert!(!bc.value.ca, "the issued certificate must not be a CA");
+        }
+        let eku = cert
+            .extended_key_usage()
+            .expect("eku readable")
+            .expect("eku present")
+            .value;
+        assert!(eku.client_auth, "the leaf authenticates a client");
+        assert!(!eku.server_auth, "the CSR's serverAuth request was dropped");
+        assert!(!eku.any, "no anyExtendedKeyUsage");
+        assert!(
+            cert.subject_alternative_name()
+                .expect("san readable")
+                .is_none(),
+            "the CSR's SAN was dropped"
+        );
     }
 
     /// The Baseline makes this a MUST on the Server: a request it cannot act on is answered with a
