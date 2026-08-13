@@ -85,5 +85,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0054](0054-a-configuration-may-state-the-agent-type-it-is-for.md) | A Configuration may state the Agent type it is for — and then reaches no Agent of another | 🟢 accepted |
 | [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | 🟢 accepted |
 | [0056](0056-the-client-accepts-its-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's | 🟢 accepted |
-| [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟡 proposed |
+| [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟢 accepted |
 

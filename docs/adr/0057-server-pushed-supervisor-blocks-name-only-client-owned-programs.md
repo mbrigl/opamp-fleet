@@ -1,6 +1,6 @@
 # ADR-0057: A Server-pushed `[[supervisor]]` block may name only a Client-owned program
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-13
 - **Deciders:** Markus Brigl
 
