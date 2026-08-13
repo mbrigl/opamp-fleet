@@ -27,7 +27,12 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with(tracing_subscriber::fmt::layer())
+        // Colour only when stderr is a real terminal: under a service manager stderr is a pipe to
+        // journald or the SCM, and ANSI escapes there are noise in the syslog, not colour.
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
+        )
         // The log file (ADR-0041), which discards everything until a service run opens it — the
         // state directory is not known until the command line is parsed, a few lines below. No
         // colour: this one is read with a pager, not a terminal.
