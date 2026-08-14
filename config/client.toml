@@ -215,6 +215,8 @@ state_dir = "client-state"
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
+# [supervisor.env]         # optional environment for the process
+# OTLP_HTTP_ENDPOINT = "127.0.0.1:4318"
 
 # 2. A Collector WITHOUT the extension — the core distribution has no opampextension, so the
 # Supervisor observes it from the outside (spawn, exit, restart). endpoint_port stays unset:
@@ -229,6 +231,8 @@ state_dir = "client-state"
 # binary = "otelcol"
 # service_name = "otelcol"   # without the extension nothing reports a type, so state one here;
 #                            # left out, the program's file name ("otelcol") is used anyway.
+# [supervisor.env]           # optional environment for the process
+# OTLP_GRPC_ENDPOINT = "127.0.0.1:4317"
 
 # 3. Any other process — a Foreign Agent under a generic "command" Custom Supervisor. The
 # process speaks no OpAMP, so the Supervisor observes it from the outside (spawn, exit,
