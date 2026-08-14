@@ -57,5 +57,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
 | [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
 | [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟡 proposed |
-| [0029](0029-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟢 accepted |
+| [0029](0029-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt`, and the system service may run under an operator-named account that owns the instance's files | 🟢 accepted |
 
