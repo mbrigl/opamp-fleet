@@ -72,6 +72,10 @@ pub struct ClientConfig {
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// How Managed-Process package updates behave once applied (ADR-0058) — the retention of a
+    /// superseded version. Absent takes the defaults: one day.
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
@@ -141,6 +145,10 @@ pub struct SupervisorBlock {
     /// configuration is acknowledged `APPLIED`; exiting within the grace reports `FAILED`
     /// (the health-gated acknowledgement ADR-0011 names). `0` acknowledges on start, as before.
     pub apply_grace_secs: u64,
+    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0058): how
+    /// long the version a successful update supersedes is kept before deletion. `None` — the
+    /// default — takes the global value.
+    pub retain_previous_secs: Option<u64>,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
     /// Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g.
@@ -299,6 +307,12 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: apply_grace_secs must not be negative")
             })?,
         };
+        let retain_previous_secs = match take_integer(&mut table, "retain_previous_secs")? {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
+                format!("supervisor {name:?}: retain_previous_secs must not be negative")
+            })?),
+        };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
         let program_path = match take_string(&mut table, "program_path")
@@ -337,6 +351,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             endpoint_port,
             stop_timeout_secs,
             apply_grace_secs,
+            retain_previous_secs,
             attributes,
             program_path,
             settings: table,
@@ -571,6 +586,30 @@ impl Default for LoggingConfig {
     }
 }
 
+/// The `[updates]` section (ADR-0058): how a Managed Process's package updates behave once applied.
+/// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// How long the version a successful update supersedes is kept before it is deleted, so an
+    /// operator has a fallback window (ADR-0058). `0` deletes it on success, the pre-ADR-0058
+    /// behaviour. A per-Supervisor `retain_previous_secs` overrides this for one block.
+    #[serde(default = "default_retain_previous_secs")]
+    pub retain_previous_secs: u64,
+}
+
+fn default_retain_previous_secs() -> u64 {
+    24 * 60 * 60 // one day
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            retain_previous_secs: default_retain_previous_secs(),
+        }
+    }
+}
+
 /// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
 /// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
 /// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
@@ -730,6 +769,7 @@ impl Default for ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
             logging: LoggingConfig::default(),
+            updates: UpdatesConfig::default(),
             service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
@@ -1415,6 +1455,58 @@ mod tests {
         let command = &cfg.supervisors[1];
         assert_eq!(command.endpoint_port, 0);
         assert!(command.settings.contains_key("args"));
+    }
+
+    /// ADR-0058: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
+    /// block overrides it for itself — the shape `apply_grace_secs` has.
+    #[test]
+    fn retention_defaults_globally_and_is_overridable_per_supervisor() {
+        let default: ClientConfig = toml::from_str("").expect("parse");
+        assert_eq!(
+            default.updates.retain_previous_secs,
+            24 * 60 * 60,
+            "one day by default"
+        );
+
+        let cfg: ClientConfig = toml::from_str(
+            r#"
+            [updates]
+            retain_previous_secs = 3600
+
+            [[supervisor]]
+            type = "command"
+            name = "keeps-default"
+            command = "agent"
+
+            [[supervisor]]
+            type = "command"
+            name = "overrides"
+            command = "agent"
+            retain_previous_secs = 0
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.updates.retain_previous_secs, 3600,
+            "the global override"
+        );
+        assert_eq!(
+            cfg.supervisors[0].retain_previous_secs, None,
+            "a block that says nothing takes the global"
+        );
+        assert_eq!(
+            cfg.supervisors[1].retain_previous_secs,
+            Some(0),
+            "a block may override to immediate deletion"
+        );
+
+        let negative = toml::from_str::<ClientConfig>(
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"a\"\nretain_previous_secs = -1\n",
+        );
+        assert!(negative
+            .unwrap_err()
+            .to_string()
+            .contains("retain_previous_secs"));
     }
 
     #[test]

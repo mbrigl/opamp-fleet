@@ -78,6 +78,7 @@ impl Plugin for CommandPlugin {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
+            retain_previous: ctx.retain_previous,
             // A package (ADR-0015) swaps this command's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key.clone(),

@@ -72,6 +72,16 @@ fn runner(
     version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
+    runner_retaining(install, apply_grace, Duration::ZERO, version_probe, build)
+}
+
+fn runner_retaining(
+    install: Option<InstallTarget>,
+    apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
+    build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+) -> Harness {
     let (event_tx, events) = mpsc::channel(64);
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
@@ -79,6 +89,7 @@ fn runner(
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
+        retain_previous,
         install,
         archive_key: None,
         version_probe,
@@ -601,6 +612,114 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     assert!(result.is_err(), "a binary that exits fails the install");
     // The binary on disk is the original one again.
     assert_eq!(std::fs::read(&binary).expect("read"), good, "rolled back");
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+
+/// ADR-0058: a *first* install that will not start has nothing to roll back to, so it is **kept**
+/// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
+/// empty the directory and set the Server re-offering the same artifact in a loop.
+#[tokio::test]
+async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    // Nothing on disk yet: a first install onto an empty program directory.
+    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+
+    let staged = dir.path().join("downloaded.staged");
+    let crasher = bytes_of(&stub_crasher());
+    std::fs::write(&staged, &crasher).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_err(), "a crasher fails the install");
+    // Not rolled back to nothing: the verified program is still there.
+    assert!(
+        binary.exists(),
+        "the first install is kept, not discarded (ADR-0058)"
+    );
+    assert_eq!(
+        std::fs::read(&binary).expect("read"),
+        crasher,
+        "and it is the installed bytes"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+
+/// ADR-0058: a program that keeps failing to start is **held** after a few tries, not restarted
+/// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
+/// reports it plainly.
+#[tokio::test]
+async fn a_program_that_keeps_crashing_is_held_not_looped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    let mut harness = binary_harness(&binary, Duration::from_millis(100));
+
+    // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
+    let staged = dir.path().join("downloaded.staged");
+    std::fs::write(&staged, bytes_of(&stub_crasher())).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_err());
+
+    // Within a bounded time the Runner gives up and says so, instead of spinning forever.
+    let held = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let health = next_health(&mut harness.events).await;
+            if health.status.contains("not restarting") {
+                return health;
+            }
+        }
+    })
+    .await
+    .expect("the Runner holds instead of restarting forever");
+    assert!(held.status.contains("not restarting"), "{}", held.status);
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+
+/// ADR-0058: a successful update does not delete the version it superseded — it is retained for the
+/// window, with a marker recording the deadline, so an operator has a fallback.
+#[tokio::test]
+async fn a_successful_update_keeps_the_previous_version_for_the_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    // A predecessor that stays up.
+    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let program = binary.clone();
+    let mut harness = runner_retaining(
+        Some(InstallTarget::Binary(binary.clone())),
+        Duration::from_millis(200),
+        Duration::from_secs(3600), // keep the predecessor an hour
+        None,
+        move || Some(spec(&program)),
+    );
+    let _ = next_health(&mut harness.events).await;
+
+    // A new good version installs and stays up.
+    let staged = dir.path().join("downloaded.staged");
+    std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
+    let (_, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+    assert!(result.is_ok(), "a good binary applies");
+
+    // The predecessor is retained, not deleted on success — its file and a deadline marker remain.
+    let backup = binary.with_extension("rollback");
+    assert!(
+        backup.exists(),
+        "the previous version is kept for the retention window"
+    );
+    let mut marker = backup.clone().into_os_string();
+    marker.push(".until");
+    assert!(
+        PathBuf::from(marker).exists(),
+        "a marker records the deadline"
+    );
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;

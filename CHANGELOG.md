@@ -15,6 +15,27 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.2.7]
+
+### Changed
+
+- **A Managed Process's package updates no longer loop, and keep a fallback**
+  ([ADR-0058](docs/adr/0058-package-rollback-retention-and-no-restart-loop.md)). Three changes to
+  how a Supervisor applies a package (ADR-0015):
+  - A **first** install that will not start is no longer discarded — the verified program is kept in
+    place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
+    the Server re-offering the same artifact in a download-crash-rollback loop.
+  - A program that **keeps failing to start** is held after a few attempts instead of being
+    restarted forever (the give-up the Client's own self-update already uses). The Agent reports
+    `not restarting: the program keeps failing to start`.
+  - A **successful** update keeps the version it superseded for a window before deleting it, so an
+    operator has a fallback. New `[updates] retain_previous_secs` (default one day), overridable per
+    `[[supervisor]]` block with `retain_previous_secs`; `0` restores the old delete-on-success.
+
+  **What to do:** nothing to keep working. If a rollout of a package that crashes on start had been
+  looping, it now stops on its own; and a superseded version now occupies disk for up to a day per
+  Supervisor — lower `retain_previous_secs`, globally or per block, on a host that cannot spare it.
+
 ## [0.2.6]
 
 ### Added

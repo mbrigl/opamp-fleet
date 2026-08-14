@@ -519,6 +519,7 @@ edit to the blocks stands only until the next publication overwrites it.
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
 | `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
+| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion (ADR-0058), overriding the global default for this Supervisor. `0` deletes it on success. See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
 | `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
 | `[supervisor.attributes]` | none | Attributes for this Agent alone, overriding the Client's `[attributes]` per key. |
 
@@ -720,6 +721,30 @@ land.
 One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
 addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
 than written over the binary it was meant to extend.
+
+### Package updates: rollback and retention
+
+What happens when step 4's health gate is *not* passed is settled by ADR-0058:
+
+- **A failed update rolls back to the version it replaced** — but only when there *is* one. A
+  **first** install with nothing behind it is not rolled back to nothing: the verified program is
+  **kept in place** and reported `InstallFailed`, so `program/` never goes empty and the Server does
+  not re-offer the same artifact in a loop.
+- **A program that keeps failing to start is held, not restarted forever.** After a few attempts in
+  a row the Supervisor stops trying and waits for a change — a new configuration, a new package, or
+  a restart — rather than spinning (which would hammer the Server with re-downloads). A rolled-back
+  predecessor that also will not start is held the same way. The Agent reports it plainly
+  (`not restarting: the program keeps failing to start`).
+- **A successful update keeps the version it superseded for a window, then deletes it**, so an
+  operator has a fallback if the new version proves subtly wrong. The window is
+  `retain_previous_secs`: global in `[updates]`, overridable per `[[supervisor]]` block, **one day**
+  by default. `0` deletes on success. Each Supervisor keeps at most the immediately previous version.
+
+```toml
+# Global default for every Supervisor (one day shown; the built-in default):
+[updates]
+retain_previous_secs = 86400
+```
 
 ## Agents that are more than one file
 

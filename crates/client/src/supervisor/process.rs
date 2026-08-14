@@ -7,7 +7,7 @@
 //! process that keeps exiting.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{AgentDescription, ComponentHealth};
 use tokio::process::{Child, Command};
@@ -94,8 +94,9 @@ impl InstallTarget {
     fn set_aside(&self) -> Result<bool, String> {
         let (live, backup) = (self.live(), self.backup());
         // A rename never lands on an occupied name: Windows refuses it outright, and a directory
-        // rename would nest rather than replace.
-        self.remove(&backup);
+        // rename would nest rather than replace. This also clears any *retained* predecessor
+        // (ADR-0058) and its marker — each Supervisor keeps only the immediately previous version.
+        self.drop_backup();
         match std::fs::rename(&live, &backup) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -122,14 +123,42 @@ impl InstallTarget {
             .map_err(|e| format!("cannot restore {}: {e}", live.display()))
     }
 
-    /// Throws away what was just installed — a failed *first* install, with nothing behind it.
-    fn discard(&self) {
-        self.remove(&self.live());
+    /// The marker beside a retained backup (ADR-0058): a sibling file holding the Unix-seconds
+    /// deadline after which the backup may be swept. A file even for a tree, whose backup is a
+    /// directory, so a restart can find the deadline without opening the tree.
+    fn backup_marker(&self) -> PathBuf {
+        let mut raw = self.backup().into_os_string();
+        raw.push(".until");
+        PathBuf::from(raw)
     }
 
-    /// Drops the backup once the new version has proved it stays up.
+    /// Keeps the backup and records when it may be deleted (ADR-0058). Persisted, so the deadline
+    /// survives a Client restart the way the self-update outcome marker does (ADR-0020).
+    fn retain(&self, deadline_unix: u64) {
+        let _ = std::fs::write(self.backup_marker(), deadline_unix.to_string());
+    }
+
+    /// Drops the backup — and its retention marker — once it is no longer wanted: immediately when
+    /// retention is off, or when a later update supersedes it.
     fn drop_backup(&self) {
         self.remove(&self.backup());
+        let _ = std::fs::remove_file(self.backup_marker());
+    }
+
+    /// Deletes a retained backup whose deadline has passed (ADR-0058). Best-effort; returns whether
+    /// it removed one. An unreadable or absent marker leaves an unretained backup alone — only a
+    /// backup this Runner deliberately retained carries a marker, and a marker whose value will not
+    /// parse is treated as expired rather than kept forever.
+    fn sweep(&self, now_unix: u64) -> bool {
+        let marker = self.backup_marker();
+        let Ok(text) = std::fs::read_to_string(&marker) else {
+            return false;
+        };
+        let expired = text.trim().parse::<u64>().map_or(true, |d| now_unix >= d);
+        if expired {
+            self.drop_backup();
+        }
+        expired
     }
 
     /// Removes a file or a whole tree, whichever this target deals in. Best-effort throughout:
@@ -166,6 +195,9 @@ pub struct Runner {
     /// What an `ApplyPackage` swap replaces (ADR-0015) — one file, or a whole tree (ADR-0023).
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
     pub install: Option<InstallTarget>,
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0058), so
+    /// an operator has a fallback window. Zero deletes it on success, the pre-ADR-0058 behaviour.
+    pub retain_previous: Duration,
     /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
     pub archive_key: Option<String>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
@@ -178,10 +210,23 @@ pub struct Runner {
 impl Runner {
     pub async fn run(mut self, mut shutdown: Shutdown) {
         let mut backoff = Backoff::new();
+        // Consecutive start failures, and when the current process started (ADR-0058): together they
+        // stop a program that keeps crashing from being restarted forever. A process that runs past
+        // `STABLE_RUN_FLOOR` clears the streak; a command (config, package, restart) resets it.
+        let mut streak = 0usize;
+        let mut last_start = Instant::now();
+        // Clear any predecessor whose retention window already elapsed while the Client was down
+        // (ADR-0058) — the deadline is wall-clock, so a restart is exactly when one may have passed.
+        self.sweep_backup();
         // What runs today, before it runs: a Collector without the opampextension never reports
         // its own version, and one that is not configured yet never even starts.
         self.probe_version();
         let mut child = self.spawn_if_due().await;
+
+        // Honour the retention window even when the Client stays up past it. Cheap and coarse: a
+        // day-long window does not need a tight tick, and the sweep itself is a stat plus a delete.
+        let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+        sweep.tick().await; // the first tick is immediate; the startup sweep above already ran
 
         loop {
             let exited = async {
@@ -191,11 +236,14 @@ impl Runner {
                 }
             };
             tokio::select! {
+                _ = sweep.tick() => self.sweep_backup(),
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config }) => {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
+                        streak = 0; // a new configuration is a fresh chance (ADR-0058)
                         child = self.spawn_if_due().await;
+                        last_start = Instant::now();
                         // Applying means running on the new files — and surviving the apply
                         // grace (ADR-0011's health-gated acknowledgement): a process that exits
                         // right away has rejected its configuration the only way a process can.
@@ -241,11 +289,19 @@ impl Runner {
                             .await;
                         if exited_in_grace {
                             // Stay supervised: a flaky-but-valid configuration is retried with
-                            // backoff, exactly like any unexpected exit.
-                            let delay = backoff.advance();
-                            tokio::select! {
-                                _ = tokio::time::sleep(delay) => child = self.spawn_if_due().await,
-                                _ = shutdown.requested() => break,
+                            // backoff — but not forever (ADR-0058): a configuration that will not
+                            // start is held after a few tries rather than spun on.
+                            if self
+                                .respawn_or_hold(
+                                    &mut child,
+                                    &mut backoff,
+                                    &mut streak,
+                                    &mut last_start,
+                                    &mut shutdown,
+                                )
+                                .await
+                            {
+                                break;
                             }
                         }
                     }
@@ -254,12 +310,15 @@ impl Runner {
                         // that will not stay up is rolled back to the bytes it replaced (ADR-0015).
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
+                        streak = 0; // a new package is a fresh chance (ADR-0058)
                         let result = self.swap_and_gate(staged, &version, &mut child, &mut shutdown).await;
                         if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
                             child = self.spawn_if_due().await;
+                            last_start = Instant::now();
                         }
                         match result {
                             GraceOutcome::Ok => {
+                                last_start = Instant::now();
                                 // A new binary is a new version, and the Agent's `service.version`
                                 // is what the program says about itself — so ask it again. Without
                                 // this the swap is reported as installed while the Agent goes on
@@ -273,11 +332,19 @@ impl Runner {
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Err(error) })
                                     .await;
-                                // Stay supervised, exactly as a failed ApplyConfig does.
-                                let delay = backoff.advance();
-                                tokio::select! {
-                                    _ = tokio::time::sleep(delay) => child = self.spawn_if_due().await,
-                                    _ = shutdown.requested() => break,
+                                // Stay supervised, exactly as a failed ApplyConfig does — and, like
+                                // it, held rather than spun on once it keeps failing (ADR-0058).
+                                if self
+                                    .respawn_or_hold(
+                                        &mut child,
+                                        &mut backoff,
+                                        &mut streak,
+                                        &mut last_start,
+                                        &mut shutdown,
+                                    )
+                                    .await
+                                {
+                                    break;
                                 }
                             }
                             GraceOutcome::ShuttingDown => break,
@@ -286,7 +353,9 @@ impl Runner {
                     Some(ProcessCommand::Restart) => {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
+                        streak = 0; // an operator restart is a fresh chance (ADR-0058)
                         child = self.spawn_if_due().await;
+                        last_start = Instant::now();
                     }
                     Some(ProcessCommand::Shutdown) | None => break,
                 },
@@ -302,11 +371,23 @@ impl Runner {
                             describe,
                         )))
                         .await;
-                    // Come back with backoff — but stay responsive to commands and shutdown.
-                    let delay = backoff.advance();
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => child = self.spawn_if_due().await,
-                        _ = shutdown.requested() => break,
+                    // A process that had been up a while is ordinary supervision, not a start loop:
+                    // its exit clears the streak (ADR-0058). One that keeps exiting quickly does not,
+                    // so it is held after a few tries rather than restarted forever.
+                    if last_start.elapsed() >= self.apply_grace.max(STABLE_RUN_FLOOR) {
+                        streak = 0;
+                    }
+                    if self
+                        .respawn_or_hold(
+                            &mut child,
+                            &mut backoff,
+                            &mut streak,
+                            &mut last_start,
+                            &mut shutdown,
+                        )
+                        .await
+                    {
+                        break;
                     }
                 }
                 _ = shutdown.requested() => break,
@@ -388,12 +469,84 @@ impl Runner {
                     warn!(supervisor = %self.name, "rolled the program back after a failed package");
                 }
             }
-            (GraceOutcome::Failed(_), false) => target.discard(),
-            // Applied: what ran before is no longer needed.
-            (_, true) => target.drop_backup(),
+            // No predecessor: a first install with nothing behind it. It is *not* rolled back
+            // (ADR-0058) — the verified program stays in place, reported InstallFailed, so a first
+            // package that will not start does not empty `program/` and set the Server re-offering
+            // it in a loop. Discarding it here is what used to make that loop turn.
+            (GraceOutcome::Failed(_), false) => {
+                warn!(supervisor = %self.name, "the first install would not start; kept in place, not rolled back (nothing to roll back to)");
+            }
+            // Applied: the predecessor is no longer what runs, but it is kept for the retention
+            // window (ADR-0058) so an operator has a fallback, then swept once its deadline passes.
+            (_, true) => self.retain_backup(&target),
             (_, false) => {}
         }
         outcome
+    }
+
+    /// Keeps the version a successful update superseded, or drops it now (ADR-0058). With retention
+    /// off it is the old immediate delete; otherwise the backup stays and a marker records the
+    /// deadline `now + retain_previous`, swept once it passes.
+    fn retain_backup(&self, target: &InstallTarget) {
+        if self.retain_previous.is_zero() {
+            target.drop_backup();
+            return;
+        }
+        let deadline = now_unix().saturating_add(self.retain_previous.as_secs());
+        target.retain(deadline);
+        info!(
+            supervisor = %self.name,
+            retain_secs = self.retain_previous.as_secs(),
+            "keeping the previous version until it may be rolled back to no longer"
+        );
+    }
+
+    /// Deletes a retained predecessor whose deadline has passed (ADR-0058). Called at startup and on
+    /// a periodic tick, so the window is honoured whether or not the Client restarts within it.
+    fn sweep_backup(&self) {
+        if let Some(target) = &self.install {
+            if target.sweep(now_unix()) {
+                info!(supervisor = %self.name, "swept the retained previous version past its window");
+            }
+        }
+    }
+
+    /// Respawns after a start failure — or, once the process has failed to stay up
+    /// [`MAX_CRASH_RESTARTS`] times in a row, **holds** it down instead of spinning (ADR-0058). A
+    /// held Supervisor reports unhealthy and waits: the next configuration, package, or restart is
+    /// a fresh chance and resets the streak. Returns `true` when shutdown was requested mid-wait.
+    async fn respawn_or_hold(
+        &self,
+        child: &mut Option<Child>,
+        backoff: &mut Backoff,
+        streak: &mut usize,
+        last_start: &mut Instant,
+        shutdown: &mut Shutdown,
+    ) -> bool {
+        *streak += 1;
+        if *streak >= MAX_CRASH_RESTARTS {
+            warn!(
+                supervisor = %self.name, restarts = *streak,
+                "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart (ADR-0058)"
+            );
+            self.events
+                .send(ProcessEvent::Health(unhealthy(
+                    "not restarting: the program keeps failing to start".to_string(),
+                    format!("held after {} failed starts in a row", *streak),
+                )))
+                .await;
+            *child = None;
+            return false;
+        }
+        let delay = backoff.advance();
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {
+                *child = self.spawn_if_due().await;
+                *last_start = Instant::now();
+                false
+            }
+            _ = shutdown.requested() => true,
+        }
     }
 
     /// The apply-grace health gate shared by a package swap: a freshly started process must
@@ -539,6 +692,22 @@ impl Runner {
 
 /// How long a version probe may take before it is abandoned — it must never stall startup.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often a running Supervisor re-checks whether a retained predecessor's window has passed
+/// (ADR-0058). Coarse on purpose: the window is measured in hours to a day, and the startup sweep
+/// covers a Client that was down when a deadline elapsed.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
+
+/// How many times in a row a Managed Process may fail to stay up before the Runner stops restarting
+/// it and holds until something changes — a new configuration, a new package, or a restart (ADR-0058).
+/// It is the self-update's give-up (three attempts, ADR-0020), so the two update paths behave alike.
+/// A restart loop is a denial of service against the fleet's own Server; this bounds it.
+const MAX_CRASH_RESTARTS: usize = 3;
+
+/// A process that stayed up at least this long counts as *stable*: a later exit is ordinary
+/// supervision, not a start loop, so it clears the streak. Below the floor a zero-grace Supervisor
+/// would treat every restart as stable; above it, one that survives its grace comfortably resets.
+const STABLE_RUN_FLOOR: Duration = Duration::from_secs(10);
 
 /// Runs `<program> <args>` once and reports the Managed Process's version as a Description
 /// event, if the output contains one. Best effort by design: a missing binary, a hang, or
@@ -801,6 +970,15 @@ fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
+/// Wall-clock seconds since the Unix epoch — what a retention deadline (ADR-0058) is written and
+/// compared in, so it survives a Client restart.
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,5 +1093,54 @@ mod tests {
             artifact.exists(),
             "the archive is read, never consumed — only its member is installed"
         );
+    }
+
+    /// ADR-0058: a retained predecessor is swept only once its deadline passes, never before, and
+    /// the marker goes with it.
+    #[test]
+    fn a_retained_backup_is_swept_only_after_its_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = InstallTarget::Binary(dir.path().join("prog"));
+        std::fs::write(target.backup(), b"the previous version").expect("write backup");
+        target.retain(1000); // deadline: 1000 unix-seconds
+        assert!(
+            target.backup_marker().exists(),
+            "the marker records the deadline"
+        );
+
+        assert!(!target.sweep(999), "before the deadline it is kept");
+        assert!(
+            target.backup().exists(),
+            "the previous version is still there"
+        );
+
+        assert!(target.sweep(1000), "at the deadline it is swept");
+        assert!(!target.backup().exists(), "the previous version is gone");
+        assert!(!target.backup_marker().exists(), "and so is its marker");
+    }
+
+    /// A backup with no marker is not something this Runner retained (the pre-ADR-0058 immediate
+    /// drop, or a half-finished install), so a sweep leaves it alone.
+    #[test]
+    fn a_sweep_leaves_an_unmarked_backup_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = InstallTarget::Binary(dir.path().join("prog"));
+        std::fs::write(target.backup(), b"unmarked").expect("write backup");
+        assert!(!target.sweep(u64::MAX), "no marker, nothing to sweep");
+        assert!(target.backup().exists());
+    }
+
+    /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
+    /// deadline behind.
+    #[test]
+    fn dropping_a_backup_clears_its_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = InstallTarget::Binary(dir.path().join("prog"));
+        std::fs::write(target.backup(), b"old").expect("write");
+        target.retain(5000);
+        assert!(target.backup_marker().exists());
+        target.drop_backup();
+        assert!(!target.backup().exists());
+        assert!(!target.backup_marker().exists());
     }
 }
