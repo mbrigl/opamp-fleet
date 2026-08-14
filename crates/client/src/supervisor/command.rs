@@ -34,6 +34,38 @@ struct CommandSettings {
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     #[serde(default)]
     version_args: Option<Vec<String>>,
+    /// The signal that makes this process re-read its configuration in place (e.g. `"HUP"`),
+    /// applied instead of the restart (ADR-0060); a reload that fails still falls back to the
+    /// restart. Whether a daemon reloads on a signal is its own convention — hence opt-in, and
+    /// unix-only: a set key is refused on Windows at parse time, not at the first apply.
+    #[serde(default)]
+    reload_signal: Option<String>,
+}
+
+/// Maps a declared reload signal (ADR-0060) to its number. Only the signals daemons
+/// conventionally re-read configuration on — a stop signal here would turn every apply into a
+/// kill, so anything unknown is refused loudly (ADR-0008), with or without a `SIG` prefix.
+#[cfg(unix)]
+fn reload_signal(name: &str, value: &str) -> Result<i32, String> {
+    match value.strip_prefix("SIG").unwrap_or(value) {
+        "HUP" => Ok(libc::SIGHUP),
+        "USR1" => Ok(libc::SIGUSR1),
+        "USR2" => Ok(libc::SIGUSR2),
+        _ => Err(format!(
+            "supervisor {name:?}: unknown `reload_signal` {value:?} (known: HUP, USR1, USR2)"
+        )),
+    }
+}
+
+/// Windows has no signal a process can reload on, so a set key is a configuration error — the
+/// operator learns it at startup, not from a Supervisor that silently restarts instead.
+#[cfg(not(unix))]
+fn reload_signal(name: &str, value: &str) -> Result<i32, String> {
+    let _ = value;
+    Err(format!(
+        "supervisor {name:?}: `reload_signal` is unix-only — this platform has no signal a \
+         process can reload on"
+    ))
 }
 
 pub struct CommandPlugin;
@@ -53,6 +85,12 @@ impl Plugin for CommandPlugin {
         let settings: CommandSettings = std::mem::take(&mut ctx.settings)
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
+        // Resolved before anything runs, so a bad signal name fails startup (ADR-0060).
+        let reload = settings
+            .reload_signal
+            .as_deref()
+            .map(|value| reload_signal(&ctx.name, value))
+            .transpose()?;
         // Everything the operator wrote about *where* things are goes through the placeholders
         // (ADR-0022) — the program itself deliberately does not.
         let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
@@ -83,6 +121,7 @@ impl Plugin for CommandPlugin {
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
             version_probe,
+            reload_signal: reload,
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.
@@ -100,9 +139,14 @@ impl Plugin for CommandPlugin {
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        let _: CommandSettings = settings
+        let settings: CommandSettings = settings
             .try_into()
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        // The signal name is part of the strict read (ADR-0060): an offered set naming an
+        // unknown one — or any on Windows — is refused before a running process is touched.
+        if let Some(value) = settings.reload_signal.as_deref() {
+            reload_signal(name, value)?;
+        }
         Ok(())
     }
 }
@@ -132,5 +176,38 @@ mod tests {
 
         let typo: toml::Table = toml::from_str("comand = \"/x\"").expect("table");
         assert!(typo.try_into::<CommandSettings>().is_err());
+    }
+
+    /// The reload signal is read strictly (ADR-0060): the conventional reload signals only, with
+    /// or without the `SIG` prefix — never a stop signal, whose acceptance would turn every
+    /// apply into a kill.
+    #[cfg(unix)]
+    #[test]
+    fn the_reload_signal_maps_conventional_names_and_refuses_the_rest() {
+        assert_eq!(reload_signal("s", "HUP"), Ok(libc::SIGHUP));
+        assert_eq!(reload_signal("s", "SIGHUP"), Ok(libc::SIGHUP));
+        assert_eq!(reload_signal("s", "USR1"), Ok(libc::SIGUSR1));
+        assert_eq!(reload_signal("s", "USR2"), Ok(libc::SIGUSR2));
+        for refused in ["TERM", "KILL", "hup", "1", ""] {
+            let err = reload_signal("s", refused).expect_err(refused);
+            assert!(err.contains("unknown `reload_signal`"), "{err}");
+        }
+    }
+
+    /// Windows has no signal a process can reload on; the key itself is the error there.
+    #[cfg(windows)]
+    #[test]
+    fn a_reload_signal_is_refused_on_windows() {
+        let err = reload_signal("s", "HUP").expect_err("windows has no signals");
+        assert!(err.contains("unix-only"), "{err}");
+    }
+
+    /// `check` reads the signal name exactly as `start` would (ADR-0056), so an offered set
+    /// naming a bad one is refused before any running process is touched.
+    #[test]
+    fn check_refuses_a_bad_reload_signal() {
+        let table: toml::Table = toml::from_str("reload_signal = \"NOPE\"").expect("table");
+        let err = CommandPlugin.check("agent", table).expect_err("refused");
+        assert!(err.contains("reload_signal"), "{err}");
     }
 }

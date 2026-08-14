@@ -37,11 +37,10 @@ async fn configurations_crud_round_trips() {
     assert_eq!(stored["name"], "base");
     assert_eq!(stored["selector"]["os.type"], "linux");
     assert_eq!(stored["body"], "receivers: {}\n");
-    assert_eq!(
-        stored["published"], false,
-        "a fresh PUT stages a draft (ADR-0055)"
+    assert!(
+        stored.get("published").is_none() && stored.get("pending_changes").is_none(),
+        "ADR-0061: content has one state — saved; rollout is a fact about Agents: {stored}"
     );
-    assert_eq!(stored["pending_changes"], false);
 
     // Read back, singly and as the list.
     let got: serde_json::Value = client
@@ -142,16 +141,16 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// ADR-0055 over the wire: saving stages, publication distributes, retraction withdraws — and an
-/// edit of a published Configuration is pending, not in force, until released again.
+/// ADR-0061 over the wire: saving proposes, the rollout act distributes — resource-wide or per
+/// Agent — and a later edit waits as `update` until the next act pins it.
 #[tokio::test]
-async fn a_configuration_is_a_draft_until_published() {
+async fn a_configuration_waits_until_it_is_rolled_out() {
     let server = spawn().await;
     let client = reqwest::Client::new();
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // Saved: complete, aimed at everybody — and offered to nobody.
+    // Saved: complete, aimed at everybody — a visible candidate, assigned to nobody.
     let put = client
         .put(url(server.addr, "/api/v1/configurations/fleet"))
         .json(&serde_json::json!({ "body": "receivers: {}" }))
@@ -159,74 +158,132 @@ async fn a_configuration_is_a_draft_until_published() {
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
+    let view = agent_view(&client, server.addr, &uid).await;
+    assert_eq!(view["matched_configurations"][0], "fleet", "a candidate");
     assert!(
-        matched_configurations(&client, server.addr, &uid)
-            .await
+        view["assigned_configurations"]
+            .as_array()
+            .expect("array")
             .is_empty(),
-        "a draft reaches nobody, whatever it says"
+        "saving distributes nothing: {view}"
     );
+    assert_eq!(view["pending_configurations"][0]["name"], "fleet");
+    assert_eq!(view["pending_configurations"][0]["change"], "new");
 
-    // Published: its own act is what starts the rollout.
-    let published: serde_json::Value = client
-        .put(url(server.addr, "/api/v1/configurations/fleet/publication"))
-        .json(&serde_json::json!({ "published": true }))
+    // The resource-level act: rolled out to every currently matching Agent.
+    let rollout: serde_json::Value = client
+        .post(url(server.addr, "/api/v1/configurations/fleet/rollout"))
         .send()
         .await
-        .expect("publish")
+        .expect("rollout")
         .json()
         .await
         .expect("json");
-    assert_eq!(published["published"], true);
-    assert_eq!(published["pending_changes"], false);
-    assert_eq!(
-        matched_configurations(&client, server.addr, &uid).await,
-        ["fleet"]
-    );
+    assert_eq!(rollout["assigned_agents"], 1);
+    let view = agent_view(&client, server.addr, &uid).await;
+    assert_eq!(view["assigned_configurations"][0], "fleet");
+    assert!(view["pending_configurations"]
+        .as_array()
+        .expect("array")
+        .is_empty());
 
-    // Edited: the save is pending, the fleet keeps the published revision.
-    let edited: serde_json::Value = client
+    // Edited: the Agent keeps its pinned revision; the edit waits as an update.
+    let put = client
         .put(url(server.addr, "/api/v1/configurations/fleet"))
         .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
         .send()
         .await
-        .expect("edit")
+        .expect("edit");
+    assert_eq!(put.status(), 200);
+    let view = agent_view(&client, server.addr, &uid).await;
+    assert_eq!(
+        view["pending_configurations"][0]["change"], "update",
+        "the edit is saved, waiting, not in force: {view}"
+    );
+
+    // The per-Agent act releases the edit to this one Agent.
+    let per_agent = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .json(&serde_json::json!({ "configuration": "fleet" }))
+        .send()
+        .await
+        .expect("rollout to agent");
+    assert_eq!(per_agent.status(), 200);
+    let view: serde_json::Value = per_agent.json().await.expect("json");
+    assert!(view["pending_configurations"]
+        .as_array()
+        .expect("array")
+        .is_empty());
+
+    // A rollout of a name the store does not hold is 404, never a silent create.
+    let missing = client
+        .post(url(server.addr, "/api/v1/configurations/missing/rollout"))
+        .send()
+        .await
+        .expect("rollout missing");
+    assert_eq!(missing.status(), 404);
+    let missing = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .json(&serde_json::json!({ "configuration": "missing" }))
+        .send()
+        .await
+        .expect("rollout missing to agent");
+    assert_eq!(missing.status(), 404);
+}
+
+/// ADR-0061 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
+/// and receives nothing until an act of its own. The bulk act must be repeated (or the per-Agent
+/// one pressed) for latecomers.
+#[tokio::test]
+async fn an_agent_that_appears_later_waits() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let early = opamp::uid::InstanceUid::default();
+    report(
+        &client,
+        server.addr,
+        &support::full_report(&early, "early", 1),
+    )
+    .await;
+
+    client
+        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
+    let rollout: serde_json::Value = client
+        .post(url(server.addr, "/api/v1/configurations/fleet/rollout"))
+        .send()
+        .await
+        .expect("rollout")
         .json()
         .await
         .expect("json");
-    assert_eq!(edited["published"], true);
-    assert_eq!(
-        edited["pending_changes"], true,
-        "the edit is saved, reviewed, not yet released"
-    );
-    assert_eq!(
-        matched_configurations(&client, server.addr, &uid).await,
-        ["fleet"],
-        "the published revision stays in force"
-    );
+    assert_eq!(rollout["assigned_agents"], 1);
 
-    // Retracted: the offer is withdrawn.
-    let retracted = client
-        .put(url(server.addr, "/api/v1/configurations/fleet/publication"))
-        .json(&serde_json::json!({ "published": false }))
+    // The latecomer enrols: a candidate, pending, assigned nothing.
+    let late = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&late, "late", 1)).await;
+    let view = agent_view(&client, server.addr, &late).await;
+    assert!(
+        view["assigned_configurations"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "enrolment distributes nothing: {view}"
+    );
+    assert_eq!(view["pending_configurations"][0]["change"], "new");
+
+    // Its own act — the empty body releases everything waiting.
+    let rolled = client
+        .post(url(server.addr, &format!("/api/v1/agents/{late}/rollout")))
         .send()
         .await
-        .expect("retract");
-    assert_eq!(retracted.status(), 200);
-    assert!(matched_configurations(&client, server.addr, &uid)
-        .await
-        .is_empty());
-
-    // Publication of a name the store does not hold is 404, never a silent create.
-    let missing = client
-        .put(url(
-            server.addr,
-            "/api/v1/configurations/missing/publication",
-        ))
-        .json(&serde_json::json!({ "published": true }))
-        .send()
-        .await
-        .expect("publish missing");
-    assert_eq!(missing.status(), 404);
+        .expect("rollout to agent");
+    assert_eq!(rolled.status(), 200);
+    let view: serde_json::Value = rolled.json().await.expect("json");
+    assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
 /// ADR-0054 over the wire: a Configuration stating an Agent type reaches only Agents reporting
@@ -249,16 +306,6 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
             .await
             .expect("put");
         assert_eq!(put.status(), 200);
-        let published = client
-            .put(url(
-                server.addr,
-                &format!("/api/v1/configurations/{name}/publication"),
-            ))
-            .json(&serde_json::json!({ "published": true }))
-            .send()
-            .await
-            .expect("publish");
-        assert_eq!(published.status(), 200);
     }
 
     assert_eq!(
@@ -266,6 +313,15 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
         ["for-collectors"],
         "the type is a fit, not an aim: the other type's Configuration is no candidate"
     );
+
+    // And the per-Agent act refuses the one that does not fit (ADR-0061).
+    let refused = client
+        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .json(&serde_json::json!({ "configuration": "for-clients" }))
+        .send()
+        .await
+        .expect("rollout");
+    assert_eq!(refused.status(), 409, "a non-candidate is refused, not assigned");
 }
 
 #[tokio::test]
@@ -329,7 +385,15 @@ async fn the_openapi_document_describes_the_contract() {
     );
     assert!(paths.contains_key("/api/v1/configurations"));
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
-    assert!(paths.contains_key("/api/v1/configurations/{name}/publication"));
+    assert!(
+        paths.contains_key("/api/v1/configurations/{name}/rollout"),
+        "the rollout act is part of the contract (ADR-0061)"
+    );
+    assert!(paths.contains_key("/api/v1/agents/{instance_uid}/rollout"));
+    assert!(
+        !paths.contains_key("/api/v1/configurations/{name}/publication"),
+        "publication left the contract with ADR-0061"
+    );
     // The resource schemas ride along, so a client can be generated without the source.
     assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
     assert!(document["components"]["schemas"]["ConfigurationSpec"].is_object());
@@ -399,19 +463,12 @@ async fn configurations_survive_a_server_restart() {
                 },
             )
             .expect("put");
-        state
-            .set_configuration_published("keeper", true)
-            .expect("publish")
-            .expect("the configuration exists");
     }
     let reopened = server::fleet::AppState::new(store_dir).expect("reopen");
     let restored = reopened.configurations().list();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].name, "keeper");
-    assert!(
-        restored[0].published.is_some(),
-        "publication survives the restart"
-    );
+    assert_eq!(restored[0].saved.body, "receivers: {}\n");
 }
 
 /// ADR-0039. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
@@ -597,8 +654,8 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // A Configuration aimed at the canary ring, published so it is in force (ADR-0055).
-    // Nothing reports `rollout`, so it matches nobody.
+    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes
+    // itself to nobody — and since ADR-0061 even a match only proposes.
     let put = client
         .put(url(server.addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
@@ -606,16 +663,6 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
-    let published = client
-        .put(url(
-            server.addr,
-            "/api/v1/configurations/canary/publication",
-        ))
-        .json(&serde_json::json!({ "published": true }))
-        .send()
-        .await
-        .expect("publish");
-    assert_eq!(published.status(), 200);
     assert!(
         matched_configurations(&client, server.addr, &uid)
             .await
@@ -781,7 +828,21 @@ async fn forgetting_an_agent_keeps_its_labels() {
     assert_eq!(agents[0]["labels"]["rollout"], "canary");
 }
 
-/// The Configurations currently matching one Agent, as the fleet view reports them.
+/// One Agent's row of the fleet view.
+async fn agent_view(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    uid: &opamp::uid::InstanceUid,
+) -> serde_json::Value {
+    agents(client, addr)
+        .await
+        .into_iter()
+        .find(|a| a["instance_uid"] == uid.to_string())
+        .expect("the agent is in the fleet")
+}
+
+/// The Configurations currently matching one Agent — the candidates — as the fleet view reports
+/// them.
 async fn matched_configurations(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,

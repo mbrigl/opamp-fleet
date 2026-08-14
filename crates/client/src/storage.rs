@@ -274,7 +274,7 @@ fn entry_file_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{AgentConfigFile, AgentConfigMap};
+    use opamp::proto::{AgentConfigMap, AgentConfigObject};
     use std::collections::HashMap;
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
             config: Some(AgentConfigMap {
                 config_map: HashMap::from([(
                     String::new(),
-                    AgentConfigFile {
+                    AgentConfigObject {
                         role: String::new(),
                         body: b"receivers: {}\n".to_vec(),
                         content_type: String::new(),
@@ -381,7 +381,7 @@ mod tests {
                     .map(|(name, body)| {
                         (
                             name.to_string(),
-                            AgentConfigFile {
+                            AgentConfigObject {
                                 role: String::new(),
                                 body: body.to_vec(),
                                 content_type: String::new(),
@@ -437,7 +437,7 @@ mod tests {
                     .map(|(name, body, role)| {
                         (
                             name.to_string(),
-                            AgentConfigFile {
+                            AgentConfigObject {
                                 role: role.to_string(),
                                 body: body.to_vec(),
                                 content_type: String::new(),

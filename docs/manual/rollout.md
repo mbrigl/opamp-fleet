@@ -15,7 +15,7 @@ The example is `promtail` — one static binary, which is the requirement (see
 - [2. Build the artifact](#2-build-the-artifact)
 - [3. Sign it](#3-sign-it-optional-but-decide-fleet-wide)
 - [4. Give it to the Server](#4-give-it-to-the-server)
-- [5. Aim it](#5-aim-it)
+- [5. Aim it, then roll it out](#5-aim-it-then-roll-it-out)
 - [6. Send its configuration](#6-send-its-configuration)
 - [7. Watch it land](#7-watch-it-land)
 - [8. Ship an update, and take it back](#8-ship-an-update-and-take-it-back)
@@ -23,13 +23,13 @@ The example is `promtail` — one static binary, which is the requirement (see
 
 ## Limits worth knowing first
 
-Three properties of package delivery decide whether this path is open to a given agent (ADR-0018).
+Three properties of package delivery decide whether this path is open to a given agent.
 Reading them first is cheaper than discovering them at rollout time.
 
 - **One file by default, a whole tree when you say so.** A statically linked single binary —
   Promtail, Vector, a Go or Rust agent — needs nothing extra. An agent that is an executable *plus*
   the shared objects it loads, such as Fluent Bit, needs `program_path` in its block, which unpacks
-  the whole archive instead of one member (ADR-0023); see
+  the whole archive instead of one member; see
   [Agents that are more than one file](client.md#agents-that-are-more-than-one-file). Everything
   below applies to both.
 - **Only `.tar.gz` and `.7z` are opened.** The Client decides what an artifact is by its **leading
@@ -41,7 +41,7 @@ Reading them first is cheaper than discovering them at rollout time.
 
 ## 1. Configure the Supervisor
 
-The program's *written form* is the whole of this host's consent to being updated (ADR-0021). A
+The program's *written form* is the whole of this host's consent to being updated. A
 bare file name puts the program in a directory the Client owns, and that is what makes this Agent
 declare `AcceptsPackages`:
 
@@ -59,7 +59,7 @@ Two things this block gets right that are easy to get wrong:
 - `command = "promtail"` is **not** looked up in `$PATH`. It names a file in that Supervisor's own
   `program/` directory — which is exactly why the Server may write there. An absolute path would
   make this the machine's program, supervised but never updated.
-- `${config_dir}` is a placeholder (ADR-0022), so the argument cannot drift when `supervisor_dir`
+- `${config_dir}` is a placeholder, so the argument cannot drift when `supervisor_dir`
   moves or the Supervisor is renamed. `promtail-conf` is the *name of the Configuration on the
   Server*, which is what the written entry file is called.
 
@@ -69,11 +69,11 @@ plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, 
 version arrives the same way every later one does.
 
 **The block does not have to be written on the host either.** A Configuration typed
-`opamp-fleet-client` (ADR-0054) whose body carries this `[[supervisor]]` block rolls the block
+`opamp-fleet-client` whose body carries this `[[supervisor]]` block rolls the block
 itself out to every matching Client, which writes it into its own `client.toml` and starts the
-Supervisor (ADR-0056) — the walkthrough's remaining steps are the same either way. A
+Supervisor — the walkthrough's remaining steps are the same either way. A
 Server-delivered block may name its program **only by a bare file name** — one this Client owns and
-updates from signed packages (ADR-0057); a block that names an absolute path is refused, because
+updates from signed packages; a block that names an absolute path is refused, because
 that would let the Server spawn a machine binary that never passed through package signing. An
 absolute-path Supervisor is the operator's to write in `client.toml` on the host, not the Server's
 to push.
@@ -119,7 +119,7 @@ archive_key = "…the same value…"
 ```
 
 Already have an upstream release? Then it is already a `.tar.gz` and needs no repacking — that is
-the point of ADR-0018. The OpenTelemetry Collector, for instance, publishes its distributions on
+the point of the design. The OpenTelemetry Collector, for instance, publishes its distributions on
 the [collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
 one artifact per platform named `<distribution>_<version>_<os>_<arch>.tar.gz`:
 
@@ -151,66 +151,94 @@ Put the public key in every Client's `[packages] verification_key`. This is flee
 with a key configured, an **unsigned** package is refused; without one, a **signed** package is
 refused. Decide once, for all hosts.
 
-The signature matters more than it looks: the package download route is unauthenticated by design
-(ADR-0013), so the content hash and this signature — not access control — are what protect an
+The signature matters more than it looks: the package download route is unauthenticated by design,
+so the content hash and this signature — not access control — are what protect an
 installed binary.
 
 ## 4. Give it to the Server
 
-Either upload the artifact, or point the Server at one hosted elsewhere.
+Create the **Set** — its identity is the package name, the Agent type, and the version — then
+either upload the artifact as an entry, or point the Server at one hosted elsewhere. Nothing in
+this step reaches any host: a stored Set waits for the rollout act in the next one.
 
-**Upload** — the artifact is the body, its metadata rides the query. The Server hashes what it
-stores, so no hash is passed here. `os` and `arch` say which machines this artifact runs on, and are
-required: the Server offers an Agent only the artifact built for the platform it reported (ADR-0031).
+```console
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0
+```
+
+The **Agent type** (the middle path segment) is compared raw against the `service.name` the
+Agents report — for a Supervisor that is its block's `name`. A typo here is a rollout that
+reaches nobody, which the reach count in step 5 makes visible.
+
+**Upload** — the artifact is the body; the platform is the path. The Server hashes what it
+stores, so no hash is passed here. `os` and `arch` say which machines this artifact runs on: the
+Server offers an Agent only the entry built for the platform it reported.
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.0.0&os=linux&arch=amd64&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
 ```
 
 Their values are what an Agent reports as `os.type` and `host.arch` — `linux`, `darwin`, `windows`
 and `amd64`, `arm64`. The tokens off an upstream release file name work too (`macos` is `darwin`,
 `x86_64` is `amd64`), and the response says which canonical pair was stored.
 
-**A fleet on several platforms is still one package.** Upload each build under the *same name* with
-its own `os`/`arch`, and every host is offered its own binary:
+**A fleet on several platforms is still one Set.** Store each build as its own entry, and every
+host is offered its own binary:
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.0.0&os=linux&arch=arm64"
+       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/arm64"
 ```
 
-**Or reference** (ADR-0018) — the Server stores the address and *your* SHA-256, offers them
+**Or reference** — the Server stores the address and *your* SHA-256, offers them
 verbatim, and never downloads the artifact. This is where the hash from step 2 is required, because
 nothing else stands between the mirror and the fleet:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\",
-            \"version\": \"3.0.0\", \"os\": \"linux\", \"arch\": \"amd64\"}" \
-       http://127.0.0.1:4320/api/v1/packages/promtail/source
+       -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\"}" \
+       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64/source
 ```
 
-The package **name** (`promtail` in the URL) is the Server's name for the package. It has nothing
-to do with the member name inside the archive, and nothing to do with the Supervisor's name — only
-the *member* has to match the configured program.
+The package **name** (the first `promtail` in the URL) is the Server's name for the package. It
+has nothing to do with the member name inside the archive, and nothing to do with the
+Supervisor's name — only the *member* has to match the configured program.
 
-## 5. Aim it
+## 5. Aim it, then roll it out
 
-A package with no Selector reaches every Agent that accepts packages. Start narrower:
+A Set with no Selector would reach every Agent of its type that accepts packages. Start narrower:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/packages/promtail/selector
+       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/selector
 ```
 
 Each pair must equal an attribute the Agent reported — `env` here comes from `[attributes]` in
-`client.toml`. The Selector aims **every platform** of the package at once, because the aim belongs
-to the name; the platform decides only which bytes each host gets. Where several packages match one
-Agent the **most specific Selector wins**, which is how a rollout widens: keep the canary package narrow, add the fleet-wide one, then drop the canary.
-Two *equally* specific Selectors reaching one Agent leave it with no offer at all, and its fleet row
-says so in `package_conflict`.
+`client.toml`. The Selector aims **every platform** of the Set at once, because the aim belongs
+to the Set; the platform decides only which bytes each host gets. Editing it distributes nothing:
+it decides whom the next act reaches, and `targeted_agents` on the Set says how many that is —
+check it now, `0` means the type, the platforms, or the Selector missed.
+
+**The rollout act is what distributes** — nothing before this press changed any host:
+
+```console
+$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/rollout
+{"assigned_agents": 3}
+```
+
+It assigns the Set to every Agent it fits and the Selector aims at, **as the fleet is now**. A
+host that enrols (or is labelled into the ring) afterwards is not touched: its row on the Agents
+tab shows the Set *waiting*, with a per-Agent **roll out** control — press that, or repeat the
+Set's act, when it should follow. To try one host before the ring, skip the Set's act and use the
+per-Agent one first:
+
+```console
+$ curl -X POST -H 'Content-Type: application/json' \
+       -d '{"package": {"name": "promtail", "agent_type": "promtail", "version": "3.0.0"}}' \
+       http://127.0.0.1:4320/api/v1/agents/<instance_uid>/rollout
+```
 
 ## 6. Send its configuration
 
@@ -222,16 +250,15 @@ pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from st
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
        http://127.0.0.1:4320/api/v1/configurations/promtail-conf
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"published": true}' \
-       http://127.0.0.1:4320/api/v1/configurations/promtail-conf/publication
+$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/promtail-conf/rollout
 ```
 
-The first call only stores a draft — saving never distributes (ADR-0055); the second releases it,
-and the `service_name` keeps the body away from every Agent that is not a promtail, whatever the
-Selector says (ADR-0054). The Configuration's name and the file name in the argument are the same
-string. Change the Configuration and publish again: the Supervisor rewrites the file and restarts
-the process so it re-reads it.
+The first call only stores — saving never distributes; the second is the rollout act that
+releases it to every matching Agent, and the `service_name` keeps the body away from every Agent
+that is not a promtail, whatever the Selector says. The Configuration's name and the file name in
+the argument are the same string. Change the Configuration and roll it out again: the Supervisor
+rewrites the file and restarts the process so it re-reads it. An Agent keeps the exact revision
+it was rolled out — an edit waits, visible per Agent on the fleet view, until the next act.
 
 ## 7. Watch it land
 
@@ -257,21 +284,24 @@ on `apply_grace_secs`** — a version that will not stay up is rolled back to it
 
 ## 8. Ship an update, and take it back
 
-An update is step 2 and step 4 again with a new version. The Server keeps **one** step of history
-per platform (ADR-0019), so a bad version can be re-offered as the old one:
+An update is steps 2, 4 and 5 again with a new version — a new version is a new Set, and the old
+one stays in the store beside it:
 
 ```console
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "canary"}}' \
+       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0
 $ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail?version=3.1.0&os=linux&arch=amd64&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0/entries/linux/amd64?signature=$sig"
+$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0/rollout
 # …and if 3.1.0 turns out badly:
-$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/promtail/rollback?os=linux&arch=amd64"
+$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/rollout
 ```
 
-The rollback is an ordinary offer naming the older artifact; the Selector is untouched. It names one
-platform and moves only that one — the point of which is exactly this case: `3.1.0` went out on
-Linux first, and taking it back must not push macOS off a version it never left. An artifact that
-has replaced nothing answers `409`. This is the Server-side undo — distinct from the Client's
-own automatic rollback in step 7, which reacts to a binary that will not stay up on one host.
+The rollback is the same act pointed at the older Set; the Selector is untouched, and the old
+artifact is still here to serve. To take one host back rather than the ring, name the older
+version in that host's per-Agent rollout instead. This is the Server-side undo — distinct from
+the Client's own automatic rollback in step 7, which reacts to a binary that will not stay up on
+one host.
 
 ## Troubleshooting
 

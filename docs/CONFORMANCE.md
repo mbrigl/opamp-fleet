@@ -11,15 +11,15 @@
 The **Protocol Baseline** is the pinned upstream specification version this project implements
 against. It is the single authoritative statement of "which OpAMP" this code speaks.
 
-<!-- protocol-baseline: v0.19.0 -->
+<!-- protocol-baseline: v0.20.0 -->
 
 | | |
 |---|---|
-| **Baseline version** | `v0.19.0` |
-| **Released upstream** | 2026-08-03 |
+| **Baseline version** | `v0.20.0` |
+| **Released upstream** | 2026-08-12 |
 | **Upstream specification** | <https://github.com/open-telemetry/opamp-spec> |
 | **Upstream status** | Beta — the protocol itself is not yet stable |
-| **Last reconciled with upstream** | 2026-08-04 |
+| **Last reconciled with upstream** | 2026-08-14 |
 
 Moving the Baseline to a newer upstream version is a deliberate change — see
 [Upgrading the Baseline](#upgrading-the-baseline) for what it obliges.
@@ -34,11 +34,19 @@ reproduces those markers rather than inventing its own.
 
 Recorded when the Baseline was last reconciled, so that a future bump is a review of a known list
 rather than a rediscovery. These are **not** part of the Baseline and are deliberately not
-implemented yet; they are what a move past `v0.19.0` would have to take in.
+implemented yet; they are what a move past `v0.20.0` would have to take in.
 
 | Upstream change | Effect on this project |
 |---|---|
-| *(none)* | At the last reconciliation `main` was `v0.19.0` exactly — no commit upstream is ahead of the Baseline. |
+| *(none)* | At the last reconciliation `main` was `v0.20.0` exactly — no commit upstream is ahead of the Baseline. |
+
+### What `v0.20.0` brought
+
+The Baseline moved from `v0.19.0` to `v0.20.0` on 2026-08-14; upstream released it on 2026-08-12.
+
+| Upstream change | Taken up as |
+|---|---|
+| **`AgentConfigFile` renamed to `AgentConfigObject`, empty map key allowed unconditionally** ([#385](https://github.com/open-telemetry/opamp-spec/pull/385)) | Adopted: the vendored schema renames the message and its use in `AgentConfigMap.config_map`, and the generated Rust type follows (`opamp::proto::AgentConfigObject`). A wire-compatible rename — the field numbers and the `config_map` shape are unchanged, so nothing on the wire moved. The empty-key clarification needed no code change: this project already keys the map by the Configuration name and never rejected an empty one. |
 
 ### What `v0.19.0` brought
 
@@ -48,7 +56,7 @@ each item landed, so a reader can check the claim rather than take it.
 | Upstream change | Taken up as |
 |---|---|
 | **Transport message size limits** ([#346](https://github.com/open-telemetry/opamp-spec/pull/346)) | Implemented on both ends and both transports — see [Message size limits](#message-size-limits). |
-| **Proto folders restructured** ([#352](https://github.com/open-telemetry/opamp-spec/pull/352)) | Adopted: the vendored schema now lives at `crates/opamp/proto/v0.19.0/opamp/v1/`. Build inputs only — see [Where the schema lives](#where-the-schema-lives). |
+| **Proto folders restructured** ([#352](https://github.com/open-telemetry/opamp-spec/pull/352)) | Adopted: the vendored schema now lives at `crates/opamp/proto/v0.20.0/opamp/v1/`. Build inputs only — see [Where the schema lives](#where-the-schema-lives). |
 | **`ComponentHealth.attributes`** ([#334](https://github.com/open-telemetry/opamp-spec/pull/334)) | Generated from the schema and relayed as part of the health message the Supervisor Endpoint folds upstream; this project sets none of its own. |
 | **`agent_disconnect` recommended for plain HTTP** ([#353](https://github.com/open-telemetry/opamp-spec/pull/353)) | Already the behaviour: the Client sends `agent_disconnect` on shutdown over both transports. |
 | **`AgentConfigFile.role`** ([#350](https://github.com/open-telemetry/opamp-spec/pull/350)) | Implemented ([ADR-0016](adr/0016-configuration-content-role.md)): an optional `role` on the Configuration resource travels verbatim into every entry composed from it. |
@@ -143,7 +151,7 @@ Bit values are from `ServerCapabilities` in the Baseline's `opamp.proto`.
 | Capability | Bit | Maturity | Requirement | Status | Note |
 |---|---|---|---|---|---|
 | `AcceptsStatus` | `0x0001` | stable | **required** | implemented | MUST be set by every Server. |
-| `OffersRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). `AgentConfigFile.role`, new in `v0.19.0`, carries the optional `role` of the Configuration it was composed from (ADR-0016) — empty, and so unset on the wire, unless an operator set one. It is part of the hash that gates every push, so a role change reaches the fleet like any other edit; an empty role is hashed as nothing, which keeps every hash predating the decision exactly where it was. The Client writes a roled entry to the config directory like any other but leaves it out of what the Managed Process is configured with — the Collector plugin passes one `--config` per *unroled* entry, so `supplementary` content is there to be read by path and never handed over as configuration. |
+| `OffersRemoteConfig` | `0x0002` | stable | optional | implemented | Core of the control loop (goal 1). `AgentConfigObject.role` (the field debuted in `v0.19.0` on `AgentConfigFile`, renamed with the message in `v0.20.0`) carries the optional `role` of the Configuration it was composed from (ADR-0016) — empty, and so unset on the wire, unless an operator set one. It is part of the hash that gates every push, so a role change reaches the fleet like any other edit; an empty role is hashed as nothing, which keeps every hash predating the decision exactly where it was. The Client writes a roled entry to the config directory like any other but leaves it out of what the Managed Process is configured with — the Collector plugin passes one `--config` per *unroled* entry, so `supplementary` content is there to be read by path and never handed over as configuration. |
 | `AcceptsEffectiveConfig` | `0x0004` | stable | optional | implemented | Core of the control loop (goal 2). |
 | `OffersPackages` | `0x0008` | Beta | optional | implemented | Declared only while a non-empty package store is armed (`packages_dir`, ADR-0015). The store holds **Sets** (ADR-0052): each identified by *(name, Agent type, version)*, holding one entry per platform — an uploaded artifact or a reference (ADR-0018) — persisted and managed through the REST API, uploaded under `max_package_size_bytes` and served straight from disk, so neither the store nor a download holds a program in memory. The offer is composed **per Agent** from the Sets that *fit* it and are then *aimed* at it, as the Baseline's "available on the Server for this Agent" describes, and its `all_packages_hash` is computed over that same set. A Set the operator has not **published** takes part in none of this (ADR-0043, without exception under ADR-0052: saving never distributes, and a published Set's entries are immutable): releasing it through `PUT …/publication` is what makes it a candidate, and withholding one is the Server's own composition of a set the Baseline leaves to it. Fit is then two mandatory steps and runs first: a Set built for another **Agent type** is dropped — the type in its identity is matched against the `service.name` the Agent reports (ADR-0033, ADR-0034), and an Agent reporting none fits nothing — and then every Set without an entry for the Agent's **platform** (ADR-0031). What survives is aimed by Selector (ADR-0017) and resolved to at most one Set per name: most specific Selector wins, and among equally specific ones the greater version (ADR-0029's comparison); an unbreakable tie is offered to nobody and surfaced. An uploaded entry's `download_url` points at this listener; a **referenced** one carries the address, the operator's SHA-256, and any headers the source needs, verbatim — the Baseline's Download Server *"may be on the same host as the OpAMP Server or a different host"*. A rollback is a publication move (ADR-0052, superseding ADR-0019): retracting the newest version has the fleet offered the newest one still published — an ordinary offer naming an older artifact, which is exactly what the Baseline means by *"an upgrade or downgrade of a package that the Agent already has"*. |
 | `AcceptsPackagesStatus` | `0x0010` | Beta | optional | implemented | The Server records each Agent's reported `PackageStatuses` and gates re-offering on the `server_provided_all_packages_hash` (ADR-0015). |

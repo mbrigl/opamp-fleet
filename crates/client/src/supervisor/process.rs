@@ -1,6 +1,9 @@
-//! The shared child runner both plugins drive: spawn, watch, restart with backoff, apply a new
-//! configuration by respawning, stop gracefully within the budget — plus the version probe both
-//! plugins use to learn a Managed Process's own version, run at startup and after every swap.
+//! The shared child runner both plugins drive — the generic implementation of the whole
+//! lifecycle vocabulary (ADR-0060): spawn, watch, restart with backoff, apply a new
+//! configuration by respawning — or, when the plugin declared a reload mechanism, in place —
+//! stop gracefully within the budget, and answer an uninstall before the core purges. Plus the
+//! version probe both plugins use to learn a Managed Process's own version, run at startup and
+//! after every swap.
 //!
 //! Mirrors the reference `opampsupervisor` (ADR-0011): SIGTERM → bounded wait → kill on Unix,
 //! `Child::kill` on Windows (which has no SIGTERM equivalent), and exponential backoff for a
@@ -202,6 +205,10 @@ pub struct Runner {
     pub archive_key: Option<String>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
+    /// The signal that makes the running process re-read its configuration in place (ADR-0060);
+    /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
+    /// fails, or a process that dies on it, falls back to the restart (`reload-or-restart`).
+    pub reload_signal: Option<i32>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -239,9 +246,25 @@ impl Runner {
                 _ = sweep.tick() => self.sweep_backup(),
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config }) => {
-                        stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
                         streak = 0; // a new configuration is a fresh chance (ADR-0058)
+                        // In place first (ADR-0060): a kind that declared a reload keeps its
+                        // process — and its in-flight state — across the change; anything short
+                        // of a survived grace falls back to the restart below.
+                        match self.try_reload(&mut child, &mut shutdown).await {
+                            Reloaded::Applied => {
+                                self.events
+                                    .send(ProcessEvent::ConfigApplied {
+                                        hash: config.config_hash,
+                                        result: Ok(()),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            Reloaded::ShuttingDown => break,
+                            Reloaded::NotApplied => {}
+                        }
+                        stop(&mut child, self.stop_timeout, &self.name).await;
                         child = self.spawn_if_due().await;
                         last_start = Instant::now();
                         // Applying means running on the new files — and surviving the apply
@@ -356,6 +379,17 @@ impl Runner {
                         streak = 0; // an operator restart is a fresh chance (ADR-0058)
                         child = self.spawn_if_due().await;
                         last_start = Instant::now();
+                    }
+                    Some(ProcessCommand::Uninstall) => {
+                        // Retired for good (ADR-0060): the generic uninstall is exactly the
+                        // graceful stop — nothing the generic Runner installs lives outside the
+                        // Supervisor's directory, and that directory is the core's to purge
+                        // (ADR-0059) once this answer is out.
+                        stop(&mut child, self.stop_timeout, &self.name).await;
+                        self.events
+                            .send(ProcessEvent::Uninstalled { result: Ok(()) })
+                            .await;
+                        return;
                     }
                     Some(ProcessCommand::Shutdown) | None => break,
                 },
@@ -592,6 +626,53 @@ impl Runner {
         }
     }
 
+    /// The in-place apply (ADR-0060): sends the declared reload signal to the running process,
+    /// which must then survive the apply grace — the same standard the restart path holds a
+    /// fresh process to, and the only outside-observable evidence a reload leaves. Everything
+    /// short of that is `NotApplied`, and the caller restarts on the new files instead
+    /// (`reload-or-restart`): no mechanism declared, nothing running to signal, a failed
+    /// signal, or a death within the grace.
+    async fn try_reload(&self, child: &mut Option<Child>, shutdown: &mut Shutdown) -> Reloaded {
+        let Some(signal) = self.reload_signal else {
+            return Reloaded::NotApplied;
+        };
+        let Some(mut proc) = child.take() else {
+            return Reloaded::NotApplied;
+        };
+        let Some(pid) = proc.id() else {
+            // Already exited; the restart path is about to notice and respawn.
+            *child = Some(proc);
+            return Reloaded::NotApplied;
+        };
+        if let Err(e) = send_reload_signal(pid, signal) {
+            warn!(supervisor = %self.name, signal, error = %e, "cannot signal a reload; restarting instead");
+            *child = Some(proc);
+            return Reloaded::NotApplied;
+        }
+        info!(supervisor = %self.name, signal, "reload signalled");
+        if self.apply_grace.is_zero() {
+            *child = Some(proc);
+            return Reloaded::Applied;
+        }
+        tokio::select! {
+            status = proc.wait() => {
+                let describe = status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|e| format!("wait failed: {e}"));
+                warn!(supervisor = %self.name, status = %describe, "process exited on the reload; restarting on the new files");
+                Reloaded::NotApplied
+            }
+            _ = tokio::time::sleep(self.apply_grace) => {
+                *child = Some(proc);
+                Reloaded::Applied
+            }
+            _ = shutdown.requested() => {
+                *child = Some(proc);
+                Reloaded::ShuttingDown
+            }
+        }
+    }
+
     /// Asks the program for its own version, if the plugin knows how to ask.
     ///
     /// Out of band by design: the answer arrives whenever it arrives, as a Description event, and
@@ -821,6 +902,33 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     let _ = timeout; // Windows has no SIGTERM equivalent: kill is the stop.
     let _ = c.kill().await;
     info!(supervisor = %name, "process stopped");
+}
+
+/// The result of an in-place reload attempt (ADR-0060).
+enum Reloaded {
+    /// Signalled and survived the grace — applied, the process kept running.
+    Applied,
+    /// No reload happened (no mechanism, nothing running, a failed signal, or a death within
+    /// the grace) — the caller falls back to the restart.
+    NotApplied,
+    /// A shutdown was requested mid-grace; the caller stops without an acknowledgement.
+    ShuttingDown,
+}
+
+/// Delivers the reload signal (ADR-0060). Unix-only in substance: the settings parse refuses a
+/// `reload_signal` anywhere else, so the other arm exists for the compiler, not for a host.
+#[cfg(unix)]
+fn send_reload_signal(pid: u32, signal: i32) -> Result<(), String> {
+    // SAFETY: plain kill(2) on the child's pid; no memory is touched.
+    match unsafe { libc::kill(pid as libc::pid_t, signal) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error().to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+fn send_reload_signal(_pid: u32, _signal: i32) -> Result<(), String> {
+    Err("this platform has no signal a process can reload on".to_string())
 }
 
 /// The result of health-gating a freshly (re)started process.

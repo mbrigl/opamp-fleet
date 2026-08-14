@@ -102,9 +102,6 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     store
         .put_entry(&set, &this_host(), Some(signature), artifact.clone())
         .expect("put entry");
-    // And released (ADR-0043): saving stages the Set, so without this it is a draft and reaches
-    // nobody — which is the decision, not an accident of the test.
-    store.set_published(&set, true).expect("publish");
 
     let (addr, state, dir) = spawn_server(store).await;
 
@@ -145,6 +142,18 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     std::fs::write(&config_path, toml).expect("write client.toml");
 
     let _client = spawn_client(&config_path);
+
+    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, retried until the
+    // Agent has reported and can be assigned — which is the decision, not an accident of the
+    // test.
+    wait_until("the rollout act to reach the agent", || {
+        state
+            .rollout_package(&set)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
 
     // The Agent connects, is offered the package, downloads and verifies it, swaps the binary,
     // and reports Installed at the offered version.

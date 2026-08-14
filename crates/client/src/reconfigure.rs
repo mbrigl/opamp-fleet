@@ -5,9 +5,9 @@
 //! is ignored, because the rest of `client.toml` is host-local trust and wiring the Server must
 //! never write. The offered set is validated against the running configuration's globals first;
 //! then the Supervisors that left or changed are stopped, the merged document is written to
-//! `client.toml` — surgically, so the operator's comments and layout survive — and the changed
-//! and added Supervisors are started from the file just written. Unchanged Supervisors ride
-//! through untouched.
+//! `client.toml` — surgically, so the operator's comments and layout survive — the removed
+//! Supervisors' directories are purged (ADR-0059), and the changed and added Supervisors are
+//! started from the file just written. Unchanged Supervisors ride through untouched.
 
 use std::path::Path;
 
@@ -94,8 +94,11 @@ async fn apply_inner(
         .filter(|new| config.supervisors.iter().all(|old| old != *new))
         .map(|new| new.name.clone())
         .collect();
+    let removed = removed_names(&config.supervisors, &blocks);
 
-    let goodbyes = engine.retire_supervisors(&stopping).await;
+    // A removed Supervisor is uninstalled (ADR-0060) — its adapter answers before the purge
+    // below — while a changed one is only stopped and restarts under its name.
+    let goodbyes = engine.retire_supervisors(&stopping, &removed).await;
 
     // Stopped, so the write comes next: a crash between the two restarts into the old file, one
     // after it into the new one — both build exactly what the file says, so both converge.
@@ -110,6 +113,11 @@ async fn apply_inner(
             return Err(Failed(error, goodbyes));
         }
     };
+
+    // Written: the file no longer names the removed Supervisors, so their directories go with
+    // them (ADR-0059) — program, packages, configuration, identity. The changed blocks in
+    // `stopping` restart under their names and keep theirs.
+    purge_removed(config, &removed);
 
     config.supervisors = blocks;
     let redacted = redact_secrets(&source);
@@ -137,6 +145,72 @@ async fn apply_inner(
         Ok(goodbyes)
     } else {
         Err(Failed(errors.join("; "), goodbyes))
+    }
+}
+
+/// The names the offered set removed: present in the running blocks, absent — **by name** — from
+/// the offered ones (ADR-0059). A changed block keeps its name and is stopped-and-restarted, not
+/// removed, so its directory rides through.
+fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Vec<String> {
+    running
+        .iter()
+        .filter(|old| offered.iter().all(|new| new.name != old.name))
+        .map(|old| old.name.clone())
+        .collect()
+}
+
+/// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
+/// `instance-uid` whose Agent has already said its goodbye (ADR-0059). Runs only after the
+/// rewritten `client.toml` no longer names the Supervisor: a failed write restarts the stopped
+/// set from the old file, which needs the data intact. A directory that will not delete is a
+/// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
+/// orphan the next startup reports.
+fn purge_removed(config: &ClientConfig, removed: &[String]) {
+    // Resolved once, so the confinement check below compares canonical against canonical — which
+    // catches a symlinked *parent* component as well as a symlinked directory. `None` if the root
+    // does not exist yet, in which case there is nothing under it to purge either.
+    let canon_root = config.supervisors_root().canonicalize().ok();
+    for name in removed {
+        let dir = config.supervisor_dir(name);
+        // The delete is confined to the Supervisor's own directory *self-containedly* (ADR-0059),
+        // not by trusting `remove_dir_all`'s symlink handling. `name` is already a validated single
+        // component (ADR-0057), so `dir` cannot traverse; the risk this guards is a symlink planted
+        // where the directory should be. Refuse to recurse through one — unlink the stray link
+        // itself — and refuse a resolved path that is not under the supervisors root.
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = std::fs::remove_file(&dir);
+                warn!(supervisor = %name, path = %dir.display(), "refusing to purge through a symlink; removed the link only");
+                continue;
+            }
+            Ok(_) => {
+                if let (Some(root), Ok(resolved)) = (&canon_root, dir.canonicalize()) {
+                    if !resolved.starts_with(root) {
+                        warn!(supervisor = %name, path = %dir.display(), "refusing to purge: the resolved path is outside the supervisors directory");
+                        continue;
+                    }
+                }
+            }
+            // Never materialized (a block that failed to start owns no directory yet): purged is
+            // what it already is.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot inspect the removed supervisor's directory");
+                continue;
+            }
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                info!(supervisor = %name, path = %dir.display(), "removed supervisor purged");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                supervisor = %name,
+                path = %dir.display(),
+                error = %e,
+                "cannot purge the removed supervisor's directory"
+            ),
+        }
     }
 }
 
@@ -190,7 +264,7 @@ fn offered_blocks(
         .ok_or_else(|| "the offer carries no configuration".to_string())?;
     // Entries in name order: the composed map is unordered on the wire, and the written file
     // should not depend on iteration luck.
-    let mut entries: Vec<(&String, &opamp::proto::AgentConfigFile)> = map.iter().collect();
+    let mut entries: Vec<(&String, &opamp::proto::AgentConfigObject)> = map.iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
 
     let mut blocks = Vec::new();
@@ -357,7 +431,7 @@ fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{AgentConfigFile, AgentConfigMap};
+    use opamp::proto::{AgentConfigMap, AgentConfigObject};
 
     fn offer_of(entries: &[(&str, &str)]) -> AgentRemoteConfig {
         AgentRemoteConfig {
@@ -367,7 +441,7 @@ mod tests {
                     .map(|(name, body)| {
                         (
                             (*name).to_string(),
-                            AgentConfigFile {
+                            AgentConfigObject {
                                 body: body.as_bytes().to_vec(),
                                 ..Default::default()
                             },
@@ -606,6 +680,86 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a new file is owner-only, got {mode:o}");
+    }
+
+    /// ADR-0059 point 1: removal is keyed by name. A block that *changed* keeps its name — it is
+    /// stopped and restarted, never purged; only a name absent from the offered set is removed.
+    #[test]
+    fn removed_is_by_name_so_a_changed_block_is_not_removed() {
+        let parse = |text: &str| -> Vec<SupervisorBlock> {
+            let config: ClientConfig = toml::from_str(text).expect("parse");
+            config.supervisors
+        };
+        let running = parse(
+            "[[supervisor]]\ntype = \"command\"\nname = \"changed\"\ncommand = \"old\"\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"gone\"\ncommand = \"gone\"\n",
+        );
+        let offered =
+            parse("[[supervisor]]\ntype = \"command\"\nname = \"changed\"\ncommand = \"new\"\n");
+        assert_eq!(
+            removed_names(&running, &offered),
+            vec!["gone".to_string()],
+            "the changed block stays; only the vanished name is removed"
+        );
+    }
+
+    /// ADR-0059: the purge deletes exactly the removed Supervisor's directory — whole, identity
+    /// included — leaves the neighbours untouched, and a directory that never materialized is
+    /// nothing to report.
+    #[test]
+    fn the_purge_deletes_exactly_the_removed_supervisors_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+        let gone = config.supervisor_dir("gone");
+        let stays = config.supervisor_dir("stays");
+        std::fs::create_dir_all(gone.join("program")).expect("create");
+        std::fs::write(gone.join("instance-uid"), "uid").expect("write");
+        std::fs::create_dir_all(&stays).expect("create");
+        std::fs::write(stays.join("instance-uid"), "uid").expect("write");
+
+        purge_removed(&config, &["gone".to_string(), "never-started".to_string()]);
+
+        assert!(!gone.exists(), "the removed supervisor's directory is gone");
+        assert!(
+            stays.join("instance-uid").is_file(),
+            "a neighbour keeps its directory and identity"
+        );
+    }
+
+    /// ADR-0059 hardening: the purge never recurses through a symlink planted where a Supervisor's
+    /// directory should be — it removes the link, not what it points at. A `name` cannot itself
+    /// traverse (ADR-0057), so this is the only way the delete could have escaped, and it does not.
+    #[cfg(unix)]
+    #[test]
+    fn the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+
+        // A precious directory outside the supervisors root, with a file the purge must not touch.
+        let outside = dir.path().join("precious");
+        std::fs::create_dir_all(&outside).expect("create");
+        std::fs::write(outside.join("keep"), "important").expect("write");
+
+        // A Supervisor directory that is really a symlink pointing at it.
+        std::fs::create_dir_all(config.supervisors_root()).expect("root");
+        let link = config.supervisor_dir("evil");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        purge_removed(&config, &["evil".to_string()]);
+
+        assert!(
+            outside.join("keep").is_file(),
+            "the symlink target and its contents survive"
+        );
+        assert!(!link.exists(), "the stray symlink itself is removed");
     }
 
     /// An offer whose entries carry no blocks empties the set: the file keeps its globals and

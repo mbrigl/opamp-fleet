@@ -1,9 +1,11 @@
 //! The package store (ADR-0015, reorganised by ADR-0052): the Server's software artifacts,
 //! organised as **Sets**. A Set is identified by *(name, Agent type, version)*, may define a
 //! Selector, and holds **one entry per Platform** (ADR-0031) — an uploaded artifact or a source
-//! reference (ADR-0018), with the SHA-256 content hash and an optional Ed25519 signature. Every
-//! saved Set is a **draft** until it is published (ADR-0043), and a published Set's bytes are
-//! immutable.
+//! reference (ADR-0018), with the SHA-256 content hash and an optional Ed25519 signature. A
+//! saved Set reaches nobody by itself (ADR-0061): what an Agent is offered is composed from the
+//! per-Agent assignments the operator's rollout acts wrote; [`resolve`] only computes the
+//! **candidates** such an act would release. The immutability of an assigned Set's entries is
+//! enforced by the fleet, which knows the assignments.
 //!
 //! Package *bodies* are opaque bytes: what a package contains and how it is applied is the Agent's
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
@@ -157,6 +159,20 @@ impl SetId {
     fn dir_name(&self) -> String {
         format!("{}@{}@{}", self.name, self.version, self.service_name)
     }
+
+    /// Parses the `<name>@<version>@<type>` form the [`Display`] impl and the Set directory use —
+    /// also the persisted shape of a package assignment (ADR-0061).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut parts = text.split('@');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(name), Some(version), Some(service_name), None) => {
+                SetId::new(name, service_name, version)
+            }
+            _ => Err(format!(
+                "{text:?} is not a <name>@<version>@<type> set identity"
+            )),
+        }
+    }
 }
 
 impl fmt::Display for SetId {
@@ -176,14 +192,10 @@ impl fmt::Display for SetId {
 pub struct PackageSet {
     pub id: SetId,
     /// The Selector (ADR-0012 semantics, ADR-0017): equality pairs that must all match an
-    /// attribute the Agent reported. **Empty matches every Agent** (of this Set's type). Editable
-    /// in every state — aim is not bytes, and moving a published Set between rings is how a
-    /// rollout proceeds.
+    /// attribute the Agent reported. **Empty matches every Agent** (of this Set's type). Always
+    /// editable — aim is not bytes, and since ADR-0061 it only steers whom a rollout act would
+    /// reach, never a running offer.
     pub selector: BTreeMap<String, String>,
-    /// Whether the fleet may have this Set (ADR-0043, kept by ADR-0052 without exception): every
-    /// saved Set is a draft, offered to nobody, until this releases it. While it is `true` the
-    /// entries are immutable — the fleet is installing those bytes.
-    pub published: bool,
     /// `false` is the Baseline's `TopLevel` (a Managed Process's binary), `true` an `Addon`. One
     /// flag for the Set: what kind of package this is does not vary by platform.
     pub addon: bool,
@@ -302,7 +314,6 @@ pub struct SetSummary {
     pub service_name: String,
     pub version: String,
     pub selector: BTreeMap<String, String>,
-    pub published: bool,
     pub addon: bool,
     /// One entry per Platform, in platform order.
     pub entries: Vec<EntrySummary>,
@@ -326,7 +337,6 @@ impl SetSummary {
             service_name: set.id.service_name.clone(),
             version: set.id.version.clone(),
             selector: set.selector.clone(),
-            published: set.published,
             addon: set.addon,
             entries: set
                 .entries
@@ -352,9 +362,11 @@ struct SetMeta {
     version: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selector: BTreeMap<String, String>,
-    /// Whether the fleet may have it (ADR-0043). A Set is created a draft, always — the in-place
-    /// upgrade that once bypassed the gate does not exist under ADR-0052.
-    #[serde(default)]
+    /// The pre-ADR-0061 publication state. Read for exactly one purpose — seeding the per-Agent
+    /// assignments of Agent records that predate the ADR (point 9) — and written only `true`, by
+    /// the pre-ADR-0052 migration below, so a store that migrates twice in one upgrade does not
+    /// lose what was in force. Every ordinary write drops the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     published: bool,
     #[serde(default)]
     addon: bool,
@@ -402,7 +414,7 @@ impl SetMeta {
             service_name: set.id.service_name.clone(),
             version: set.id.version.clone(),
             selector: set.selector.clone(),
-            published: set.published,
+            published: false,
             addon: set.addon,
             entries: set.entries.values().map(EntryMeta::of).collect(),
         }
@@ -415,6 +427,10 @@ impl SetMeta {
 pub struct PackageStore {
     dir: PathBuf,
     sets: RwLock<BTreeMap<SetId, PackageSet>>,
+    /// The Sets a pre-ADR-0061 store said were published — what was in force at upgrade time.
+    /// Read once by the fleet to seed the assignments of Agent records that predate the ADR
+    /// (point 9); empty for a store born under it.
+    formerly_published: Vec<SetId>,
 }
 
 impl PackageStore {
@@ -437,6 +453,7 @@ impl PackageStore {
         migrate_legacy(&dir)?;
 
         let mut sets = BTreeMap::new();
+        let mut formerly_published = Vec::new();
         let listing =
             std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for entry in listing {
@@ -510,17 +527,16 @@ impl PackageStore {
                     },
                 );
             }
-            if !meta.published {
-                // A draft is the ordinary state of a Set being prepared, not a fault — said once
-                // at startup so that "nothing is reaching the fleet" is never a mystery.
-                info!(set = %id, "draft: this set is offered to no Agent until it is published");
+            if meta.published {
+                // A pre-ADR-0061 store said this Set was in force; remembered for seeding the
+                // assignments of Agent records that predate the ADR (point 9).
+                formerly_published.push(id.clone());
             }
             sets.insert(
                 id.clone(),
                 PackageSet {
                     id,
                     selector: meta.selector,
-                    published: meta.published,
                     addon: meta.addon,
                     entries,
                 },
@@ -529,7 +545,14 @@ impl PackageStore {
         Ok(PackageStore {
             dir,
             sets: RwLock::new(sets),
+            formerly_published,
         })
+    }
+
+    /// The Sets a pre-ADR-0061 store said were published, for seeding the assignments of Agent
+    /// records that predate the ADR. Empty for a store born under ADR-0061.
+    pub fn formerly_published(&self) -> &[SetId] {
+        &self.formerly_published
     }
 
     fn set_dir(&self, id: &SetId) -> PathBuf {
@@ -597,9 +620,10 @@ impl PackageStore {
             .sum()
     }
 
-    /// Creates a Set as a **draft** (ADR-0052: saving never publishes), or updates an existing
-    /// one's Selector — the aim is editable in every state. The addon flag is part of what the
-    /// offer's hash covers, so on a published Set it is as frozen as the entries are.
+    /// Creates a Set, or updates an existing one's Selector and kind. **Saving never
+    /// distributes** (ADR-0061): a Set reaches an Agent only through a rollout act. The fleet
+    /// refuses the kind change on a Set assigned somewhere before calling here — the addon flag
+    /// is part of what the offer's hash covers, so it is frozen with the bytes.
     pub fn create_or_update(
         &self,
         id: &SetId,
@@ -608,12 +632,6 @@ impl PackageStore {
     ) -> Result<(), String> {
         let mut sets = self.sets.write().expect("sets lock");
         if let Some(set) = sets.get_mut(id) {
-            if set.published && set.addon != addon {
-                return Err(format!(
-                    "set {id} is published and its kind is frozen with its bytes — retract it \
-                     first"
-                ));
-            }
             set.selector = selector;
             set.addon = addon;
             let meta = serde_json::to_vec_pretty(&SetMeta::of(set)).expect("set serializes");
@@ -622,7 +640,6 @@ impl PackageStore {
         let set = PackageSet {
             id: id.clone(),
             selector,
-            published: false,
             addon,
             entries: BTreeMap::new(),
         };
@@ -640,25 +657,19 @@ impl PackageStore {
     /// overwrite each other while they are still in flight.
     ///
     /// # Errors
-    /// Returns an error when no Set of that identity exists, or it is published — a published
-    /// Set's bytes are immutable (ADR-0052), so there is nothing an upload could become.
+    /// Returns an error when no Set of that identity exists. The fleet refuses the upload before
+    /// this when the Set is assigned to an Agent — an assigned Set's bytes are immutable
+    /// (ADR-0061), so there would be nothing an upload could become.
     pub fn staging_path(&self, id: &SetId, platform: &Platform) -> Result<PathBuf, String> {
         self.writable(id)?;
         Ok(self.set_dir(id).join(format!("{}.upload", platform.tag())))
     }
 
-    /// The gate every entry write passes: the Set must exist and be a draft. While a Set is
-    /// published the fleet is installing those bytes, and a hash that changes under an offer is
-    /// the confusion the publication gate exists to prevent (ADR-0052).
+    /// The gate every entry write passes: the Set must exist. The immutability of an assigned
+    /// Set (ADR-0061) is the fleet's to enforce — only it knows the assignments.
     fn writable(&self, id: &SetId) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
-        let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
-        if set.published {
-            return Err(format!(
-                "set {id} is published and its entries are immutable — retract it first, or \
-                 create the next version as a new set"
-            ));
-        }
+        sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
         Ok(())
     }
 
@@ -797,20 +808,15 @@ impl PackageStore {
         self.write_meta(id, &meta)
     }
 
-    /// Deletes one entry; `Ok(false)` when the Set or the entry does not exist. Refused on a
-    /// published Set — its bytes are immutable. The last entry taken away leaves an **empty
-    /// draft**, kept: a Set being reassembled is a normal state, and deleting the Set is its own
-    /// act.
+    /// Deletes one entry; `Ok(false)` when the Set or the entry does not exist. The fleet refuses
+    /// this before calling here when the Set is assigned to an Agent (ADR-0061). The last entry
+    /// taken away leaves an **empty Set**, kept: a Set being reassembled is a normal state, and
+    /// deleting the Set is its own act.
     pub fn delete_entry(&self, id: &SetId, platform: &Platform) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
         };
-        if set.published {
-            return Err(format!(
-                "set {id} is published and its entries are immutable — retract it first"
-            ));
-        }
         if set.entries.remove(platform).is_none() {
             return Ok(false);
         }
@@ -825,8 +831,8 @@ impl PackageStore {
     }
 
     /// Deletes a whole Set — entries, artifacts, and metadata; `Ok(false)` when none of that
-    /// identity exists. Deleting a published Set withdraws its offer with it, which is the
-    /// explicit act it sounds like; Agents that installed it keep running it (ADR-0017).
+    /// identity exists. The fleet removes every assignment that referenced it, which withdraws
+    /// the offer; Agents that installed it keep running it (ADR-0017).
     pub fn delete_set(&self, id: &SetId) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         if sets.remove(id).is_none() {
@@ -838,8 +844,8 @@ impl PackageStore {
         Ok(true)
     }
 
-    /// Sets a Set's Selector (ADR-0017) — editable in every state, because aim is not bytes:
-    /// moving a published Set between rings is precisely how a rollout proceeds.
+    /// Sets a Set's Selector (ADR-0017) — always editable, because aim is not bytes. Since
+    /// ADR-0061 it steers only whom a rollout act would reach; no offer changes with it.
     pub fn set_selector(
         &self,
         id: &SetId,
@@ -854,49 +860,25 @@ impl PackageStore {
         self.write_meta(id, &meta)
     }
 
-    /// Releases a Set to the fleet, or retracts it (ADR-0043, per Set under ADR-0052).
-    ///
-    /// **Releasing is the act a rollout starts with** — a draft is offered to nobody however
-    /// complete it is — and publishing a Set with **no entries** is refused: a Set *contains one
-    /// or more entries* by definition, and the empty state exists only while an operator is still
-    /// assembling one.
-    ///
-    /// **Retracting withdraws the offer and uninstalls nothing.** An Agent keeps running what it
-    /// installed; what changes is who is offered the Set from now on — and, with
-    /// greater-version-wins resolution, retracting the newest published version is how a fleet
-    /// falls back to the one still published beneath it.
-    pub fn set_published(&self, id: &SetId, published: bool) -> Result<(), String> {
-        let mut sets = self.sets.write().expect("sets lock");
-        let set = sets
-            .get_mut(id)
-            .ok_or_else(|| format!("no package set {id}"))?;
-        if published && set.entries.is_empty() {
-            return Err(format!(
-                "set {id} holds no entries — a set contains one or more entries before it can be \
-                 published"
-            ));
-        }
-        set.published = published;
-        let meta = serde_json::to_vec_pretty(&SetMeta::of(set)).expect("set serializes");
-        self.write_meta(id, &meta)
-    }
-
-    /// One Agent's offer: for each package name, at most one Set — fitted by publication, type,
-    /// platform and Selector, then resolved by specificity and version (ADR-0052) — plus the
-    /// `all_packages_hash` over *that* set (the Baseline's per-Agent aggregate). `Ok(None)` when
-    /// nothing matches; `Err` when the targeting is ambiguous and the Server refuses to guess.
-    pub fn offer_for(
+    /// One Agent's offer, composed from its **assignments** (ADR-0061): for each assigned Set,
+    /// the entry built for the platform the Agent reports, plus the `all_packages_hash` over that
+    /// set (the Baseline's per-Agent aggregate). `None` when the Agent is assigned nothing it
+    /// fits — it is offered nothing and keeps running what it runs. An assignment whose Set is
+    /// gone composes nothing rather than failing: deletion removes assignments, so the case is a
+    /// race, not a state.
+    pub fn offer_for_assigned(
         &self,
+        assigned: &BTreeMap<String, SetId>,
         description: Option<&AgentDescription>,
         download_base: &str,
         headers: Option<Headers>,
-    ) -> Result<Option<PackagesAvailable>, String> {
+    ) -> Option<PackagesAvailable> {
         let sets = self.sets.read().expect("sets lock");
-        let matching = resolve(&sets, description, Drafts::Excluded)?;
+        let matching = assigned_entries(&sets, assigned, description);
         if matching.is_empty() {
-            return Ok(None);
+            return None;
         }
-        Ok(Some(PackagesAvailable {
+        Some(PackagesAvailable {
             packages: matching
                 .iter()
                 .map(|(set, entry)| {
@@ -907,32 +889,108 @@ impl PackageStore {
                 })
                 .collect(),
             all_packages_hash: aggregate_hash(&matching),
-        }))
+        })
     }
 
-    /// The identities of the Sets this Agent would be offered — **including the ones still in
-    /// draft** (ADR-0043): the reach a Set reports answers "whom would this reach", and a rollout
-    /// is staged precisely so that question can be asked before it starts.
-    ///
-    /// Deliberately the same [`resolve`] the offer itself runs, so a count built from this cannot
-    /// claim a reach the fleet does not get. Ambiguous targeting yields nothing, exactly as it
-    /// does for the offer.
-    pub fn offered_ids(&self, description: Option<&AgentDescription>) -> Vec<SetId> {
+    /// The aggregate hash over one Agent's assignments, to gate re-offering without building the
+    /// whole message. Empty when the Agent is assigned nothing it fits — it is offered nothing,
+    /// and has nothing to be in sync with.
+    pub fn assigned_hash_for(
+        &self,
+        assigned: &BTreeMap<String, SetId>,
+        description: Option<&AgentDescription>,
+    ) -> Vec<u8> {
         let sets = self.sets.read().expect("sets lock");
-        resolve(&sets, description, Drafts::Included)
+        let matching = assigned_entries(&sets, assigned, description);
+        if matching.is_empty() {
+            return Vec::new();
+        }
+        aggregate_hash(&matching)
+    }
+
+    /// The identities of the Sets a rollout act would release to this Agent — the **candidates**
+    /// (ADR-0061): fitted by type, platform and Selector, then resolved by specificity and
+    /// version (ADR-0052). Never an offer. `Err` when the targeting is ambiguous and the Server
+    /// refuses to guess; the fleet view shows the refusal.
+    pub fn candidate_ids(
+        &self,
+        description: Option<&AgentDescription>,
+    ) -> Result<Vec<SetId>, String> {
+        let sets = self.sets.read().expect("sets lock");
+        resolve(&sets, description)
+            .map(|matching| matching.iter().map(|(set, _)| set.id.clone()).collect())
+    }
+
+    /// The Sets a **pre-ADR-0061** offer would have released to this Agent: the candidate
+    /// resolution restricted to the formerly published Sets. The migration seed for an Agent
+    /// record that predates the ADR (point 9); ambiguous targeting seeds nothing, exactly as the
+    /// old offer composed nothing.
+    pub fn formerly_offered(&self, description: Option<&AgentDescription>) -> Vec<SetId> {
+        if self.formerly_published.is_empty() {
+            return Vec::new();
+        }
+        let sets = self.sets.read().expect("sets lock");
+        let subset: BTreeMap<SetId, PackageSet> = sets
+            .iter()
+            .filter(|(id, _)| self.formerly_published.contains(id))
+            .map(|(id, set)| (id.clone(), set.clone()))
+            .collect();
+        resolve(&subset, description)
             .map(|matching| matching.iter().map(|(set, _)| set.id.clone()).collect())
             .unwrap_or_default()
     }
 
-    /// The aggregate hash for one Agent, to gate re-offering without building the whole message.
-    /// Empty when nothing matches or the targeting is ambiguous — in both cases the Agent is
-    /// offered nothing, and has nothing to be in sync with.
-    pub fn all_packages_hash_for(&self, description: Option<&AgentDescription>) -> Vec<u8> {
+    /// Whether an explicit rollout act may release this Set to this Agent (ADR-0061): the Set
+    /// must exist, hold an entry for the platform the Agent reports, be built for its type, and
+    /// its Selector must match. Deliberately **not** the version ranking of [`resolve`] — the
+    /// candidate computation proposes the greatest version, but an operator rolling out an older
+    /// Set by name is the rollback ADR-0052 described, now as the one explicit act.
+    pub fn fits_agent(
+        &self,
+        id: &SetId,
+        description: Option<&AgentDescription>,
+    ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
-        match resolve(&sets, description, Drafts::Excluded) {
-            Ok(matching) if !matching.is_empty() => aggregate_hash(&matching),
-            _ => Vec::new(),
+        let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
+        if set.entries.is_empty() {
+            return Err(format!(
+                "set {id} holds no entries — a set contains one or more entries before it can be \
+                 rolled out"
+            ));
         }
+        let Some(platform) = Platform::reported(description) else {
+            return Err(format!(
+                "set {id} fits no platform this Agent reports — it reports none"
+            ));
+        };
+        if reported_service_name(description) != Some(set.id.service_name.as_str()) {
+            return Err(format!(
+                "set {id} is built for Agent type {:?}, which this Agent does not report",
+                set.id.service_name
+            ));
+        }
+        if !set.entries.contains_key(&platform) {
+            return Err(format!(
+                "set {id} holds no entry for {}-{}, which this Agent reports",
+                platform.os, platform.arch
+            ));
+        }
+        if !matches(&set.selector, description) {
+            return Err(format!(
+                "the Selector of set {id} does not match this Agent"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether this Set is an addon; `None` when no Set of that identity exists. The fleet uses
+    /// it for the Baseline's "one top-level package" rule when it writes an assignment.
+    pub fn is_addon(&self, id: &SetId) -> Option<bool> {
+        self.sets
+            .read()
+            .expect("sets lock")
+            .get(id)
+            .map(|set| set.addon)
     }
 
     fn write_meta(&self, id: &SetId, bytes: &[u8]) -> Result<(), String> {
@@ -985,27 +1043,40 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
     Ok((size, hasher.finalize().to_vec()))
 }
 
-/// Whether an unpublished Set (ADR-0043) takes part in a resolution. Never for an offer; only
-/// for the question "whom would this reach", which is what a draft is prepared to be asked.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Drafts {
-    Excluded,
-    Included,
+/// The entries one Agent's assignments compose (ADR-0061): each assigned Set that still exists
+/// and holds an entry for the platform the Agent reports. No ranking runs here — the operator's
+/// assignment already chose — and a Set that stopped fitting (the host was reinstalled on another
+/// platform) simply composes nothing for it.
+fn assigned_entries<'a>(
+    sets: &'a BTreeMap<SetId, PackageSet>,
+    assigned: &BTreeMap<String, SetId>,
+    description: Option<&AgentDescription>,
+) -> Vec<(&'a PackageSet, &'a Entry)> {
+    let Some(platform) = Platform::reported(description) else {
+        return Vec::new();
+    };
+    assigned
+        .values()
+        .filter_map(|id| {
+            let set = sets.get(id)?;
+            let entry = set.entries.get(&platform)?;
+            Some((set, entry))
+        })
+        .collect()
 }
 
-/// Which Sets one Agent is offered — **fit, aim, then version** (ADR-0052), at most one Set per
-/// package name.
+/// Which Sets a rollout act would release to one Agent — **fit, aim, then version** (ADR-0052),
+/// at most one Set per package name. Since ADR-0061 this computes the **candidates** the fleet
+/// view shows as waiting and the bulk acts assign; it never composes an offer.
 ///
-/// *Fit* comes first and cannot be switched off: an unpublished Set is not a candidate for anyone
-/// (ADR-0043), nor is one built for another Agent type (ADR-0034), another operating system or
-/// architecture (ADR-0031); an Agent that reports no platform or no type fits nothing.
+/// *Fit* comes first and cannot be switched off: a Set built for another Agent type (ADR-0034)
+/// or another operating system or architecture (ADR-0031) is not a candidate for anyone; an
+/// Agent that reports no platform or no type fits nothing.
 ///
 /// *Aim* is ADR-0017 unchanged, over what is left, now ranking Sets: among candidates **sharing a
 /// name**, the most specific Selector wins; among equally specific ones the **greater version**
-/// wins, compared as ADR-0029 compares versions — which is what makes a rollback a publication
-/// move: retract the newest Set and the fleet falls back to the one still published beneath it. A
-/// tie the version comparison cannot break is a conflict — nothing is offered under that name,
-/// and it is reported rather than guessed.
+/// wins, compared as ADR-0029 compares versions. A tie the version comparison cannot break is a
+/// conflict — nothing is proposed under that name, and it is reported rather than guessed.
 ///
 /// Then the Baseline's own shape: every matching addon, and **one** top-level package across all
 /// names — "normally only one top-level package", and a Supervisor has one binary to replace.
@@ -1015,7 +1086,6 @@ enum Drafts {
 fn resolve<'a>(
     sets: &'a BTreeMap<SetId, PackageSet>,
     description: Option<&AgentDescription>,
-    drafts: Drafts,
 ) -> Result<Vec<(&'a PackageSet, &'a Entry)>, String> {
     let Some(platform) = Platform::reported(description) else {
         return Ok(Vec::new());
@@ -1027,9 +1097,6 @@ fn resolve<'a>(
     };
     let mut by_name: BTreeMap<&str, Vec<(&PackageSet, &Entry)>> = BTreeMap::new();
     for set in sets.values() {
-        if !(set.published || drafts == Drafts::Included) {
-            continue;
-        }
         if set.id.service_name != service_name {
             continue;
         }
@@ -1413,8 +1480,9 @@ mod tests {
         }
     }
 
-    /// A Set with one uploaded linux entry, created and published in one go.
-    fn published_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> SetId {
+    /// A Set with one uploaded linux entry — stored, which since ADR-0061 reaches nobody until
+    /// an assignment names it.
+    fn stored_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> SetId {
         let id = id(name, version);
         store
             .create_or_update(&id, BTreeMap::new(), false)
@@ -1422,14 +1490,36 @@ mod tests {
         store
             .put_entry(&id, &linux(), None, artifact.to_vec())
             .expect("entry");
-        store.set_published(&id, true).expect("publish");
         id
     }
 
-    fn offered(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
-        store
-            .offer_for(Some(description), "", None)
+    /// The assignment map of an Agent the operator rolled these Sets out to.
+    fn assigned(ids: &[&SetId]) -> BTreeMap<String, SetId> {
+        ids.iter()
+            .map(|id| (id.name.clone(), (*id).clone()))
+            .collect()
+    }
+
+    /// The candidates a rollout act would release to this Agent, as `(name, version)`.
+    fn candidates(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
+        let mut names: Vec<(String, String)> = store
+            .candidate_ids(Some(description))
             .expect("resolution")
+            .into_iter()
+            .map(|id| (id.name, id.version))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What this Agent is offered, given its assignments, as `(name, version)`.
+    fn offered(
+        store: &PackageStore,
+        assigned: &BTreeMap<String, SetId>,
+        description: &AgentDescription,
+    ) -> Vec<(String, String)> {
+        store
+            .offer_for_assigned(assigned, Some(description), "", None)
             .map(|offer| {
                 let mut names: Vec<(String, String)> = offer
                     .packages
@@ -1443,7 +1533,7 @@ mod tests {
     }
 
     /// ADR-0052: the identity is the triple, entries are per platform, and the whole Set —
-    /// entries, publication, selector — survives a reopen.
+    /// entries and selector — survives a reopen.
     #[test]
     fn a_set_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1472,12 +1562,14 @@ mod tests {
                     },
                 )
                 .expect("windows entry");
-            store.set_published(&set, true).expect("publish");
         }
         let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
         let summary = store.summary(&id("otelcol", "1.2.3")).expect("summary");
-        assert!(summary.published);
         assert_eq!(summary.selector["ring"], "canary");
+        assert!(
+            store.formerly_published().is_empty(),
+            "a store born under ADR-0061 seeds no migration"
+        );
         assert_eq!(summary.entries.len(), 2);
         assert_eq!(summary.entries[0].os, "linux");
         assert!(summary.entries[0].signed);
@@ -1487,65 +1579,78 @@ mod tests {
         );
     }
 
-    /// ADR-0052 with ADR-0043: every saved Set is a draft — nothing reaches any Agent until the
-    /// publication act — and an empty Set cannot be published at all.
+    /// ADR-0061: a saved Set reaches nobody by itself. It is a visible candidate, and only an
+    /// assignment — the operator's rollout act — composes an offer from it.
     #[test]
-    fn a_set_is_a_draft_until_published_and_never_published_empty() {
+    fn a_saved_set_reaches_nobody_without_an_assignment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let set = id("otelcol", "1.0.0");
-        store
-            .create_or_update(&set, BTreeMap::new(), false)
-            .expect("create");
-        let err = store.set_published(&set, true).expect_err("empty refused");
-        assert!(err.contains("holds no entries"), "{err}");
-        store
-            .put_entry(&set, &linux(), None, b"bytes".to_vec())
-            .expect("entry");
-        assert!(
-            offered(&store, &agent("linux", "amd64", &[])).is_empty(),
-            "a draft reaches nobody"
-        );
-        store.set_published(&set, true).expect("publish");
+        let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[])),
+            candidates(&store, &agent("linux", "amd64", &[])),
+            [("otelcol".to_string(), "1.0.0".to_string())],
+            "the candidate is visible"
+        );
+        assert!(
+            offered(&store, &BTreeMap::new(), &agent("linux", "amd64", &[])).is_empty(),
+            "no assignment, no offer"
+        );
+        assert_eq!(
+            offered(&store, &assigned(&[&set]), &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
     }
 
-    /// ADR-0052: a published Set's bytes are immutable — entries cannot be written or deleted —
-    /// while its Selector stays editable, because aim is not bytes.
+    /// The gate an explicit rollout act runs (ADR-0061): the Set must hold entries, fit the
+    /// Agent's type and platform, and its Selector must match — but the version ranking stays
+    /// out, because rolling out an older Set by name is the rollback.
     #[test]
-    fn a_published_set_is_immutable_in_its_bytes_but_not_its_aim() {
+    fn fits_agent_checks_fit_and_aim_but_not_the_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let set = published_set(&store, "otelcol", "1.0.0", b"bytes");
-        assert!(store
-            .put_entry(&set, &windows(), None, b"more".to_vec())
-            .expect_err("write refused")
-            .contains("immutable"));
-        assert!(store
-            .delete_entry(&set, &linux())
-            .expect_err("delete refused")
-            .contains("immutable"));
-        assert!(store.staging_path(&set, &windows()).is_err());
+        let empty = id("otelcol", "0.9.0");
         store
-            .set_selector(&set, BTreeMap::from([("ring".into(), "canary".into())]))
-            .expect("the Selector stays editable");
-        store.set_published(&set, false).expect("retract");
+            .create_or_update(&empty, BTreeMap::new(), false)
+            .expect("create");
+        assert!(store
+            .fits_agent(&empty, Some(&agent("linux", "amd64", &[])))
+            .expect_err("empty refused")
+            .contains("holds no entries"));
+
+        let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
         store
-            .put_entry(&set, &windows(), None, b"more".to_vec())
-            .expect("a retracted set is writable again");
+            .set_selector(&old, BTreeMap::from([("ring".into(), "canary".into())]))
+            .expect("aim");
+
+        let ringed = agent("linux", "amd64", &[("ring", "canary")]);
+        assert!(store.fits_agent(&old, Some(&ringed)).is_ok(), "a rollback target fits");
+        assert!(store.fits_agent(&new, Some(&ringed)).is_ok());
+        assert!(store
+            .fits_agent(&old, Some(&agent("linux", "amd64", &[])))
+            .expect_err("outside the ring")
+            .contains("Selector"));
+        assert!(store
+            .fits_agent(&new, Some(&agent("windows", "amd64", &[])))
+            .expect_err("wrong platform")
+            .contains("no entry for"));
+        assert!(store
+            .fits_agent(&new, Some(&AgentDescription::default()))
+            .is_err(), "no platform and no type fits nothing");
+        assert!(store
+            .fits_agent(&id("otelcol", "9.9.9"), Some(&ringed))
+            .expect_err("unknown set")
+            .contains("no package set"));
     }
 
-    /// ADR-0052's resolution ladder within one name: the most specific Selector wins; among
-    /// equally specific Sets the greater version wins — which is what makes a canary ring one
-    /// Selector edit and a rollback a publication move.
+    /// ADR-0052's candidate ladder within one name: the most specific Selector wins; among
+    /// equally specific Sets the greater version wins. The offer itself follows the assignment
+    /// alone — an Agent left assigned the older Set keeps being offered it (ADR-0061).
     #[test]
     fn specificity_wins_then_the_greater_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let stable = published_set(&store, "otelcol", "1.0.0", b"v1");
+        let stable = stored_set(&store, "otelcol", "1.0.0", b"v1");
         let canary = id("otelcol", "2.0.0");
         store
             .create_or_update(
@@ -1557,45 +1662,42 @@ mod tests {
         store
             .put_entry(&canary, &linux(), None, b"v2".to_vec())
             .expect("entry");
-        store.set_published(&canary, true).expect("publish");
 
-        // The ring gets the canary — more specific — and everyone else the stable version.
+        // The ring's candidate is the canary — more specific — everyone else's the stable one.
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[("ring", "canary")])),
+            candidates(&store, &agent("linux", "amd64", &[("ring", "canary")])),
             [("otelcol".to_string(), "2.0.0".to_string())]
         );
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[])),
+            candidates(&store, &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
 
-        // The rollout finishes: the canary Selector widens to everyone, and the greater version
-        // wins over the still-published stable Set.
+        // The Selector widens: the greater version becomes everyone's candidate.
         store.set_selector(&canary, BTreeMap::new()).expect("widen");
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[])),
+            candidates(&store, &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "2.0.0".to_string())]
         );
 
-        // The rollback is a publication move: retract the newest and the fleet falls back.
-        store.set_published(&canary, false).expect("retract");
+        // The offer follows the assignment, not the ranking: an Agent still assigned the stable
+        // Set keeps it, and assigning the stable Set anew is the rollback.
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[])),
+            offered(&store, &assigned(&[&stable]), &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
-        let _ = stable;
     }
 
-    /// The tie the version comparison cannot break is a conflict: nothing is offered under that
+    /// The tie the version comparison cannot break is a conflict: nothing is proposed under that
     /// name, and the refusal is reported rather than guessed (ADR-0052).
     #[test]
     fn versions_that_cannot_be_ordered_are_a_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        published_set(&store, "otelcol", "nightly-a", b"a");
-        published_set(&store, "otelcol", "nightly-b", b"b");
+        stored_set(&store, "otelcol", "nightly-a", b"a");
+        stored_set(&store, "otelcol", "nightly-b", b"b");
         let err = store
-            .offer_for(Some(&agent("linux", "amd64", &[])), "", None)
+            .candidate_ids(Some(&agent("linux", "amd64", &[])))
             .expect_err("refused");
         assert!(err.contains("cannot be ordered"), "{err}");
     }
@@ -1606,10 +1708,10 @@ mod tests {
     fn equally_specific_names_are_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        published_set(&store, "otelcol-a", "1.0.0", b"a");
-        published_set(&store, "otelcol-b", "1.0.0", b"b");
+        stored_set(&store, "otelcol-a", "1.0.0", b"a");
+        stored_set(&store, "otelcol-b", "1.0.0", b"b");
         let err = store
-            .offer_for(Some(&agent("linux", "amd64", &[])), "", None)
+            .candidate_ids(Some(&agent("linux", "amd64", &[])))
             .expect_err("refused");
         assert!(err.contains("equally specific"), "{err}");
     }
@@ -1620,7 +1722,7 @@ mod tests {
     fn fit_is_mandatory_platform_and_type() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        published_set(&store, "otelcol", "1.0.0", b"linux-only");
+        stored_set(&store, "otelcol", "1.0.0", b"linux-only");
         let foreign = SetId::new("promtail", "promtail", "1.0.0").expect("id");
         store
             .create_or_update(&foreign, BTreeMap::new(), false)
@@ -1628,16 +1730,18 @@ mod tests {
         store
             .put_entry(&foreign, &linux(), None, b"p".to_vec())
             .expect("entry");
-        store.set_published(&foreign, true).expect("publish");
 
-        assert!(offered(&store, &agent("windows", "amd64", &[])).is_empty());
+        assert!(candidates(&store, &agent("windows", "amd64", &[])).is_empty());
         assert_eq!(
-            offered(&store, &agent("linux", "amd64", &[])),
+            candidates(&store, &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())],
             "the promtail set fits another type and is not a candidate"
         );
         assert!(
-            offered(&store, &AgentDescription::default()).is_empty(),
+            store
+                .candidate_ids(Some(&AgentDescription::default()))
+                .expect("resolution")
+                .is_empty(),
             "no platform and no type fits nothing"
         );
     }
@@ -1657,9 +1761,12 @@ mod tests {
         store
             .put_entry(&set, &mac, None, b"mac".to_vec())
             .expect("entry");
-        store.set_published(&set, true).expect("publish");
         assert_eq!(
-            offered(&store, &agent("darwin", "amd64", &[])),
+            candidates(&store, &agent("darwin", "amd64", &[])),
+            [("otelcol".to_string(), "1.0.0".to_string())]
+        );
+        assert_eq!(
+            offered(&store, &assigned(&[&set]), &agent("darwin", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
     }
@@ -1670,14 +1777,14 @@ mod tests {
     fn the_offer_carries_a_download_url_naming_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        published_set(&store, "otelcol", "1.2.3", b"bytes");
+        let set = stored_set(&store, "otelcol", "1.2.3", b"bytes");
         let offer = store
-            .offer_for(
+            .offer_for_assigned(
+                &assigned(&[&set]),
                 Some(&agent("linux", "amd64", &[])),
                 "https://fleet.example",
                 None,
             )
-            .expect("resolution")
             .expect("an offer");
         let url = &offer.packages["otelcol"]
             .file
@@ -1690,45 +1797,25 @@ mod tests {
         );
     }
 
-    /// The aggregate hash is per Agent and follows the content (ADR-0017): it changes when the
-    /// offered Set changes, and is empty for an Agent offered nothing.
+    /// The aggregate hash is per Agent and follows its assignments (ADR-0061): it changes when
+    /// the assigned Set changes, and is empty for an Agent assigned nothing it fits.
     #[test]
-    fn the_aggregate_hash_is_per_agent_and_follows_the_content() {
+    fn the_aggregate_hash_is_per_agent_and_follows_the_assignment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        published_set(&store, "otelcol", "1.0.0", b"v1");
-        let before = store.all_packages_hash_for(Some(&agent("linux", "amd64", &[])));
+        let v1 = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let before = store.assigned_hash_for(&assigned(&[&v1]), Some(&agent("linux", "amd64", &[])));
         assert!(!before.is_empty());
         assert!(store
-            .all_packages_hash_for(Some(&agent("windows", "amd64", &[])))
+            .assigned_hash_for(&assigned(&[&v1]), Some(&agent("windows", "amd64", &[])))
+            .is_empty());
+        assert!(store
+            .assigned_hash_for(&BTreeMap::new(), Some(&agent("linux", "amd64", &[])))
             .is_empty());
 
-        published_set(&store, "otelcol", "2.0.0", b"v2");
-        let after = store.all_packages_hash_for(Some(&agent("linux", "amd64", &[])));
-        assert_ne!(before, after, "a new winning version moves the aggregate");
-    }
-
-    /// A draft still reports the reach it would have (ADR-0043): staging a rollout is how its aim
-    /// is checked before it starts.
-    #[test]
-    fn a_draft_still_reports_the_reach_it_would_have() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let set = id("otelcol", "1.0.0");
-        store
-            .create_or_update(&set, BTreeMap::new(), false)
-            .expect("create");
-        store
-            .put_entry(&set, &linux(), None, b"bytes".to_vec())
-            .expect("entry");
-        assert_eq!(
-            store.offered_ids(Some(&agent("linux", "amd64", &[]))),
-            std::slice::from_ref(&set)
-        );
-        assert!(store
-            .offer_for(Some(&agent("linux", "amd64", &[])), "", None)
-            .expect("resolution")
-            .is_none());
+        let v2 = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let after = store.assigned_hash_for(&assigned(&[&v2]), Some(&agent("linux", "amd64", &[])));
+        assert_ne!(before, after, "a new assigned version moves the aggregate");
     }
 
     /// Deleting an entry frees its artifact; deleting the Set takes the directory with it.
@@ -1853,19 +1940,27 @@ mod tests {
 
         let store = PackageStore::open(dir.path().to_path_buf()).expect("migrates");
         let migrated = store.summary(&id("otelcol", "2.0.0")).expect("current set");
-        assert!(migrated.published, "the current version stays in flight");
         assert_eq!(migrated.selector["ring"], "canary");
-        let kept = store
+        assert_eq!(
+            store.formerly_published(),
+            std::slice::from_ref(&id("otelcol", "2.0.0")),
+            "what was in force seeds the assignment migration (ADR-0061 point 9)"
+        );
+        store
             .summary(&id("otelcol", "1.0.0"))
-            .expect("previous set");
-        assert!(!kept.published, "the rollback target is a draft");
+            .expect("the rollback target is kept as its own set");
         assert!(
             !dir.path().join("otelcol.json").exists(),
             "legacy files are gone"
         );
-        // And both artifacts still verify: a second open re-hashes them.
+        // And both artifacts still verify: a second open re-hashes them — and the migration seed
+        // survives the double hop, because the migrated set.json keeps its publication state.
         drop(store);
-        PackageStore::open(dir.path().to_path_buf()).expect("reopen clean");
+        let reopened = PackageStore::open(dir.path().to_path_buf()).expect("reopen clean");
+        assert_eq!(
+            reopened.formerly_published(),
+            std::slice::from_ref(&id("otelcol", "2.0.0"))
+        );
     }
 
     /// A legacy package without an Agent type cannot become a Set — the type is identity — and

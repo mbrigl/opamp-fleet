@@ -12,7 +12,7 @@
 //! whatever the Managed Process runs, credentials included. The filesystem adapter answers with an
 //! owner-only directory; any other adapter must answer with its own access control.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use base64::Engine as _;
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::fleet::Transport;
+use crate::packages::SetId;
 
 /// Everything about one Agent that survives a restart: what it reported and what an operator
 /// queued for it — never what a live connection knows (`connected`, the owning connection).
@@ -45,6 +46,13 @@ pub struct PersistedAgent {
     pub last_seen_ms: u64,
     /// A queued restart is operator intent and survives like any other (ADR-0051).
     pub restart_pending: bool,
+    /// The Configurations the operator rolled out to this Agent (ADR-0061): name → the pinned
+    /// revision's hash. `None` marks a record persisted before the ADR, whose assignments the
+    /// fleet seeds at startup from what was published then (point 9).
+    pub config_assignments: Option<BTreeMap<String, String>>,
+    /// The package Sets the operator rolled out to this Agent (ADR-0061), keyed by package name.
+    /// `None` marks a record whose seed has not run — it runs when package delivery is armed.
+    pub package_assignments: Option<BTreeMap<String, SetId>>,
 }
 
 impl PersistedAgent {
@@ -121,6 +129,13 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
+    /// The config assignments (ADR-0061), name → revision hash. Absent in a pre-ADR file, which
+    /// is exactly the migration marker the fleet reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_assignments: Option<BTreeMap<String, String>>,
+    /// The package assignments (ADR-0061), package name → `<name>@<version>@<type>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_assignments: Option<BTreeMap<String, String>>,
 }
 
 const ENVELOPE_VERSION: u32 = 1;
@@ -162,6 +177,13 @@ impl Envelope {
             connection_settings_status: encode(&record.connection_settings_status),
             package_statuses: encode(&record.package_statuses),
             available_components: encode(&record.available_components),
+            config_assignments: record.config_assignments.clone(),
+            package_assignments: record.package_assignments.as_ref().map(|assignments| {
+                assignments
+                    .iter()
+                    .map(|(name, id)| (name.clone(), id.to_string()))
+                    .collect()
+            }),
         }
     }
 
@@ -191,6 +213,20 @@ impl Envelope {
             },
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
+            config_assignments: self.config_assignments,
+            package_assignments: self
+                .package_assignments
+                .map(|assignments| {
+                    assignments
+                        .into_iter()
+                        .map(|(name, id)| {
+                            SetId::parse(&id)
+                                .map(|parsed| (name, parsed))
+                                .map_err(|e| format!("invalid package assignment: {e}"))
+                        })
+                        .collect::<Result<BTreeMap<String, SetId>, String>>()
+                })
+                .transpose()?,
         })
     }
 }
@@ -294,6 +330,14 @@ mod tests {
             transport: Transport::WebSocket,
             last_seen_ms: 123,
             restart_pending: true,
+            config_assignments: Some(BTreeMap::from([(
+                "base".to_string(),
+                "0123abcd".to_string(),
+            )])),
+            package_assignments: Some(BTreeMap::from([(
+                "otelcol".to_string(),
+                SetId::new("otelcol", "otelcol", "1.2.3").expect("set id"),
+            )])),
         }
     }
 
@@ -309,6 +353,29 @@ mod tests {
         let reopened = FsAgentStore::open(dir.path().join("agents")).expect("reopen");
         let restored = reopened.load().expect("load");
         assert!(restored[&uid] == record(), "the record round-trips whole");
+    }
+
+    /// ADR-0061 point 9: an envelope written before the ADR has no assignment fields, and they
+    /// restore as `None` — the marker the fleet's migration reads. They are not invented as
+    /// empty, which would silently un-roll the Agent.
+    #[test]
+    fn a_pre_adr_0061_record_restores_with_no_assignments() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let uid = InstanceUid::default();
+        let mut old = record();
+        old.config_assignments = None;
+        old.package_assignments = None;
+        store.put(&uid, &old).expect("put");
+        let text = std::fs::read_to_string(dir.path().join("agents").join(format!("{uid}.json")))
+            .expect("read");
+        assert!(
+            !text.contains("assignments"),
+            "absent fields stay absent on disk: {text}"
+        );
+        let restored = store.load().expect("load");
+        assert!(restored[&uid].config_assignments.is_none());
+        assert!(restored[&uid].package_assignments.is_none());
     }
 
     /// The dirty check's foundation: a report that only moves the timestamp and the sequence

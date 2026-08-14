@@ -101,7 +101,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
 }
 
-/// ADR-0016: the operator's role reaches the Agent in `AgentConfigFile.role`, verbatim, and a
+/// ADR-0016: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
 /// Configuration without one leaves the field unset.
 #[tokio::test]
 async fn a_configuration_role_reaches_the_agent_verbatim() {

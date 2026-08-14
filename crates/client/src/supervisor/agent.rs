@@ -1400,7 +1400,7 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{AgentConfigFile, AgentConfigMap};
+    use opamp::proto::{AgentConfigMap, AgentConfigObject};
     use std::collections::HashMap;
 
     /// `host.ip` and `host.mac` as the conventions define them (ADR-0050): loopback interfaces
@@ -1479,7 +1479,7 @@ mod tests {
             config: Some(AgentConfigMap {
                 config_map: HashMap::from([(
                     String::new(),
-                    AgentConfigFile {
+                    AgentConfigObject {
                         role: String::new(),
                         body: body.to_vec(),
                         content_type: String::new(),

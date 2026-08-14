@@ -155,7 +155,7 @@ has proved itself.
 - **OpAMP Baseline** — packages are opaque to the protocol: "The content of the file, functionality
   provided by the packages, how they are stored and used by the Agent side is Agent type-specific
   and is outside the concerns of the OpAMP protocol." `PackageType_TopLevel`/`PackageType_Addon` in
-  the pinned proto (`crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto`).
+  the pinned proto (`crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto`).
   <https://github.com/open-telemetry/opamp-spec/blob/main/specification.md>
 - **Elastic Agent** distributes a `.tar.gz` holding a directory tree and states that the archive
   distributions — not the system packages — are the ones Fleet can upgrade: the same conclusion

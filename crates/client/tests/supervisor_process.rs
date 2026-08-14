@@ -82,6 +82,24 @@ fn runner_retaining(
     version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
+    runner_full(
+        install,
+        apply_grace,
+        retain_previous,
+        version_probe,
+        None,
+        build,
+    )
+}
+
+fn runner_full(
+    install: Option<InstallTarget>,
+    apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
+    reload_signal: Option<i32>,
+    build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+) -> Harness {
     let (event_tx, events) = mpsc::channel(64);
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
@@ -93,6 +111,7 @@ fn runner_retaining(
         install,
         archive_key: None,
         version_probe,
+        reload_signal,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
@@ -296,6 +315,135 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
+}
+
+// ── Reload and uninstall (ADR-0060) ──────────────────────────────────────────
+
+/// The pid the spawn reported — how these tests tell a kept process from a fresh one.
+async fn next_spawned_pid(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> u32 {
+    loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("an event in time")
+            .expect("an open channel");
+        if let ProcessEvent::Pid(Some(pid)) = event {
+            return pid;
+        }
+    }
+}
+
+/// Drains events until the apply's acknowledgement, collecting every pid spawned on the way — a
+/// reload keeps the process, so any pid before the ack means a restart happened.
+async fn ack_and_spawned_pids(
+    events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+) -> (Result<(), String>, Vec<u32>) {
+    let mut pids = Vec::new();
+    loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("an event in time")
+            .expect("an open channel");
+        match event {
+            ProcessEvent::Pid(Some(pid)) => pids.push(pid),
+            ProcessEvent::ConfigApplied { result, .. } => return (result, pids),
+            _ => {}
+        }
+    }
+}
+
+/// A kind that declared a reload applies a configuration in place (ADR-0060): the process is
+/// signalled, survives the grace, and the apply is acknowledged without a restart — the process
+/// that was running is still the one running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_declared_reload_applies_without_a_restart() {
+    let mut harness = runner_full(
+        None,
+        Duration::from_millis(300),
+        Duration::ZERO,
+        None,
+        Some(libc::SIGHUP),
+        || {
+            let mut spec = spec(&stub_agent());
+            spec.args = vec!["--ignore-hup".to_string()];
+            Some(spec)
+        },
+    );
+    let pid = next_spawned_pid(&mut harness.events).await;
+
+    apply(&harness, b"reload").await;
+    let (result, spawned) = ack_and_spawned_pids(&mut harness.events).await;
+    assert_eq!(result, Ok(()));
+    assert!(
+        spawned.is_empty(),
+        "an in-place reload spawns nothing; a fresh pid would mean a restart: {spawned:?}"
+    );
+    // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
+    assert_eq!(
+        unsafe { libc::kill(pid as libc::pid_t, 0) },
+        0,
+        "the process that was signalled is still the one running"
+    );
+    harness.shutdown_tx.send(true).expect("signal shutdown");
+    let _ = harness.task.await;
+}
+
+/// `reload-or-restart` (ADR-0060): a process that dies on its reload signal — the stub without
+/// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
+/// files, and the apply is acknowledged from that restart rather than failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
+    let mut harness = runner_full(
+        None,
+        Duration::from_millis(300),
+        Duration::ZERO,
+        None,
+        Some(libc::SIGHUP),
+        || Some(spec(&stub_agent())),
+    );
+    let first = next_spawned_pid(&mut harness.events).await;
+
+    apply(&harness, b"reload").await;
+    let (result, spawned) = ack_and_spawned_pids(&mut harness.events).await;
+    assert_eq!(result, Ok(()), "the fallback restart is the apply");
+    assert_eq!(spawned.len(), 1, "exactly one respawn carries the fallback");
+    assert_ne!(
+        spawned[0], first,
+        "a fresh process replaced the one that died"
+    );
+    harness.shutdown_tx.send(true).expect("signal shutdown");
+    let _ = harness.task.await;
+}
+
+/// The generic uninstall (ADR-0060): the graceful stop plus the answer, which is the adapter's
+/// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0059).
+#[tokio::test]
+async fn an_uninstall_stops_the_process_answers_and_exits() {
+    let mut harness = start(|| Some(spec(&stub_agent())));
+    let health = next_health(&mut harness.events).await;
+    assert!(health.healthy);
+
+    harness
+        .commands
+        .send(ProcessCommand::Uninstall)
+        .await
+        .expect("send the command");
+    let result = loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(10), harness.events.recv())
+            .await
+            .expect("an event in time")
+            .expect("an open channel");
+        if let ProcessEvent::Uninstalled { result } = event {
+            break result;
+        }
+    };
+    assert_eq!(result, Ok(()));
+    tokio::time::timeout(Duration::from_secs(10), harness.task)
+        .await
+        .expect("the adapter exits on the command itself")
+        .expect("no panic");
 }
 
 // ── Supervision ──────────────────────────────────────────────────────────────

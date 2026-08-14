@@ -9,11 +9,21 @@
 //!   and *with what*; a restart rewrites it with a fresh pid.
 //! - `--exit-code <n> --exit-after-ms <m>` — exit with code `n` after `m` milliseconds, for
 //!   crash-path tests. Without them the stub sleeps until it is killed.
+//! - `--ignore-hup` (Unix only) — ignore `SIGHUP`, the way a daemon that reloads on it survives
+//!   the signal; without the flag the default disposition terminates the stub. What the reload
+//!   tests (ADR-0060) use for both sides of `reload-or-restart`.
 
 use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.iter().any(|a| a == "--ignore-hup") {
+        // SAFETY: installs SIG_IGN for SIGHUP; no memory is touched.
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        }
+    }
     if args.iter().any(|a| a == "--version") {
         println!("stub_agent version 9.9.9 (test build)");
         return;

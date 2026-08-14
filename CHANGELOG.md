@@ -17,6 +17,60 @@ carries a date once its tag exists.
 
 ## [0.3.0]
 
+### Changed
+
+- **Publication is gone; a rollout is an explicit act, per Agent or per resource**
+  ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)). Saving a Configuration or a
+  package Set never distributes anything, and there is no draft/published state any more: what an
+  Agent runs is its **assignment**, written only by a rollout act — `POST
+  /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
+  for every currently matching Agent, or `POST /api/v1/agents/{uid}/rollout` for one. An act pins
+  the content as of that press; later saves wait, visible per Agent in the fleet view
+  (`pending_configurations`, `pending_packages`), as does an Agent that enrols or starts matching
+  later. Selector edits and label moves no longer distribute either. Deleting a Configuration or
+  a Set removes it from every assigned Agent. Package rollback is the same act pointed at the
+  older version.
+  **What to do:** replace every `PUT …/publication` call with the matching `POST …/rollout`;
+  after adding hosts, press the resource's rollout (or the new host's) — nothing reaches them by
+  itself any more. Existing stores migrate as "rolled out to what was published", so a running
+  fleet is not changed by the upgrade. The `published`/`pending_changes` fields left the API.
+
+### Added
+
+- **A `command` Supervisor can reload instead of restart**
+  ([ADR-0060](docs/adr/0060-unified-supervisor-lifecycle-port.md)). A `[[supervisor]]` block of
+  `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
+  with or without a `SIG` prefix): a configuration change is then applied by sending that signal,
+  and the process keeps running with its in-flight state. If the signal cannot be delivered or
+  the process dies on it, the Supervisor falls back to the restart, so the apply still lands.
+  Linux/macOS only — on Windows a set key is refused at startup.
+  **What to do:** nothing; the key is opt-in. Set it only for a program that genuinely re-reads
+  its configuration on the signal.
+
+### Changed
+
+- **Removing a Supervisor now deletes its directory**
+  ([ADR-0059](docs/adr/0059-a-removed-supervisor-is-purged.md)). When an applied Supervisor set
+  removes a Supervisor, the Client stops it as before and then deletes
+  `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
+  configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
+  fresh Agent with a new identity; the Server keeps the old Agent's record as disconnected. A
+  program named by an absolute path is the machine's file and stays untouched — only the state
+  directory goes. A directory the Client cannot delete, or one orphaned by editing
+  `client.toml` by hand while the Client was down, is reported in the log at startup and never
+  deleted automatically.
+  **What to do:** nothing before the upgrade. Be aware that removing a Supervisor from a Client
+  is now destructive on that host — re-adding it restores service, not history.
+
+- **The OpAMP Protocol Baseline moved to `v0.20.0`** ([PR #385](https://github.com/open-telemetry/opamp-spec/pull/385)).
+  Upstream renamed the `AgentConfigFile` message to `AgentConfigObject` and clarified that an empty
+  configuration-map key is always allowed. This is a **wire-compatible** change — the field numbers
+  and the `config_map` shape are unchanged, so a Server and Client on either version interoperate,
+  and this project already keyed the map by the Configuration name and never rejected an empty one.
+  The vendored schema now lives at `crates/opamp/proto/v0.20.0/`, and the generated Rust type is
+  `opamp::proto::AgentConfigObject`. See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+  **What to do:** nothing — no operator action, and nothing changes on the wire.
+
 ### Fixed
 
 - **The Client stops its Managed Processes cleanly when it updates itself.** The self-update

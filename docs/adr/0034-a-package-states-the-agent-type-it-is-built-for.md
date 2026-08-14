@@ -143,7 +143,7 @@ reported `service.name` equals it.
   matchable at all, and the resolution order (`opampextension`'s `dist.name` → the block's
   `service_name` → the program's file name) that guarantees every Agent this Client presents has one.
 - The Baseline's `AgentDescription`
-  ([`opamp.proto:690`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L690)) — `service.name`
+  ([`opamp.proto:690`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L690)) — `service.name`
   as "a reverse FQDN that uniquely identifies the Agent type", which is the attribute this fit reads
   and the reason it is the right one to read.
 - [OpAMP specification § Packages (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
