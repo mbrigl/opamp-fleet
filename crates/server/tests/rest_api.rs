@@ -455,6 +455,29 @@ async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
 }
 
 #[tokio::test]
+async fn the_ui_fonts_are_served_same_origin() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+
+    // The vendored IBM Plex Sans faces the UI references — no CDN, so the page works offline.
+    for path in ["/fonts/ibm-plex-sans-400.woff2", "/fonts/ibm-plex-sans-600.woff2"] {
+        let font = client
+            .get(url(server.addr, path))
+            .send()
+            .await
+            .expect("get font");
+        assert_eq!(font.status(), 200);
+        assert!(font
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct == "font/woff2"));
+        let bytes = font.bytes().await.expect("bytes");
+        assert_eq!(&bytes[..4], b"wOF2", "a real woff2, not a stub");
+    }
+}
+
+#[tokio::test]
 async fn configurations_survive_a_server_restart() {
     // The store is the persistence: a new AppState over the same directory restores everything.
     let dir = tempfile::tempdir().expect("tempdir");

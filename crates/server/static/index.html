@@ -5,112 +5,148 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpAMP Fleet</title>
     <style>
-      /* Dark by default, after GitKraken: deep desaturated navy surfaces, a teal-green primary,
-         and violet for the one thing that is *selected*. Dark is the ground state rather than the
-         alternative, because that palette is the whole of the look being borrowed — a page that
-         came up light would show none of it. Light is a deliberate switch away, below; the system
-         preference is not consulted, so what an operator last chose is what they get.
+      /* IBM Plex Sans, vendored and served same-origin (the Redoc precedent): the face that
+         carries the Carbon look. `swap` so text is never invisible while it loads. */
+      @font-face {
+        font-family: "IBM Plex Sans";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("/fonts/ibm-plex-sans-400.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "IBM Plex Sans";
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url("/fonts/ibm-plex-sans-600.woff2") format("woff2");
+      }
 
-         The exact values are ours: GitKraken ships its own inside the application
-         (`dark.jsonc-default`) and publishes none, so this is the character, not a copy. */
+      /* Dark by default, after IBM's Carbon Design System: the Gray 100 theme's flat charcoal
+         layers, Carbon blue for the one thing you press, and Carbon purple for the one thing that
+         is *selected*. Dark is the ground state rather than the alternative; light is the Gray 10
+         theme, a deliberate switch away, below. The system preference is not consulted, so what an
+         operator last chose is what they get.
+
+         The values are Carbon v11 tokens (g100 / g10), applied through this page's own semantic
+         names — no Carbon library is involved, only its palette and geometry. */
       :root {
         color-scheme: dark;
-        --bg: #10131c;
-        --panel: #181c28;
-        --border: #252b3a;
-        --border-strong: #333a4e;
-        --text: #e6eaf4;
-        --muted: #8b95ad;
-        --link: #3fd0bb;
-        --primary: #2dd4bf;
-        /* What is legible *on* the primary — bright teal carries dark text, not white. */
-        --primary-fg: #06231f;
-        --primary-hover: #5fe0d0;
+        --bg: #161616;
+        --panel: #262626;
+        --border: #393939;
+        --border-strong: #6f6f6f;
+        --text: #f4f4f4;
+        --muted: #c6c6c6;
+        --link: #78a9ff;
+        --link-hover: #a6c8ff;
+        --primary: #0f62fe;
+        --primary-fg: #ffffff;
+        --primary-hover: #0353e9;
         /* The second accent: what is picked, expanded, or being edited. */
-        --accent: #6f4cf5;
-        --accent-fg: #ffffff;
-        --row-hover: #1c2130;
-        --chip-bg: #222839;
-        --chip-fg: #aab3c8;
-        --ok-bg: #0f7d5f;
-        --ok-fg: #ffffff;
-        --soft-green-bg: #0f2f28;
-        --soft-green-fg: #4fd8ab;
-        --soft-gray-bg: #222839;
-        --soft-gray-fg: #9aa4bb;
-        --soft-amber-bg: #33280f;
-        --soft-amber-fg: #e6b45e;
-        --soft-red-bg: #331a1e;
-        --soft-red-fg: #f2908b;
-        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --accent: #a56eff;
+        --accent-fg: #161616;
+        --row-hover: #333333;
+        --layer-accent: #393939;
+        --field: #393939;
+        --focus: #ffffff;
+        --chip-bg: #525252;
+        --chip-fg: #f4f4f4;
+        --ok-bg: #42be65;
+        /* What is legible *on* the support green — in g100 it is bright and carries dark text. */
+        --ok-fg: #161616;
+        --soft-green-bg: #044317;
+        --soft-green-fg: #6fdc8c;
+        --soft-gray-bg: #525252;
+        --soft-gray-fg: #f4f4f4;
+        --soft-amber-bg: #483700;
+        --soft-amber-fg: #f1c21b;
+        --soft-red-bg: #750e13;
+        --soft-red-fg: #ff8389;
+        --error: #fa4d56;
+        --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
       /* The only other state. Dark needs no rule of its own — :root above *is* dark, so the
          toggle either sets this attribute or removes it. */
       :root[data-theme="light"] {
           color-scheme: light;
-          --bg: #f3f6f9;
+          --bg: #f4f4f4;
           --panel: #ffffff;
-          --border: #e1e6ee;
-          --border-strong: #ccd3e0;
-          --text: #16202e;
-          --muted: #5b6678;
-          --link: #0a7568;
-          --primary: #0b7d70;
+          --border: #e0e0e0;
+          --border-strong: #8d8d8d;
+          --text: #161616;
+          --muted: #525252;
+          --link: #0f62fe;
+          --link-hover: #0043ce;
+          --primary: #0f62fe;
           --primary-fg: #ffffff;
-          --primary-hover: #086158;
-          --accent: #6d4aff;
+          --primary-hover: #0353e9;
+          --accent: #6929c4;
           --accent-fg: #ffffff;
-          --row-hover: #eef7f6;
-          --chip-bg: #eaeef4;
-          --chip-fg: #46516a;
-          --ok-bg: #0c8062;
+          --row-hover: #e8e8e8;
+          --layer-accent: #e0e0e0;
+          --field: #f4f4f4;
+          --focus: #0f62fe;
+          --chip-bg: #e0e0e0;
+          --chip-fg: #161616;
+          --ok-bg: #24a148;
           --ok-fg: #ffffff;
-          --soft-green-bg: #e2f6ef;
-          --soft-green-fg: #0a7259;
-          --soft-gray-bg: #eaeef4;
-          --soft-gray-fg: #54607a;
-          --soft-amber-bg: #fdf3e2;
-          --soft-amber-fg: #8a5d11;
-          --soft-red-bg: #fdecec;
-          --soft-red-fg: #b33227;
+          --soft-green-bg: #a7f0ba;
+          --soft-green-fg: #0e6027;
+          --soft-gray-bg: #e0e0e0;
+          --soft-gray-fg: #161616;
+          --soft-amber-bg: #fcf4d6;
+          --soft-amber-fg: #684e00;
+          --soft-red-bg: #ffd7d9;
+          --soft-red-fg: #a2191f;
+          --error: #da1e28;
         }
 
       * { box-sizing: border-box; }
+      /* Carbon's focus: a 2px ring in the theme's focus color, drawn inward so it survives
+         clipped table cells. Only for keyboard focus — a click should not leave a ring behind. */
+      :focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+      :focus:not(:focus-visible) { outline: none; }
       body {
         margin: 0;
-        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        font: 14px/1.5 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
         background: var(--bg);
         color: var(--text);
       }
       .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 28px 48px; }
 
       .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
-      .page-head h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+      /* Carbon headings are light, not bold — heading-04 is 28px at regular weight. */
+      .page-head h1 { margin: 0; font-size: 28px; font-weight: 400; }
       .page-head p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
 
+      /* Carbon buttons: rectangular, regular weight, the "sm" 32px height for this dense UI. */
       .btn {
-        border: 0; border-radius: 8px; padding: 9px 16px;
-        font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+        border: 0; border-radius: 0; height: 32px; padding: 0 16px;
+        font-size: 14px; font-weight: 400; cursor: pointer; white-space: nowrap;
       }
       .btn-primary { background: var(--primary); color: var(--primary-fg); }
       .btn-primary:hover { background: var(--primary-hover); }
+      .btn-primary:active { background: #002d9c; }
+      /* Reads as Carbon's tertiary/ghost: transparent with a strong border. */
       .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
       .btn-ghost:hover { background: var(--row-hover); }
       /* A row-sized button: the rollout act lives on the Set's table row. */
-      .btn-sm { padding: 4px 12px; font-size: 12px; }
+      .btn-sm { height: 24px; padding: 0 12px; font-size: 12px; }
 
-      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 0; }
 
       /* Tabs: the three managements — Agents, Packages, Configurations — one on screen at a time.
-         The active tab's underline is the primary, because the tab bar is where the next press
-         lands; violet stays reserved for what is selected *within* a section. */
+         Carbon line tabs: a 2px bottom border carries selection in the primary blue, because the
+         tab bar is where the next press lands; purple stays reserved for what is selected
+         *within* a section. */
       .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
       .tab {
-        border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600;
-        padding: 10px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+        border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 400;
+        height: 40px; padding: 0 16px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
       }
-      .tab:hover { color: var(--text); }
-      .tab.active { color: var(--text); border-bottom-color: var(--primary); }
+      .tab:hover { color: var(--text); border-bottom-color: var(--border-strong); }
+      .tab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--primary); }
       .tab .num { margin-left: 7px; }
       .tab-panel { display: none; }
       .tab-panel.active { display: block; }
@@ -119,9 +155,11 @@
       .config { padding: 16px; margin-bottom: 20px; }
       .config h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
       .config-fields { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+      /* Carbon text inputs: a filled field with only a bottom border, square corners. */
       .config-fields input {
-        flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--border-strong);
-        border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px;
+        flex: 1; min-width: 220px; height: 32px; padding: 0 16px;
+        border: none; border-bottom: 1px solid var(--border-strong);
+        border-radius: 0; background: var(--field); color: var(--text); font-size: 13px;
         font-family: var(--mono);
       }
       .config-fields input::placeholder { color: var(--muted); }
@@ -129,8 +167,8 @@
       .config-fields input.narrow { flex: 0 1 190px; min-width: 150px; }
       /* A field the action refuses to run without. Marked only while it is empty — once it holds
          a value there is nothing left to point at, and a border that kept shouting would be the
-         same noise as no marking at all. */
-      .config-fields input.required:placeholder-shown { border-color: var(--soft-amber-fg); }
+         same noise as no marking at all. Carbon's support-warning yellow, in both themes. */
+      .config-fields input.required:placeholder-shown { border-bottom-color: #f1c21b; }
       /* A field that stands alone on its line and should not stretch across it — the package name,
          which everything on the lines below is a statement about. */
       .config-fields input.quarter { flex: 0 1 25%; min-width: 180px; }
@@ -139,8 +177,9 @@
       .chip.selected { background: var(--accent); color: var(--accent-fg); }
       .chip.clickable { cursor: pointer; }
       textarea {
-        width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
-        border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
+        width: 100%; min-height: 120px; padding: 11px 16px; border-radius: 0;
+        border: none; border-bottom: 1px solid var(--border-strong);
+        background: var(--field); color: var(--text);
         font-family: var(--mono); font-size: 13px; resize: vertical;
       }
       .config-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
@@ -149,13 +188,14 @@
       /* Filter bar */
       .filters { display: flex; align-items: stretch; gap: 0; padding: 10px; margin-bottom: 16px; }
       .filters .dropdown {
-        display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px;
-        border: 1px solid var(--border-strong); border-radius: 8px; color: var(--muted);
-        font-size: 13px; background: var(--panel); white-space: nowrap;
+        display: inline-flex; align-items: center; gap: 6px; padding: 0 16px; height: 32px;
+        border: none; border-bottom: 1px solid var(--border-strong); border-radius: 0;
+        color: var(--muted); font-size: 13px; background: var(--field); white-space: nowrap;
       }
       .filters input {
-        flex: 1; margin-left: 10px; padding: 8px 12px; border: 1px solid var(--border-strong);
-        border-radius: 8px; background: var(--panel); color: var(--text); font-size: 13px;
+        flex: 1; margin-left: 10px; height: 32px; padding: 0 16px;
+        border: none; border-bottom: 1px solid var(--border-strong); border-radius: 0;
+        background: var(--field); color: var(--text); font-size: 13px;
         font-family: var(--mono);
       }
       .filters input::placeholder { color: var(--muted); font-family: var(--mono); }
@@ -168,24 +208,36 @@
          elastic (Operating System is px too — its values repeat from a small set). The wrap's
          overflow-x stays as the fallback for windows too narrow for any division. */
       table { width: 100%; border-collapse: collapse; font-size: 13.5px; table-layout: fixed; }
-      th[data-key="name"] { width: 16%; }
-      th[data-key="version"] { width: 70px; }
-      th[data-key="os"] { width: 130px; }
-      th.col-network { width: 136px; }
-      th[data-key="config"] { width: 110px; }
+      th[data-key="name"] { width: 15%; }
+      th[data-key="version"] { width: 64px; }
+      th[data-key="os"] { width: 114px; }
+      th.col-network { width: 128px; }
+      th[data-key="config"] { width: 102px; }
       th[data-key="seq"] { width: 50px; }
       th[data-key="seen"] { width: 88px; }
+      /* Sized for its widest verdict — the Unhealthy pill — plus the cells' padding; the red
+         detail line under the pill wraps within the same width. */
+      th[data-key="health"] { width: 122px; }
+      /* Rollout, the seventh column: room for an assignment chip and a waiting pill whole.
+         Effective config is then the one elastic column left, and it truncates gracefully —
+         its cell is a one-line peek at a document that opens in the dialog anyway. */
+      #head-row th:nth-child(7) { width: 120px; }
+      /* Carbon data-table headers: full-strength text on the accent layer, not muted small
+         print — the header row reads as a surface of its own. */
+      /* overflow hidden, like the body cells below: under the fixed layout a heading wider than
+         its narrow column is clipped at the cell's edge rather than written across the neighbour. */
       thead th {
-        text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border);
-        color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; user-select: none;
+        text-align: left; padding: 8px 16px; background: var(--layer-accent);
+        color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; user-select: none;
+        overflow: hidden; text-overflow: ellipsis;
       }
       thead th.sortable { cursor: pointer; }
-      thead th.sortable:hover { color: var(--text); }
+      thead th.sortable:hover { background: var(--row-hover); }
       th .arrow { opacity: .55; font-size: 10px; }
       /* overflow hidden: under the fixed layout a value that fits no line of its column — one
          overlong chip, an unbroken token — is clipped at the cell's edge rather than written
          across the neighbour; the full value stays in the cell's own tooltip or details. */
-      tbody td { padding: 13px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
+      tbody td { padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
       tbody tr:last-child td { border-bottom: 0; }
       /* An agent is a row — and, when it is the current one, the rows under it that carry its
          sets. The separator then belongs after the last of them, or the agent would read as
@@ -200,17 +252,21 @@
       tbody tr.detail td { padding-top: 0; padding-bottom: 4px; }
       tbody tr.detail:hover { background: transparent; }
       tbody tr:hover { background: var(--row-hover); }
-      td.chk, th.chk { width: 34px; }
+      /* Wide enough for the checkbox between the cells' own 16px padding — Carbon's selection
+         column is 48px for the same reason. */
+      td.chk, th.chk { width: 48px; }
       input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
 
       .name { color: var(--link); font-weight: 600; text-decoration: none; }
-      .name:hover { text-decoration: underline; }
+      .name:hover { text-decoration: underline; color: var(--link-hover); }
       .sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 2px; }
       /* The UID is long and rarely read, but must be selectable when it is: one line, its own text
          selection, and a size that keeps it under the name rather than beside it. */
       .uid { font-size: 11px; opacity: 0.75; white-space: nowrap; user-select: all; overflow: hidden; text-overflow: ellipsis; }
 
-      .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      /* Carbon tags: fully rounded, regular weight — the color pair does the talking. Capped at
+         the cell so a pill never runs under the clipping edge with its rounding cut off. */
+      .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 400; white-space: nowrap; max-width: 100%; overflow: hidden; }
       /* The ✕ riding inside the Disconnected badge: a small solid disc in the badge's own colors
          inverted, so it reads as a control rather than dissolving into the label beside it. */
       .pill .forget-btn {
@@ -237,15 +293,19 @@
       .cfg.cfg-open:hover { color: var(--text); }
       /* The full effective configuration is a document, not a cell: the truncated column opens it
          whole in a dialog, where it scrolls inside its own box. */
-      .cfg-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; padding: 16px 18px; width: min(760px, 92vw); }
-      .cfg-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+      /* Carbon modal: a square panel over the Carbon overlay — the page's charcoal at 70%. */
+      .cfg-dialog { background: var(--panel); color: var(--text); border: none; border-radius: 0; padding: 16px 18px; width: min(760px, 92vw); }
+      .cfg-dialog::backdrop { background: rgba(22, 22, 22, 0.7); }
       .cfg-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
-      .cfg-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+      .cfg-dialog-head strong { font-size: 20px; font-weight: 400; }
+      .cfg-full { margin: 0; padding: 8px 16px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: none; border-radius: 0; background: var(--field); }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
-      .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+      /* inline-block with a cap, so a chip wider than its cell truncates inside its own rounded
+         edge instead of being cut mid-shape by the cell. */
+      .chip { display: inline-block; background: var(--chip-bg); color: var(--chip-fg); border-radius: 999px; padding: 2px 10px; font-size: 12px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
       .empty { padding: 40px 0; text-align: center; color: var(--muted); }
-      .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }
+      .err { color: var(--error); font-size: 12px; margin-top: 3px; }
     </style>
     <script>
       // Before the first paint, or a stored choice of light would show dark for a frame and then
@@ -578,14 +638,18 @@
       // what the connection carries is actually running. A Supervisor whose Managed Process
       // will not start is exactly the case that needs the split: its row reads Connected,
       // truthfully — the Supervisor lives — and only the health says the process does not.
-      // The red pill wears the Agent's own status string ("no process installed", …): the
-      // Baseline defines no status values, so the Agent's words are the most an operator can
-      // be told. Gray when no health was ever reported — absence of a report is not a finding,
-      // and a Foreign Agent that never promised ReportsHealth must not read as broken.
+      // The pill is the verdict, sized like its green sibling; the Agent's own words — the
+      // status string ("no process installed", …) and the error — go in the red line under it,
+      // where they can wrap. In the pill they would truncate to noise: the Health column is
+      // narrow, and "not …" reads as a rendering bug, not a finding. Gray when no health was
+      // ever reported — absence of a report is not a finding, and a Foreign Agent that never
+      // promised ReportsHealth must not read as broken.
       function healthPill(a) {
         if (a.healthy) return `<span class="pill green">Healthy</span>`;
-        if (a.health_status || a.health_error)
-          return `<span class="pill red">${esc(a.health_status) || "Unhealthy"}</span>${a.health_error ? `<div class="err">${esc(a.health_error)}</div>` : ""}`;
+        if (a.health_status || a.health_error) {
+          const detail = [a.health_status, a.health_error].filter(Boolean).join(" — ");
+          return `<span class="pill red" title="${esc(detail)}">Unhealthy</span><div class="err">${esc(detail)}</div>`;
+        }
         return `<span class="pill gray">—</span>`;
       }
       function configPill(a) {

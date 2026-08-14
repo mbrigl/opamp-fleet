@@ -85,6 +85,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/v1/docs", get(docs))
     .route("/api/v1/docs/redoc.js", get(redoc_js))
     .route("/", get(index))
+    .route("/fonts/ibm-plex-sans-400.woff2", get(plex_sans_400))
+    .route("/fonts/ibm-plex-sans-600.woff2", get(plex_sans_600))
     .with_state(state)
 }
 
@@ -103,6 +105,27 @@ async fn redoc_js() -> Response {
     (
         [(header::CONTENT_TYPE, "application/javascript")],
         include_str!("../static/redoc.standalone.js"),
+    )
+        .into_response()
+}
+
+/// The vendored IBM Plex Sans faces the UI's Carbon styling asks for, served same-origin so the
+/// page needs no CDN. Immutable: a changed face would ship under a new binary anyway.
+async fn plex_sans_400() -> Response {
+    font(include_bytes!("../static/fonts/ibm-plex-sans-400.woff2"))
+}
+
+async fn plex_sans_600() -> Response {
+    font(include_bytes!("../static/fonts/ibm-plex-sans-600.woff2"))
+}
+
+fn font(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
     )
         .into_response()
 }
