@@ -1,6 +1,6 @@
-# Minimal test Configuration for the "otelcol" supervisor example in config/client.toml — an
-# otelcol-contrib WITH the opampextension reporting into the Supervisor Endpoint on port 4321.
-# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-conf" (ADR-0012).
+# Minimal test Configuration for the "otelcol-contrib" supervisor example in config/client.toml —
+# an otelcol-contrib WITH the opampextension reporting into the Supervisor Endpoint on port 4321.
+# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-contrib-conf" (ADR-0012).
 
 extensions:
   opamp:
@@ -14,7 +14,9 @@ receivers:
   otlp:
     protocols:
       http:
-        endpoint: 127.0.0.1:4318
+        # Set by the [supervisor.env] example in config/client.toml; the value after :- is
+        # the fallback when that table stays commented out.
+        endpoint: ${env:OTLP_HTTP_ENDPOINT:-127.0.0.1:4318}
 
 exporters:
   debug: {}
