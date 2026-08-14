@@ -61,24 +61,24 @@ no configuration file at all, because every setting has a default.
 3. **Open the UI** at <http://127.0.0.1:4320/>. The Agent is listed as *Connected*, with the
    attributes it reported.
 
-4. **Create and publish a Configuration.** In the UI, press **Configurations**, give it a name,
+4. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
    leave the Selector empty (which targets every Agent), enter the configuration text, save — and
-   then press **Publish**, because saving only stores a draft; publishing is what reaches the
-   fleet. The same two steps over the API:
+   then press **Roll out to all matching**, because saving only stores; the rollout act is what
+   reaches the fleet. The same two steps over the API:
 
    ```console
    $ curl -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {}, "body": "receivers: {}"}' \
           http://127.0.0.1:4320/api/v1/configurations/base
-   $ curl -X PUT -H 'Content-Type: application/json' \
-          -d '{"published": true}' \
-          http://127.0.0.1:4320/api/v1/configurations/base/publication
+   $ curl -X POST http://127.0.0.1:4320/api/v1/configurations/base/rollout
    ```
 
 5. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its
    next poll. It stores the configuration, reports it **Applied** with the matching hash, and its
-   effective configuration appears in the fleet table. Re-publishing the same Configuration sends
-   nothing — every push is gated on a content hash.
+   effective configuration appears in the fleet table. Rolling the same Configuration out again
+   sends nothing — every push is gated on a content hash. An Agent that connects *later* is not
+   changed by the earlier act: its row on the Agents tab shows the Configuration waiting, with a
+   **roll out** control of its own.
 
 From here, [Server](server.md) covers targeting a subset of the fleet and distributing software, and
 [Client](client.md) covers putting a real Collector or a Foreign Agent under management.

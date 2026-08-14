@@ -490,7 +490,7 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
   the endpoint, the credential, the state directory stay the host's, and can never arrive over
-  the wire. You may publish a full `client.toml`-shaped document; exactly its supervisor half
+  the wire. You may roll out a full `client.toml`-shaped document; exactly its supervisor half
   takes effect. A duplicate `name` fails the offer, as it would fail the file.
 - **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
   merged file is written, changed and added ones are started from it. An unchanged Supervisor's
@@ -508,12 +508,12 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   once the file is written and the starts are issued — or `FAILED` with the reason when the
   offer does not parse, a block does not validate against this host's globals, or the write
   fails (then nothing is applied and the running set stays in force). A body that is not TOML —
-  say, a Collector YAML published fleet-wide with no type — is refused the same way, which is
+  say, a Collector YAML rolled out fleet-wide with no type — is refused the same way, which is
   one more reason to state whom a Configuration is for.
 
-A Client whose Server never publishes such a Configuration runs its locally written blocks
+A Client whose Server never rolls such a Configuration out runs its locally written blocks
 exactly as before. Note that once one applied, the Server's set is authoritative: a later local
-edit to the blocks stands only until the next publication overwrites it.
+edit to the blocks stands only until the next rollout act overwrites it.
 
 ### Keys every block accepts
 
