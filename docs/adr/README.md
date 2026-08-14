@@ -88,4 +88,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟢 accepted |
 | [0058](0058-package-rollback-retention-and-no-restart-loop.md) | A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion | 🟢 accepted |
 | [0059](0059-a-removed-supervisor-is-purged.md) | A removed Supervisor is purged — its Managed Process stops and its directory goes with it | 🟢 accepted |
+| [0060](0060-unified-supervisor-lifecycle-port.md) | One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin | 🟡 proposed |
 
