@@ -22,12 +22,14 @@ a service.
 
 ## What the Server does
 
-- **Distributes Configurations to the Agents a Selector names**, and only when what the
-  Agent reports differs from what it should run — every push is gated on a content hash.
+- **Distributes Configurations to the Agents a Selector names — when you say so**: saving stores,
+  an explicit rollout act releases, and every push is gated on a content hash so nothing the
+  Agent already runs is sent again.
 - **Tracks the fleet**: which Agents exist, what they report, whether they are connected, healthy,
   and in sync, which Configurations match them, and which packages they have installed.
-- **Distributes packages**: an uploaded artifact, or a reference to one hosted elsewhere,
-  aimed at part of the fleet by Selector, with one step of rollback history.
+- **Distributes packages**: versioned Sets of uploaded artifacts, or references to ones hosted
+  elsewhere, aimed at part of the fleet by Selector — released only by an explicit rollout act,
+  and rolled back by rolling the older version out again.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
   command.
 - **Offers new connection settings**: a credential, a heartbeat interval, or an entirely
@@ -221,13 +223,18 @@ A **Configuration** is a name, a body of text, an optional **Agent type**, an op
 digits, and `-`, not starting or ending with `-`, and not a Windows reserved device name (`con`,
 `nul`, `com1`, …).
 
-**Saving never distributes**. `PUT` stores a **draft** — complete, aimed, and offered
-to nobody. Releasing it is its own act, `PUT …/publication` with `{"published": true}`, which
-promotes the draft as one snapshot; editing a published Configuration stages the change the same
-way (the fleet keeps the published revision, and the API answers `pending_changes: true`) until
-the next publication. `{"published": false}` retracts — and unlike retracting a package, that is
-**not** inert: the entry leaves every composed config map, matching Agents apply the removal and
-restart; only an Agent left matching nothing keeps running what it runs.
+**Saving never distributes**. `PUT` stores the Configuration — complete, aimed, and reaching
+nobody. Distribution is a **rollout act**, and there are two of the same meaning:
+`POST …/rollout` releases the saved text to **every Agent it currently fits and aims at**, and
+the per-Agent control on the fleet view releases it to one Agent. Either act pins a snapshot:
+the Agent keeps exactly the revision it was rolled out, so a later edit changes nothing anywhere
+— the fleet view shows the newer save *waiting* per Agent — until the next act. An Agent that
+connects (or starts matching) after the act waits the same way: nothing is distributed by
+enrolment, by a Selector edit, or by a label move.
+
+**Deleting is not inert**: removing a Configuration removes it from every Agent it was rolled out
+to; those Agents apply their config map without the entry and restart. Only an Agent left with
+nothing assigned keeps running what it runs.
 
 **The type decides whom it can reach at all**. `service_name`, when set, must equal
 the `service.name` the Agent reports — compared raw, before the Selector. Unset means every type,
@@ -244,9 +251,7 @@ Agent of the type (or every Agent, if no type is set either).
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "otelcol-contrib", "selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
        http://127.0.0.1:4320/api/v1/configurations/linux-prod
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"published": true}' \
-       http://127.0.0.1:4320/api/v1/configurations/linux-prod/publication
+$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/linux-prod/rollout
 ```
 
 **Several Configurations may match one Agent.** It receives all of them, as named entries in one
@@ -266,15 +271,22 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        http://127.0.0.1:4320/api/v1/configurations/ruleset
 ```
 
-**Nothing is sent twice.** The Server composes the **published** entries an Agent should run,
-hashes them, and compares that hash to what the Agent reports. Equal hashes mean nothing crosses
-the wire. This is why re-publishing an unchanged Configuration is free, and why a role change
-*does* reach the fleet once published: the role is part of the hash.
+**Nothing is sent twice.** The Server composes the entries an Agent was **rolled out**, hashes
+them, and compares that hash to what the Agent reports. Equal hashes mean nothing crosses the
+wire. This is why repeating a rollout act with unchanged content is free, and why a role change
+*does* reach the fleet once rolled out: the role is part of the hash.
 
-**How a change travels.** Publication is the moment it starts — over WebSocket the Server pushes
-it within a second; over plain HTTP it rides the Agent's next poll. The Agent then reports the configuration back as applied or failed,
-with the hash it applied — visible on the Agent's row as `remote_config_status`, `remote_config_error`,
-and `in_sync`.
+**How a change travels.** The rollout act is the moment it starts — over WebSocket the Server
+pushes it within a second; over plain HTTP it rides the Agent's next poll. The Agent then reports
+the configuration back as applied or failed, with the hash it applied — visible on the Agent's
+row as `remote_config_status`, `remote_config_error`, and `in_sync`.
+
+**The fleet view shows what waits.** Per Agent, `GET /api/v1/agents` answers what is rolled out
+to it (`assigned_configurations`, `assigned_packages`) and what could be
+(`pending_configurations`, `pending_packages` — a candidate not yet rolled out, or a newer save
+than the one in force). The Server never acts on the waiting list by itself; the per-Agent
+rollout (`POST /api/v1/agents/{instance_uid}/rollout`, empty body for everything waiting, or
+`{"configuration": "…"}` / `{"package": {…}}` for one resource) is the operator's press.
 
 ## Packages: distributing software
 
@@ -284,57 +296,55 @@ type *and* for the machine it reported — *and* the package's Selector matches 
 accepts packages at all, which is the Client's decision, made by how it names its program
 (see [the Client](client.md#which-programs-take-updates)).
 
-**Nothing is offered before it is published**. Uploading an artifact **stages** a
-package: it is a *draft*, stored and offered to no Agent however complete the rest of it is.
-Releasing it is its own request, and it is what starts the rollout:
+**Nothing is offered before it is rolled out**. Uploading stores a Set — complete, typed, aimed,
+and reaching no Agent however finished it is. Distribution is the **rollout act**, the same act
+Configurations have: the Set's own act releases it to every Agent it fits and its Selector aims
+at, and the per-Agent control on the fleet view releases it to one Agent:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-       http://<server>:4320/api/v1/packages/otelcol/publication
+$ curl -X POST http://<server>:4320/api/v1/packages/otelcol/otelcol-contrib/1.2.3/rollout
 ```
 
-So five platforms' artifacts can be uploaded, typed and aimed, and then released together — and the
-window in which a half-described package is already reaching the fleet does not exist. `false`
-**retracts** it: the offer stops for Agents that have not taken it, and **nothing is uninstalled** —
-an Agent keeps running what it installed, exactly as when a Selector stops matching it.
-
-Two details worth knowing. Replacing the artifact of a package that is *already* published
-distributes on upload, as it always did — that is the ordinary in-place upgrade, and staging one
-means retracting first. And a package stored before this state existed loads **published**, so an
-upgrade of this Server stops no rollout that was already in flight.
+So five platforms' artifacts can be uploaded, aimed, and then released together — and the window
+in which a half-described package is already reaching the fleet does not exist. An Agent that
+enrols later waits, marked pending on its fleet row, for an act of its own. While a Set is rolled
+out to at least one Agent its entries are **frozen** (the fleet is installing those bytes;
+uploads answer `409`); ship a change as the next version, which is a new Set. Deleting a Set
+withdraws it from every Agent it was rolled out to, and **nothing is uninstalled** — an Agent
+keeps running what it installed.
 
 **Fit is mandatory, aim is optional** — and fit runs first, in two steps. A
-package built for another **Agent type** is not a candidate at all: its type is matched against the
+Set built for another **Agent type** is not a candidate at all: its type is matched against the
 `service.name` the Agent reports, so a Promtail artifact never reaches a Collector even with no
-Selector on it. Then every artifact built for another **platform** is dropped. Only what survives
-both is aimed. This is why a package with **no type set reaches nobody**: unset is not "every type",
-it is inert, and the fleet view marks such a package rather than quietly offering it around.
+Selector on it. Then every entry built for another **platform** is dropped. Only what survives
+both is aimed.
 
-**One name, one artifact per platform**. A package name carries a whole release: the
-Linux build, the macOS builds, the Windows build. The Server hands each Agent the one built for
-its `os.type` and `host.arch` and never another, so a mixed fleet is one rollout rather than one
-per platform. **The Selector aims, the type and the platform fit** — which Agents of a kind a
-package is for is your choice, what kind and which bytes are not.
+**A package is a Set**: identified by *name, Agent type, and version* — stated at creation,
+never edited; a new version is a new Set — holding one entry per platform: the Linux build, the
+macOS builds, the Windows build. The Server hands each Agent the entry built for its `os.type`
+and `host.arch` and never another, so a mixed fleet is one rollout rather than one per platform.
+**The Selector aims, the type and the platform fit** — which Agents of a kind a Set is for is
+your choice, what kind and which bytes are not.
 
-**Upload an artifact.** The artifact is the raw request body, its metadata rides the query:
+**Create the Set, then upload its entries.** The identity is the path; the type is compared
+**raw** against the `service.name` the Agents report — there is no canonical set of Agent types,
+so spell it exactly as they do; a typo here is a rollout act that reaches nobody rather than an
+error, and **`targeted_agents` is how you catch it** (the package list in the UI shows
+`⚠ 0`). The artifact is the raw request body of its entry route:
 
 ```console
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/otelcol?version=0.109.0&os=linux&arch=amd64&signature=$sig"
+       "http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64?signature=$sig"
 ```
 
-| Query parameter | Meaning |
-|---|---|
-| `version` | Free-form version string, e.g. a SemVer the Agent can compare. Required. |
-| `os` | The operating system this artifact runs on, as Agents report `os.type`: `linux`, `darwin`, `windows`. **Required.** |
-| `arch` | The architecture, as Agents report `host.arch`: `amd64`, `arm64`. **Required.** |
-| `addon` | `true` marks an addon package. The default is a top-level package — a Managed Process's binary. A Supervisor has no way to apply an addon, so an Agent refuses one with `InstallFailed`. |
-| `signature` | Hex-encoded Ed25519 signature over the artifact, verified by the Agent before it installs. |
-
-Other spellings are accepted and answered canonically, so the tokens off an upstream release's file
-name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean `amd64`, `aarch64`
-means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather than refused —
-the fleet may run a system nobody here anticipated.
+The create body takes `{"selector": {…}, "addon": true|false}` — an addon marks content a
+Supervisor applies beside the program; the default is a top-level package, a Managed Process's
+binary. Platform spellings are accepted and stored canonically, so the tokens off an upstream
+release's file name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean
+`amd64`, `aarch64` means `arm64`. An `os`/`arch` this Server has never heard of is stored as
+given rather than refused — the fleet may run a system nobody here anticipated.
 
 **Or reference an artifact hosted elsewhere**. The Server stores the address and your
 SHA-256, offers them verbatim, and never downloads the artifact — so the hash, and the signature
@@ -342,9 +352,8 @@ when one is configured, is the whole of the protection:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…",
-            "version": "0.109.0", "os": "linux", "arch": "amd64"}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/source
+       -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…"}' \
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64/source
 ```
 
 The URL is probed once, to catch a typo while you are still looking at the screen. A definitive
@@ -352,60 +361,43 @@ refusal from the source (a `4xx`) fails the request; a source this Server cannot
 because the Server is not in the download path and its reachability says nothing about the Agents'.
 A private source can be given headers to send.
 
-**Type it**. This is the step that arms the package — until it is taken, the package sits
-in the store and is offered to nobody:
-
-```console
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "otelcol-contrib"}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/type
-```
-
-The value is compared **raw** against the `service.name` the Agents report — there is no canonical
-set of Agent types to normalise against, so spell it exactly as they do; a typo here is a rollout
-that never starts rather than an error. **`targeted_agents` on the package is how you catch that**:
-it says how many Agents the package reaches as things stand, and the package list in the UI shows
-`⚠ reaches no agent` at zero. Read it off a fleet row, or off the `service_name` a
-`[[supervisor]]` block sets. Like the Selector it belongs to the *name*, so it covers every platform
-of the package at once.
-
-**Aim it**. Without a Selector a package reaches every Agent **of its type** that accepts
-packages:
+**Aim it**. Without a Selector a rollout act reaches every Agent **of the Set's type** that
+accepts packages:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/selector
+       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/selector
 ```
 
-A Selector aims **every** platform of that package at once, because the aim belongs to the name.
+A Selector aims **every** platform of that Set at once, because the aim belongs to the Set — and
+editing it distributes nothing: it decides whom the *next* rollout act reaches.
 
-Where several packages match one Agent, **the most specific Selector wins** — a fleet-wide package
-plus a narrower one is how a rollout starts on part of the fleet. Two equally specific Selectors
-reaching the same Agent leave it with no offer at all, and the fleet view says so on that Agent, in
-`package_conflict`. Two platforms of *one* package can never collide this way: only one of them is
-ever a candidate.
+Where several Sets of one name would reach an Agent, **the most specific Selector wins the
+proposal**, and among equally specific ones the greater version — a fleet-wide Set plus a
+narrower canary one is how a rollout starts on part of the fleet. Two equally specific Selectors
+of *different* names reaching the same Agent leave it with no proposal at all, and the fleet view
+says so on that Agent, in `package_conflict`.
 
 **An Agent that reports no `service.name`, `os.type`, or `host.arch` is offered nothing** — there is
 no artifact that can be known to be meant for it or to run on it, and guessing is how a fleet-wide
 outage starts. Every Client this project ships reports all three; a foreign OpAMP client that
 reports no type says so on its fleet row rather than leaving you with a rollout that never starts.
 
-**One step back**. Replacing an artifact keeps its predecessor, and a rollback re-offers
-it — an ordinary offer naming an older artifact. The Selector is untouched. An artifact that has
-replaced nothing answers `409`:
+**The rollback is the same act, pointed at the older version**. Versions are kept side by side —
+a new version is a new Set — so taking a bad one back is rolling the previous version out again:
 
 ```console
-$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/rollback?os=linux&arch=amd64"
+$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/1.2.2/rollout"
 ```
 
-The rollback names **one platform**, and moves only that one. A canary that reached Linux and went
-badly is taken back on Linux; rolling the whole name back would push every other platform to a
-predecessor it never left.
+It reaches exactly the Agents the Set fits and aims at, which is also how a rollback can be
+tried on one Agent first — the per-Agent rollout accepts any version that fits, not only the
+newest.
 
-**Deleting.** `DELETE /api/v1/packages/otelcol` removes the package and every platform's artifact;
-adding `?os=…&arch=…` removes just that one. Taking the last artifact away takes the package with
-it — a name with nothing to offer is not a package.
+**Deleting.** `DELETE /api/v1/packages/otelcol/otelcol-contrib/0.109.0` removes the Set — its
+entries, artifacts, metadata, and every per-Agent assignment that referenced it; the entry route
+with a platform removes just that one entry. Nothing is uninstalled either way.
 
 **Building and signing**. The helper that ships with the Client writes the
 artifact, hashes it, and signs it:
@@ -440,20 +432,22 @@ show.
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout rings without touching the host](#labels-rollout-rings-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
-| `GET /api/v1/configurations` | Every Configuration: its draft, plus `published` and `pending_changes`. |
+| `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act. Empty body: everything the fleet view shows as waiting for this Agent. `{"configuration": "…"}` or `{"package": {"name": "…", "agent_type": "…", "version": "…"}}`: that one resource — any version that fits, which is how a rollback is tried on one Agent first. |
+| `GET /api/v1/configurations` | Every Configuration — the saved revision each. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
-| `PUT /api/v1/configurations/{name}` | Create it, or replace its draft. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
-| `PUT /api/v1/configurations/{name}/publication` | Body `{"published": true}` releases the draft to the fleet as one snapshot — the moment a change starts travelling. `{"published": false}` retracts: the entry leaves every composed config map, which matching Agents apply. |
-| `DELETE /api/v1/configurations/{name}` | Remove it. Agents that matched it stop matching; they keep running what they last applied. |
-| `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
-| `PUT /api/v1/packages/{name}` | Upload an artifact. See above for the query parameters. |
-| `PUT /api/v1/packages/{name}/source` | Point the package at an artifact hosted elsewhere. |
-| `PUT /api/v1/packages/{name}/type` | Set the Agent type it is built for. Body: `{"service_name": "…"}`. Required before it is offered to anyone; `400` on an empty value. |
-| `PUT /api/v1/packages/{name}/selector` | Set which Agents of that type it is offered to. |
-| `PUT /api/v1/packages/{name}/publication` | Release the package to the fleet, or withdraw it. Body: `{"published": true\|false}`. An upload stages a package as a draft; this is what starts the rollout, and withdrawing uninstalls nothing. |
-| `POST /api/v1/packages/{name}/rollback` | Re-offer the version this package replaced. `409` when there is none. |
-| `DELETE /api/v1/packages/{name}` | Remove it from the store. |
-| `GET /api/v1/packages/{name}/file` | The artifact bytes — where an offered `download_url` points. |
+| `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
+| `POST /api/v1/configurations/{name}/rollout` | Roll the saved revision out to every Agent it currently fits and aims at — the moment a change starts travelling. Answers how many Agents were assigned. |
+| `DELETE /api/v1/configurations/{name}` | Remove it — from every Agent it was rolled out to as well, which those Agents apply. |
+| `GET /api/v1/packages` | Every stored Set (never the artifact bytes), with `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
+| `PUT /api/v1/packages/{name}/{agent_type}/{version}` | Create a Set, or update its Selector and kind. Body: `{"selector": {…}, "addon": false}`. **Distributes nothing**. |
+| `GET /api/v1/packages/{name}/{agent_type}/{version}` | One Set. |
+| `PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body; optional `?signature=<hex>`). `409` while the Set is rolled out to an Agent. |
+| `PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "signature": "…", "headers": {…}}`. |
+| `DELETE /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Set is rolled out to an Agent. |
+| `PUT /api/v1/packages/{name}/{agent_type}/{version}/selector` | Set whom a rollout act would release it to. Never distributes. |
+| `POST /api/v1/packages/{name}/{agent_type}/{version}/rollout` | Roll the Set out to every Agent it fits and its Selector aims at — the moment a rollout starts. An older version here is the rollback. `409` while the Set holds no entries. |
+| `DELETE /api/v1/packages/{name}/{agent_type}/{version}` | Remove the Set — and every per-Agent assignment that referenced it. Uninstalls nothing. |
+| `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 
@@ -480,9 +474,9 @@ It counts the fleet **as reported so far**, which means a package staged ahead o
 for legitimately reads `0`. That is why it is a number to read rather than something the Server
 refuses to store.
 
-**A draft is counted as if it were published**, because checking the aim of a rollout before
-starting it is what staging is for. So the number answers "whom *would* this reach"; whether the
-fleet may have it yet is the `published` field beside it, and the package view shows both.
+The number answers "whom would a rollout act reach *now*" — checking the aim before the act is
+what it is for. Which Agents actually run the Set is a fact about the Agents, answered per row by
+`GET /api/v1/agents` (`assigned_packages`, `pending_packages`).
 
 **What a fleet row tells you.** `GET /api/v1/agents` is what the UI renders, and the fields worth
 knowing by name:

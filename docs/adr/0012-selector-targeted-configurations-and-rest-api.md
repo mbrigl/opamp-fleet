@@ -280,7 +280,7 @@ equality against the `service.name` an Agent reports — before the Selector, an
   The consistent mirror, and the starting assumption. Rejected: it abolishes the fleet-wide
   degenerate case of the Selector semantics and cross-type supplementary content, both legitimate
   and in use; and it needs a migration in which every existing Configuration goes silently inert on
-  upgrade — the shape ADR-0028 point 4 refused for a state that is not unsafe. For packages the
+  upgrade — the migration shape refused here for a state that is not unsafe. For packages the
   unset state hid an outage; here it is a feature with a name.
 - **Require the type only for top-level Configurations and not for `supplementary` ones.**
   Splits the safety rule along the content role, which the Server treats as opaque beyond one

@@ -12,7 +12,7 @@ Everything those ADRs *guarantee* survives and is strengthened: the platform voc
 canonicalisation, and mandatory platform fit (ADR-0017 points 8–12), the type fit and its raw
 comparison (ADR-0017 points 15, 17, 18), file-or-source entries
 ([ADR-0017](0017-package-artifacts.md)), and the publication gate
-([ADR-0028](0028-a-package-is-published-before-it-is-offered.md)) — whose one asymmetry this
+([ADR-0028](0028-a-rollout-is-an-explicit-act.md)) — whose one asymmetry this
 decision removes.
 
 ## Context
@@ -329,7 +329,7 @@ version)**, immutable in its bytes while published, and offered to nobody until 
 - This repository: [ADR-0017](0017-package-artifacts.md) (file-or-source entries, kept),
   [ADR-0009](0009-version-baking-comparison-and-display.md) (the version
   comparison point 8 ranks by), [ADR-0017](0017-package-artifacts.md) (structure superseded,
-  guarantees kept), [ADR-0028](0028-a-package-is-published-before-it-is-offered.md) (the gate,
+  guarantees kept), [ADR-0028](0028-a-rollout-is-an-explicit-act.md) (the gate,
   kept and closed).
 
 ## Consequences

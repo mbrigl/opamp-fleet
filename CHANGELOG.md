@@ -17,6 +17,24 @@ carries a date once its tag exists.
 
 ## [0.3.0]
 
+### Changed
+
+- **Publication is gone; a rollout is an explicit act, per Agent or per resource**
+  ([ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)). Saving a Configuration or a
+  package Set never distributes anything, and there is no draft/published state any more: what an
+  Agent runs is its **assignment**, written only by a rollout act — `POST
+  /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
+  for every currently matching Agent, or `POST /api/v1/agents/{uid}/rollout` for one. An act pins
+  the content as of that press; later saves wait, visible per Agent in the fleet view
+  (`pending_configurations`, `pending_packages`), as does an Agent that enrols or starts matching
+  later. Selector edits and label moves no longer distribute either. Deleting a Configuration or
+  a Set removes it from every assigned Agent. Package rollback is the same act pointed at the
+  older version.
+  **What to do:** replace every `PUT …/publication` call with the matching `POST …/rollout`;
+  after adding hosts, press the resource's rollout (or the new host's) — nothing reaches them by
+  itself any more. Existing stores migrate as "rolled out to what was published", so a running
+  fleet is not changed by the upgrade. The `published`/`pending_changes` fields left the API.
+
 ### Added
 
 - **A `command` Supervisor can reload instead of restart**
@@ -134,7 +152,7 @@ carries a date once its tag exists.
 
 ### Changed
 
-- **Saving a Configuration no longer distributes it** ([ADR-0028](docs/adr/0028-a-package-is-published-before-it-is-offered.md)).
+- **Saving a Configuration no longer distributes it** ([ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)).
   `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
   `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
   published Configuration stages the change (`pending_changes: true`) until the next publication.
@@ -516,7 +534,7 @@ carries a date once its tag exists.
 
   The package itself goes when its last artifact does, so nothing is left behind either. Deleting
   uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
-  ([ADR-0028](docs/adr/0028-a-package-is-published-before-it-is-offered.md)).
+  ([ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)).
 
   `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
   sends the `?os=…&arch=…` form of it that
@@ -561,7 +579,7 @@ carries a date once its tag exists.
 ### Changed
 
 - **A package is published before it is offered — uploading only stages it**
-  ([ADR-0028](docs/adr/0028-a-package-is-published-before-it-is-offered.md)). A newly created
+  ([ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)). A newly created
   package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
   no Agent until it is released.
 
@@ -647,7 +665,7 @@ carries a date once its tag exists.
   again, and **the host is updated back to the published version.** That is the point — the Server
   decides what the fleet runs. To keep a host on an older Client, retract the package first
   (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
-  [ADR-0028](docs/adr/0028-a-package-is-published-before-it-is-offered.md)); retracting uninstalls
+  [ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)); retracting uninstalls
   nothing, so the host stays where it is.
 
   This is the Client's own package only. A Managed Process's package record is unchanged: only the
