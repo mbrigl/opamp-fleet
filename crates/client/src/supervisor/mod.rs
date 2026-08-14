@@ -236,6 +236,11 @@ pub fn start_supervisor(
         install,
         stop_timeout: Duration::from_secs(block.stop_timeout_secs),
         apply_grace: Duration::from_secs(block.apply_grace_secs),
+        retain_previous: Duration::from_secs(
+            block
+                .retain_previous_secs
+                .unwrap_or(config.updates.retain_previous_secs),
+        ),
         archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
         settings,
         events: EventSender::new(index, event_tx.clone()),
