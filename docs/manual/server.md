@@ -22,16 +22,15 @@ a service.
 
 ## What the Server does
 
-- **Distributes Configurations to the Agents a Selector names** (ADR-0012), and only when what the
+- **Distributes Configurations to the Agents a Selector names**, and only when what the
   Agent reports differs from what it should run — every push is gated on a content hash.
 - **Tracks the fleet**: which Agents exist, what they report, whether they are connected, healthy,
   and in sync, which Configurations match them, and which packages they have installed.
-- **Distributes packages** (ADR-0015): an uploaded artifact, or a reference to one hosted elsewhere
-  (ADR-0018), aimed at part of the fleet by Selector (ADR-0017), with one step of rollback history
-  (ADR-0019).
+- **Distributes packages**: an uploaded artifact, or a reference to one hosted elsewhere,
+  aimed at part of the fleet by Selector, with one step of rollback history.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
   command.
-- **Offers new connection settings** (ADR-0014): a credential, a heartbeat interval, or an entirely
+- **Offers new connection settings**: a credential, a heartbeat interval, or an entirely
   different endpoint, which each Agent verifies by connecting before it switches.
 - **Serves one listener for everything**: OpAMP over both transports, the REST API, the OpenAPI
   document and its docs page, and a rudimentary UI.
@@ -46,7 +45,7 @@ $ server --version
 | Flag | Meaning |
 |---|---|
 | `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory; a missing file is not an error, since every setting has a default. |
-| `--version` | Print the version and exit — the full string, `0.3.0+<commit>` for a release and `0.3.0-dev+<commit>` for a build on the way to one (ADR-0009). |
+| `--version` | Print the version and exit — the full string, `1.2.3+<commit>` for a release and `1.2.3-dev+<commit>` for a build on the way to one. |
 
 Any other argument prints usage and exits with status 2. Logging goes to stderr and is controlled by
 the `RUST_LOG` environment variable (default `info`); everything else is in the configuration file.
@@ -54,11 +53,11 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
 
-Everything is served on the single configured listener (ADR-0005):
+Everything is served on the single configured listener:
 
 | Path | What it is |
 |---|---|
-| `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both (ADR-0007). |
+| `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both. |
 | `/api/v1/…` | The REST API. |
 | `/api/v1/openapi.json` | The OpenAPI document — the contract to generate a client from. |
 | `/api/v1/docs` | Interactive API documentation (Redoc, vendored and served from this origin, so it works offline). |
@@ -78,12 +77,12 @@ optional and shown below with its default; an unknown key fails startup rather t
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. |
-| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale** (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
+| `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 | `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset for the ordinary single-listener case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when downloads must go through a different host. |
 
 ### `[tls]`
 
-Present means the listener serves HTTPS and WSS instead of plain HTTP and WS (ADR-0007).
+Present means the listener serves HTTPS and WSS instead of plain HTTP and WS.
 `cert_file` and `key_file` are required together; `client_ca_file` is optional and turns on mutual
 TLS (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 
@@ -144,7 +143,7 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 
 ## Mutual TLS: proving who is on the connection
 
-`[tls]` gains an optional `client_ca_file` (ADR-0035). With it set, every request to `/v1/opamp`
+`[tls]` gains an optional `client_ca_file`. With it set, every request to `/v1/opamp`
 must arrive over a connection carrying a client certificate that bundle verifies:
 
 ```toml
@@ -222,7 +221,7 @@ A **Configuration** is a name, a body of text, an optional **Agent type**, an op
 digits, and `-`, not starting or ending with `-`, and not a Windows reserved device name (`con`,
 `nul`, `com1`, …).
 
-**Saving never distributes** (ADR-0055). `PUT` stores a **draft** — complete, aimed, and offered
+**Saving never distributes**. `PUT` stores a **draft** — complete, aimed, and offered
 to nobody. Releasing it is its own act, `PUT …/publication` with `{"published": true}`, which
 promotes the draft as one snapshot; editing a published Configuration stages the change the same
 way (the fleet keeps the published revision, and the API answers `pending_changes: true`) until
@@ -230,7 +229,7 @@ the next publication. `{"published": false}` retracts — and unlike retracting 
 **not** inert: the entry leaves every composed config map, matching Agents apply the removal and
 restart; only an Agent left matching nothing keeps running what it runs.
 
-**The type decides whom it can reach at all** (ADR-0054). `service_name`, when set, must equal
+**The type decides whom it can reach at all**. `service_name`, when set, must equal
 the `service.name` the Agent reports — compared raw, before the Selector. Unset means every type,
 which for a Collector body is rarely what you want: every Agent a Client presents accepts remote
 configuration, so an untyped fleet-wide body reaches Foreign Agents and the Client's own Agent
@@ -254,7 +253,7 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 config map, and merges them itself. An Agent matching none is left running what it already runs —
 the Server never blanks an Agent by omission.
 
-**The role marks content that is not configuration** (ADR-0016). `role: "supplementary"` means the
+**The role marks content that is not configuration**. `role: "supplementary"` means the
 Managed Process reads this content *by path* — a rule file, a lookup table — so the Client writes it
 into the configuration directory under its own name but never passes it to the process as
 configuration. An unset role means top-level configuration, which is what every Configuration was
@@ -285,7 +284,7 @@ type *and* for the machine it reported — *and* the package's Selector matches 
 accepts packages at all, which is the Client's decision, made by how it names its program
 (see [the Client](client.md#which-programs-take-updates)).
 
-**Nothing is offered before it is published** (ADR-0043). Uploading an artifact **stages** a
+**Nothing is offered before it is published**. Uploading an artifact **stages** a
 package: it is a *draft*, stored and offered to no Agent however complete the rest of it is.
 Releasing it is its own request, and it is what starts the rollout:
 
@@ -304,14 +303,14 @@ distributes on upload, as it always did — that is the ordinary in-place upgrad
 means retracting first. And a package stored before this state existed loads **published**, so an
 upgrade of this Server stops no rollout that was already in flight.
 
-**Fit is mandatory, aim is optional** — and fit runs first, in two steps (ADR-0034, ADR-0031). A
+**Fit is mandatory, aim is optional** — and fit runs first, in two steps. A
 package built for another **Agent type** is not a candidate at all: its type is matched against the
 `service.name` the Agent reports, so a Promtail artifact never reaches a Collector even with no
 Selector on it. Then every artifact built for another **platform** is dropped. Only what survives
 both is aimed. This is why a package with **no type set reaches nobody**: unset is not "every type",
 it is inert, and the fleet view marks such a package rather than quietly offering it around.
 
-**One name, one artifact per platform** (ADR-0031). A package name carries a whole release: the
+**One name, one artifact per platform**. A package name carries a whole release: the
 Linux build, the macOS builds, the Windows build. The Server hands each Agent the one built for
 its `os.type` and `host.arch` and never another, so a mixed fleet is one rollout rather than one
 per platform. **The Selector aims, the type and the platform fit** — which Agents of a kind a
@@ -337,7 +336,7 @@ name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean 
 means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather than refused —
 the fleet may run a system nobody here anticipated.
 
-**Or reference an artifact hosted elsewhere** (ADR-0018). The Server stores the address and your
+**Or reference an artifact hosted elsewhere**. The Server stores the address and your
 SHA-256, offers them verbatim, and never downloads the artifact — so the hash, and the signature
 when one is configured, is the whole of the protection:
 
@@ -353,7 +352,7 @@ refusal from the source (a `4xx`) fails the request; a source this Server cannot
 because the Server is not in the download path and its reachability says nothing about the Agents'.
 A private source can be given headers to send.
 
-**Type it** (ADR-0034). This is the step that arms the package — until it is taken, the package sits
+**Type it**. This is the step that arms the package — until it is taken, the package sits
 in the store and is offered to nobody:
 
 ```console
@@ -370,7 +369,7 @@ it says how many Agents the package reaches as things stand, and the package lis
 `[[supervisor]]` block sets. Like the Selector it belongs to the *name*, so it covers every platform
 of the package at once.
 
-**Aim it** (ADR-0017). Without a Selector a package reaches every Agent **of its type** that accepts
+**Aim it**. Without a Selector a package reaches every Agent **of its type** that accepts
 packages:
 
 ```console
@@ -392,7 +391,7 @@ no artifact that can be known to be meant for it or to run on it, and guessing i
 outage starts. Every Client this project ships reports all three; a foreign OpAMP client that
 reports no type says so on its fleet row rather than leaving you with a rollout that never starts.
 
-**One step back** (ADR-0019). Replacing an artifact keeps its predecessor, and a rollback re-offers
+**One step back**. Replacing an artifact keeps its predecessor, and a rollback re-offers
 it — an ordinary offer naming an older artifact. The Selector is untouched. An artifact that has
 replaced nothing answers `409`:
 
@@ -408,7 +407,7 @@ predecessor it never left.
 adding `?os=…&arch=…` removes just that one. Taking the last artifact away takes the package with
 it — a name with nothing to offer is not a package.
 
-**Building and signing** (ADR-0015, ADR-0018). The helper that ships with the Client writes the
+**Building and signing**. The helper that ships with the Client writes the
 artifact, hashes it, and signs it:
 
 ```console
@@ -443,7 +442,7 @@ show.
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
 | `GET /api/v1/configurations` | Every Configuration: its draft, plus `published` and `pending_changes`. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
-| `PUT /api/v1/configurations/{name}` | Create it, or replace its draft. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing** (ADR-0055). |
+| `PUT /api/v1/configurations/{name}` | Create it, or replace its draft. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
 | `PUT /api/v1/configurations/{name}/publication` | Body `{"published": true}` releases the draft to the fleet as one snapshot — the moment a change starts travelling. `{"published": false}` retracts: the entry leaves every composed config map, which matching Agents apply. |
 | `DELETE /api/v1/configurations/{name}` | Remove it. Agents that matched it stop matching; they keep running what they last applied. |
 | `GET /api/v1/packages` | Every stored package (never the artifact bytes), including the version a rollback would restore and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
@@ -467,9 +466,9 @@ promise a reach the fleet does not get.
 
 **Zero is the number to look for.** A package targets nobody when
 
-- its **Agent type** is unset or misspelled — compared raw, with nothing to catch a typo (ADR-0034);
-- no **artifact** matches a platform any Agent reports (ADR-0031);
-- its **Selector** matches no Agent (ADR-0017); or
+- its **Agent type** is unset or misspelled — compared raw, with nothing to catch a typo;
+- no **artifact** matches a platform any Agent reports;
+- its **Selector** matches no Agent; or
 - two equally specific Selectors reach the same Agents, so the Server refuses to guess and offers
   nothing.
 
@@ -490,10 +489,10 @@ knowing by name:
 
 | Field | Meaning |
 |---|---|
-| `connected`, `stale` | Two facts, not one (ADR-0038). `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away. On plain HTTP there is no socket to close, so `connected` turns true on the first poll and is cleared only by the Agent's `agent_disconnect` on shutdown — a poller that dies without saying goodbye stays `connected` forever, and `stale` is the fact worth reading. |
-| `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one (ADR-0033); it is empty for a foreign OpAMP client that reports none. |
+| `connected`, `stale` | Two facts, not one. `connected` says a connection carrying this Agent is open — behind a Gateway, the *Gateway's*. `stale` says nothing has been heard from the Agent itself for longer than its budget. `connected: true, stale: true` is the gatewayed Agent whose Client went away. On plain HTTP there is no socket to close, so `connected` turns true on the first poll and is cleared only by the Agent's `agent_disconnect` on shutdown — a poller that dies without saying goodbye stays `connected` forever, and `stale` is the fact worth reading. |
+| `instance_uid`, `service_name`, `service_instance_name`, `service_version`, `os` | Identity, as the Agent reports it. `service_name` is the Agent *type* — what it is, shared by every Agent of that kind — and `service_instance_name` is the operator's name for this one; it is empty for a foreign OpAMP client that reports none. |
 | `identifying_attributes`, `non_identifying_attributes` | Everything the Agent reports, and part of what a Selector matches. |
-| `labels`, `shadowed_labels` | The labels you set (ADR-0042), matched by Selectors like a reported attribute. `shadowed_labels` names the ones the Agent's own reports override — set, and matching nothing. |
+| `labels`, `shadowed_labels` | The labels you set, matched by Selectors like a reported attribute. `shadowed_labels` names the ones the Agent's own reports override — set, and matching nothing. |
 | `capabilities` | The capability set this Agent declared — which tells you, for instance, whether it accepts packages. |
 | `matched_configurations`, `desired_hash` | What it should be running. |
 | `remote_config_status`, `remote_config_error`, `in_sync` | What it reports about the last configuration it was sent. |
@@ -510,7 +509,7 @@ attribute a staged rollout actually wants, `rollout = "canary"`, is one you inve
 could only be invented in `[attributes]` in `client.toml`, so moving a host between rings meant
 editing a file **on that host** and restarting it.
 
-**Labels are that attribute, set from here** (ADR-0042):
+**Labels are that attribute, set from here**:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
@@ -519,7 +518,7 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 ```
 
 A label is matched exactly like a reported attribute, by **both** halves of the targeting: the
-Configuration an Agent is sent (ADR-0012) and the package it is offered (ADR-0017). So a canary
+Configuration an Agent is sent and the package it is offered. So a canary
 rollout of a new collector binary is a Selector of `rollout = canary` on the package plus this call
 on the hosts that should get it first — and moving a host out again is the same call with an empty
 map.
@@ -529,7 +528,7 @@ for its next poll.
 
 **A label may not restate an attribute the Agent reports** — that is refused with `409`, naming the
 key. Reported attributes are not annotations: `os.type` and `host.arch` decide which artifact fits
-the machine (ADR-0031) and `service.name` decides which packages fit it at all (ADR-0034). If a
+the machine and `service.name` decides which packages fit it at all. If a
 label could outrank them, a slip here would offer a host a binary built for another one. Where an
 Agent reports something wrong, the fix belongs in that host's `client.toml`, where the wrong value
 comes from.
@@ -550,7 +549,7 @@ it does when two Agents report the same identity — the new identity starts wit
 
 A host that was decommissioned leaves a row behind, and nothing ages it out. `DELETE
 /api/v1/agents/{instance_uid}` — the `✕ forget` action on a fleet row — drops what this Server knows
-about that Agent (ADR-0039).
+about that Agent.
 
 **It does nothing on the machine.** No process is stopped, nothing is uninstalled, and no credential
 is revoked: a credential here proves *fleet membership*, never which Agent is speaking, so there is
@@ -575,7 +574,7 @@ until someone forgets it.
 
 ## Authentication
 
-`[auth]` guards **the OpAMP endpoint only** (ADR-0013). Without the section the endpoint is open;
+`[auth]` guards **the OpAMP endpoint only**. Without the section the endpoint is open;
 with it, every OpAMP request — plain-HTTP `POST` or WebSocket upgrade — needs an `Authorization`
 header matching one of the listed credentials, and anything else is answered `401`.
 
@@ -598,7 +597,7 @@ loopback interface, but it still sends it. Pair `[auth]` with `[tls]` for anythi
 
 ## TLS
 
-`[tls]` turns the single listener into an HTTPS/WSS listener (ADR-0007) — there is no second port,
+`[tls]` turns the single listener into an HTTPS/WSS listener — there is no second port,
 and no plaintext one left open beside it. Clients then use `wss://` or `https://` endpoints, and
 Clients trusting a private CA additionally set `ca_file` in their own `[tls]` section.
 
@@ -607,7 +606,7 @@ see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection).
 
 ## The fleet's own telemetry
 
-`[telemetry_offer]` (ADR-0036) is where the fleet's Clients send their own metrics, logs, and
+`[telemetry_offer]` is where the fleet's Clients send their own metrics, logs, and
 traces. Each signal is independent, and each is offered only to Agents that declare they can report
 it:
 
@@ -639,12 +638,12 @@ Two limits worth knowing before you point this somewhere:
   Agent and reported back, because the stream carries identifying attributes and whatever the Client
   logs. The protocol permits exactly this refusal.
 - **A Collector's internal telemetry does not come this way.** The Client must not touch a Managed
-  Process's configuration (ADR-0011), so what it reports about a Collector is what it can see from
+  Process's configuration, so what it reports about a Collector is what it can see from
   outside. Configure the Collector for its own internals as you would without OpAMP.
 
 ## Moving the fleet: connection settings
 
-`[connection_offer]` (ADR-0014) is how the fleet is moved to a new credential, a new heartbeat
+`[connection_offer]` is how the fleet is moved to a new credential, a new heartbeat
 interval, or a new endpoint without touching every host. The Server compiles the section into one
 hash-gated offer, and every Agent that accepts connection settings gets it, **verifies it by
 actually connecting**, and switches only on success. An Agent that cannot connect with the offered
@@ -666,7 +665,7 @@ them, which is the Server half of the missing mutual-TLS support.
 
 ## What the Server does not do
 
-- **It does not authenticate the REST API or the UI**, by design (ADR-0013) — see above.
+- **It does not authenticate the REST API or the UI**, by design — see above.
 - **It does not throttle.** It honours the protocol's error and retry semantics and answers
   malformed input with `BAD_REQUEST`, but it never tells an Agent to slow down.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;

@@ -20,8 +20,6 @@ Agent gets, the Client decides *whether* it takes one at all).
 - **[`docs/SPECIFICATION.md`](../SPECIFICATION.md)** — the problem, the goals, and the vocabulary.
   Every capitalized term here (Agent, Supervisor, Configuration, Selector, Package, Foreign Agent,
   Managed Process) is defined there.
-- **[`docs/adr/`](../adr/)** — *why* each thing is built the way it is. This manual states the rule
-  and names the ADR; the reasoning stays in the ADR.
 - **[`docs/CONFORMANCE.md`](../CONFORMANCE.md)** — how much of the OpAMP protocol each end
   implements, capability by capability, including what is deliberately missing.
 - **[`CHANGELOG.md`](../../CHANGELOG.md)** — what an upgrade needs edited or moved before it will
@@ -66,7 +64,7 @@ no configuration file at all, because every setting has a default.
 4. **Create and publish a Configuration.** In the UI, press **Configurations**, give it a name,
    leave the Selector empty (which targets every Agent), enter the configuration text, save — and
    then press **Publish**, because saving only stores a draft; publishing is what reaches the
-   fleet (ADR-0055). The same two steps over the API:
+   fleet. The same two steps over the API:
 
    ```console
    $ curl -X PUT -H 'Content-Type: application/json' \
@@ -98,36 +96,36 @@ connection, so the Server's fleet view has more rows than there are hosts.
 `service.namespace` where a deployment uses one. These are what Selectors match on. An attribute the
 host cannot answer is absent rather than empty.
 
-Two of them are easy to confuse, and telling them apart is what aims everything else (ADR-0033):
+Two of them are easy to confuse, and telling them apart is what aims everything else:
 `service.name` is the Agent **type** — `otelcol-contrib`, `promtail`, `opamp-fleet-client` — the
 same value on every host running that kind of agent, while `service.instance.name` is **your** name
 for one Agent, the `[[supervisor]]` block's `name`. Aim at the type to reach every Agent of a kind,
 at the instance name to reach exactly one.
 
-**Configuration and Selector** (ADR-0012). A *Configuration* is a named body of text held by the
+**Configuration and Selector.** A *Configuration* is a named body of text held by the
 Server. Its *Selector* is a set of `key=value` pairs that an Agent's reported attributes must equal
 for it to receive that Configuration; an empty Selector targets every Agent. An Agent matching
 several Configurations receives all of them, as named entries, and merges them itself; an Agent
 matching none is left running what it already runs.
 
-**Role** (ADR-0016). A Configuration may carry the role `supplementary`, which means *content the
+**Role.** A Configuration may carry the role `supplementary`, which means *content the
 Managed Process reads by path* — a rule file, a lookup table — rather than configuration it is
 started with. The Client writes it beside the configuration under its own name, and leaves it out of
 what the process is configured with.
 
-**Package** (ADR-0015, ADR-0017, ADR-0018). A named artifact the Server distributes. It states the
-Agent **type** it is built for and reaches no Agent of another, whatever its Selector says
-(ADR-0034) — a package with no type set reaches nobody at all — and within that type its Selector
+**Package.** A named artifact the Server distributes. It states the
+Agent **type** it is built for and reaches no Agent of another, whatever its Selector says —
+a package with no type set reaches nobody at all — and within that type its Selector
 picks which Agents, and its platform which bytes each of them gets. The Server decides which
 artifact an Agent is offered; the Client decides whether it accepts packages at all. Artifacts are
 verified by content hash always, and by Ed25519 signature when a verification key is configured.
 
-**Transports** (ADR-0007). The URL scheme in the Client's `endpoint` selects the transport:
+**Transports.** The URL scheme in the Client's `endpoint` selects the transport:
 `ws://`/`wss://` for WebSocket, where the Server pushes changes within seconds, and
 `http://`/`https://` for plain-HTTP polling. The Server accepts both on the same path, at the same
 time.
 
-**Configuration files** (ADR-0008). Both ends read one hand-edited TOML file, named with `--config`.
+**Configuration files.** Both ends read one hand-edited TOML file, named with `--config`.
 Every key is optional, an unknown key is refused at startup rather than ignored, and there are no
 environment-variable fallbacks. The annotated examples in [`config/`](../../config/) are the
 reference copies: [`config/server.toml`](../../config/server.toml) and
@@ -139,10 +137,10 @@ The manual documents what runs today. These are designed, or partly built, and n
 not go looking for a setting that does not exist. [`docs/CONFORMANCE.md`](../CONFORMANCE.md) is the
 authority on all of it.
 
-- **`tls` and `proxy` in connection settings** (ADR-0035) — a Server offering either is told, in
+- **`tls` and `proxy` in connection settings** — a Server offering either is told, in
   its status report, that the Client dropped them. Mutual TLS itself *is* built: see
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
-- **Certificate revocation** (ADR-0035) — there is no CRL and no OCSP. A short `validity_days` plus
+- **Certificate revocation** — there is no CRL and no OCSP. A short `validity_days` plus
   renewal is what bounds an issued certificate.
 - **Custom messages** (`CustomCapabilities` / `CustomMessage`) — planned, not implemented.
 - **Other connection settings** (`AcceptsOtherConnectionSettings`) — deliberately not implemented:

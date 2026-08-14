@@ -29,7 +29,7 @@ Server sends them, reports back what they are doing, and can replace their binar
   reports `client.toml` itself as its effective configuration — with credential values (`[auth]`'s
   `bearer_token` and `password`, `[packages]`'s `archive_key`) masked as `***`, since the Server
   persists what it receives.
-- **Supervises processes** (ADR-0011): starts them, watches them, restarts them on a configuration
+- **Supervises processes**: starts them, watches them, restarts them on a configuration
   change or a Server-issued restart command, stops them gracefully on shutdown.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
   points the process at it, and reports the configuration applied or failed with the hash it
@@ -57,7 +57,7 @@ $ opamp-fleet-client --version
 | `--instance <name>` | Selects the service identity (`opamp-fleet-client-<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`, whose service is plain `opamp-fleet-client`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
 | `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
 
-There are no environment-variable fallbacks for configuration (ADR-0008) — the flags say only where
+There are no environment-variable fallbacks for configuration — the flags say only where
 the file is and which instance is meant. Logging goes to stderr and is controlled by `RUST_LOG`
 (default `info`).
 
@@ -67,7 +67,7 @@ than as a host that fell off the network.
 
 ## Running it as an OS service
 
-The Client registers *itself* with systemd, launchd, or the Windows SCM (ADR-0010) — there is no
+The Client registers *itself* with systemd, launchd, or the Windows SCM — there is no
 packaging step and no unit file to write:
 
 ```console
@@ -81,9 +81,9 @@ $ opamp-fleet-client service uninstall      # deregisters; never deletes the ins
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
-| `--root <dir>` | `service install` | The install root: everything — the executable layout, `client.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start — ADR-0053); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
-| `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service (ADR-0027). See below. |
-| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it (ADR-0046) — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
+| `--root <dir>` | `service install` | The install root: everything — the executable layout, `client.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
+| `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service. See below. |
+| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
 
 ### The first configuration, on a host that has none
 
@@ -139,11 +139,11 @@ file afterwards. All four rules above hold unchanged — in particular, an exist
 
 ### Installing from a native package
 
-A release also ships a `.deb`, an `.rpm` and an `.msi` (ADR-0046). They deliver the binary to
+A release also ships a `.deb`, an `.rpm` and an `.msi`. They deliver the binary to
 `/usr/libexec/opamp-fleet-client` (Windows: the folder you choose) and then run `service install`
 themselves — the layout, the unit and the SCM entry are the same ones this page describes, because
 they are made by the same command. No package ships a unit file of its own. What lands on `PATH` —
-`/usr/bin/opamp-fleet-client` — is a symlink through the layout's `current` pointer (ADR-0048), so
+`/usr/bin/opamp-fleet-client` — is a symlink through the layout's `current` pointer, so
 the command you type is always the binary the service runs.
 
 ```console
@@ -177,10 +177,10 @@ Two things to know about living with a packaged install:
   self-update ([Updating the Client itself](#updating-the-client-itself)) the service runs the binary
   under `<root>/current/`, which no package manager owns — that separation is what keeps the next
   `apt upgrade` from silently reverting the Server's decision. `opamp-fleet-client --version` goes
-  through `current` (ADR-0048) and answers for the running binary, as does the fleet view; those two
+  through `current` and answers for the running binary, as does the fleet view; those two
   are the truth.
 - **Removing the package stops and unregisters the service and uninstalls every staged version.**
-  `versions/` and the `current` pointer go with the package (ADR-0048); the state directory and
+  `versions/` and the `current` pointer go with the package; the state directory and
   `client.toml` stay, for the same reason an install never overwrites a configuration: it may hold
   a credential you typed. `apt purge` deletes those too — the instance directory whole. A reinstall
   after a plain remove keeps the host's identity and configuration and stages its own binary fresh.
@@ -189,7 +189,7 @@ macOS has no native installer; there, unpack the `.7z` and run `service install`
 
 ### What the service is called
 
-One name on every platform (ADR-0030) — the default instance is the product's name, and any other
+One name on every platform — the default instance is the product's name, and any other
 instance appends its own:
 
 | | `--instance default` | `--instance prod` |
@@ -208,7 +208,7 @@ as its `Description`, and a launchd job has no name besides its label.
 ### Where the service's logs are
 
 A Client started by the service manager writes its own log to **`<state_dir>/logs/`** on every
-platform (ADR-0041), one file per day, seven days kept:
+platform, one file per day, seven days kept:
 
 ```
 <state_dir>/logs/opamp-fleet-client.2026-08-09.log
@@ -237,7 +237,7 @@ unbounded setting is the one that eventually fills a disk, so turning the log of
 Client says so and runs anyway: a monitoring agent that refuses to start because of its own log
 file has turned a diagnostic into an outage.
 
-This is a different thing from the Client's own telemetry (`ReportsOwnLogs`, ADR-0036), which ships
+This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
 is exactly what a bad `client.toml`, an unusable certificate, or a refused endpoint does not give
 it. The file on disk is what explains those.
@@ -261,14 +261,14 @@ against, and the default state directory:
 Because the service runs `<root>/current/opamp-fleet-client`, switching versions never re-registers
 the service.
 
-On a **Linux system install without `--root`**, the picture above spans two directories
-(ADR-0053): `versions/` and `current` live under `/opt/opamp-fleet/client/<instance>` — SELinux
+On a **Linux system install without `--root`**, the picture above spans two
+directories: `versions/` and `current` live under `/opt/opamp-fleet/client/<instance>` — SELinux
 never lets systemd execute a binary labeled for `/var/lib` — while `client.toml` and `state/`
 stay under `/var/lib/opamp-fleet/client/<instance>`. An explicit `--root` keeps everything under
 the one directory it names.
 
 After a crash the service manager restarts the service; after an explicit stop it stays down. Known
-platform gaps, tracked in ADR-0010: on macOS `service status` is advisory and `install` does not
+platform gaps: on macOS `service status` is advisory and `install` does not
 auto-start, and on Windows the SCM discards stderr, so service logs are lost until logging to a file
 lands.
 
@@ -301,13 +301,13 @@ optional and shown below with its default; an unknown key fails startup rather t
 
 | Key | Default | Meaning |
 |---|---|---|
-| `endpoint` | `"ws://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport (ADR-0007): `ws://`/`wss://` for WebSocket, `http://`/`https://` for polling. |
-| `name` | `"opamp-fleet-client"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `opamp-fleet-client`, the same on every host (ADR-0033). |
+| `endpoint` | `"ws://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport: `ws://`/`wss://` for WebSocket, `http://`/`https://` for polling. |
+| `name` | `"opamp-fleet-client"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `opamp-fleet-client`, the same on every host. |
 | `poll_interval_secs` | `30` | How often the plain-HTTP transport polls. Ignored on WebSocket. |
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
 | `state_dir` | `"client-state"` | Where the Client persists its own Agent's identity, its remote configuration, and any Server-offered connection settings. A self-update artifact is streamed here first, so it needs room for one agent binary. |
-| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live (ADR-0021). Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. |
+| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. |
 
 > **Moving `supervisor_dir` on a running host leaves the old tree behind**, `instance-uid` included,
 > so every Supervisor re-registers as a **new** Agent on the Server. Nothing migrates automatically.
@@ -315,7 +315,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 ### `[attributes]`
 
 Operator-defined attributes reported by every Agent this Client presents, so the Server's Selectors
-can target them (ADR-0012). They are reported as non-identifying attributes, and they never override
+can target them. They are reported as non-identifying attributes, and they never override
 what the code or the Managed Process reports under the same key.
 
 ```toml
@@ -333,7 +333,7 @@ an Agent and where it runs: `service.name`, `service.instance.name`, `service.in
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
 Supervisor-backed Agent is whatever the Managed Process reports about itself.
 
-The first two are the pair to keep apart (ADR-0033): `service.name` is *what* this Agent is — the
+The first two are the pair to keep apart: `service.name` is *what* this Agent is — the
 type, shared by every Agent of that kind — and `service.instance.name` is *which* one it is, the
 name you gave it. Neither is settable through `[attributes]`: a table entry under either key is
 ignored, since the Supervisor already reports both.
@@ -365,10 +365,10 @@ Every key is optional on its own, so this section may carry a trust override, a 
 both.
 
 `ca_file` is the trust override for `wss://`/`https://` endpoints whose certificate comes from a
-private CA (ADR-0007). Without it the platform's trust store applies.
+private CA. Without it the platform's trust store applies.
 
 `cert_file` and `key_file` are this Client's own certificate for a Server that requires mutual TLS
-(ADR-0035) — they go together or not at all. This is the identity an operator provisions, including
+— they go together or not at all. This is the identity an operator provisions, including
 the **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
 the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
 prefers it, the same precedence persisted connection settings have over `client.toml`. Deleting the
@@ -383,7 +383,7 @@ what protects it.
 ### `[auth]`
 
 Exactly one scheme: `bearer_token`, **or** `username` and `password` together. Mixing them, or
-giving half of one, fails at startup (ADR-0013).
+giving half of one, fails at startup.
 
 ```toml
 [auth]
@@ -409,10 +409,10 @@ archive_key = "the key an encrypted .7z was packed with"
 | Key | Meaning |
 |---|---|
 | `verification_key` | With a key set, every Server-offered package **must** carry a valid Ed25519 signature over its artifact. Without it, an unsigned package installs on its content hash alone and a **signed** one is refused. Generate the key with `opamp-package-sign keygen` (see [the Server](server.md#packages-distributing-software)). |
-| `archive_key` | Opens an encrypted `.7z` artifact (ADR-0018). One secret for the fleet — a single archive serves every Agent — and never the `[auth]` credential, which the Server may rotate on its own: a rotation would leave every archive unopenable. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
+| `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent — and never the `[auth]` credential, which the Server may rotate on its own: a rotation would leave every archive unopenable. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
 
 Note what is *not* here: which artifact a Supervisor receives is the Server's decision, expressed as
-the package's Agent type (ADR-0034) and its Selector (ADR-0017), never a key in this file.
+the package's Agent type and its Selector, never a key in this file.
 
 ### `[self_update]`
 
@@ -427,7 +427,7 @@ own Agent declares no package capability at all and no offer can reach it.
 ## Gateway Mode: carrying other Clients
 
 A Client can stand at a network boundary and carry other Clients' Agents upstream over a small pool
-of connections (ADR-0037) — for a segmented network the Server cannot reach into, or simply for a
+of connections — for a segmented network the Server cannot reach into, or simply for a
 fleet too large to give every Agent its own connection:
 
 ```toml
@@ -454,10 +454,10 @@ gateway for others.
 - **It never speaks for an Agent.** If a downstream Client disappears without sending
   `agent_disconnect`, the Gateway forwards nothing — inventing that message would tell the Server
   the Agent said something it did not. What makes such an Agent visible instead is the Server's
-  staleness flag (ADR-0038): the connection stays up, because it is the Gateway's, and the row reads
+  staleness flag: the connection stays up, because it is the Gateway's, and the row reads
   **Connected + Stale**. It needs a heartbeat configured on the Agent to work, since staleness only
   applies to Agents that promised to report periodically.
-- **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop (ADR-0035):
+- **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop:
   `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
   this Client's own, from the top-level `[tls]` or issued through the CSR flow.
 
@@ -478,14 +478,14 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Two plugin types ship today (ADR-0011): `collector` for an OpenTelemetry Collector, and `command`
+Two plugin types ship today: `collector` for an OpenTelemetry Collector, and `command`
 for any other process — a **Foreign Agent** that speaks no OpAMP. A new kind of process means a new
 plugin, not a change to the core.
 
 ### The Server can manage the set
 
-The `[[supervisor]]` blocks are the fleet-manageable half of `client.toml` (ADR-0056). A
-Configuration typed for the Client itself — `service_name = "opamp-fleet-client"` (ADR-0054) —
+The `[[supervisor]]` blocks are the fleet-manageable half of `client.toml`. A
+Configuration typed for the Client itself — `service_name = "opamp-fleet-client"` —
 carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
@@ -495,7 +495,7 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
 - **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
   merged file is written, changed and added ones are started from it. An unchanged Supervisor's
   process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
-- **A removed Supervisor is purged** (ADR-0059). Once the rewritten file no longer names it, its
+- **A removed Supervisor is purged**. Once the rewritten file no longer names it, its
   whole directory `<supervisor_dir>/<name>/` is deleted — identity, written configuration,
   staged packages, and the Client-owned program. A changed Supervisor restarts under its name
   and keeps its directory; a program named by an absolute path is the machine's file and is
@@ -509,7 +509,7 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   offer does not parse, a block does not validate against this host's globals, or the write
   fails (then nothing is applied and the running set stays in force). A body that is not TOML —
   say, a Collector YAML published fleet-wide with no type — is refused the same way, which is
-  one more reason to state whom a Configuration is for (ADR-0054).
+  one more reason to state whom a Configuration is for.
 
 A Client whose Server never publishes such a Configuration runs its locally written blocks
 exactly as before. Note that once one applied, the Server's set is authoritative: a later local
@@ -521,17 +521,17 @@ edit to the blocks stands only until the next publication overwrites it.
 |---|---|---|
 | `type` | — | `"collector"` or `"command"`. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
-| `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents (ADR-0033). A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
+| `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
 | `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
-| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion (ADR-0058), overriding the global default for this Supervisor. `0` deletes it on success. See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
-| `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
+| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion, overriding the global default for this Supervisor. `0` deletes it on success. See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
+| `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree, e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
 | `[supervisor.attributes]` | none | Attributes for this Agent alone, overriding the Client's `[attributes]` per key. |
 
 Two keys were **removed** and now fail at startup with a message saying what to do instead:
-`package` (the Server aims packages by Selector now, ADR-0017) and `accepts_packages` (the program's
-path decides, ADR-0021).
+`package` (the Server aims packages by Selector now) and `accepts_packages` (the program's
+path decides).
 
 ### `type = "collector"`
 
@@ -543,7 +543,7 @@ path decides, ADR-0021).
 
 The Supervisor writes every received config-map entry into its own `config/` directory under the
 Configuration's name and passes each **unroled** entry as its own `--config`; a `supplementary`
-entry is written but never passed (ADR-0016). A change restarts the Collector so it re-reads them.
+entry is written but never passed. A change restarts the Collector so it re-reads them.
 The version is probed once with `--version`, so even a Collector without the extension reports one.
 
 Prebuilt Collector distributions are published on the
@@ -627,17 +627,17 @@ is called.
 
 ## Which programs take updates
 
-How a block names its program is also what decides whether the Server may replace it (ADR-0021),
+How a block names its program is also what decides whether the Server may replace it,
 because replacing a program means writing in the directory it sits in. The same rule applies to
 `binary` and `command` alike:
 
 | What you write | What it means |
 |---|---|
-| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates**, and it is the **only** shape a Server may deliver (ADR-0057). |
+| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates**, and it is the **only** shape a Server may deliver. |
 | an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. Only an operator may write it in `client.toml`; a Server-delivered block that names one is refused. |
 | anything else — `./x`, `bin/x` | A startup error, rather than a guess. |
 
-A block a Server pushes as part of a Supervisor set (ADR-0056) is held to the first row alone: it
+A block a Server pushes as part of a Supervisor set is held to the first row alone: it
 may name only a program this Client owns, so a delivered Supervisor can run only signed, packaged
 programs — never an arbitrary machine binary. An absolute-path Supervisor stays the operator's to
 write on the host.
@@ -656,7 +656,7 @@ accepted.
 A Foreign Agent is told where its configuration is *through its own command line*, and an absolute
 path written there drifts the moment `supervisor_dir` moves or the Supervisor is renamed —
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
-(ADR-0022) close that, in a Supervisor's operator-written strings — a `command`'s `args`,
+close that, in a Supervisor's operator-written strings — a `command`'s `args`,
 `working_dir`, and `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`:
 
 | Placeholder | Expands to |
@@ -684,22 +684,22 @@ The Client's own Agent keeps its state in `state_dir`:
 <state_dir>/connection-settings.pb    # Server-offered settings, if any
 <state_dir>/installed-package.json    # the self-update it last installed, if any
 <state_dir>/packages/                 # staging for a self-update artifact
-<state_dir>/logs/                     # the service's own rotating log (ADR-0041)
+<state_dir>/logs/                     # the service's own rotating log
 ```
 
-Each Supervisor owns everything under its own directory (ADR-0021):
+Each Supervisor owns everything under its own directory:
 
 ```
 <supervisor_dir>/<name>/instance-uid      # this Agent's identity
 <supervisor_dir>/<name>/remote-config.pb  # the last configuration it received
 <supervisor_dir>/<name>/config/           # one entry file per matching Configuration
 <supervisor_dir>/<name>/program/          # the program, when it is named by a bare file name
-<supervisor_dir>/<name>/program/tree/     # …or the whole unpacked package (ADR-0023)
+<supervisor_dir>/<name>/program/tree/     # …or the whole unpacked package
 <supervisor_dir>/<name>/packages/         # staging its package downloads go through
 ```
 
 The directory lives exactly as long as its `[[supervisor]]` block: a Supervisor removed by an
-applied set takes it along, whole (ADR-0059). A directory no block names — left by a purge that
+applied set takes it along, whole. A directory no block names — left by a purge that
 could not finish, or by a block removed from `client.toml` by hand while the Client was down —
 is warned about at startup and never deleted automatically: remove it by hand once you are sure
 its Supervisor is gone for good.
@@ -712,14 +712,14 @@ what the file says.
 
 A Supervisor whose program is its own (a bare file name) declares that it accepts packages, and the
 Server offers it a package built for the Agent type it reports and aimed at it by that package's
-Selector (ADR-0034, ADR-0017) — so a Supervisor reporting `promtail` is never handed the Collector's
+Selector — so a Supervisor reporting `promtail` is never handed the Collector's
 binary, whatever anyone forgot to aim. What then happens on the host:
 
 1. The artifact is **streamed to disk** in that Supervisor's `packages/` directory — never held in
    memory.
 2. It is **verified**: the content hash always, and the Ed25519 signature whenever
    `[packages] verification_key` is set.
-3. It is **unpacked** when it is a `.tar.gz` or a `.7z` (ADR-0018) — the member whose file name
+3. It is **unpacked** when it is a `.tar.gz` or a `.7z` — the member whose file name
    matches the configured program, so an upstream release can be uploaded exactly as published. An
    encrypted `.7z` opens with `[packages] archive_key`. A bare program artifact is moved into place
    rather than copied.
@@ -738,7 +738,7 @@ than written over the binary it was meant to extend.
 
 ### Package updates: rollback and retention
 
-What happens when step 4's health gate is *not* passed is settled by ADR-0058:
+What happens when step 4's health gate is *not* passed:
 
 - **A failed update rolls back to the version it replaced** — but only when there *is* one. A
   **first** install with nothing behind it is not rolled back to nothing: the verified program is
@@ -763,7 +763,7 @@ retain_previous_secs = 86400
 ## Agents that are more than one file
 
 An executable plus the shared objects it loads — Fluent Bit is the usual example — is delivered by
-naming where the program sits inside the package (ADR-0023):
+naming where the program sits inside the package:
 
 ```toml
 [[supervisor]]
@@ -817,7 +817,7 @@ package = "opamp-fleet-client"
 
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
-another Agent type either (ADR-0034), and this Client's type is the constant `opamp-fleet-client`.
+another Agent type either, and this Client's type is the constant `opamp-fleet-client`.
 Neither replaces the other — an operator who types a Collector artifact as `opamp-fleet-client` gets
 past the Server, and this name is what is left.
 
@@ -825,7 +825,7 @@ On an accepted offer the artifact is verified like any other, staged as a new ve
 running one in the install layout, and proved by running `opamp-fleet-client self-check` on it before the
 `current` pointer moves — which asks two things at once: does this binary run at all on this host,
 and is it actually an OpAMP Fleet Client at the version offered. The process then shuts down exactly
-as an ordinary stop does — Managed Processes stopped gracefully, the goodbyes sent (ADR-0020) — and
+as an ordinary stop does — Managed Processes stopped gracefully, the goodbyes sent — and
 exits, asking the service manager to restart it; it does not restart itself. A marker in `state_dir` carries the
 outcome across that restart: the new version commits itself once it reaches the Server, and one that
 will not stay up is rolled back to its predecessor after three attempts. Either outcome is reported
@@ -844,18 +844,15 @@ first ([`publication`](server.md#packages-distributing-software)) — retracting
 and uninstalls nothing.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`opamp-fleet-client_<version>_<os>_<arch>.7z`
-([ADR-0025](../adr/0025-release-pipeline-and-artifacts.md),
-[ADR-0032](../adr/0032-release-artifacts-separate-their-fields-with-underscores.md)) — and that file
+`opamp-fleet-client_<version>_<os>_<arch>.7z` — and that file
 *is* a package artifact: it holds the Client under the name the install layout gives it, so it is
 uploaded exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies.
 Nothing repacks it. The fields are separated by `_` because two of them carry `-` — the name
 (`opamp-fleet-client`) and a prerelease version (`1.2.3-dev`) — so the last two fields are the
 platform and can be read off the name.
 
-**The version in the query is the release number** — the one in the file name
-([ADR-0029](../adr/0029-a-version-is-compared-and-shown-without-its-build-metadata.md)) — and the
-platform is required with it (ADR-0031), spelled as the Agent reports it:
+**The version in the query is the release number** — the one in the file name — and the
+platform is required with it, spelled as the Agent reports it:
 
 ```console
 $ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
@@ -865,7 +862,7 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        http://<server>:4320/api/v1/packages/opamp-fleet-client/type
 ```
 
-The second call is what arms the package (ADR-0034): until a type is set it is offered to nobody, so
+The second call is what arms the package: until a type is set it is offered to nobody, so
 an artifact uploaded and left untyped reaches no Client at all. For this one the type is the
 Client's own, `opamp-fleet-client`.
 
@@ -889,7 +886,7 @@ accepts both at once.
 **Reconnecting.** A dropped connection is retried with capped exponential backoff, and the Client
 honours the Server's `UNAVAILABLE` retry hints.
 
-**Server-offered connection settings** (ADR-0014). When the Server offers a new credential,
+**Server-offered connection settings**. When the Server offers a new credential,
 heartbeat interval, or endpoint, the Client **verifies the offer by actually connecting with it**,
 persists it, and only then switches — across transports if the offered endpoint demands it. A
 failed verification leaves the current settings in force and is reported as such, so a bad offer
@@ -899,7 +896,7 @@ showing through; see [`docs/CONFORMANCE.md`](../CONFORMANCE.md).
 
 ## Troubleshooting
 
-**The Client will not start.** Configuration errors are deliberately fatal and name the key (ADR-0008).
+**The Client will not start.** Configuration errors are deliberately fatal and name the key.
 The ones you are most likely to meet:
 
 | Message about | What to do |
@@ -922,7 +919,7 @@ configuration.
 absolute path. The startup log states, per Supervisor, what it resolved and what it decided.
 
 **An Agent that accepts packages is offered none.** Two equally specific Selectors are reaching it;
-`package_conflict` on its fleet row names the problem (ADR-0017).
+`package_conflict` on its fleet row names the problem.
 
 **Everything re-registered as new Agents after a move.** `supervisor_dir` changed, and the
 `instance-uid` files stayed behind in the old tree. That is expected; nothing migrates
