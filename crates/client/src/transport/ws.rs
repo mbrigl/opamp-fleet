@@ -272,7 +272,14 @@ async fn serve(
                             return Served::ConnectionLost;
                         }
                         // The `Installing` above is the last thing this version says (ADR-0020).
+                        // Then exit for the restart *cleanly*: stop the Managed Processes and send
+                        // the goodbyes over this connection, exactly as an ordinary shutdown does,
+                        // rather than abandoning the children when the process exits.
                         if engine.restart_for_update() {
+                            engine.shutdown_processes().await;
+                            let _ = send_all(&mut socket, engine.disconnect_messages(), limit).await;
+                            let _ = socket.close(None).await;
+                            info!("disconnected for the self-update restart");
                             return Served::RestartForUpdate;
                         }
                         // The self-Agent's configuration is its Supervisor set (ADR-0056):

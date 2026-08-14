@@ -17,6 +17,17 @@ carries a date once its tag exists.
 
 ## [0.2.7]
 
+### Fixed
+
+- **The Client stops its Managed Processes cleanly when it updates itself.** The self-update
+  restart path exited without running the graceful shutdown ADR-0020 specifies, so the Managed
+  Processes were left to the service manager. On systemd the unit's cgroup reaped them; on a manager
+  that does not (launchd, the Windows SCM, a foreground or non-cgroup container run) they were
+  orphaned, and the restarted Client spawned duplicates that fought over their ports. The self-update
+  exit now stops the Managed Processes and sends the goodbyes first, on both transports, exactly as
+  an ordinary shutdown does.
+  **What to do:** nothing.
+
 ### Changed
 
 - **A Managed Process's package updates no longer loop, and keep a fallback**

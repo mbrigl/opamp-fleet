@@ -317,6 +317,111 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     );
 }
 
+/// ADR-0020: exiting for the self-update restart is a *graceful* shutdown — the Managed Processes
+/// are stopped, not abandoned. Before the fix the restart path returned before that shutdown, so on
+/// a service manager that does not reap the process group the Collector was orphaned and the next
+/// Client spawned a duplicate. Here every managed process that ran before a restart is dead
+/// afterwards. Linux-only: it reads `/proc/<pid>` to tell a process apart from its successor.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
+    let full = version_of(&client);
+    let version = opamp::version::identity(&full)
+        .unwrap_or_else(|| panic!("{full:?} is not a version"))
+        .to_string();
+
+    // Offer the Client a version of itself, exactly as the test above does.
+    let artifact = std::fs::read(&client).expect("read the client binary");
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    let set = server::packages::SetId::new("opamp-fleet-client", "opamp-fleet-client", &version)
+        .expect("set id");
+    store
+        .create_or_update(&set, Default::default(), false)
+        .expect("create set");
+    store
+        .put_entry(&set, &this_host(), None, artifact)
+        .expect("put entry");
+    store.set_published(&set, true).expect("publish");
+
+    let (addr, state) = spawn_server(store).await;
+    let root = dir.path().join("install");
+    let program = install_layout(&root, &client);
+    let state_dir = dir.path().join("client-state");
+    let config = dir.path().join("client.toml");
+
+    // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
+    // every time it is (re)started. An absolute path: the machine's program, run but never updated,
+    // which is exactly what a locally written block may name (ADR-0057).
+    let stub = env!("CARGO_BIN_EXE_stub_agent");
+    let marker = dir.path().join("managed.pid");
+    std::fs::write(
+        &config,
+        format!(
+            concat!(
+                "endpoint = \"ws://{addr}/v1/opamp\"\n",
+                "name = \"self-updating-client\"\n",
+                "state_dir = {state:?}\n",
+                "heartbeat_interval_secs = 1\n\n",
+                "[self_update]\n",
+                "package = \"opamp-fleet-client\"\n\n",
+                "[[supervisor]]\n",
+                "type = \"command\"\n",
+                "name = \"managed\"\n",
+                "command = {stub:?}\n",
+                "args = [\"--touch\", {marker:?}]\n",
+            ),
+            addr = addr,
+            state = state_dir.to_string_lossy(),
+            stub = stub,
+            marker = marker.to_string_lossy(),
+        ),
+    )
+    .expect("write config");
+
+    let mut service = Supervised::start(&program, &config);
+
+    let read_managed_pid = |path: &Path| -> Option<u32> {
+        let text = std::fs::read_to_string(path).ok()?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("pid="))
+            .and_then(|n| n.trim().parse().ok())
+    };
+    // Every distinct managed pid seen while the update runs, in order — the last is the one running
+    // once it has settled; all before it were superseded by a restart and must have been stopped.
+    let mut seen: Vec<u32> = Vec::new();
+    wait_until("the self-update to be reported Installed", || {
+        service.tend();
+        if let Some(pid) = read_managed_pid(&marker) {
+            if seen.last() != Some(&pid) {
+                seen.push(pid);
+            }
+        }
+        let snapshot = state.snapshot();
+        let agent = view(&snapshot, "self-updating-client")?;
+        let package = agent
+            .packages
+            .iter()
+            .find(|p| p.name == "opamp-fleet-client")?;
+        (package.status == "Installed" && package.version == version).then_some(())
+    })
+    .await;
+
+    assert!(
+        seen.len() >= 2,
+        "the update restarted the Client, so the managed process was (re)started too: pids {seen:?}"
+    );
+    let alive = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
+    for pid in &seen[..seen.len() - 1] {
+        assert!(
+            !alive(*pid),
+            "a managed process from before a restart (pid {pid}) was orphaned, not stopped: {seen:?}"
+        );
+    }
+}
+
 /// The name in `[self_update]` is the whole of the protection (ADR-0020): a package with an empty
 /// Selector reaches every consenting Agent, and one written over the Client would take the host
 /// out of reach. Anything not called what that section says is refused and reported — never
