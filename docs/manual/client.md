@@ -555,7 +555,7 @@ Server distributes carries the extension pointing at it:
 ```toml
 [[supervisor]]
 type = "collector"
-name = "otelcol"
+name = "otelcol-contrib"
 binary = "otelcol-contrib"
 endpoint_port = 4321
 ```
@@ -573,13 +573,15 @@ service:
 ```
 
 A Collector **without** the extension needs no `endpoint_port`: the endpoint still comes up on an
-ephemeral port, and nothing ever connects to it.
+ephemeral port, and nothing ever connects to it. Nothing reports an Agent type either, so state one
+with `service_name` — left out, the program's file name is used anyway.
 
 ```toml
 [[supervisor]]
 type = "collector"
-name = "otelcol-plain"
-binary = "/usr/local/bin/otelcol"
+name = "otelcol"
+binary = "otelcol"
+service_name = "otelcol"
 ```
 
 ### `type = "command"`
@@ -810,8 +812,9 @@ past the Server, and this name is what is left.
 On an accepted offer the artifact is verified like any other, staged as a new version *beside* the
 running one in the install layout, and proved by running `opamp-fleet-client self-check` on it before the
 `current` pointer moves — which asks two things at once: does this binary run at all on this host,
-and is it actually an OpAMP Fleet Client at the version offered. The process then exits and asks the
-service manager to restart it; it does not restart itself. A marker in `state_dir` carries the
+and is it actually an OpAMP Fleet Client at the version offered. The process then shuts down exactly
+as an ordinary stop does — Managed Processes stopped gracefully, the goodbyes sent (ADR-0020) — and
+exits, asking the service manager to restart it; it does not restart itself. A marker in `state_dir` carries the
 outcome across that restart: the new version commits itself once it reaches the Server, and one that
 will not stay up is rolled back to its predecessor after three attempts. Either outcome is reported
 to the Server by whichever version came up.

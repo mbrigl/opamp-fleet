@@ -63,19 +63,23 @@ no configuration file at all, because every setting has a default.
 3. **Open the UI** at <http://127.0.0.1:4320/>. The Agent is listed as *Connected*, with the
    attributes it reported.
 
-4. **Create a Configuration.** In the UI, press **Configurations**, give it a name, leave the
-   Selector empty (which targets every Agent), enter the configuration text, and save. The same
-   thing over the API:
+4. **Create and publish a Configuration.** In the UI, press **Configurations**, give it a name,
+   leave the Selector empty (which targets every Agent), enter the configuration text, save — and
+   then press **Publish**, because saving only stores a draft; publishing is what reaches the
+   fleet (ADR-0055). The same two steps over the API:
 
    ```console
    $ curl -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {}, "body": "receivers: {}"}' \
           http://127.0.0.1:4320/api/v1/configurations/base
+   $ curl -X PUT -H 'Content-Type: application/json' \
+          -d '{"published": true}' \
+          http://127.0.0.1:4320/api/v1/configurations/base/publication
    ```
 
 5. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its
    next poll. It stores the configuration, reports it **Applied** with the matching hash, and its
-   effective configuration appears in the fleet table. Saving the same Configuration again sends
+   effective configuration appears in the fleet table. Re-publishing the same Configuration sends
    nothing — every push is gated on a content hash.
 
 From here, [Server](server.md) covers targeting a subset of the fleet and distributing software, and
