@@ -46,7 +46,7 @@ $ server --version
 | Flag | Meaning |
 |---|---|
 | `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory; a missing file is not an error, since every setting has a default. |
-| `--version` | Print the version and exit — the full string, `0.2.0+<commit>` for a release and `0.2.0-dev+<commit>` for a build on the way to one (ADR-0009). |
+| `--version` | Print the version and exit — the full string, `0.3.0+<commit>` for a release and `0.3.0-dev+<commit>` for a build on the way to one (ADR-0009). |
 
 Any other argument prints usage and exits with status 2. Logging goes to stderr and is controlled by
 the `RUST_LOG` environment variable (default `info`); everything else is in the configuration file.

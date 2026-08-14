@@ -342,7 +342,7 @@ Two more conventions ride along, both plain strings and both from sources alread
 ## Sources / Prior art
 
 - The Baseline's `AgentDescription`
-  ([`opamp.proto:690-727`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L690-L727)) — the
+  ([`opamp.proto:690-727`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L690-L727)) — the
   direct authority for the type and the instance name: `service.name` "should be set to a reverse
   FQDN that uniquely identifies the Agent type, e.g. `io.opentelemetry.collector`",
   `service.instance.id` separately as what identifies the Agent, and the non-identifying clause

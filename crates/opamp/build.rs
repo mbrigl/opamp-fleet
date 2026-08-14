@@ -14,7 +14,7 @@ use git2::Repository;
 /// The Protocol Baseline. The single place the proto path derives from, which is what kept
 /// upstream's relocation of the files (`proto/` to `proto/opamp/v1/`, adopted with `v0.19.0`) a
 /// change to this file alone — docs/CONFORMANCE.md requires it stay that way.
-const BASELINE: &str = "v0.19.0";
+const BASELINE: &str = "v0.20.0";
 
 const TAG_PREFIX: &str = "version/";
 

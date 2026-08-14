@@ -16,11 +16,11 @@ inventing semantics the protocol deliberately leaves to the Agent.
 
 **The protocol says what to send and where.** Each capability means "the Agent can report own
 \<signal\> to the destination specified by the Server via `ConnectionSettingsOffers.own_*`"
-([`opamp.proto:744-756`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L744-L756)). The
+([`opamp.proto:744-756`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L744-L756)). The
 destination is a `TelemetryConnectionSettings` whose `destination_endpoint` "MUST be a full URL an
 OTLP/HTTP/Protobuf receiver with path", and the Agent "MAY refuse to send the telemetry if the URL
 begins with `http://`"
-([`opamp.proto:347-375`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L347-L375)). The
+([`opamp.proto:347-375`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L347-L375)). The
 Baseline also asks that the `AgentDescription`'s identifying attributes appear in the OTLP Resource,
 so the telemetry is attributable to the Agent that produced it, and names process metrics —
 "CPU or RAM usage" — as what own metrics are for.
@@ -173,9 +173,9 @@ own.
 
 - [OpAMP specification — Agent's own telemetry](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md)
   and the vendored schema:
-  [the three capability bits](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L744-L756),
-  [`TelemetryConnectionSettings`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L347-L375),
-  [the `own_*` offer fields](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L521-L545) — the
+  [the three capability bits](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L744-L756),
+  [`TelemetryConnectionSettings`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L347-L375),
+  [the `own_*` offer fields](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L521-L545) — the
   OTLP/HTTP/Protobuf requirement, the identifying attributes in the Resource, the process-metrics
   expectation, and the "MAY refuse `http://`" provision.
 - [`opampsupervisor`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/cmd/opampsupervisor)

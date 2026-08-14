@@ -55,10 +55,10 @@ reports nothing, because the Server has no way to find out."
 
 **The protocol provides the whole mechanism, and it is not optional-shaped.** `TLSCertificate`
 carries a PEM certificate *and* its private key
-([`opamp.proto:478-496`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L478-L496)), so a
+([`opamp.proto:478-496`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L478-L496)), so a
 Server can hand an Agent a complete identity. Alongside it the Baseline defines an Agent-initiated
 alternative in which the private key never moves: `AgentToServer.connection_settings_request`
-carries a PEM CSR ([`opamp.proto:130-157`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L130-L157)),
+carries a PEM CSR ([`opamp.proto:130-157`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L130-L157)),
 and the Server answers with an `OpAMPConnectionSettings` whose `certificate.cert` holds the issued
 certificate. The upstream specification's steps are explicit: the Client connects over regular TLS,
 generates a keypair and a CSR, sends it, and the Server "creates a client certificate … either by
@@ -262,7 +262,7 @@ Concretely this binds ten things:
    loop — that behaviour already exists. `TLSConnectionSettings` is refused on merit, not only for
    want of time: its fields are `ca_pem_contents`, `include_system_ca_certs_pool`,
    `insecure_skip_verify`, `min_version`, `max_version`, `cipher_suites`
-   ([`opamp.proto:434-452`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L434-L452)) — a
+   ([`opamp.proto:434-452`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L434-L452)) — a
    Server that can command `insecure_skip_verify` can turn off the verification that authenticates
    *it*, and trust in this project is an operator's file (ADR-0007), not a Server's instruction.
    `ProxyConnectionSettings` has nothing on the Client to configure. Both are `[Development]`
@@ -455,10 +455,10 @@ OpAMP specification's own guidance that the transport, not the message, is the t
   restriction of the flow to the OpAMP connection, and the "verify by actually connecting" MUST.
   Baseline `v0.19.0` (see [`CONFORMANCE.md`](../CONFORMANCE.md)).
 - The vendored Baseline schema itself:
-  [`TLSCertificate`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L478-L496),
-  [`ConnectionSettingsRequest`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L130-L157),
-  [`TLSConnectionSettings`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L434-L452),
-  [`ProxyConnectionSettings`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L455-L464).
+  [`TLSCertificate`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L478-L496),
+  [`ConnectionSettingsRequest`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L130-L157),
+  [`TLSConnectionSettings`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L434-L452),
+  [`ProxyConnectionSettings`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L455-L464).
 - OpAMP specification: `instance_uid` is Agent-chosen and Server-assignable (`ServerToAgent.agent_identification`);
   its security model treats the connection, authenticated by the transport, as the trust boundary
   rather than authorizing individual messages.
