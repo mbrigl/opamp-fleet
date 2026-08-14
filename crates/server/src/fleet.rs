@@ -2,7 +2,7 @@
 //! connection that carried a message (ADR-0003).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -28,9 +28,9 @@ use utoipa::ToSchema;
 use crate::agent_store::{AgentStore, FsAgentStore, PersistedAgent};
 use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
-use crate::configs::{ConfigStore, Configuration, DesiredConfig, Revision};
+use crate::configs::{self, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::labels::{LabelError, LabelStore};
-use crate::packages::PackageStore;
+use crate::packages::{PackageStore, SetId};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -106,7 +106,20 @@ pub struct AgentRecord {
     /// every place a Selector is matched sees them without a second lookup. The store is the
     /// authority; this copy is written when the labels are and when the record is created.
     pub labels: BTreeMap<String, String>,
+    /// The Configurations the operator rolled out to this Agent (ADR-0061): name → the pinned
+    /// revision's hash in the `ConfigStore`'s retained revisions. **Every config offer is
+    /// composed from this**; matching only proposes. Written by the rollout acts, persisted like
+    /// `restart_pending` — operator intent that survives a restart (ADR-0051).
+    pub config_assignments: BTreeMap<String, String>,
+    /// The package Sets the operator rolled out to this Agent (ADR-0061), keyed by package name.
+    /// `None` means the record predates the ADR and its seed has not run yet — it runs when
+    /// package delivery is armed, and reads as empty everywhere else.
+    pub package_assignments: Option<BTreeMap<String, SetId>>,
 }
+
+/// What [`AgentRecord::package_assignments`] reads as while a pre-ADR-0061 record waits for its
+/// seed: nothing assigned.
+static NO_PACKAGE_ASSIGNMENTS: BTreeMap<String, SetId> = BTreeMap::new();
 
 impl AgentRecord {
     /// What a Selector is matched against: what the Agent reported, plus the labels that do not
@@ -120,6 +133,20 @@ impl AgentRecord {
         }
         crate::labels::effective_description(self.description.as_ref(), &self.labels)
             .map(Cow::Owned)
+    }
+
+    /// The package Sets rolled out to this Agent — empty while a pre-ADR-0061 record waits for
+    /// its seed.
+    fn package_assignments(&self) -> &BTreeMap<String, SetId> {
+        self.package_assignments
+            .as_ref()
+            .unwrap_or(&NO_PACKAGE_ASSIGNMENTS)
+    }
+
+    /// The package assignments for writing — a rollout act settles the record under ADR-0061,
+    /// seed or no seed, because the operator's explicit act is now the authority.
+    fn package_assignments_mut(&mut self) -> &mut BTreeMap<String, SetId> {
+        self.package_assignments.get_or_insert_with(BTreeMap::new)
     }
 
     /// What of this record survives a restart (ADR-0051): everything report-derived or
@@ -138,6 +165,8 @@ impl AgentRecord {
             transport: self.transport,
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
+            config_assignments: Some(self.config_assignments.clone()),
+            package_assignments: self.package_assignments.clone(),
         }
     }
 
@@ -161,6 +190,8 @@ impl AgentRecord {
             package_statuses: persisted.package_statuses,
             owner: None,
             labels,
+            config_assignments: persisted.config_assignments.unwrap_or_default(),
+            package_assignments: persisted.package_assignments,
         }
     }
 }
@@ -182,6 +213,31 @@ pub enum ForgetError {
     /// hashes that stop the Server re-offering, so its next exchange would re-apply its
     /// configuration, which for a managed Agent restarts the Managed Process.
     StillReporting,
+}
+
+/// Why a rollout act (ADR-0061) was refused.
+#[derive(Debug)]
+pub enum RolloutError {
+    /// No Agent of that identity is known.
+    UnknownAgent,
+    /// The named Configuration or Set does not exist (or package delivery is not configured).
+    UnknownResource(String),
+    /// The resource exists but cannot be released here: it does not fit or aim at the Agent, or
+    /// the Set holds no entries.
+    NotApplicable(String),
+    /// The act could not be persisted.
+    Storage(String),
+}
+
+/// What one per-Agent rollout act releases (ADR-0061).
+pub enum RolloutTarget {
+    /// Everything currently waiting for the Agent: every candidate Configuration and Set.
+    Everything,
+    /// One Configuration by name.
+    Configuration(String),
+    /// One Set by identity — any Set that fits and aims at the Agent, not only the ranked
+    /// candidate: rolling out an older version by name is the rollback.
+    Package(SetId),
 }
 
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
@@ -363,14 +419,38 @@ impl AppState {
         }
         // Every restored Agent comes back disconnected — what it last reported is knowledge,
         // whether it is still there is not (ADR-0051) — and in the ring its labels put it in.
+        //
+        // A record persisted before ADR-0061 carries no config assignments. It loads as **rolled
+        // out to what the published content matched it at upgrade time** (point 9) — reading it
+        // as unassigned would empty every composed map and reconfigure the entire fleet on
+        // upgrade. The seed is persisted immediately, so a later rewrite of the Configuration
+        // files cannot strand a record that still needed it.
+        let formerly_published = configs.formerly_published();
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
-        for (uid, persisted) in agent_store.load()? {
+        for (uid, mut persisted) in agent_store.load()? {
+            let agent_labels = labels.get(&uid);
+            if persisted.config_assignments.is_none() {
+                let effective = if agent_labels.is_empty() {
+                    persisted.description.clone()
+                } else {
+                    crate::labels::effective_description(
+                        persisted.description.as_ref(),
+                        &agent_labels,
+                    )
+                };
+                let seeded: BTreeMap<String, String> = formerly_published
+                    .iter()
+                    .filter(|(_, revision, _)| configs::fits(revision, effective.as_ref()))
+                    .map(|(name, _, hash)| (name.clone(), hash.clone()))
+                    .collect();
+                info!(agent = %uid, assigned = seeded.len(),
+                    "migrated a pre-ADR-0061 record: rolled out to what was published");
+                persisted.config_assignments = Some(seeded);
+                agent_store.put(&uid, &persisted)?;
+            }
             written.insert(uid, persisted.durable_digest());
-            fleet.insert(
-                uid,
-                AgentRecord::from_persisted(persisted, labels.get(&uid)),
-            );
+            fleet.insert(uid, AgentRecord::from_persisted(persisted, agent_labels));
         }
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
@@ -497,9 +577,34 @@ impl AppState {
 
     /// Arms package delivery (ADR-0015); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
+    ///
+    /// Arming is also when a pre-ADR-0061 record's package assignments are seeded (point 9): the
+    /// record loads as rolled out to what the formerly published Sets resolved to for it, so an
+    /// upgrade does not silently withdraw a single offer. The seed cannot run earlier — the
+    /// package store does not exist before this call.
     #[must_use]
     pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
         self.packages = packages;
+        if let Some(offering) = &self.packages {
+            let mut fleet = self.fleet.lock().expect("fleet lock");
+            for (uid, record) in fleet.iter_mut() {
+                if record.package_assignments.is_some() {
+                    continue;
+                }
+                let seeded: BTreeMap<String, SetId> = offering
+                    .store()
+                    .formerly_offered(record.effective_description().as_deref())
+                    .into_iter()
+                    .map(|id| (id.name.clone(), id))
+                    .collect();
+                if !seeded.is_empty() {
+                    info!(agent = %uid, assigned = seeded.len(),
+                        "migrated a pre-ADR-0061 record: rolled out to the published sets");
+                }
+                record.package_assignments = Some(seeded);
+                self.persist_if_dirty(uid, record);
+            }
+        }
         self
     }
 
@@ -543,38 +648,162 @@ impl AppState {
         &self.configs
     }
 
-    /// Creates a Configuration or replaces its draft revision, and persists it. **Saving only
-    /// saves** (ADR-0055): nothing is offered and no WebSocket loop wakes — the fleet keeps
-    /// running the published revision, if any, until [`Self::set_configuration_published`]
-    /// releases the draft.
+    /// Creates a Configuration or replaces its saved revision, and persists it. **Saving only
+    /// saves** (ADR-0061): nothing is offered and no WebSocket loop wakes — every Agent keeps
+    /// the revision its assignment pins, and the fleet view shows the newer save waiting.
     pub fn save_configuration(
         &self,
         name: &str,
         revision: Revision,
     ) -> Result<Configuration, String> {
-        let config = self.configs.put_draft(name, revision)?;
-        info!(configuration = %name, "configuration draft stored — nothing distributed");
+        let config = self.configs.put_saved(name, revision)?;
+        info!(configuration = %name, "configuration saved — nothing distributed");
         Ok(config)
     }
 
-    /// Releases a Configuration's draft to the fleet as one snapshot, or retracts the published
-    /// revision (ADR-0055), and wakes every WebSocket loop either way — this, not saving, is the
-    /// moment the fleet changes. `Ok(None)` when no Configuration of that name exists.
-    pub fn set_configuration_published(
+    /// One rollout act toward one Agent (ADR-0061): releases the target — a named Configuration,
+    /// a named Set, or everything currently waiting — to it, pinning the content as of this
+    /// press, and wakes the WebSocket loops so a connected Agent hears it now.
+    pub fn rollout_to_agent(
         &self,
-        name: &str,
-        published: bool,
-    ) -> Result<Option<Configuration>, String> {
-        let Some(config) = self.configs.set_published(name, published)? else {
-            return Ok(None);
-        };
-        self.push.send_modify(|rev| *rev += 1);
-        if published {
-            info!(configuration = %name, "configuration published and distributed");
-        } else {
-            info!(configuration = %name, "configuration retracted — its entry leaves every composed map");
+        uid: &InstanceUid,
+        target: &RolloutTarget,
+    ) -> Result<(), RolloutError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid).ok_or(RolloutError::UnknownAgent)?;
+        let mut collected: Vec<String> = Vec::new();
+        match target {
+            RolloutTarget::Configuration(name) => {
+                let config = self
+                    .configs
+                    .get(name)
+                    .ok_or_else(|| RolloutError::UnknownResource(format!("no configuration {name:?}")))?;
+                if !configs::fits(&config.saved, record.effective_description().as_deref()) {
+                    return Err(RolloutError::NotApplicable(format!(
+                        "configuration {name:?} does not fit or aim at agent {uid}"
+                    )));
+                }
+                let hash = self.configs.retain_saved(name).map_err(RolloutError::Storage)?;
+                record.config_assignments.insert(name.clone(), hash);
+                collected.push(name.clone());
+            }
+            RolloutTarget::Package(id) => {
+                let store = self
+                    .packages()
+                    .ok_or_else(|| {
+                        RolloutError::UnknownResource(
+                            "package delivery is not configured on this Server".to_string(),
+                        )
+                    })?;
+                store.fits_agent(id, record.effective_description().as_deref()).map_err(|e| {
+                    if e.starts_with("no package set") {
+                        RolloutError::UnknownResource(e)
+                    } else {
+                        RolloutError::NotApplicable(e)
+                    }
+                })?;
+                assign_package(record, store, id);
+            }
+            RolloutTarget::Everything => {
+                let effective_owned = record.effective_description().map(Cow::into_owned);
+                let description = effective_owned.as_ref();
+                for (name, hash) in self.configs.candidates_for(description) {
+                    if record.config_assignments.get(&name) != Some(&hash) {
+                        self.configs.retain_saved(&name).map_err(RolloutError::Storage)?;
+                        record.config_assignments.insert(name.clone(), hash);
+                        collected.push(name);
+                    }
+                }
+                if let Some(store) = self.packages.as_ref().map(PackageOffering::store) {
+                    // An ambiguous candidate set proposes nothing (the view says why), so a
+                    // conflict never blocks the Configurations riding the same press.
+                    for id in store.candidate_ids(description).unwrap_or_default() {
+                        assign_package(record, store, &id);
+                    }
+                }
+            }
         }
-        Ok(Some(config))
+        self.persist_if_dirty(uid, record);
+        // The rollout may have replaced a pinned revision nothing references any more.
+        for name in collected {
+            let referenced = referenced_hashes(&fleet, &name);
+            if let Err(e) = self.configs.retain_only(&name, &referenced) {
+                warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
+            }
+        }
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "rollout to agent");
+        Ok(())
+    }
+
+    /// The resource-level rollout act for a Configuration (ADR-0061 point 5): releases the saved
+    /// revision to **every Agent it currently fits and aims at** — a bulk write of the same
+    /// per-Agent assignments — and returns how many Agents that was. An Agent that appears later
+    /// waits for its own act (point 6).
+    pub fn rollout_configuration(&self, name: &str) -> Result<usize, RolloutError> {
+        let config = self
+            .configs
+            .get(name)
+            .ok_or_else(|| RolloutError::UnknownResource(format!("no configuration {name:?}")))?;
+        let hash = self.configs.retain_saved(name).map_err(RolloutError::Storage)?;
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut assigned = 0usize;
+        for (uid, record) in fleet.iter_mut() {
+            if !configs::fits(&config.saved, record.effective_description().as_deref()) {
+                continue;
+            }
+            record
+                .config_assignments
+                .insert(name.to_string(), hash.clone());
+            self.persist_if_dirty(uid, record);
+            assigned += 1;
+        }
+        let referenced = referenced_hashes(&fleet, name);
+        if let Err(e) = self.configs.retain_only(name, &referenced) {
+            warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
+        }
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(configuration = %name, agents = assigned, "configuration rolled out to all matching agents");
+        Ok(assigned)
+    }
+
+    /// The resource-level rollout act for a Set (ADR-0061 point 5): releases it to every Agent
+    /// it fits and its Selector aims at, and returns how many Agents that was. Rolling out a Set
+    /// with no entries is refused, as publishing one was.
+    pub fn rollout_package(&self, id: &SetId) -> Result<usize, RolloutError> {
+        let store = self.packages().ok_or_else(|| {
+            RolloutError::UnknownResource(
+                "package delivery is not configured on this Server".to_string(),
+            )
+        })?;
+        let summary = store
+            .summary(id)
+            .ok_or_else(|| RolloutError::UnknownResource(format!("no package set {id}")))?;
+        if summary.entries.is_empty() {
+            return Err(RolloutError::NotApplicable(format!(
+                "set {id} holds no entries — a set contains one or more entries before it can be \
+                 rolled out"
+            )));
+        }
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut assigned = 0usize;
+        for (uid, record) in fleet.iter_mut() {
+            if store
+                .fits_agent(id, record.effective_description().as_deref())
+                .is_err()
+            {
+                continue;
+            }
+            assign_package(record, store, id);
+            self.persist_if_dirty(uid, record);
+            assigned += 1;
+        }
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(set = %id, agents = assigned, "package rolled out to all matching agents");
+        Ok(assigned)
     }
 
     /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so
@@ -602,8 +831,8 @@ impl AppState {
     /// it at all (ADR-0034), so a label that outranked them would let a slip here offer this Agent
     /// an artifact built for another machine. Labels annotate; they do not correct.
     ///
-    /// The write is published like a Configuration edit, so an Agent moved into a ring receives the
-    /// Configuration that ring gets on the spot rather than at its next poll.
+    /// Since ADR-0061 a label move changes only what the fleet view **proposes**: the Agent's
+    /// candidates follow its new ring, and nothing is distributed until a rollout act says so.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
@@ -621,8 +850,7 @@ impl AppState {
             .map_err(LabelError::Storage)?;
         record.labels = set;
         drop(fleet);
-        self.push.send_modify(|rev| *rev += 1);
-        info!(agent = %uid, "labels set");
+        info!(agent = %uid, "labels set — candidates follow, nothing is distributed (ADR-0061)");
         Ok(())
     }
 
@@ -651,7 +879,7 @@ impl AppState {
         let fleet = self.fleet.lock().expect("fleet lock");
         for record in fleet.values() {
             let effective = record.effective_description();
-            for id in store.offered_ids(effective.as_deref()) {
+            for id in store.candidate_ids(effective.as_deref()).unwrap_or_default() {
                 *reach.entry(id.to_string()).or_insert(0) += 1;
             }
         }
@@ -681,10 +909,19 @@ impl AppState {
         if record.connected && !is_silent(record, self.stale_after()) {
             return Err(ForgetError::StillReporting);
         }
-        fleet.remove(uid);
+        let removed = fleet.remove(uid);
         // Forgetting that left a stored record behind would be the "remembering under another
         // name" ADR-0039 rejected — the record leaves the store with the row (ADR-0051).
         self.unpersist(uid);
+        // A pinned revision only this Agent referenced is unreferenced now (ADR-0061).
+        if let Some(record) = removed {
+            for name in record.config_assignments.keys() {
+                let referenced = referenced_hashes(&fleet, name);
+                if let Err(e) = self.configs.retain_only(name, &referenced) {
+                    warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
+                }
+            }
+        }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "agent forgotten");
@@ -704,13 +941,22 @@ impl AppState {
         Some(restart_command(uid, self.capabilities()))
     }
 
-    /// Deletes a Configuration and wakes every WebSocket loop; `false` when none of that name
-    /// exists. Agents that applied it keep running it — narrowing never revokes (ADR-0012).
+    /// Deletes a Configuration and removes every assignment that referenced it (ADR-0061 point
+    /// 7); `false` when none of that name exists. That is **not inert** for an Agent that had it
+    /// assigned: its composed map shrinks and it applies the map without the entry — only an
+    /// Agent left assigned nothing keeps running what it runs (goal 9).
     pub fn delete_configuration(&self, name: &str) -> Result<bool, String> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
         let deleted = self.configs.delete(name)?;
         if deleted {
+            for (uid, record) in fleet.iter_mut() {
+                if record.config_assignments.remove(name).is_some() {
+                    self.persist_if_dirty(uid, record);
+                }
+            }
+            drop(fleet);
             self.push.send_modify(|rev| *rev += 1);
-            info!(configuration = %name, "configuration deleted");
+            info!(configuration = %name, "configuration deleted — its entry leaves every assigned map");
         }
         Ok(deleted)
     }
@@ -870,6 +1116,10 @@ impl AppState {
                 connection_settings_status: None,
                 package_statuses: None,
                 owner: conn,
+                // A new Agent waits (ADR-0061 point 6): it is assigned nothing until an
+                // operator's rollout act says so, and the fleet view shows what it could get.
+                config_assignments: BTreeMap::new(),
+                package_assignments: Some(BTreeMap::new()),
             }
         });
 
@@ -1026,15 +1276,14 @@ impl AppState {
         // durable state (ADR-0051) — a heartbeat did not, and writes nothing.
         self.persist_if_dirty(&uid, record);
 
-        // The config offer — composed from the Configurations whose Selectors match this Agent
-        // (ADR-0012), gated by the hash comparison, and only toward an Agent that both said
-        // goodbye ≠ true and declared AcceptsRemoteConfig (capability negotiation is binding).
+        // The config offer — composed from this Agent's assignments (ADR-0061), gated by the
+        // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
+        // AcceptsRemoteConfig (capability negotiation is binding). Matching proposes; only an
+        // operator's rollout act made anything an assignment.
         let remote_config = if disconnected {
             None
         } else {
-            let desired = self
-                .configs
-                .desired_for(record.effective_description().as_deref());
+            let desired = self.configs.compose(&record.config_assignments);
             offer(record, desired.as_ref())
         };
 
@@ -1070,13 +1319,13 @@ impl AppState {
         }
     }
 
-    /// The package offer for one Agent, or `None` when it cannot accept packages, no package's
-    /// Selector matches it, or the aggregate hash it last reported already matches the set it
-    /// should have.
+    /// The package offer for one Agent, composed from its **assignments** (ADR-0061), or `None`
+    /// when it cannot accept packages, is assigned nothing it fits, or the aggregate hash it last
+    /// reported already matches what it is assigned.
     ///
-    /// Both the offer and the aggregate are computed over *this Agent's* matching packages
-    /// (ADR-0017): comparing against a fleet-wide aggregate would re-offer, on every exchange,
-    /// packages this Agent is never given.
+    /// Both the offer and the aggregate are computed over *this Agent's* assignments: comparing
+    /// against a fleet-wide aggregate would re-offer, on every exchange, packages this Agent is
+    /// never given.
     fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
         let offering = self.packages.as_ref()?;
         if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
@@ -1084,31 +1333,29 @@ impl AppState {
         }
         let effective = record.effective_description();
         let description = effective.as_deref();
+        let assigned = record.package_assignments();
         let reported = record
             .package_statuses
             .as_ref()
             .map(|s| s.server_provided_all_packages_hash.as_slice())
             .unwrap_or_default();
-        if reported == offering.store.all_packages_hash_for(description).as_slice() {
+        if reported
+            == offering
+                .store
+                .assigned_hash_for(assigned, description)
+                .as_slice()
+        {
             return None;
         }
-        match offering
+        offering
             .store
-            .offer_for(description, &offering.download_base, None)
-        {
-            Ok(offer) => offer,
-            // Ambiguous targeting: two equally specific Selectors both reach this Agent. Offering
-            // neither is the only honest answer — but silence would leave an operator watching a
-            // rollout that never starts, so it is logged and shown in the fleet view.
-            Err(e) => {
-                warn!(error = %e, "refusing to offer a package: ambiguous targeting");
-                None
-            }
-        }
+            .offer_for_assigned(assigned, description, &offering.download_base, None)
     }
 
-    /// Why this Agent is offered no package, when the reason is the operator's targeting rather
-    /// than the absence of one (ADR-0017). `None` when nothing is wrong.
+    /// Why this Agent is **proposed** no package although it accepts them — two equally specific
+    /// Selectors both reach it, so the candidate computation refuses to guess (ADR-0017,
+    /// ADR-0052). `None` when nothing is wrong. Assignments are untouched by a conflict; only
+    /// the proposal is.
     fn package_conflict(&self, record: &AgentRecord) -> Option<String> {
         let offering = self.packages.as_ref()?;
         if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
@@ -1116,7 +1363,7 @@ impl AppState {
         }
         offering
             .store
-            .offer_for(record.effective_description().as_deref(), "", None)
+            .candidate_ids(record.effective_description().as_deref())
             .err()
     }
 
@@ -1199,15 +1446,13 @@ impl AppState {
         gate(record, composed)
     }
 
-    /// The unsolicited offer a WebSocket loop pushes when a Configuration or package changes;
-    /// `None` when the Agent already runs both (or nothing matches it, or it cannot accept one),
-    /// so nothing redundant crosses the wire.
+    /// The unsolicited offer a WebSocket loop pushes when a rollout act changes an assignment;
+    /// `None` when the Agent already runs both (or is assigned nothing, or it cannot accept
+    /// one), so nothing redundant crosses the wire.
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
-        let desired = self
-            .configs
-            .desired_for(record.effective_description().as_deref());
+        let desired = self.configs.compose(&record.config_assignments);
         let remote_config = offer(record, desired.as_ref());
         let packages_available = self.packages_offer(record);
         if remote_config.is_none() && packages_available.is_none() {
@@ -1231,24 +1476,48 @@ impl AppState {
             .store())
     }
 
-    /// Creates a Set as a draft, or updates an existing one's Selector and kind (ADR-0052), and
-    /// wakes every WebSocket loop — a Selector move on a published Set changes whom it reaches,
-    /// and those Agents should learn of it now rather than at their next poll.
+    /// Whether any Agent's assignment references this Set — the gate that makes an assigned
+    /// Set's bytes immutable (ADR-0061 point 8). Only the fleet can answer it, which is why the
+    /// store no longer tries to.
+    fn package_set_assigned(&self, id: &crate::packages::SetId) -> bool {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        fleet
+            .values()
+            .any(|record| record.package_assignments().values().any(|a| a == id))
+    }
+
+    /// The refusal every write to an assigned Set answers with (ADR-0061 point 8).
+    fn refuse_if_assigned(&self, id: &crate::packages::SetId) -> Result<(), String> {
+        if self.package_set_assigned(id) {
+            return Err(format!(
+                "set {id} is assigned to an Agent and its entries are immutable — create the \
+                 next version as a new set and roll that out"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Creates a Set, or updates an existing one's Selector and kind (ADR-0052). **Nothing is
+    /// distributed** (ADR-0061): the Selector steers whom a rollout act would reach, so no loop
+    /// wakes. The kind is frozen while the Set is assigned somewhere — it is part of what the
+    /// offer's hash covers.
     pub fn create_package_set(
         &self,
         id: &crate::packages::SetId,
         selector: BTreeMap<String, String>,
         addon: bool,
     ) -> Result<(), String> {
-        self.package_store()?
-            .create_or_update(id, selector, addon)?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(set = %id, "package set stored");
+        let store = self.package_store()?;
+        if store.is_addon(id).is_some_and(|current| current != addon) {
+            self.refuse_if_assigned(id)?;
+        }
+        store.create_or_update(id, selector, addon)?;
+        info!(set = %id, "package set stored — nothing distributed");
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a draft Set (ADR-0052). No push: a draft reaches
-    /// nobody until it is published, so there is nothing to tell the fleet yet.
+    /// Stores one streamed upload as an entry of a Set (ADR-0052). Refused while the Set is
+    /// assigned to an Agent (ADR-0061 point 8); no push, because saving never distributes.
     pub fn put_package_entry(
         &self,
         id: &crate::packages::SetId,
@@ -1256,22 +1525,27 @@ impl AppState {
         signature: Option<Vec<u8>>,
         staged: &std::path::Path,
     ) -> Result<(), String> {
+        self.refuse_if_assigned(id)?;
         self.package_store()?
             .put_staged(id, platform, signature, staged)?;
         info!(set = %id, platform = %format!("{}-{}", platform.os, platform.arch), "package entry stored");
         Ok(())
     }
 
-    /// Where an upload for one entry is streamed before it becomes an artifact.
+    /// Where an upload for one entry is streamed before it becomes an artifact. Refused while
+    /// the Set is assigned to an Agent (ADR-0061 point 8), so a refused upload is refused before
+    /// its bytes are streamed.
     pub fn package_staging_path(
         &self,
         id: &crate::packages::SetId,
         platform: &crate::packages::Platform,
     ) -> Result<std::path::PathBuf, String> {
+        self.refuse_if_assigned(id)?;
         self.package_store()?.staging_path(id, platform)
     }
 
-    /// Points one entry of a draft Set at an artifact hosted elsewhere (ADR-0018, per ADR-0052).
+    /// Points one entry of a Set at an artifact hosted elsewhere (ADR-0018, per ADR-0052).
+    /// Refused while the Set is assigned to an Agent (ADR-0061 point 8).
     pub fn set_package_entry_source(
         &self,
         id: &crate::packages::SetId,
@@ -1280,18 +1554,21 @@ impl AppState {
         signature: Option<Vec<u8>>,
         source: crate::packages::Source,
     ) -> Result<(), String> {
+        self.refuse_if_assigned(id)?;
         self.package_store()?
             .set_entry_source(id, platform, content_hash, signature, source)?;
         info!(set = %id, "package entry now referenced from its source");
         Ok(())
     }
 
-    /// Deletes one entry of a draft Set; `Ok(false)` when the Set or entry does not exist.
+    /// Deletes one entry of a Set; `Ok(false)` when the Set or entry does not exist. Refused
+    /// while the Set is assigned to an Agent (ADR-0061 point 8).
     pub fn delete_package_entry(
         &self,
         id: &crate::packages::SetId,
         platform: &crate::packages::Platform,
     ) -> Result<bool, String> {
+        self.refuse_if_assigned(id)?;
         let deleted = self.package_store()?.delete_entry(id, platform)?;
         if deleted {
             info!(set = %id, "package entry deleted");
@@ -1299,44 +1576,43 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Sets a Set's Selector (ADR-0017) and wakes every WebSocket loop, so an Agent that the
-    /// change newly targets is offered it now rather than at its next poll.
+    /// Sets a Set's Selector (ADR-0017). Since ADR-0061 nothing is distributed by it: the
+    /// Selector steers whom a rollout act would reach, so widening one only makes the fleet view
+    /// propose more — no loop wakes, no Agent changes.
     pub fn set_package_selector(
         &self,
         id: &crate::packages::SetId,
         selector: BTreeMap<String, String>,
     ) -> Result<(), String> {
         self.package_store()?.set_selector(id, selector)?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(set = %id, "package selector changed");
+        info!(set = %id, "package selector changed — candidates follow, nothing is distributed");
         Ok(())
     }
 
-    /// Releases a Set to the fleet, or retracts it (ADR-0043), waking every WebSocket loop.
-    ///
-    /// This is the moment a rollout starts, so the Agents it reaches should learn of it at once
-    /// rather than on their next poll. Retracting pushes too: an Agent mid-exchange should not be
-    /// handed an offer that was just withdrawn — and with greater-version-wins resolution
-    /// (ADR-0052), retracting the newest version is what rolls the fleet back to the one still
-    /// published beneath it.
-    pub fn set_package_published(
-        &self,
-        id: &crate::packages::SetId,
-        published: bool,
-    ) -> Result<(), String> {
-        self.package_store()?.set_published(id, published)?;
-        self.push.send_modify(|rev| *rev += 1);
-        info!(set = %id, published, "package publication changed");
-        Ok(())
-    }
-
-    /// Deletes a Set; `Ok(false)` when none of that identity exists. Wakes the loops because
-    /// deleting a published Set withdraws its offer with it.
+    /// Deletes a Set and removes every assignment that referenced it (ADR-0061 point 7);
+    /// `Ok(false)` when none of that identity exists. The withdrawal uninstalls nothing — an
+    /// Agent keeps running what it installed (ADR-0017) — and the loops wake so a pending offer
+    /// is not delivered after its Set is gone.
     pub fn delete_package_set(&self, id: &crate::packages::SetId) -> Result<bool, String> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
         let deleted = self.package_store()?.delete_set(id)?;
         if deleted {
+            for (uid, record) in fleet.iter_mut() {
+                let removed = record
+                    .package_assignments
+                    .as_mut()
+                    .is_some_and(|assignments| {
+                        let before = assignments.len();
+                        assignments.retain(|_, assigned| assigned != id);
+                        assignments.len() != before
+                    });
+                if removed {
+                    self.persist_if_dirty(uid, record);
+                }
+            }
+            drop(fleet);
             self.push.send_modify(|rev| *rev += 1);
-            info!(set = %id, "package set deleted");
+            info!(set = %id, "package set deleted — every assignment that referenced it is gone");
         }
         Ok(deleted)
     }
@@ -1363,18 +1639,65 @@ impl AppState {
         let mut agents: Vec<AgentView> = fleet
             .iter()
             .map(|(uid, record)| {
-                // One derived description for both, so a label can never mean one thing for the
-                // Configuration an Agent gets and another for the list of what matched it.
+                // One derived description for everything below, so a label can never mean one
+                // thing for the offer and another for what the view proposes.
                 let effective = record.effective_description();
-                let desired = self.configs.desired_for(effective.as_deref());
+                let desired = self.configs.compose(&record.config_assignments);
                 let matched = self.configs.matching_names(effective.as_deref());
                 let package_conflict = self.package_conflict(record);
+
+                // What is waiting (ADR-0061 point 4): the difference between the candidates a
+                // rollout act would release and what the assignments pin.
+                let pending_configurations: Vec<PendingConfigurationView> = self
+                    .configs
+                    .candidates_for(effective.as_deref())
+                    .into_iter()
+                    .filter_map(|(name, hash)| {
+                        match record.config_assignments.get(&name) {
+                            Some(assigned) if *assigned == hash => None,
+                            Some(_) => Some(PendingConfigurationView {
+                                name,
+                                change: "update".to_string(),
+                            }),
+                            None => Some(PendingConfigurationView {
+                                name,
+                                change: "new".to_string(),
+                            }),
+                        }
+                    })
+                    .collect();
+                let pending_packages: Vec<PendingPackageView> = self
+                    .packages()
+                    .map(|store| {
+                        store
+                            .candidate_ids(effective.as_deref())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|id| {
+                                let change = match record.package_assignments().get(&id.name) {
+                                    Some(assigned) if *assigned == id => return None,
+                                    Some(_) => "update",
+                                    None => "new",
+                                };
+                                Some(PendingPackageView {
+                                    name: id.name,
+                                    agent_type: id.service_name,
+                                    version: id.version,
+                                    change: change.to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 AgentView::from_record(
                     uid,
                     record,
                     desired.as_ref(),
                     matched,
                     package_conflict,
+                    pending_configurations,
+                    pending_packages,
                     self.stale_after(),
                 )
             })
@@ -1384,8 +1707,34 @@ impl AppState {
     }
 }
 
+/// Writes one package assignment (ADR-0061): keyed by name — and for a top-level Set the
+/// Baseline's "one top-level package" rule drops any other top-level assignment first, whatever
+/// its name: an Agent has one binary to replace, and the operator's explicit act is what chooses
+/// it now.
+fn assign_package(record: &mut AgentRecord, store: &PackageStore, id: &SetId) {
+    let addon = store.is_addon(id).unwrap_or(false);
+    let assignments = record.package_assignments_mut();
+    if !addon {
+        assignments.retain(|_, assigned| store.is_addon(assigned).unwrap_or(false));
+    }
+    assignments.insert(id.name.clone(), id.clone());
+}
+
+/// Every revision hash of `name` that any Agent's assignment still references — what
+/// [`ConfigStore::retain_only`] is told to keep.
+fn referenced_hashes(
+    fleet: &HashMap<InstanceUid, AgentRecord>,
+    name: &str,
+) -> BTreeSet<String> {
+    fleet
+        .values()
+        .filter_map(|record| record.config_assignments.get(name))
+        .cloned()
+        .collect()
+}
+
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
-/// it — the "no redundant reconfiguration" goal in one place. Every matching Configuration is one
+/// it — the "no redundant reconfiguration" goal in one place. Every assigned Configuration is one
 /// named entry; the Managed Process does its own merging (ADR-0012).
 fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentRemoteConfig> {
     let desired = desired?;
@@ -1464,9 +1813,24 @@ pub struct AgentView {
     pub identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     pub non_identifying_attributes: BTreeMap<String, String>,
-    /// The Configurations currently matching this Agent, in name order.
+    /// The Configurations whose saved revision currently matches this Agent — the **candidates**
+    /// a rollout act would release to it (ADR-0061), in name order. Never what it runs; that is
+    /// [`assigned_configurations`](Self::assigned_configurations).
     pub matched_configurations: Vec<String>,
-    /// Hex hash of the composed configuration this Agent should run; empty when nothing matches.
+    /// The Configurations rolled out to this Agent (ADR-0061), in name order — what its offer is
+    /// composed from.
+    pub assigned_configurations: Vec<String>,
+    /// The package Sets rolled out to this Agent (ADR-0061), as `name@version@type`, in name
+    /// order.
+    pub assigned_packages: Vec<String>,
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0061 point 4): a
+    /// candidate not yet assigned (`change: "new"`), or one whose saved revision is newer than
+    /// the assigned one (`change: "update"`). The Server never acts on this by itself.
+    pub pending_configurations: Vec<PendingConfigurationView>,
+    /// The package Sets waiting for a rollout act toward this Agent (ADR-0061 point 4).
+    pub pending_packages: Vec<PendingPackageView>,
+    /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
+    /// nothing.
     pub desired_hash: String,
     /// The Capability Set this Agent declared, as capability names from the Baseline's
     /// `AgentCapabilities` (see docs/CONFORMANCE.md).
@@ -1518,6 +1882,25 @@ pub struct AgentView {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
+}
+
+/// One Configuration waiting for a rollout act toward one Agent (ADR-0061).
+#[derive(Serialize, ToSchema)]
+pub struct PendingConfigurationView {
+    pub name: String,
+    /// `new` — a candidate not yet assigned; `update` — the saved revision is newer than the
+    /// assigned one.
+    pub change: String,
+}
+
+/// One package Set waiting for a rollout act toward one Agent (ADR-0061).
+#[derive(Serialize, ToSchema)]
+pub struct PendingPackageView {
+    pub name: String,
+    pub agent_type: String,
+    pub version: String,
+    /// `new` — no Set of this name is assigned; `update` — another version (or content) is.
+    pub change: String,
 }
 
 /// One package's installation state as the REST API and UI see it (ADR-0015).
@@ -1638,12 +2021,15 @@ fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
 }
 
 impl AgentView {
+    #[allow(clippy::too_many_arguments)]
     fn from_record(
         uid: &InstanceUid,
         record: &AgentRecord,
         desired: Option<&DesiredConfig>,
         matched_configurations: Vec<String>,
         package_conflict: Option<String>,
+        pending_configurations: Vec<PendingConfigurationView>,
+        pending_packages: Vec<PendingPackageView>,
         stale_after: Duration,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
@@ -1686,6 +2072,14 @@ impl AgentView {
             identifying_attributes: identifying,
             non_identifying_attributes: non_identifying,
             matched_configurations,
+            assigned_configurations: record.config_assignments.keys().cloned().collect(),
+            assigned_packages: record
+                .package_assignments()
+                .values()
+                .map(|id| id.to_string())
+                .collect(),
+            pending_configurations,
+            pending_packages,
             desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
             capabilities: capability_names(record.capabilities),
             available_components: record
@@ -2020,6 +2414,8 @@ mod tests {
             package_statuses: None,
             owner: None,
             labels: BTreeMap::new(),
+            config_assignments: BTreeMap::new(),
+            package_assignments: Some(BTreeMap::new()),
         }
     }
 
@@ -2181,6 +2577,99 @@ mod tests {
         let new_uid = processed.uid.expect("the new identity");
         assert!(!dir.join("agents").join(format!("{uid}.json")).exists());
         assert!(dir.join("agents").join(format!("{new_uid}.json")).exists());
+    }
+
+    /// ADR-0061 point 9: a store written before the ADR loads as **rolled out** — the record is
+    /// seeded with what the published content matched it — so an upgrade neither empties a
+    /// composed map nor delivers the newer draft anyone left unreleased.
+    #[test]
+    fn a_pre_adr_0061_store_loads_as_rolled_out() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        }
+        // The pre-ADR shapes: a two-revision Configuration file (ADR-0055), and an agent record
+        // without assignment fields.
+        std::fs::write(
+            dir.join("fleet.json"),
+            r#"{"name":"fleet","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
+        )
+        .expect("write the legacy configuration");
+        let record_path = dir.join("agents").join(format!("{uid}.json"));
+        let mut record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&record_path).expect("read"))
+                .expect("json");
+        let fields = record.as_object_mut().expect("object");
+        fields.remove("config_assignments");
+        fields.remove("package_assignments");
+        std::fs::write(&record_path, serde_json::to_vec(&record).expect("json")).expect("write");
+
+        let state = AppState::new(dir).expect("reopened state");
+        let view = &state.snapshot()[0];
+        assert_eq!(
+            view.assigned_configurations,
+            ["fleet"],
+            "the record is seeded as rolled out to what was published"
+        );
+        assert_eq!(
+            view.pending_configurations[0].change, "update",
+            "the never-released draft waits instead of being delivered"
+        );
+    }
+
+    /// ADR-0061: saving proposes, the acts assign — and an Agent that appears after the bulk act
+    /// waits for one of its own (point 6).
+    #[test]
+    fn rollout_acts_assign_and_a_late_agent_waits() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let state = AppState::new(dir).expect("state");
+        let early = InstanceUid::default();
+        state.process(report(&early, 1), Transport::Http, None);
+        state
+            .save_configuration(
+                "fleet",
+                Revision {
+                    selector: BTreeMap::new(),
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                    service_name: String::new(),
+                },
+            )
+            .expect("save");
+
+        let view = &state.snapshot()[0];
+        assert!(view.assigned_configurations.is_empty(), "saving assigns nothing");
+        assert_eq!(view.pending_configurations[0].change, "new");
+
+        assert_eq!(
+            state.rollout_configuration("fleet").expect("rollout"),
+            1,
+            "the bulk act assigns the one known Agent"
+        );
+        assert_eq!(state.snapshot()[0].assigned_configurations, ["fleet"]);
+
+        // The latecomer: a candidate, waiting, assigned nothing — until its own act.
+        let late = InstanceUid::default();
+        state.process(report(&late, 1), Transport::Http, None);
+        let late_view = state
+            .snapshot()
+            .into_iter()
+            .find(|v| v.instance_uid == late.to_string())
+            .expect("the late agent");
+        assert!(late_view.assigned_configurations.is_empty());
+        assert_eq!(late_view.pending_configurations[0].change, "new");
+        state
+            .rollout_to_agent(&late, &RolloutTarget::Everything)
+            .expect("rollout to agent");
+        let late_view = state
+            .snapshot()
+            .into_iter()
+            .find(|v| v.instance_uid == late.to_string())
+            .expect("the late agent");
+        assert_eq!(late_view.assigned_configurations, ["fleet"]);
+        assert!(late_view.pending_configurations.is_empty());
     }
 
     /// ADR-0051: a queued restart is operator intent and survives the Server restarting.

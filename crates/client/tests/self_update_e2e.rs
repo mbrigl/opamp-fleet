@@ -248,8 +248,6 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     store
         .put_entry(&set, &this_host(), None, artifact)
         .expect("put entry");
-    // And released, or it is a draft the fleet never sees (ADR-0043).
-    store.set_published(&set, true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -260,6 +258,18 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
+
+    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, and it needs the
+    // Client's Agent to be known and fitted — so it is retried until the first report arrived.
+    wait_until("the rollout act to reach the agent", || {
+        service.tend();
+        state
+            .rollout_package(&set)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
 
     // The contract: however many restarts it takes, the Server is told the new version is in.
     wait_until("the self-update to be reported Installed", || {
@@ -344,7 +354,6 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     store
         .put_entry(&set, &this_host(), None, artifact)
         .expect("put entry");
-    store.set_published(&set, true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -382,6 +391,18 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
+
+    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, and it needs the
+    // Client's Agent to be known and fitted — so it is retried until the first report arrived.
+    wait_until("the rollout act to reach the agent", || {
+        service.tend();
+        state
+            .rollout_package(&set)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
 
     let read_managed_pid = |path: &Path| -> Option<u32> {
         let text = std::fs::read_to_string(path).ok()?;
@@ -449,7 +470,6 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     store
         .put_entry(&set, &this_host(), None, artifact)
         .expect("put entry");
-    store.set_published(&set, true).expect("publish");
 
     let (addr, state) = spawn_server(store).await;
     let root = dir.path().join("install");
@@ -461,6 +481,18 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
         .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
+
+    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, and it needs the
+    // Client's Agent to be known and fitted — so it is retried until the first report arrived.
+    wait_until("the rollout act to reach the agent", || {
+        service.tend();
+        state
+            .rollout_package(&set)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
 
     // An offer refused outright has no package status to hang the reason on — the report carries
     // it, and the fleet view shows it as `package_error`.

@@ -208,8 +208,9 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.healthy);
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
-    // The operator distributes a fleet-wide Configuration — saved, then published, because
-    // saving alone stages a draft (ADR-0055); the Server pushes the release over the socket.
+    // The operator distributes a fleet-wide Configuration — saved, then rolled out, because
+    // saving alone distributes nothing (ADR-0061); the act assigns every currently matching
+    // Agent and the Server pushes the release over the socket.
     state
         .save_configuration(
             "fleet",
@@ -222,9 +223,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         )
         .expect("save the fleet configuration");
     state
-        .set_configuration_published("fleet", true)
-        .expect("publish the fleet configuration")
-        .expect("the configuration exists");
+        .rollout_configuration("fleet")
+        .expect("roll out the fleet configuration");
 
     // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
     // files. The fleet-wide Configuration has an empty Selector, so it reaches the Client's own
@@ -328,9 +328,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         )
         .expect("save the targeted configuration");
     state
-        .set_configuration_published("edge-extra", true)
-        .expect("publish the targeted configuration")
-        .expect("the configuration exists");
+        .rollout_configuration("edge-extra")
+        .expect("roll out the targeted configuration");
     wait_until("the stub to apply both entries", || {
         let snapshot = state.snapshot();
         let stub = view(&snapshot, "stub")?;
@@ -385,13 +384,18 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // ——— The Server manages the Client's own Supervisor set (ADR-0056) ———
 
     // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is
-    // YAML), so the operator first states whom it is for (ADR-0054): the type both Supervisors
-    // report. Their own maps carry the same entry with the same body, so nothing restarts.
+    // YAML). Since ADR-0061 a narrower aim no longer withdraws what was already rolled out —
+    // the Client keeps its pinned assignment however the type changes — so the recovery is to
+    // delete the Configuration, which removes it from every assigned Agent, and roll it out
+    // again stated for the type both Supervisors report (ADR-0054).
     let snapshot = state.snapshot();
     let supervised_type = view(&snapshot, "otelcol")
         .expect("otelcol view")
         .service_name
         .clone();
+    state
+        .delete_configuration("fleet")
+        .expect("delete the poisoned configuration");
     state
         .save_configuration(
             "fleet",
@@ -404,9 +408,24 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         )
         .expect("retype the fleet configuration");
     state
-        .set_configuration_published("fleet", true)
-        .expect("republish the fleet configuration")
-        .expect("the configuration exists");
+        .rollout_configuration("fleet")
+        .expect("roll out the retyped configuration");
+    // The two Supervisors settle on the retyped map before pids are compared below: the delete
+    // and the re-rollout each moved their hash, which restarts their processes.
+    wait_until("the supervised agents to settle on the retyped map", || {
+        let snapshot = state.snapshot();
+        ["otelcol", "stub"]
+            .iter()
+            .all(|name| {
+                view(&snapshot, name).is_some_and(|a| {
+                    a.in_sync
+                        && a.remote_config_status == "APPLIED"
+                        && a.assigned_configurations.iter().any(|c| c == "fleet")
+                })
+            })
+            .then_some(())
+    })
+    .await;
 
     // A Configuration typed for the Client itself carries `[[supervisor]]` blocks: the running
     // two, verbatim, plus a third. Unchanged blocks ride through — the stub must keep its pid.
@@ -438,9 +457,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         )
         .expect("save the supervisor set");
     state
-        .set_configuration_published("client-supervisors", true)
-        .expect("publish the supervisor set")
-        .expect("the configuration exists");
+        .rollout_configuration("client-supervisors")
+        .expect("roll out the supervisor set");
 
     wait_until("the added supervisor to connect, the set applied", || {
         let snapshot = state.snapshot();
@@ -477,9 +495,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         )
         .expect("shrink the supervisor set");
     state
-        .set_configuration_published("client-supervisors", true)
-        .expect("publish the shrunken set")
-        .expect("the configuration exists");
+        .rollout_configuration("client-supervisors")
+        .expect("roll out the shrunken set");
 
     wait_until("the added supervisor to say goodbye", || {
         let snapshot = state.snapshot();

@@ -17,6 +17,24 @@ carries a date once its tag exists.
 
 ## [0.3.0]
 
+### Changed
+
+- **Publication is gone; a rollout is an explicit act, per Agent or per resource**
+  ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)). Saving a Configuration or a
+  package Set never distributes anything, and there is no draft/published state any more: what an
+  Agent runs is its **assignment**, written only by a rollout act — `POST
+  /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
+  for every currently matching Agent, or `POST /api/v1/agents/{uid}/rollout` for one. An act pins
+  the content as of that press; later saves wait, visible per Agent in the fleet view
+  (`pending_configurations`, `pending_packages`), as does an Agent that enrols or starts matching
+  later. Selector edits and label moves no longer distribute either. Deleting a Configuration or
+  a Set removes it from every assigned Agent. Package rollback is the same act pointed at the
+  older version.
+  **What to do:** replace every `PUT …/publication` call with the matching `POST …/rollout`;
+  after adding hosts, press the resource's rollout (or the new host's) — nothing reaches them by
+  itself any more. Existing stores migrate as "rolled out to what was published", so a running
+  fleet is not changed by the upgrade. The `published`/`pending_changes` fields left the API.
+
 ### Added
 
 - **A `command` Supervisor can reload instead of restart**

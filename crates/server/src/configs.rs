@@ -1,10 +1,11 @@
 //! Named Configurations with Selectors (ADR-0012): the persistent store, the type fit
-//! (ADR-0054) and Selector matching, and the composition of each Agent's Remote configuration
-//! out of everything that matches it. Since ADR-0055 a Configuration carries two revisions —
-//! a draft the operator edits and a published one the fleet is offered — and only publication
-//! moves the draft into force.
+//! (ADR-0054) and Selector matching, and the composition of each Agent's Remote configuration.
+//! Since ADR-0061 saving is the only content state — **a saved Configuration reaches nobody by
+//! itself**. What an Agent is offered is composed from the per-Agent assignments the operator's
+//! explicit rollout acts wrote; the store's part is to keep the saved revision, and to retain
+//! every pinned revision an assignment still references.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -41,29 +42,34 @@ pub struct Revision {
     pub service_name: String,
 }
 
-/// A named Configuration as the store holds it (ADR-0055): the draft revision every `PUT`
-/// writes, and the published revision — the snapshot composition reads — if it has ever been
-/// released. Saving only saves; `published` moves only through its own act.
+/// The hash an assignment pins a revision by (ADR-0061): over what the Agent is delivered — body
+/// and role, length-prefixed — never the Selector or the type, which decide *whom* a revision
+/// reaches rather than what it is.
+pub fn revision_hash(revision: &Revision) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((revision.body.len() as u64).to_le_bytes());
+    hasher.update(revision.body.as_bytes());
+    hasher.update((revision.role.len() as u64).to_le_bytes());
+    hasher.update(revision.role.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// A named Configuration as the store holds it (ADR-0061): the saved revision every `PUT`
+/// writes — the only revision an operator edits — and the retained revisions that per-Agent
+/// assignments pin by content hash. Saving only saves; a revision enters `retained` through a
+/// rollout act and leaves it when no assignment references it any more.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Configuration {
     /// The name: a config-map key on the wire and a file name on both ends, so it follows the
     /// ADR-0010 name grammar.
     pub name: String,
-    /// What editing operates on. Never composed, never offered, whatever it says.
-    pub draft: Revision,
-    /// What the fleet is offered — frozen at publication as one snapshot of the whole spec.
-    /// `None` means never published (or retracted): this Configuration reaches nobody.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub published: Option<Revision>,
-}
-
-impl Configuration {
-    /// The draft differs from what is in force — the "pending changes" marker (ADR-0055).
-    pub fn pending_changes(&self) -> bool {
-        self.published
-            .as_ref()
-            .is_some_and(|published| *published != self.draft)
-    }
+    /// What editing operates on, and what a rollout act releases as one snapshot.
+    pub saved: Revision,
+    /// The revisions in force somewhere in the fleet, keyed by [`revision_hash`]. An assignment
+    /// pins one of these; the saved revision is copied in here at the moment it is rolled out, so
+    /// a later edit changes nothing on any Agent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retained: BTreeMap<String, Revision>,
 }
 
 /// The role value this project understands (ADR-0016). Every other non-empty value is passed on
@@ -71,7 +77,7 @@ impl Configuration {
 pub const ROLE_SUPPLEMENTARY: &str = "supplementary";
 
 /// The writable part of a [`Configuration`] — the `PUT` request body; the name comes from the
-/// URL. Writes the draft revision (ADR-0055): saving only saves.
+/// URL. Writes the saved revision (ADR-0061): saving only saves.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationSpec {
@@ -95,9 +101,9 @@ pub struct ConfigEntry {
     pub role: String,
 }
 
-/// One Agent's composed Remote configuration: every matching published Configuration as a named
+/// One Agent's composed Remote configuration: every assigned Configuration revision as a named
 /// entry, in name order, plus the hash that gates every push (goal 3). `None` entries never
-/// exist — an Agent matching nothing gets no offer at all.
+/// exist — an Agent assigned nothing gets no offer at all.
 #[derive(Clone)]
 pub struct DesiredConfig {
     /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
@@ -189,14 +195,26 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
 }
 
 /// A Configuration file written before ADR-0055: the flat `{name, selector, body, role}` shape,
-/// which was both the stored record and the API resource. It loads as published — draft equal to
-/// published — because what it held was in force; reading it as a draft would empty every
-/// composed map and actively reconfigure the whole fleet on upgrade (ADR-0055 point 5).
+/// which was both the stored record and the API resource. What it held was in force, so it loads
+/// as saved **and** formerly published — the migration seed for the per-Agent assignments
+/// (ADR-0061 point 9).
 #[derive(Deserialize)]
-struct LegacyConfiguration {
+struct LegacyFlatConfiguration {
     name: String,
     #[serde(flatten)]
     revision: Revision,
+}
+
+/// A Configuration file written under ADR-0055: two revisions, draft and published. The draft
+/// becomes the saved revision; a published revision is retained and remembered as formerly
+/// published, so existing Agent records can load as "rolled out to what was in force"
+/// (ADR-0061 point 9).
+#[derive(Deserialize)]
+struct LegacyTwoRevisionConfiguration {
+    name: String,
+    draft: Revision,
+    #[serde(default)]
+    published: Option<Revision>,
 }
 
 /// The persistent Configuration store: one JSON file per Configuration under `config_dir`,
@@ -205,6 +223,10 @@ struct LegacyConfiguration {
 pub struct ConfigStore {
     dir: PathBuf,
     configs: RwLock<BTreeMap<String, Configuration>>,
+    /// What a pre-ADR-0061 store said was in force — Configuration name to the hash of its
+    /// published revision (the revision itself is in `retained`). Read once by the fleet to seed
+    /// the assignments of Agent records that predate the ADR; empty for a store born under it.
+    formerly_published: BTreeMap<String, String>,
 }
 
 impl ConfigStore {
@@ -214,6 +236,7 @@ impl ConfigStore {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let mut configs = BTreeMap::new();
+        let mut formerly_published = BTreeMap::new();
         let entries =
             std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for entry in entries {
@@ -227,16 +250,34 @@ impl ConfigStore {
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let value: serde_json::Value = serde_json::from_str(&text)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            let config: Configuration = if value.get("draft").is_some() {
+            let config: Configuration = if value.get("saved").is_some() {
                 serde_json::from_value(value)
                     .map_err(|e| format!("cannot parse {}: {e}", path.display()))?
-            } else {
-                let legacy: LegacyConfiguration = serde_json::from_value(value)
+            } else if value.get("draft").is_some() {
+                // ADR-0055 shape. The file is left as it is until the next write, so an Agent
+                // record that has not migrated yet can still be seeded from it on a later start.
+                let legacy: LegacyTwoRevisionConfiguration = serde_json::from_value(value)
                     .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+                let mut retained = BTreeMap::new();
+                if let Some(published) = legacy.published {
+                    let hash = revision_hash(&published);
+                    formerly_published.insert(legacy.name.clone(), hash.clone());
+                    retained.insert(hash, published);
+                }
                 Configuration {
                     name: legacy.name,
-                    draft: legacy.revision.clone(),
-                    published: Some(legacy.revision),
+                    saved: legacy.draft,
+                    retained,
+                }
+            } else {
+                let legacy: LegacyFlatConfiguration = serde_json::from_value(value)
+                    .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+                let hash = revision_hash(&legacy.revision);
+                formerly_published.insert(legacy.name.clone(), hash.clone());
+                Configuration {
+                    name: legacy.name,
+                    saved: legacy.revision.clone(),
+                    retained: BTreeMap::from([(hash, legacy.revision)]),
                 }
             };
             validate_name(&config.name)
@@ -246,7 +287,22 @@ impl ConfigStore {
         Ok(ConfigStore {
             dir,
             configs: RwLock::new(configs),
+            formerly_published,
         })
+    }
+
+    /// What a pre-ADR-0061 store said was in force, for seeding the assignments of Agent records
+    /// that predate the ADR: `(name, published revision, its hash)` per formerly published
+    /// Configuration. Empty for a store born under ADR-0061.
+    pub fn formerly_published(&self) -> Vec<(String, Revision, String)> {
+        let configs = self.configs.read().expect("configs lock");
+        self.formerly_published
+            .iter()
+            .filter_map(|(name, hash)| {
+                let revision = configs.get(name)?.retained.get(hash)?.clone();
+                Some((name.clone(), revision, hash.clone()))
+            })
+            .collect()
     }
 
     /// All Configurations, in name order.
@@ -267,10 +323,10 @@ impl ConfigStore {
             .cloned()
     }
 
-    /// Creates a Configuration or replaces its **draft** revision (ADR-0055): validated,
-    /// persisted atomically (temp file + rename) — and offered to nobody until published. A
-    /// published revision, where one exists, keeps being offered untouched.
-    pub fn put_draft(&self, name: &str, revision: Revision) -> Result<Configuration, String> {
+    /// Creates a Configuration or replaces its **saved** revision (ADR-0061): validated,
+    /// persisted atomically (temp file + rename) — and distributed to nobody. Every retained
+    /// revision keeps being offered untouched to the Agents assigned it.
+    pub fn put_saved(&self, name: &str, revision: Revision) -> Result<Configuration, String> {
         validate_name(name).map_err(|e| format!("invalid name {name:?}: {e}"))?;
         if revision.body.trim().is_empty() {
             return Err("the configuration body is empty; refusing to store it".to_string());
@@ -278,13 +334,13 @@ impl ConfigStore {
         let mut configs = self.configs.write().expect("configs lock");
         let config = match configs.get(name) {
             Some(existing) => Configuration {
-                draft: revision,
+                saved: revision,
                 ..existing.clone()
             },
             None => Configuration {
                 name: name.to_string(),
-                draft: revision,
-                published: None,
+                saved: revision,
+                retained: BTreeMap::new(),
             },
         };
         self.persist(&config)?;
@@ -292,26 +348,46 @@ impl ConfigStore {
         Ok(config)
     }
 
-    /// Releases the draft as one snapshot, or retracts the published revision (ADR-0055).
-    /// `Ok(None)` when no Configuration of that name exists. Retraction is **not inert**: the
-    /// entry leaves every composed map, which the fleet applies (the caller's documentation and
-    /// UI say so).
-    pub fn set_published(
-        &self,
-        name: &str,
-        published: bool,
-    ) -> Result<Option<Configuration>, String> {
+    /// Pins the saved revision for an assignment (ADR-0061): copies it into `retained` under its
+    /// content hash — idempotently — and returns that hash. This is the store's half of a rollout
+    /// act; the fleet writes the returned hash into the Agent's assignment.
+    pub fn retain_saved(&self, name: &str) -> Result<String, String> {
         let mut configs = self.configs.write().expect("configs lock");
         let Some(existing) = configs.get(name) else {
-            return Ok(None);
+            return Err(format!("no configuration {name:?}"));
         };
-        let config = Configuration {
-            published: published.then(|| existing.draft.clone()),
-            ..existing.clone()
-        };
+        let hash = revision_hash(&existing.saved);
+        if existing.retained.contains_key(&hash) {
+            return Ok(hash);
+        }
+        let mut config = existing.clone();
+        config.retained.insert(hash.clone(), config.saved.clone());
         self.persist(&config)?;
-        configs.insert(config.name.clone(), config.clone());
-        Ok(Some(config))
+        configs.insert(config.name.clone(), config);
+        Ok(hash)
+    }
+
+    /// Drops every retained revision of `name` that `referenced` does not name — the collection
+    /// half of ADR-0061's "the store retains every revision an assignment still references". The
+    /// caller computes `referenced` from the fleet's assignments; a revision left behind by a
+    /// failed write is harmless and collected on the next act.
+    pub fn retain_only(&self, name: &str, referenced: &BTreeSet<String>) -> Result<(), String> {
+        let mut configs = self.configs.write().expect("configs lock");
+        let Some(existing) = configs.get(name) else {
+            return Ok(());
+        };
+        if existing
+            .retained
+            .keys()
+            .all(|hash| referenced.contains(hash))
+        {
+            return Ok(());
+        }
+        let mut config = existing.clone();
+        config.retained.retain(|hash, _| referenced.contains(hash));
+        self.persist(&config)?;
+        configs.insert(config.name.clone(), config);
+        Ok(())
     }
 
     fn persist(&self, config: &Configuration) -> Result<(), String> {
@@ -322,7 +398,8 @@ impl ConfigStore {
         std::fs::rename(&temp, &path).map_err(|e| format!("cannot persist {}: {e}", path.display()))
     }
 
-    /// Deletes a Configuration — both revisions; `Ok(false)` when none of that name exists.
+    /// Deletes a Configuration — the saved revision and every retained one; `Ok(false)` when none
+    /// of that name exists. The caller removes the assignments that referenced it.
     pub fn delete(&self, name: &str) -> Result<bool, String> {
         let mut configs = self.configs.write().expect("configs lock");
         if configs.remove(name).is_none() {
@@ -334,35 +411,48 @@ impl ConfigStore {
         Ok(true)
     }
 
-    /// The names of the Configurations whose **published** revision reaches this Agent, in name
-    /// order. Drafts are invisible here, whatever they say (ADR-0055).
+    /// The names of the Configurations whose **saved** revision reaches this Agent, in name
+    /// order — the candidates a rollout act would release to it (ADR-0061). Never an offer.
     pub fn matching_names(&self, description: Option<&AgentDescription>) -> Vec<String> {
         self.configs
             .read()
             .expect("configs lock")
             .values()
-            .filter(|c| {
-                c.published
-                    .as_ref()
-                    .is_some_and(|revision| fits(revision, description))
-            })
+            .filter(|c| fits(&c.saved, description))
             .map(|c| c.name.clone())
             .collect()
     }
 
-    /// This Agent's composed Remote configuration, or `None` when nothing matches — in which
-    /// case no offer is made and the Agent keeps running what it already runs (goal 9).
-    /// Composed from published revisions only (ADR-0055).
-    pub fn desired_for(&self, description: Option<&AgentDescription>) -> Option<DesiredConfig> {
-        let entries: Vec<ConfigEntry> = self
-            .configs
+    /// The candidates for one Agent (ADR-0061): each Configuration whose saved revision fits it,
+    /// as `(name, hash of the saved revision)` in name order. What the fleet view diffs against
+    /// the Agent's assignments to show what is waiting, and what "roll out everything" assigns.
+    pub fn candidates_for(
+        &self,
+        description: Option<&AgentDescription>,
+    ) -> Vec<(String, String)> {
+        self.configs
             .read()
             .expect("configs lock")
             .values()
-            .filter_map(|c| {
-                let revision = c.published.as_ref().filter(|r| fits(r, description))?;
+            .filter(|c| fits(&c.saved, description))
+            .map(|c| (c.name.clone(), revision_hash(&c.saved)))
+            .collect()
+    }
+
+    /// One Agent's composed Remote configuration, from its assignments (ADR-0061): each assigned
+    /// Configuration's pinned revision as one entry. `None` when the Agent is assigned nothing —
+    /// no offer is made and it keeps running what it already runs (goal 9). An assignment whose
+    /// Configuration or revision is gone composes nothing rather than failing: deletion removes
+    /// assignments, so the case is a race, not a state.
+    pub fn compose(&self, assignments: &BTreeMap<String, String>) -> Option<DesiredConfig> {
+        let configs = self.configs.read().expect("configs lock");
+        let entries: Vec<ConfigEntry> = assignments
+            .iter()
+            .filter_map(|(name, hash)| {
+                let config = configs.get(name)?;
+                let revision = config.retained.get(hash)?;
                 Some(ConfigEntry {
-                    name: c.name.clone(),
+                    name: name.clone(),
                     body: revision.body.clone(),
                     role: revision.role.clone(),
                 })
@@ -437,13 +527,22 @@ mod tests {
         revision
     }
 
-    /// Save and release in one step — the tests' shorthand for "this is in force".
-    fn put_published(store: &ConfigStore, name: &str, revision: Revision) {
-        store.put_draft(name, revision).expect("put");
-        store
-            .set_published(name, true)
-            .expect("publish")
-            .expect("the configuration exists");
+    /// Save and pin in one step — the tests' shorthand for "this is assigned somewhere", plus the
+    /// assignment map an Agent holding exactly this would carry.
+    fn put_assigned(
+        store: &ConfigStore,
+        name: &str,
+        revision: Revision,
+    ) -> BTreeMap<String, String> {
+        store.put_saved(name, revision).expect("put");
+        let hash = store.retain_saved(name).expect("retain");
+        BTreeMap::from([(name.to_string(), hash)])
+    }
+
+    fn merge(maps: &[&BTreeMap<String, String>]) -> BTreeMap<String, String> {
+        maps.iter()
+            .flat_map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .collect()
     }
 
     #[test]
@@ -522,81 +621,101 @@ mod tests {
         assert!(fits(&revision(&[], "b"), Some(&untyped_agent)));
     }
 
-    /// ADR-0055: saving only saves. A draft is composed for nobody until its own act releases
-    /// it, and retraction takes it back out.
+    /// ADR-0061: saving only saves. A saved Configuration is composed for nobody until an
+    /// assignment pins it, and only the assignment decides what an Agent is offered.
     #[test]
-    fn a_draft_is_offered_to_nobody_until_published() {
+    fn a_saved_configuration_reaches_nobody_without_an_assignment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
         store
-            .put_draft("base", revision(&[], "receivers: {}\n"))
+            .put_saved("base", revision(&[], "receivers: {}\n"))
             .expect("put");
 
-        assert!(store.desired_for(None).is_none(), "a draft reaches nobody");
-        assert!(store.matching_names(None).is_empty());
-
-        store
-            .set_published("base", true)
-            .expect("publish")
-            .expect("exists");
-        assert_eq!(store.matching_names(None), ["base"]);
-        assert_eq!(store.desired_for(None).expect("offered").entries.len(), 1);
-
-        store
-            .set_published("base", false)
-            .expect("retract")
-            .expect("exists");
-        assert!(store.desired_for(None).is_none(), "retracted is withdrawn");
-
         assert!(
-            store
-                .set_published("missing", true)
-                .expect("no io error")
-                .is_none(),
-            "publishing an unknown name finds nothing"
+            store.compose(&BTreeMap::new()).is_none(),
+            "no assignment, no offer"
+        );
+        assert_eq!(
+            store.matching_names(None),
+            ["base"],
+            "the candidate is visible"
+        );
+
+        let assignments = BTreeMap::from([(
+            "base".to_string(),
+            store.retain_saved("base").expect("retain"),
+        )]);
+        assert_eq!(
+            store.compose(&assignments).expect("offered").entries.len(),
+            1
+        );
+        assert!(
+            store.retain_saved("missing").is_err(),
+            "pinning an unknown name finds nothing"
         );
     }
 
-    /// ADR-0055 point 3: publication is a snapshot of the whole spec. Editing the draft
-    /// afterwards changes nothing in force until the next release.
+    /// ADR-0061 point 2: a rollout pins a snapshot. Editing the saved revision afterwards changes
+    /// nothing for an Agent assigned the pinned one, and the candidate hash moves so the fleet
+    /// view can show a newer save waiting.
     #[test]
-    fn publication_snapshots_the_draft_and_later_edits_stay_pending() {
+    fn an_assignment_pins_a_snapshot_and_later_edits_wait() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "base", revision(&[], "v1\n"));
-        let released = store.desired_for(None).expect("offered");
+        let assignments = put_assigned(&store, "base", revision(&[], "v1\n"));
+        let released = store.compose(&assignments).expect("offered");
         assert_eq!(released.entries[0].body, "v1\n");
-        assert!(!store.get("base").expect("base").pending_changes());
 
-        store
-            .put_draft("base", revision(&[], "v2\n"))
-            .expect("edit");
-        let config = store.get("base").expect("base");
-        assert!(
-            config.pending_changes(),
-            "the edit is pending, not in force"
-        );
+        store.put_saved("base", revision(&[], "v2\n")).expect("edit");
         assert_eq!(
-            store.desired_for(None).expect("offered").hash,
+            store.compose(&assignments).expect("offered").hash,
             released.hash,
-            "the fleet still runs the published revision"
+            "the Agent keeps its pinned revision"
+        );
+        let candidates = store.candidates_for(None);
+        assert_eq!(candidates.len(), 1);
+        assert_ne!(
+            candidates[0].1, assignments["base"],
+            "the candidate hash moved: a newer save is waiting"
         );
 
-        store
-            .set_published("base", true)
-            .expect("republish")
-            .expect("exists");
+        // The next rollout act pins the edit.
+        let assignments = put_assigned(&store, "base", revision(&[], "v2\n"));
         assert_eq!(
-            store.desired_for(None).expect("offered").entries[0].body,
+            store.compose(&assignments).expect("offered").entries[0].body,
             "v2\n"
         );
-        assert!(!store.get("base").expect("base").pending_changes());
     }
 
-    /// ADR-0055 point 5: a file written before this ADR — the flat shape — loads as published,
-    /// draft equal to published, so an upgrade neither stops an offer nor moves a hash.
+    /// ADR-0061: a retained revision lives exactly as long as an assignment references it.
     #[test]
-    fn a_legacy_flat_file_loads_as_published() {
+    fn retain_only_collects_unreferenced_revisions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
+        let first = put_assigned(&store, "base", revision(&[], "v1\n"));
+        store.put_saved("base", revision(&[], "v2\n")).expect("edit");
+        let second_hash = store.retain_saved("base").expect("retain");
+        assert_eq!(store.get("base").expect("base").retained.len(), 2);
+
+        store
+            .retain_only("base", &BTreeSet::from([second_hash.clone()]))
+            .expect("gc");
+        let config = store.get("base").expect("base");
+        assert_eq!(config.retained.len(), 1, "the orphaned revision is gone");
+        assert!(config.retained.contains_key(&second_hash));
+        assert!(
+            store.compose(&first).is_none(),
+            "the collected revision composes nothing"
+        );
+        store
+            .retain_only("missing", &BTreeSet::new())
+            .expect("collecting an unknown name is a no-op");
+    }
+
+    /// ADR-0061 point 9: a flat pre-ADR-0055 file loads as saved **and** formerly published, so
+    /// the fleet can seed old Agent records as "rolled out to what was in force".
+    #[test]
+    fn a_legacy_flat_file_loads_as_formerly_published() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("keeper.json"),
@@ -606,22 +725,54 @@ mod tests {
 
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
         let config = store.get("keeper").expect("keeper");
-        assert_eq!(config.published, Some(config.draft.clone()));
-        assert!(!config.pending_changes());
-        assert_eq!(config.draft.role, "supplementary");
+        assert_eq!(config.saved.role, "supplementary");
+        let formerly = store.formerly_published();
+        assert_eq!(formerly.len(), 1);
+        let (name, revision, hash) = &formerly[0];
+        assert_eq!(name, "keeper");
+        assert_eq!(revision.selector["os.type"], "linux");
+        assert_eq!(config.retained[hash], *revision);
         assert_eq!(
             store.matching_names(Some(&description(&[("os.type", "linux")]))),
             ["keeper"]
         );
     }
 
+    /// ADR-0061 point 9, the ADR-0055 shape: the draft becomes the saved revision, the published
+    /// one is retained and reported as formerly published — and a never-published draft seeds no
+    /// assignment at all.
+    #[test]
+    fn a_two_revision_file_loads_with_its_published_revision_retained() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("staged.json"),
+            r#"{"name":"staged","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
+        )
+        .expect("write");
+        std::fs::write(
+            dir.path().join("never.json"),
+            r#"{"name":"never","draft":{"body":"n\n"}}"#,
+        )
+        .expect("write");
+
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
+        let staged = store.get("staged").expect("staged");
+        assert_eq!(staged.saved.body, "v2\n", "the draft is the saved revision");
+        assert_eq!(staged.retained.len(), 1);
+        let formerly = store.formerly_published();
+        assert_eq!(formerly.len(), 1, "the never-published draft seeds nothing");
+        assert_eq!(formerly[0].0, "staged");
+        assert_eq!(formerly[0].1.body, "v1\n", "what was in force is the seed");
+        assert!(store.get("never").expect("never").retained.is_empty());
+    }
+
     #[test]
     fn the_store_round_trips_and_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "base", revision(&[], "receivers: {}\n"));
+        let assignments = put_assigned(&store, "base", revision(&[], "receivers: {}\n"));
         store
-            .put_draft(
+            .put_saved(
                 "linux-only",
                 revision(&[("os.type", "linux")], "exporters: {}\n"),
             )
@@ -630,15 +781,26 @@ mod tests {
         let reopened = ConfigStore::open(dir.path().to_path_buf()).expect("reopen");
         assert_eq!(reopened.list().len(), 2);
         let base = reopened.get("base").expect("base");
-        assert_eq!(base.draft.body, "receivers: {}\n");
-        assert!(base.published.is_some(), "publication survives the reopen");
+        assert_eq!(base.saved.body, "receivers: {}\n");
+        assert_eq!(
+            reopened
+                .compose(&assignments)
+                .expect("the pinned revision survives the reopen")
+                .entries[0]
+                .body,
+            "receivers: {}\n"
+        );
         assert!(
             reopened
                 .get("linux-only")
                 .expect("linux-only")
-                .published
-                .is_none(),
-            "a never-published draft stays a draft across the reopen"
+                .retained
+                .is_empty(),
+            "a never-assigned Configuration retains nothing across the reopen"
+        );
+        assert!(
+            reopened.formerly_published().is_empty(),
+            "a store born under ADR-0061 seeds no migration"
         );
 
         assert!(reopened.delete("base").expect("delete"));
@@ -658,42 +820,44 @@ mod tests {
     fn the_store_rejects_bad_names_and_empty_bodies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        assert!(store.put_draft("Bad Name", revision(&[], "x")).is_err());
-        assert!(store.put_draft("con", revision(&[], "x")).is_err());
-        assert!(store.put_draft("ok", revision(&[], "  \n")).is_err());
+        assert!(store.put_saved("Bad Name", revision(&[], "x")).is_err());
+        assert!(store.put_saved("con", revision(&[], "x")).is_err());
+        assert!(store.put_saved("ok", revision(&[], "  \n")).is_err());
     }
 
     #[test]
     fn composition_is_name_sorted_and_hash_stable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "zz-extra", revision(&[], "z"));
-        put_published(&store, "aa-base", revision(&[], "a"));
+        let zz = put_assigned(&store, "zz-extra", revision(&[], "z"));
+        let aa = put_assigned(&store, "aa-base", revision(&[], "a"));
+        let assignments = merge(&[&zz, &aa]);
 
-        let desired = store.desired_for(None).expect("desired");
+        let desired = store.compose(&assignments).expect("desired");
         let names: Vec<&str> = desired.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["aa-base", "zz-extra"]);
-        assert_eq!(desired.hash, store.desired_for(None).expect("again").hash);
+        assert_eq!(desired.hash, store.compose(&assignments).expect("again").hash);
 
-        // The hash covers names and bodies: renaming or editing either changes it — once the
-        // edit is released.
-        put_published(&store, "aa-base", revision(&[], "a2"));
-        assert_ne!(store.desired_for(None).expect("edited").hash, desired.hash);
+        // The hash covers names and bodies: an edit changes it — once a rollout act pins it.
+        let aa = put_assigned(&store, "aa-base", revision(&[], "a2"));
+        let assignments = merge(&[&zz, &aa]);
+        assert_ne!(store.compose(&assignments).expect("edited").hash, desired.hash);
     }
 
     #[test]
     fn a_role_travels_into_the_composed_entry_and_into_the_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "base", revision(&[], "receivers: {}\n"));
-        let without = store.desired_for(None).expect("desired").hash;
+        let base = put_assigned(&store, "base", revision(&[], "receivers: {}\n"));
+        let without = store.compose(&base).expect("desired").hash;
 
-        put_published(
+        let ruleset = put_assigned(
             &store,
             "ruleset",
             with_role(revision(&[], "rules: []\n"), ROLE_SUPPLEMENTARY),
         );
-        let desired = store.desired_for(None).expect("desired");
+        let assignments = merge(&[&base, &ruleset]);
+        let desired = store.compose(&assignments).expect("desired");
         assert_eq!(
             desired.entries,
             vec![
@@ -711,20 +875,22 @@ mod tests {
         );
 
         // Changing only the role changes the hash, so the edit actually reaches the fleet.
-        put_published(&store, "ruleset", revision(&[], "rules: []\n"));
-        assert_ne!(store.desired_for(None).expect("desired").hash, desired.hash);
-        assert_ne!(store.desired_for(None).expect("desired").hash, without);
+        let ruleset = put_assigned(&store, "ruleset", revision(&[], "rules: []\n"));
+        let assignments = merge(&[&base, &ruleset]);
+        assert_ne!(store.compose(&assignments).expect("desired").hash, desired.hash);
+        assert_ne!(store.compose(&assignments).expect("desired").hash, without);
     }
 
     /// A Configuration written before ADR-0016 has no role, and its hash must not move when the
     /// Server is upgraded — a moved hash restarts every Managed Process in the fleet to deliver a
-    /// configuration identical to the one it already runs. The same pin guards ADR-0054 and
-    /// ADR-0055: neither the type nor the revision split may enter the hash.
+    /// configuration identical to the one it already runs. The same pin guards ADR-0054, ADR-0055
+    /// and ADR-0061: neither the type, nor a revision split, nor the assignment model may enter
+    /// the hash.
     #[test]
     fn an_empty_role_leaves_the_hash_where_it_was() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "base", revision(&[], "receivers: {}\n"));
+        let assignments = put_assigned(&store, "base", revision(&[], "receivers: {}\n"));
 
         // The hash this Server computed before `role` existed, pinned by construction: name and
         // body, length-prefixed, and nothing else.
@@ -735,7 +901,7 @@ mod tests {
         expected.update(b"receivers: {}\n");
 
         assert_eq!(
-            store.desired_for(None).expect("desired").hash,
+            store.compose(&assignments).expect("desired").hash,
             expected.finalize().to_vec()
         );
     }
@@ -744,19 +910,19 @@ mod tests {
     fn a_role_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(
+        put_assigned(
             &store,
             "certs",
             with_role(revision(&[], "PEM\n"), ROLE_SUPPLEMENTARY),
         );
         let reopened = ConfigStore::open(dir.path().to_path_buf()).expect("reopen");
         assert_eq!(
-            reopened.get("certs").expect("certs").draft.role,
+            reopened.get("certs").expect("certs").saved.role,
             ROLE_SUPPLEMENTARY
         );
     }
 
-    /// The JSON contract of ADR-0016 and ADR-0054, now on the stored revision: unset fields are
+    /// The JSON contract of ADR-0016 and ADR-0054, on the stored revision: unset fields are
     /// absent on the way in and absent on the way out, so every stored file stays minimal.
     #[test]
     fn unset_role_and_type_are_absent_from_the_stored_json() {
@@ -778,26 +944,31 @@ mod tests {
     }
 
     #[test]
-    fn only_matching_configurations_compose_and_none_means_no_offer() {
+    fn candidates_follow_the_fit_and_none_means_nothing_to_roll_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        put_published(&store, "base", revision(&[], "b"));
-        put_published(&store, "linux", revision(&[("os.type", "linux")], "l"));
-        put_published(&store, "windows", revision(&[("os.type", "windows")], "w"));
-        put_published(&store, "otelcol-only", typed(revision(&[], "o"), "otelcol"));
+        store.put_saved("base", revision(&[], "b")).expect("put");
+        store
+            .put_saved("linux", revision(&[("os.type", "linux")], "l"))
+            .expect("put");
+        store
+            .put_saved("windows", revision(&[("os.type", "windows")], "w"))
+            .expect("put");
+        store
+            .put_saved("otelcol-only", typed(revision(&[], "o"), "otelcol"))
+            .expect("put");
 
         let linux = description(&[("os.type", "linux"), ("service.name", "otelcol")]);
-        let desired = store.desired_for(Some(&linux)).expect("desired");
         assert_eq!(
             store.matching_names(Some(&linux)),
             ["base", "linux", "otelcol-only"]
         );
-        assert_eq!(desired.entries.len(), 3);
+        assert_eq!(store.candidates_for(Some(&linux)).len(), 3);
 
         store.delete("base").expect("delete");
         store.delete("otelcol-only").expect("delete");
         let nothing = description(&[("os.type", "darwin")]);
-        assert!(store.desired_for(Some(&nothing)).is_none());
+        assert!(store.candidates_for(Some(&nothing)).is_empty());
         assert!(store.matching_names(Some(&nothing)).is_empty());
     }
 }

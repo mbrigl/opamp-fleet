@@ -96,7 +96,7 @@
       .btn-primary:hover { background: var(--primary-hover); }
       .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
       .btn-ghost:hover { background: var(--row-hover); }
-      /* A row-sized button: the publish/retract control lives on the Set's table row. */
+      /* A row-sized button: the rollout act lives on the Set's table row. */
       .btn-sm { padding: 4px 12px; font-size: 12px; }
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
@@ -281,7 +281,7 @@
 
       <div id="panel-configurations" class="tab-panel">
       <section id="config-card" class="card config">
-        <h2>Configurations — each targets the Agents of its type that its Selector matches; saving stages a draft, publishing releases it</h2>
+        <h2>Configurations — each proposes itself to the Agents of its type that its Selector matches; only a rollout act distributes</h2>
         <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
         <div class="config-fields">
           <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
@@ -292,10 +292,10 @@
           <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
-        <textarea id="config" placeholder="The configuration body — saved as a draft, distributed only when published…"></textarea>
+        <textarea id="config" placeholder="The configuration body — saved only; distributed by a rollout act, per agent or to all matching…"></textarea>
         <div class="config-actions">
-          <button id="save" class="btn btn-primary" title="Save the form as this Configuration's draft. Nothing is distributed by this press (ADR-0055); a published revision keeps being offered untouched until Publish.">Save</button>
-          <button id="config-publish" class="btn btn-ghost" title="Release the saved draft to the fleet as one snapshot — this, not saving, is the moment the fleet changes.">Publish</button>
+          <button id="save" class="btn btn-primary" title="Save the form as this Configuration. Nothing is distributed by this press (ADR-0061); every agent keeps the revision its assignment pins, and the Agents tab shows the save waiting.">Save</button>
+          <button id="config-rollout" class="btn btn-ghost" title="Roll the saved revision out to every agent it currently fits and aims at — the press that changes the fleet. Agents that appear later wait for their own act (Agents tab).">Roll out to all matching</button>
           <button id="delete" class="btn btn-ghost">Delete</button>
           <span id="config-state" class="sub"></span>
           <span id="config-error" class="err"></span>
@@ -305,13 +305,15 @@
 
       <!-- Packages as Sets (ADR-0052): one table of Sets, and a detail form for the *current* one.
            A Set is identified by name, agent type, and version — stated at creation, never edited;
-           it holds one entry per platform, and it is a draft until published. The table is the
-           master, the form the detail; while nothing is current the form is not on screen. -->
+           it holds one entry per platform. Saving never distributes (ADR-0061): a Set reaches an
+           agent only through a rollout act. The table is the master, the form the detail; while
+           nothing is current the form is not on screen. -->
       <div id="panel-packages" class="tab-panel">
       <div class="card filters" style="align-items: center; gap: 12px;">
         <button id="set-create" class="btn btn-primary"
-                title="Define a new Set: name, agent type, and version — its identity — plus a Selector. Saved as a draft: nothing reaches any agent until the Set is published.">＋ Create</button>
-        <span class="sub">A package defines a <b>Set</b>, identified by name, agent type, and version. Each Set holds one entry per platform — an uploaded artifact or a source URL with its sha256, optionally signed — and reaches the fleet only once it is <b>published</b>. Select a row to inspect or edit it.</span>
+                title="Define a new Set: name, agent type, and version — its identity — plus a Selector. Saved only: nothing reaches any agent until a rollout act names the Set.">＋ Create</button>
+        <span class="sub">A package defines a <b>Set</b>, identified by name, agent type, and version. Each Set holds one entry per platform — an uploaded artifact or a source URL with its sha256, optionally signed — and reaches an agent only through a <b>rollout act</b>: per agent on the Agents tab, or the row's button for all matching. Select a row to inspect or edit it.</span>
+        <span id="sets-result" class="sub"></span>
         <span id="sets-error" class="err"></span>
       </div>
 
@@ -326,8 +328,7 @@
               <th>Platforms</th>
               <th>Selector</th>
               <th style="width: 110px">Reach</th>
-              <th style="width: 120px">State</th>
-              <th style="width: 110px"></th>
+              <th style="width: 170px"></th>
             </tr>
           </thead>
           <tbody id="sets"></tbody>
@@ -337,9 +338,9 @@
 
       <!-- The detail form: exactly as capable as the API, one rule (the Server's), rendered. The
            identity fields are writable only while creating; on an existing Set they are the frozen
-           identity. Entries are editable while the Set is a draft; the Selector always. OK and
-           Cancel persist or discard the form; publishing stays its own button (ADR-0043: the press
-           that releases a rollout is never the press that carries the bytes). -->
+           identity. Entries are editable while the Set is assigned to nobody; the Selector
+           always. OK and Cancel persist or discard the form; the rollout act stays its own button
+           (ADR-0061: the press that changes the fleet is never the press that carries the bytes). -->
       <section id="set-detail" class="card config" style="display: none">
         <h2 id="set-detail-title">Package set</h2>
         <div class="config-fields">
@@ -352,16 +353,16 @@
         </div>
         <div class="config-fields">
           <input id="set-selector" placeholder="selector: key=value, key=value … (empty targets every agent of that type)" autocomplete="off"
-                 title="Whom this Set is offered to (ADR-0017). Editable in every state — moving a published Set between rollout rings is how a rollout proceeds. Among Sets of one name the most specific Selector wins; among equally specific ones the greater version." />
+                 title="Whom a rollout act would release this Set to (ADR-0017). Always editable, never distributing (ADR-0061): it steers the next act. Among Sets of one name the most specific Selector wins the proposal; among equally specific ones the greater version." />
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;"
-                 title="The Baseline's package kind. Frozen with the bytes while the Set is published.">
+                 title="The Baseline's package kind. Frozen with the bytes while the Set is assigned to an agent.">
             <input type="checkbox" id="set-addon" /> addon (default: top-level, a Managed Process's binary)
           </label>
           <span id="set-state" class="sub"></span>
         </div>
-        <h2>Entries — one per platform, no duplicates; a file upload or a source URL with its sha256. Editable while the Set is a draft; frozen while it is published.</h2>
+        <h2>Entries — one per platform, no duplicates; a file upload or a source URL with its sha256. Editable until the Set is assigned to an agent; frozen from then on.</h2>
         <div id="set-entries" class="chips" style="margin-bottom: 10px"></div>
         <div id="entry-editor">
         <div class="config-fields">
@@ -385,16 +386,16 @@
         </div>
         <!-- Delete stands alone on the left — the one press that destroys, kept away from the
              two that finish an edit. OK and Cancel sit on the right, where a form is concluded.
-             Publishing is not here at all: it lives on the Set's table row (ADR-0043's seam — the
-             press that releases a rollout is never the press that carries the bytes). -->
+             The rollout act is not here at all: it lives on the Set's table row (ADR-0061's
+             seam — the press that changes the fleet is never the press that carries the bytes). -->
         <div class="config-actions">
           <button id="set-delete" class="btn btn-ghost"
-                  title="Delete this Set — entries, artifacts, and metadata. Nothing is uninstalled: an agent keeps running what it took, and the newest version still published under the same name takes over.">Delete</button>
+                  title="Delete this Set — entries, artifacts, metadata, and every per-agent assignment that referenced it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
           <span id="set-error" class="err" style="flex: 1"></span>
           <button id="set-cancel" class="btn btn-ghost" style="margin-left: auto"
                   title="Discard the form's changes: back to the stored state, or close the form when it was creating a new Set.">Cancel</button>
           <button id="set-ok" class="btn btn-primary"
-                  title="Save the form: creates the Set (as a draft) or updates its Selector — and, when a file or source url is given above, stores that entry too. Nothing is distributed by this press.">OK</button>
+                  title="Save the form: creates the Set or updates its Selector — and, when a file or source url is given above, stores that entry too. Nothing is distributed by this press (ADR-0061).">OK</button>
         </div>
       </section>
       </div>
@@ -422,7 +423,7 @@
               <th class="sortable" data-key="os">Operating System <span class="arrow"></span></th>
               <th class="col-network">Network</th>
               <th class="sortable" data-key="config">Configuration <span class="arrow"></span></th>
-              <th>Matched configs</th>
+              <th>Rollout</th>
               <th>Effective config</th>
               <th class="sortable" data-key="seq">Seq <span class="arrow"></span></th>
               <th class="sortable" data-key="seen">Last seen <span class="arrow"></span></th>
@@ -678,10 +679,30 @@
         // a second one nested inside it would wrap them as a single item rather than individually.
         return chips.join("");
       }
-      function matchedConfigs(a) {
-        const names = a.matched_configurations || [];
-        if (!names.length) return `<span class="pill gray">none</span>`;
-        return `<div class="chips">${names.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</div>`;
+      // The rollout column (ADR-0061): what is rolled out to this Agent (its assignments), what
+      // waits for the operator's press, and the press itself. The Server never rolls out on its
+      // own — a save, a Selector edit, a label move, or this Agent enrolling only ever adds to
+      // the waiting list here.
+      function rolloutCell(a) {
+        const chips = [];
+        for (const n of a.assigned_configurations || []) {
+          chips.push(`<span class="chip" title="rolled out to this agent — the pinned revision it is offered">${esc(n)}</span>`);
+        }
+        for (const s of a.assigned_packages || []) {
+          chips.push(`<span class="chip" title="rolled out to this agent">pkg ${esc(s)}</span>`);
+        }
+        for (const p of a.pending_configurations || []) {
+          chips.push(`<span class="pill amber" title="${p.change === "update" ? "a newer save of this configuration waits for a rollout act" : "this configuration matches the agent and waits for its first rollout act"}">⏳ ${esc(p.name)}${p.change === "update" ? " ✎" : ""}</span>`);
+        }
+        for (const p of a.pending_packages || []) {
+          chips.push(`<span class="pill amber" title="${p.change === "update" ? "another version of this package waits for a rollout act" : "this package fits the agent and waits for its first rollout act"}">⏳ pkg ${esc(p.name)} ${esc(p.version)}${p.change === "update" ? " ✎" : ""}</span>`);
+        }
+        const waiting = (a.pending_configurations || []).length + (a.pending_packages || []).length;
+        if (waiting) {
+          chips.push(`<span class="chip clickable agent-rollout-btn" data-uid="${esc(a.instance_uid)}" title="Roll out everything waiting to this agent — the one press that distributes (ADR-0061)">⤴ roll out</span>`);
+        }
+        if (!chips.length) return `<span class="pill gray">none</span>`;
+        return `<div class="chips">${chips.join("")}</div>`;
       }
 
       function matches(a) {
@@ -717,7 +738,7 @@
             <td>${esc(a.os) || "—"}<div class="sub">${esc(platformOf(a)) || "no platform reported"}</div></td>
             <td>${networkOf(a)}</td>
             <td>${configPill(a)}</td>
-            <td>${matchedConfigs(a)}</td>
+            <td>${rolloutCell(a)}</td>
             <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
@@ -767,6 +788,18 @@
       });
       $("filter").addEventListener("input", (e) => { filterText = e.target.value.trim().toLowerCase(); render(); });
       $("agents").addEventListener("click", (e) => {
+        const rolloutBtn = e.target.closest(".agent-rollout-btn");
+        if (rolloutBtn) {
+          // The empty body releases everything the row shows as waiting (ADR-0061).
+          fetch(`/api/v1/agents/${encodeURIComponent(rolloutBtn.dataset.uid)}/rollout`, { method: "POST" })
+            .then(async (res) => {
+              $("fleet-error").textContent = res.ok
+                ? ""
+                : (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+              refreshAgents();
+            });
+          return;
+        }
         const restart = e.target.closest(".restart-btn");
         if (restart) {
           fetch(`/api/v1/agents/${encodeURIComponent(restart.dataset.uid)}/restart`, { method: "POST" })
@@ -903,8 +936,8 @@
       });
 
       // Configurations editor (ADR-0012): name + type + selector + body, PUT/DELETE per
-      // Configuration. A PUT stores a draft; the Publish button is what changes the fleet
-      // (ADR-0055), and the type limits whom a published Configuration can reach (ADR-0054).
+      // Configuration. A PUT only saves; the rollout act is what changes the fleet (ADR-0061),
+      // and the type limits whom a Configuration can be rolled out to (ADR-0054).
       let configurations = [];
       let selectedName = null;
 
@@ -918,31 +951,21 @@
         }
         return selector;
       }
-      // The publication state, spelled the same way everywhere: a draft was never released, a
-      // pending edit is saved but not in force — the answer to "I saved and nothing changed".
-      const configState = (c) => !c.published ? "draft" : c.pending_changes ? "pending changes" : "published";
       function renderConfigList() {
         $("config-count").textContent = configurations.length;
-        $("config-list").innerHTML = configurations.map((c) => {
-          const state = configState(c);
-          const marker = state === "published" ? "" : ` · ${state === "draft" ? "📝 draft" : "✎ pending"}`;
-          return `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="${state === "draft" ? "never published — offered to nobody" : state === "pending changes" ? "the saved draft differs from the published revision the fleet runs" : "the published revision is in force"}${c.role ? " · role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : ""}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}${marker}</span>`;
-        }).join("") || `<span class="chip">none yet</span>`;
+        $("config-list").innerHTML = configurations.map((c) =>
+          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="saved — which agents run which revision is in the Agents tab${c.role ? " · role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : ""}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
+        ).join("") || `<span class="chip">none yet</span>`;
         document.querySelectorAll("#config-list .clickable").forEach((chip) => {
           chip.addEventListener("click", () => selectConfig(chip.dataset.name));
         });
       }
-      // The action row follows the selected Configuration: what the second button does, and the
-      // state line beside it.
+      // The action row follows the selected Configuration: the rollout act needs a stored name
+      // to act on (ADR-0061), so it is disabled until one is selected.
       function renderConfigActions() {
         const config = configurations.find((c) => c.name === selectedName);
-        const publish = $("config-publish");
-        publish.disabled = !config;
-        publish.textContent = config && config.published && !config.pending_changes ? "Retract" : "Publish";
-        publish.title = config && config.published && !config.pending_changes
-          ? "Withdraw the published revision. NOT inert: the entry leaves every composed config map and matching agents apply the removal; only an agent matching nothing else keeps running unchanged."
-          : "Release the saved draft to the fleet as one snapshot — this, not saving, is the moment the fleet changes.";
-        $("config-state").textContent = config ? configState(config) : "";
+        $("config-rollout").disabled = !config;
+        $("config-state").textContent = "";
       }
       function selectConfig(name) {
         const config = configurations.find((c) => c.name === name);
@@ -982,29 +1005,30 @@
         await refreshConfigs();
         refreshAgents();
       });
-      $("config-publish").addEventListener("click", async () => {
+      $("config-rollout").addEventListener("click", async () => {
         const config = configurations.find((c) => c.name === selectedName);
         if (!config) return;
-        // Publish releases the saved draft; on a clean published Configuration the same button
-        // retracts — with the ADR-0055 warning, because retraction actively reconfigures.
-        const retract = config.published && !config.pending_changes;
-        if (retract && !confirm(`Retract "${config.name}"?\n\nIts entry leaves every composed config map: matching agents apply the removal and restart. Only an agent matching nothing else keeps running unchanged.`)) return;
-        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(config.name)}/publication`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ published: !retract }),
+        // The one press that distributes (ADR-0061): the saved revision is pinned and assigned
+        // to every agent it currently fits and aims at. Latecomers wait in the Agents tab.
+        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(config.name)}/rollout`, {
+          method: "POST",
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
           return;
         }
+        const outcome = await res.json();
         $("config-error").textContent = "";
         await refreshConfigs();
         refreshAgents();
+        $("config-state").textContent = `rolled out to ${outcome.assigned_agents} agent(s)`;
       });
       $("delete").addEventListener("click", async () => {
         const name = $("config-name").value.trim();
         if (!name) return;
+        // Deletion removes every per-agent assignment with the Configuration (ADR-0061) — an
+        // active change on the agents that had it, so it asks first.
+        if (!confirm(`Delete "${name}"?\n\nEvery agent it was rolled out to applies its config map without this entry and restarts. Only an agent left assigned nothing keeps running unchanged.`)) return;
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
           $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
@@ -1058,18 +1082,16 @@
       const currentSetView = () => packages.find((p) => setKey(p) === currentSet) || null;
       const fmtBytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KiB` : `${n} B`;
 
-      // How many Agents a Set reaches, as the Server resolves it. Zero is the case worth seeing —
-      // a mistyped agent type, a platform the fleet does not run, or a Selector matching nobody —
-      // none of which is a rejected upload, so nothing else would say it. A draft counts whom it
-      // *would* reach (ADR-0043), which is the question staging exists to answer.
+      // How many Agents a rollout act would reach, as the Server resolves it. Zero is the case
+      // worth seeing — a mistyped agent type, a platform the fleet does not run, or a Selector
+      // matching nobody — none of which is a rejected upload, so nothing else would say it.
+      // Checking the aim before the act is what the count exists for (ADR-0061).
       function reachCell(p) {
         if (typeof p.targeted_agents !== "number") return "";
         if (p.targeted_agents === 0) {
-          return p.published
-            ? `<span class="pill amber" title="reaches no agent — check the type, the platforms, and the selector">⚠ 0</span>`
-            : `<span class="pill gray" title="would reach no agent yet">0</span>`;
+          return `<span class="pill amber" title="a rollout act would reach no agent — check the type, the platforms, and the selector">⚠ 0</span>`;
         }
-        return `<span class="num" title="${p.published ? "reaches" : "would reach"} ${p.targeted_agents} agent(s)">${p.targeted_agents}</span>`;
+        return `<span class="num" title="a rollout act would reach ${p.targeted_agents} agent(s)">${p.targeted_agents}</span>`;
       }
 
       function renderSets() {
@@ -1089,21 +1111,19 @@
             <td><div class="chips">${entries || `<span class="chip">no entries yet</span>`}</div></td>
             <td>${esc(selectorText(p.selector)) || `<span class="sub">every agent of the type</span>`}</td>
             <td>${reachCell(p)}</td>
-            <td>${p.published ? `<span class="pill green">Published</span>` : `<span class="pill gray">✎ Draft</span>`}</td>
-            <td><button class="btn btn-ghost btn-sm publish-btn" data-key="${esc(key)}" title="${p.published
-              ? "Withdraw the offer: agents that have not taken this set stop being offered it. Nothing is uninstalled — and the newest version still published under the same name takes over."
-              : "Release the set to the fleet (ADR-0043): from the next exchange, every agent it fits and aims at is offered it. Refused while the set holds no entries."}">${p.published ? "Retract" : "Publish"}</button></td>
+            <td><button class="btn btn-ghost btn-sm rollout-set-btn" data-key="${esc(key)}" title="Roll this set out to every agent it fits and its selector aims at (ADR-0061) — the press that changes the fleet. Rolling out an older version is the rollback; agents that appear later wait on the Agents tab. Refused while the set holds no entries.">Roll out to all matching</button></td>
           </tr>`;
         }).join("");
       }
 
-      // The entries of the current Set. While it is a draft each carries a ✕ that deletes it —
-      // on a published Set the bytes are frozen, and the Server would answer 409 anyway.
+      // The entries of the current Set. Each carries a ✕ that deletes it; on a Set that is
+      // assigned to an agent the bytes are frozen and the Server answers 409 with the reason —
+      // one rule, held where the assignments are known (ADR-0061).
       function renderSetEntries(p) {
         const entries = p ? p.entries || [] : [];
         $("set-entries").innerHTML = entries.map((e) =>
-          `<span class="chip">${esc(e.os)}-${esc(e.arch)} · ${e.source_url ? "↗ " + esc(e.source_url) : fmtBytes(e.size)}${e.signed ? " · signed" : ""}${p.published ? "" : `&nbsp;<span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it)">✕</span>`}</span>`
-        ).join("") || `<span class="chip">no entries yet — a set needs at least one before it can be published</span>`;
+          `<span class="chip">${esc(e.os)}-${esc(e.arch)} · ${e.source_url ? "↗ " + esc(e.source_url) : fmtBytes(e.size)}${e.signed ? " · signed" : ""}&nbsp;<span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it). Refused while the set is assigned to an agent.">✕</span></span>`
+        ).join("") || `<span class="chip">no entries yet — a set needs at least one before it can be rolled out</span>`;
       }
 
       // Fills (or hides) the detail form from the current Set. With no current Set and nothing
@@ -1117,7 +1137,7 @@
         }
         $("set-detail").style.display = "block";
         $("set-detail-title").textContent = creatingSet
-          ? "New package set — saved as a draft"
+          ? "New package set — saved, distributed by a rollout act"
           : `Package set ${p.name} · ${p.version} · ${p.service_name}`;
         // The identity: writable only while creating. Afterwards it *is* the Set (ADR-0052),
         // and another version is another Create.
@@ -1127,19 +1147,16 @@
         }
         $("set-selector").value = p ? selectorText(p.selector) : "";
         $("set-addon").checked = !!(p && p.addon);
-        $("set-addon").disabled = !!(p && p.published);
+        $("set-addon").disabled = false;
         $("set-state").textContent = !p
-          ? "will be saved as a draft — publish it when its entries are complete"
-          : p.published
-            ? "published — its entries are frozen; retract it to change them, or create the next version as a new set"
-            : "draft — offered to nobody until published";
+          ? "will be saved — nothing reaches an agent until a rollout act names it"
+          : "saved — distributed only by a rollout act; entries freeze while the set is assigned to an agent";
         $("set-delete").disabled = creatingSet;
         renderSetEntries(p);
-        const frozen = !!(p && p.published);
         for (const id of ["entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256", "entry-file"]) {
-          $(id).disabled = frozen;
+          $(id).disabled = false;
         }
-        $("entry-add").disabled = frozen || creatingSet;
+        $("entry-add").disabled = creatingSet;
         setFormDirty = false;
       }
 
@@ -1202,8 +1219,8 @@
         clearEntryEditor();
         for (const id of ["entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256", "entry-file"]) $(id).disabled = false;
         $("entry-add").disabled = true; // the set does not exist yet — OK creates it, entry and all
-        $("set-detail-title").textContent = "New package set — saved as a draft";
-        $("set-state").textContent = "will be saved as a draft — publish it when its entries are complete";
+        $("set-detail-title").textContent = "New package set — saved, distributed by a rollout act";
+        $("set-state").textContent = "will be saved — nothing reaches an agent until a rollout act names it";
         $("set-delete").disabled = true;
         renderSetEntries(null);
         $("set-error").textContent = "";
@@ -1211,21 +1228,30 @@
       });
 
       // Selecting a row makes its Set current and shows it in the form; selecting it again lets
-      // it go, and the form leaves the screen with it. The publish button on the row is the one
-      // exception: it acts on its Set without selecting it — publication is a decision about the
+      // it go, and the form leaves the screen with it. The rollout button on the row is the one
+      // exception: it acts on its Set without selecting it — the rollout is a decision about the
       // fleet, not part of inspecting the record.
       $("sets").addEventListener("click", async (e) => {
-        const publish = e.target.closest(".publish-btn");
-        if (publish) {
-          const p = packages.find((x) => setKey(x) === publish.dataset.key);
+        const act = e.target.closest(".rollout-set-btn");
+        if (act) {
+          const p = packages.find((x) => setKey(x) === act.dataset.key);
           if (!p) return;
-          const failed = await putJson(
-            `${setPath(p.name, p.service_name, p.version)}/publication`,
-            { published: !p.published }
-          );
-          // A refusal is a normal answer here — an empty draft cannot be published — so it is
-          // shown beside the table the press happened in.
-          $("sets-error").textContent = failed;
+          let res;
+          try {
+            res = await fetch(`${setPath(p.name, p.service_name, p.version)}/rollout`, { method: "POST" });
+          } catch (err) {
+            $("sets-error").textContent = err.message;
+            return;
+          }
+          if (!res.ok) {
+            // A refusal is a normal answer here — an empty set cannot be rolled out — so it is
+            // shown beside the table the press happened in.
+            $("sets-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          } else {
+            const outcome = await res.json();
+            $("sets-error").textContent = "";
+            $("sets-result").textContent = `${p.name} ${p.version}: rolled out to ${outcome.assigned_agents} agent(s)`;
+          }
           await refreshPackages();
           refreshAgents();
           return;
@@ -1241,9 +1267,9 @@
         showSetDetail();
       });
 
-      // OK: persist what the form says — create the Set (a draft) or update its Selector and
-      // kind, then store the entry the editor holds, if any. Never a release: publishing stays
-      // its own press (ADR-0043).
+      // OK: persist what the form says — create the Set or update its Selector and kind, then
+      // store the entry the editor holds, if any. Never a release: the rollout act stays its own
+      // press (ADR-0061).
       $("set-ok").addEventListener("click", async () => {
         $("set-error").textContent = "";
         const name = $("set-name").value.trim();
@@ -1299,7 +1325,7 @@
         refreshAgents();
       });
 
-      // Deleting one entry of the current draft Set.
+      // Deleting one entry of the current Set; the Server refuses while it is assigned.
       $("set-entries").addEventListener("click", async (e) => {
         const del = e.target.closest(".entry-del");
         if (!del) return;
@@ -1317,7 +1343,7 @@
       });
 
       // Add entry: stores what the editor holds into the current set, now — one request per
-      // entry, so a five-platform release is five adds on one draft rather than five saves. The
+      // entry, so a five-platform release is five adds on one set rather than five saves. The
       // removal beside each entry chip is the same shape in reverse.
       $("entry-add").addEventListener("click", async () => {
         const p = currentSetView();

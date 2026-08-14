@@ -174,8 +174,9 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
     }
 }
 
-/// Stores **and publishes** a Configuration through the REST API v1, the way an operator (or
-/// portal) does — two calls since ADR-0055, because saving alone distributes nothing.
+/// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
+/// portal) does — two calls since ADR-0061, because saving alone distributes nothing and the
+/// rollout act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
 pub async fn distribute(addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
     distribute_with_role(addr, name, selector, body, "").await;
@@ -204,14 +205,13 @@ pub async fn distribute_with_role(
         .expect("put the configuration");
     assert_eq!(response.status(), 200, "the configuration is accepted");
     let response = client
-        .put(format!(
-            "http://{addr}/api/v1/configurations/{name}/publication"
+        .post(format!(
+            "http://{addr}/api/v1/configurations/{name}/rollout"
         ))
-        .json(&serde_json::json!({ "published": true }))
         .send()
         .await
-        .expect("publish the configuration");
-    assert_eq!(response.status(), 200, "the configuration is published");
+        .expect("roll out the configuration");
+    assert_eq!(response.status(), 200, "the configuration is rolled out");
 }
 
 /// The same real router with own-telemetry destinations to offer (ADR-0036).

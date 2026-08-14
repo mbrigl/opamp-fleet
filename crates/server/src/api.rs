@@ -20,7 +20,9 @@ use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
-use crate::fleet::{AgentView, AppState, ForgetError, RestartError};
+use crate::fleet::{
+    AgentView, AppState, ForgetError, RestartError, RolloutError, RolloutTarget,
+};
 use crate::labels::LabelError;
 
 #[derive(OpenApi)]
@@ -44,13 +46,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(restart_agent))
         .routes(routes!(forget_agent))
         .routes(routes!(set_agent_labels))
+        .routes(routes!(rollout_to_agent))
         .routes(routes!(list_configurations))
         .routes(routes!(
             get_configuration,
             put_configuration,
             delete_configuration
         ))
-        .routes(routes!(put_configuration_publication))
+        .routes(routes!(rollout_configuration))
         .routes(routes!(list_packages))
         .routes(routes!(
             get_package_set,
@@ -62,7 +65,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_package_set_selector))
-        .routes(routes!(put_package_set_publication))
+        .routes(routes!(rollout_package_set))
         .routes(routes!(put_package_entry_source))
         .routes(routes!(download_package))
         .split_for_parts();
@@ -122,9 +125,9 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
-/// A CSRF guard for the body-less `POST` routes (`restart`, `rollback`). Those are CORS "simple
-/// requests": a cross-origin page can fire them without the preflight the Server would have to
-/// answer, so nothing else stops a victim operator's browser from being made to send one.
+/// A CSRF guard for the body-less `POST` routes (`restart`, the rollout acts). Those are CORS
+/// "simple requests": a cross-origin page can fire them without the preflight the Server would
+/// have to answer, so nothing else stops a victim operator's browser from being made to send one.
 ///
 /// Fetch Metadata closes it. A browser sends `Sec-Fetch-Site` on every request and forbids page
 /// scripts from setting it, so a value other than `same-origin` (the bundled UI) or `none` (a
@@ -264,6 +267,89 @@ async fn set_agent_labels(
     }
 }
 
+/// What a per-Agent rollout act releases (ADR-0061). Name at most one of the two; an empty body
+/// releases everything currently waiting for the Agent.
+#[derive(Deserialize, ToSchema, Default)]
+#[serde(deny_unknown_fields)]
+struct AgentRolloutSpec {
+    /// Release this Configuration — its saved revision, pinned as of this press.
+    #[serde(default)]
+    configuration: Option<String>,
+    /// Release this Set. Any Set that fits and aims at the Agent may be named — an older version
+    /// too, which is the rollback.
+    #[serde(default)]
+    package: Option<PackageRef>,
+}
+
+/// A Set's identity, as a rollout body names it.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct PackageRef {
+    name: String,
+    agent_type: String,
+    version: String,
+}
+
+/// Rolls a Configuration or a package Set out to **this Agent** (ADR-0061) — or, with an empty
+/// body, everything the fleet view shows as waiting for it. The operator's press is the only
+/// thing that distributes: saving, publishing-like states, Selector edits and label moves all
+/// merely change what is *proposed* here.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{instance_uid}/rollout",
+    tag = "fleet",
+    params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
+    request_body(content = AgentRolloutSpec, description = "What to release; empty releases everything waiting"),
+    responses(
+        (status = 200, description = "Rolled out; the Agent with its new assignments", body = AgentView),
+        (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such Agent, Configuration, or Set", body = ErrorBody),
+        (status = 409, description = "The named resource does not fit or aim at this Agent", body = ErrorBody)
+    )
+)]
+async fn rollout_to_agent(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(instance_uid): Path<String>,
+    body: Option<Json<AgentRolloutSpec>>,
+) -> Response {
+    let Some(uid) = opamp::uid::InstanceUid::parse(&instance_uid) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("{instance_uid:?} is not an Instance UID"),
+        );
+    };
+    let spec = body.map(|Json(spec)| spec).unwrap_or_default();
+    let target = match (spec.configuration, spec.package) {
+        (Some(_), Some(_)) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "name a configuration or a package, not both — or neither for everything waiting",
+            )
+        }
+        (Some(name), None) => RolloutTarget::Configuration(name),
+        (None, Some(package)) => {
+            match set_id(&package.name, &package.agent_type, &package.version) {
+                Ok(id) => RolloutTarget::Package(id),
+                Err(e) => return error(StatusCode::BAD_REQUEST, e),
+            }
+        }
+        (None, None) => RolloutTarget::Everything,
+    };
+    match state.rollout_to_agent(&uid, &target) {
+        Ok(()) => match state
+            .snapshot()
+            .into_iter()
+            .find(|a| a.instance_uid == uid.to_string())
+        {
+            Some(view) => Json(view).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(e) => rollout_error(e),
+    }
+}
+
 /// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
 ///
 /// Reaches no host: nothing is stopped, nothing is uninstalled, and no credential is revoked —
@@ -307,10 +393,9 @@ async fn forget_agent(
     }
 }
 
-/// One Configuration as the API shows it (ADR-0055): the **draft** revision — what editing
-/// operates on — plus the publication state. `published` says whether any revision is in force;
-/// `pending_changes` says the draft differs from it, so a fleet that is not changing after a
-/// save is explainable at a glance.
+/// One Configuration as the API shows it (ADR-0061): the **saved** revision — what editing
+/// operates on and what a rollout act releases. Which Agents run which pinned revision is a fact
+/// about the Agents, answered per Agent by `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct ConfigurationView {
     name: String,
@@ -322,35 +407,26 @@ struct ConfigurationView {
     /// The Agent type this Configuration is for (ADR-0054); absent means every type.
     #[serde(skip_serializing_if = "String::is_empty")]
     service_name: String,
-    /// A published revision exists and is offered to whomever it fits and aims at.
-    published: bool,
-    /// The draft differs from the published revision — saved, reviewed, not yet released.
-    pending_changes: bool,
 }
 
 impl From<Configuration> for ConfigurationView {
     fn from(config: Configuration) -> Self {
-        let pending_changes = config.pending_changes();
         ConfigurationView {
             name: config.name,
-            selector: config.draft.selector,
-            body: config.draft.body,
-            role: config.draft.role,
-            service_name: config.draft.service_name,
-            published: config.published.is_some(),
-            pending_changes,
+            selector: config.saved.selector,
+            body: config.saved.body,
+            role: config.saved.role,
+            service_name: config.saved.service_name,
         }
     }
 }
 
-/// Whether the fleet may have a Configuration (ADR-0055).
-#[derive(Deserialize, ToSchema)]
-struct ConfigurationPublicationSpec {
-    /// `true` releases the draft as one snapshot: every Agent it fits and aims at is offered it
-    /// from now on. `false` retracts it — and unlike a package, that is **not inert**: the entry
-    /// leaves every composed config map, which the matching Agents apply; only an Agent left
-    /// matching nothing keeps running what it runs (goal 9).
-    published: bool,
+/// What a resource-level rollout act did (ADR-0061 point 5).
+#[derive(Serialize, ToSchema)]
+struct RolloutOutcome {
+    /// How many Agents the act assigned the resource to — every Agent it currently fits and
+    /// aims at. An Agent that appears later waits for its own act.
+    assigned_agents: usize,
 }
 
 /// All Configurations, in name order.
@@ -392,9 +468,9 @@ async fn get_configuration(
     }
 }
 
-/// Creates a Configuration or replaces its draft. **Saving only saves** (ADR-0055): nothing
-/// reaches any Agent, and a published revision keeps being offered untouched, until
-/// `PUT …/publication` releases the draft as one snapshot.
+/// Creates a Configuration or replaces its saved revision. **Saving only saves** (ADR-0061):
+/// nothing reaches any Agent — every Agent keeps the revision its assignment pins — until a
+/// rollout act (`POST …/rollout`, or per Agent) releases the saved revision as one snapshot.
 #[utoipa::path(
     put,
     path = "/api/v1/configurations/{name}",
@@ -402,7 +478,7 @@ async fn get_configuration(
     params(("name" = String, Path, description = "The Configuration's name (ADR-0010 grammar)")),
     request_body = ConfigurationSpec,
     responses(
-        (status = 200, description = "The stored Configuration — a draft until published", body = ConfigurationView),
+        (status = 200, description = "The stored Configuration — distributed to nobody until rolled out", body = ConfigurationView),
         (status = 400, description = "Invalid name or empty body", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
@@ -440,49 +516,59 @@ async fn put_configuration(
     };
     match state.save_configuration(&name, revision) {
         Ok(config) => {
-            info!(configuration = %config.name, role = %config.draft.role, service_name = %config.draft.service_name, bytes = config.draft.body.len(), "configuration draft stored from the API");
+            info!(configuration = %config.name, role = %config.saved.role, service_name = %config.saved.service_name, bytes = config.saved.body.len(), "configuration saved from the API");
             Json(ConfigurationView::from(config)).into_response()
         }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-/// Releases a Configuration's draft to the fleet, or retracts it (ADR-0055).
+/// Maps a rollout refusal onto the REST contract (ADR-0061).
+fn rollout_error(e: RolloutError) -> Response {
+    match e {
+        RolloutError::UnknownAgent => error(StatusCode::NOT_FOUND, "no such agent"),
+        RolloutError::UnknownResource(e) => error(StatusCode::NOT_FOUND, e),
+        RolloutError::NotApplicable(e) => error(StatusCode::CONFLICT, e),
+        RolloutError::Storage(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Rolls a Configuration out to **every Agent it currently fits and aims at** (ADR-0061).
 ///
-/// **This is the moment the fleet changes.** Saving stages a draft; publishing promotes it — the
-/// whole spec, as one snapshot — into what composition offers. Retracting removes the entry from
-/// every composed map, and that is **not inert**: matching Agents apply the map without it (the
-/// entry's file is removed and the process restarted); only an Agent left matching nothing keeps
-/// running what it runs.
+/// **This is the moment the fleet changes.** The saved revision is pinned as one snapshot and
+/// written into each matching Agent's assignment; a later edit changes nothing anywhere until
+/// the next rollout act. An Agent that enrols — or starts matching — later is *not* included: it
+/// surfaces in the fleet view as waiting, for its own act.
 #[utoipa::path(
-    put,
-    path = "/api/v1/configurations/{name}/publication",
+    post,
+    path = "/api/v1/configurations/{name}/rollout",
     tag = "configurations",
     params(("name" = String, Path, description = "The Configuration's name")),
-    request_body = ConfigurationPublicationSpec,
     responses(
-        (status = 200, description = "The Configuration, with its new publication state", body = ConfigurationView),
+        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No Configuration of that name", body = ErrorBody),
-        (status = 500, description = "The publication state could not be persisted", body = ErrorBody)
+        (status = 500, description = "The rollout could not be persisted", body = ErrorBody)
     )
 )]
-async fn put_configuration_publication(
+async fn rollout_configuration(
     State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
     Path(name): Path<String>,
-    Json(spec): Json<ConfigurationPublicationSpec>,
 ) -> Response {
-    match state.set_configuration_published(&name, spec.published) {
-        Ok(Some(config)) => {
-            info!(configuration = %name, published = spec.published, "configuration publication state set from the API");
-            Json(ConfigurationView::from(config)).into_response()
+    match state.rollout_configuration(&name) {
+        Ok(assigned_agents) => {
+            info!(configuration = %name, agents = assigned_agents, "configuration rolled out from the API");
+            Json(RolloutOutcome { assigned_agents }).into_response()
         }
-        Ok(None) => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => rollout_error(e),
     }
 }
 
-/// Deletes a Configuration. Agents that applied it keep running it — narrowing never revokes
-/// (ADR-0012); they simply receive no further offers from it.
+/// Deletes a Configuration and removes every per-Agent assignment that referenced it
+/// (ADR-0061). That is **not inert** for an Agent that had it assigned: its composed map
+/// shrinks, and it applies the map without the entry; only an Agent left assigned nothing keeps
+/// running what it runs.
 #[utoipa::path(
     delete,
     path = "/api/v1/configurations/{name}",
@@ -508,8 +594,9 @@ async fn delete_configuration(
 /// One stored package **Set** as the API shows it (ADR-0052) — never its artifact bytes.
 ///
 /// A Set is identified by *(name, agent type, version)*, stated at creation and never edited: a
-/// new version is a new Set. It may define a Selector, holds one entry per platform, and is a
-/// **draft until published** — saving never distributes anything.
+/// new version is a new Set. It may define a Selector and holds one entry per platform. **Saving
+/// never distributes anything** (ADR-0061): a Set reaches an Agent only through a rollout act,
+/// and which Agents run it is answered per Agent by `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct PackageSetView {
     name: String,
@@ -518,16 +605,11 @@ struct PackageSetView {
     service_name: String,
     /// The version every entry of this Set shares. Part of the Set's identity.
     version: String,
-    /// Whom this Set is offered to (ADR-0017): equality pairs that must all match an attribute
-    /// the Agent reported. Empty targets every Agent of this Set's type. Editable in every state —
-    /// aim is not bytes.
+    /// Whom a rollout act would release this Set to (ADR-0017): equality pairs that must all
+    /// match an attribute the Agent reported. Empty targets every Agent of this Set's type.
+    /// Always editable — it steers the next act, never a running offer.
     #[serde(default)]
     selector: std::collections::BTreeMap<String, String>,
-    /// Whether the fleet may have this Set (ADR-0043). **A draft is offered to nobody**, however
-    /// complete it is; releasing is `PUT …/publication`, its own act. While published, the
-    /// entries are immutable.
-    #[serde(default)]
-    published: bool,
     /// `true` for an addon, `false` for a top-level package (a Managed Process's binary).
     #[serde(default)]
     addon: bool,
@@ -569,7 +651,6 @@ impl PackageSetView {
             service_name: summary.service_name,
             version: summary.version,
             selector: summary.selector,
-            published: summary.published,
             addon: summary.addon,
             entries: summary
                 .entries
@@ -630,15 +711,6 @@ struct PackageSelectorSpec {
     selector: std::collections::BTreeMap<String, String>,
 }
 
-/// Whether the fleet may have a Set (ADR-0043).
-#[derive(Deserialize, ToSchema)]
-struct PackagePublicationSpec {
-    /// `true` releases the Set: every Agent it fits and aims at is offered it from now on.
-    /// `false` retracts it — the offer stops, and **nothing is uninstalled**; an Agent keeps
-    /// running what it already installed, exactly as when a Selector stops matching it (ADR-0017).
-    published: bool,
-}
-
 /// The query parameters of an entry upload: everything but the artifact, which is the body — and
 /// the platform, which is the path.
 #[derive(Deserialize, IntoParams)]
@@ -674,10 +746,7 @@ fn set_response(state: &AppState, id: &crate::packages::SetId) -> Response {
 fn package_error(e: String) -> Response {
     if e.contains("not configured") || e.starts_with("no package set") {
         error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable")
-        || e.contains("retract it first")
-        || e.contains("holds no entries")
-    {
+    } else if e.contains("immutable") || e.contains("holds no entries") {
         error(StatusCode::CONFLICT, e)
     } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
         error(StatusCode::BAD_REQUEST, e)
@@ -751,9 +820,9 @@ async fn get_package_set(
     }
 }
 
-/// Creates a Set — **as a draft** (ADR-0052: saving never publishes) — or updates an existing
-/// one's Selector and kind. The identity in the path is the whole identity: a new version is a
-/// new Set, never a mutation of an old one.
+/// Creates a Set, or updates an existing one's Selector and kind. **Saving never distributes**
+/// (ADR-0061): the Set reaches an Agent only through a rollout act. The identity in the path is
+/// the whole identity: a new version is a new Set, never a mutation of an old one.
 #[utoipa::path(
     put,
     path = "/api/v1/packages/{name}/{agent_type}/{version}",
@@ -768,7 +837,7 @@ async fn get_package_set(
         (status = 200, description = "The stored Set", body = PackageSetView),
         (status = 400, description = "Invalid identity or body", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set is published and its kind is frozen", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its kind is frozen", body = ErrorBody),
         (status = 500, description = "The Set could not be persisted", body = ErrorBody)
     )
 )]
@@ -787,9 +856,9 @@ async fn put_package_set(
     }
 }
 
-/// Deletes a Set — entries, artifacts, and metadata. Deleting a published Set withdraws its offer
-/// with it; Agents that installed it keep running it (ADR-0017), and with greater-version-wins
-/// resolution the fleet falls back to the newest version still published under the same name.
+/// Deletes a Set — entries, artifacts, metadata, and every per-Agent assignment that referenced
+/// it (ADR-0061): the offer is withdrawn, and Agents that installed it keep running it
+/// (ADR-0017).
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{name}/{agent_type}/{version}",
@@ -821,9 +890,10 @@ async fn delete_package_set(
     }
 }
 
-/// Stores one platform's artifact as an entry of a **draft** Set (ADR-0052). The artifact is the
-/// raw request body; the Set and the platform are the path. Nothing is distributed: a draft
-/// reaches nobody until `PUT …/publication` releases the Set.
+/// Stores one platform's artifact as an entry of a Set (ADR-0052). The artifact is the raw
+/// request body; the Set and the platform are the path. Nothing is distributed: the Set reaches
+/// nobody until a rollout act releases it (ADR-0061). Refused while the Set is assigned to an
+/// Agent — an assigned Set's bytes are immutable.
 #[utoipa::path(
     put,
     path = "/api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}",
@@ -841,7 +911,7 @@ async fn delete_package_set(
         (status = 200, description = "The Set, with the stored entry", body = PackageSetView),
         (status = 400, description = "Invalid identity, platform, empty artifact, or bad signature", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set is published and its entries are immutable", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
         (status = 500, description = "The entry could not be persisted", body = ErrorBody),
         (status = 507, description = "Storing it would exceed max_total_package_bytes", body = ErrorBody)
@@ -928,9 +998,9 @@ async fn put_package_entry(
     }
 }
 
-/// Deletes one entry of a **draft** Set. Refused on a published Set — its bytes are immutable;
-/// retract it first. The last entry taken away leaves an empty draft: a Set being reassembled is
-/// a normal state, and deleting the Set is its own act.
+/// Deletes one entry of a Set. Refused while the Set is assigned to an Agent — its bytes are
+/// immutable (ADR-0061). The last entry taken away leaves an empty Set: a Set being reassembled
+/// is a normal state, and deleting the Set is its own act.
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}",
@@ -946,7 +1016,7 @@ async fn put_package_entry(
         (status = 204, description = "Deleted"),
         (status = 400, description = "Invalid identity or platform", body = ErrorBody),
         (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set is published and its entries are immutable", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 500, description = "The entry could not be deleted", body = ErrorBody)
     )
 )]
@@ -994,10 +1064,10 @@ struct EntrySourceSpec {
     headers: std::collections::BTreeMap<String, String>,
 }
 
-/// Points one entry of a **draft** Set at an artifact hosted elsewhere (ADR-0018), instead of
-/// uploading it. The Server stores the reference and offers it verbatim; it never downloads the
-/// artifact, so the `sha256` — and the signature, when one is configured — is what protects every
-/// Agent.
+/// Points one entry of a Set at an artifact hosted elsewhere (ADR-0018), instead of uploading
+/// it. Refused while the Set is assigned to an Agent (ADR-0061). The Server stores the reference
+/// and offers it verbatim; it never downloads the artifact, so the `sha256` — and the signature,
+/// when one is configured — is what protects every Agent.
 ///
 /// The URL is probed once, to catch a typo while the operator is still looking at the screen. A
 /// definitive refusal from the source (a 4xx) fails the request; a source this Server simply
@@ -1019,7 +1089,7 @@ struct EntrySourceSpec {
         (status = 200, description = "The Set, with the referenced entry", body = PackageSetView),
         (status = 400, description = "Invalid identity, url, hash or signature — or the source refused the probe", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set is published and its entries are immutable", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 500, description = "The reference could not be persisted", body = ErrorBody)
     )
 )]
@@ -1186,15 +1256,15 @@ fn is_v4_internal(v4: std::net::Ipv4Addr) -> bool {
         || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
-/// Sets which Agents a Set is offered to (ADR-0017). An empty Selector targets every Agent of the
-/// Set's type; every pair must equal an attribute the Agent reported, exactly as for a
-/// Configuration. **Editable in every state** — aim is not bytes, and moving a published Set
-/// between rings is precisely how a rollout proceeds.
+/// Sets which Agents a rollout act would release this Set to (ADR-0017). An empty Selector
+/// targets every Agent of the Set's type; every pair must equal an attribute the Agent reported,
+/// exactly as for a Configuration. **Always editable, and never distributing** (ADR-0061):
+/// widening a Selector only widens what the fleet view proposes and whom the next act reaches.
 ///
-/// Where several Sets of one name match an Agent, the most specific Selector wins, and among
-/// equally specific ones the greater version (ADR-0052) — which is what makes a canary ring one
-/// Selector edit. A tie the version comparison cannot break leaves that Agent with no offer, and
-/// the fleet view says so (`package_conflict`).
+/// Where several Sets of one name match an Agent, the most specific Selector wins the candidate,
+/// and among equally specific ones the greater version (ADR-0052). A tie the version comparison
+/// cannot break leaves that Agent with no proposal, and the fleet view says so
+/// (`package_conflict`).
 #[utoipa::path(
     put,
     path = "/api/v1/packages/{name}/{agent_type}/{version}/selector",
@@ -1230,50 +1300,48 @@ async fn put_package_set_selector(
     }
 }
 
-/// Releases a Set to the fleet, or retracts it (ADR-0043, per Set under ADR-0052).
+/// Rolls a Set out to **every Agent it currently fits and its Selector aims at** (ADR-0061).
 ///
-/// **This is the moment a rollout starts.** Saving a Set stages it: it is a draft, offered to no
-/// Agent however complete it is, so the window in which a half-described package is already
-/// reaching the fleet does not exist — and unlike before ADR-0052, there is no in-place upgrade
-/// around the gate. Publishing an **empty** Set is refused: a Set contains one or more entries.
+/// **This is the moment the fleet changes.** The Set is written into each matching Agent's
+/// assignment, replacing any other version of the same name — and, for a top-level Set, any
+/// other top-level assignment: an Agent has one binary to replace. An Agent that enrols — or
+/// starts matching — later is *not* included: it surfaces in the fleet view as waiting, for its
+/// own act. Rolling out a Set with **no entries** is refused: a Set contains one or more entries.
 ///
-/// **Retracting uninstalls nothing.** Agents that already took the Set keep running it; what
-/// stops is the offer — and with greater-version-wins resolution, retracting the newest published
-/// version is how a fleet falls back to the one still published beneath it (the ADR-0019 rollback,
-/// as a publication move).
+/// Rollback is the same act pointed at the older version. Nothing is ever uninstalled by an
+/// assignment change; an Agent keeps running what it installed (ADR-0017).
 #[utoipa::path(
-    put,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/publication",
+    post,
+    path = "/api/v1/packages/{name}/{agent_type}/{version}/rollout",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name"),
         ("agent_type" = String, Path, description = "The Agent type"),
         ("version" = String, Path, description = "The version")
     ),
-    request_body = PackagePublicationSpec,
     responses(
-        (status = 200, description = "The Set, with its publication state", body = PackageSetView),
+        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
         (status = 400, description = "Invalid identity", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set holds no entries and cannot be published", body = ErrorBody),
-        (status = 500, description = "The publication state could not be persisted", body = ErrorBody)
+        (status = 409, description = "The Set holds no entries and cannot be rolled out", body = ErrorBody)
     )
 )]
-async fn put_package_set_publication(
+async fn rollout_package_set(
     State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
     Path((name, agent_type, version)): Path<(String, String, String)>,
-    Json(spec): Json<PackagePublicationSpec>,
 ) -> Response {
     let id = match set_id(&name, &agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match state.set_package_published(&id, spec.published) {
-        Ok(_) => {
-            info!(set = %id, published = spec.published, "package publication set");
-            set_response(&state, &id)
+    match state.rollout_package(&id) {
+        Ok(assigned_agents) => {
+            info!(set = %id, agents = assigned_agents, "package rolled out from the API");
+            Json(RolloutOutcome { assigned_agents }).into_response()
         }
-        Err(e) => package_error(e),
+        Err(e) => rollout_error(e),
     }
 }
 
