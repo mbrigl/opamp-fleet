@@ -1,6 +1,6 @@
 # ADR-0058: A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-13
 - **Deciders:** Markus Brigl
 

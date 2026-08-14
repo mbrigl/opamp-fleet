@@ -86,5 +86,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | 🟢 accepted |
 | [0056](0056-the-client-accepts-its-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's | 🟢 accepted |
 | [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟢 accepted |
-| [0058](0058-package-rollback-retention-and-no-restart-loop.md) | A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion | 🟡 proposed |
+| [0058](0058-package-rollback-retention-and-no-restart-loop.md) | A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion | 🟢 accepted |
 
