@@ -588,7 +588,7 @@ impl Engine {
                 config_map: Some(opamp::proto::AgentConfigMap {
                     config_map: std::collections::HashMap::from([(
                         "client.toml".to_string(),
-                        opamp::proto::AgentConfigFile {
+                        opamp::proto::AgentConfigObject {
                             role: String::new(),
                             body: source.into_bytes(),
                             content_type: String::new(),

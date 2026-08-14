@@ -25,7 +25,7 @@ pub struct Revision {
     pub selector: BTreeMap<String, String>,
     /// The configuration text handed to the Managed Process.
     pub body: String,
-    /// The Baseline's `AgentConfigFile.role` (ADR-0016), travelling unchanged to the Agent.
+    /// The Baseline's `AgentConfigObject.role` (ADR-0016), travelling unchanged to the Agent.
     /// Empty — the default, and absent from the JSON — means top-level configuration, handled as
     /// it always was. `supplementary` means content the Managed Process reads *by path* rather
     /// than being configured with: a fragment, a certificate, a rule file. Any other value is
@@ -91,7 +91,7 @@ pub struct ConfigurationSpec {
 pub struct ConfigEntry {
     pub name: String,
     pub body: String,
-    /// The Baseline's `AgentConfigFile.role` (ADR-0016); empty is top-level configuration.
+    /// The Baseline's `AgentConfigObject.role` (ADR-0016); empty is top-level configuration.
     pub role: String,
 }
 

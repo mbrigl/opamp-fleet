@@ -17,6 +17,17 @@ carries a date once its tag exists.
 
 ## [0.3.0]
 
+### Changed
+
+- **The OpAMP Protocol Baseline moved to `v0.20.0`** ([PR #385](https://github.com/open-telemetry/opamp-spec/pull/385)).
+  Upstream renamed the `AgentConfigFile` message to `AgentConfigObject` and clarified that an empty
+  configuration-map key is always allowed. This is a **wire-compatible** change — the field numbers
+  and the `config_map` shape are unchanged, so a Server and Client on either version interoperate,
+  and this project already keyed the map by the Configuration name and never rejected an empty one.
+  The vendored schema now lives at `crates/opamp/proto/v0.20.0/`, and the generated Rust type is
+  `opamp::proto::AgentConfigObject`. See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+  **What to do:** nothing — no operator action, and nothing changes on the wire.
+
 ### Fixed
 
 - **The Client stops its Managed Processes cleanly when it updates itself.** The self-update

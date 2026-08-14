@@ -55,7 +55,7 @@ opt-in, and the failure mode of forgetting it is the worst one this system has.
 | ADR-0025 release file names | `linux` / `macos` / `windows` | `x86_64` | `aarch64` |
 
 The operating system is very nearly settled — `os.type` is what the Baseline names
-([`opamp.proto:716`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L716): "the following
+([`opamp.proto:716`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L716): "the following
 attributes SHOULD be included: `os.type`, `os.version`"), our Client already maps Rust's `macos` onto
 the convention's `darwin`, and the Collector agrees; only the release file name still says `macos`.
 The architecture is not settled at all. The Client passes Rust's constant through where the
@@ -222,7 +222,7 @@ A **Package** is a name plus one or more **Variants**: one artifact per Platform
   document for `GOARCH`/`GOOS`" — i.e. one named canonical set that everything is understood *as*,
   rather than a free-for-all of equivalent spellings.
 - The Baseline's own `AgentDescription`
-  ([`opamp.proto:690`](../../crates/opamp/proto/v0.19.0/opamp/v1/opamp.proto#L690)) — "keys/values
+  ([`opamp.proto:690`](../../crates/opamp/proto/v0.20.0/opamp/v1/opamp.proto#L690)) — "keys/values
   are according to OpenTelemetry semantic conventions", then "the following attributes SHOULD be
   included: `os.type`, `os.version`" and "`host.*` to describe the host the Agent runs on". The
   protocol names the two attributes this decision fits against *and* names the conventions as the

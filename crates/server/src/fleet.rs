@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opamp::attributes;
 use opamp::proto::{
-    any_value, AgentConfigFile, AgentConfigMap, AgentDescription, AgentIdentification,
+    any_value, AgentConfigMap, AgentConfigObject, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
     ConnectionSettingsOffers, ConnectionSettingsStatus, Header, Headers, KeyValue,
     OpAmpConnectionSettings, PackageStatuses, PackagesAvailable, RemoteConfigStatus,
@@ -1408,7 +1408,7 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
                 .map(|entry| {
                     (
                         entry.name.clone(),
-                        AgentConfigFile {
+                        AgentConfigObject {
                             body: entry.body.clone().into_bytes(),
                             content_type: String::new(),
                             // The operator's role, verbatim (ADR-0016). Empty — the default —

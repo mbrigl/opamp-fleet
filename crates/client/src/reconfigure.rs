@@ -190,7 +190,7 @@ fn offered_blocks(
         .ok_or_else(|| "the offer carries no configuration".to_string())?;
     // Entries in name order: the composed map is unordered on the wire, and the written file
     // should not depend on iteration luck.
-    let mut entries: Vec<(&String, &opamp::proto::AgentConfigFile)> = map.iter().collect();
+    let mut entries: Vec<(&String, &opamp::proto::AgentConfigObject)> = map.iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
 
     let mut blocks = Vec::new();
@@ -357,7 +357,7 @@ fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{AgentConfigFile, AgentConfigMap};
+    use opamp::proto::{AgentConfigMap, AgentConfigObject};
 
     fn offer_of(entries: &[(&str, &str)]) -> AgentRemoteConfig {
         AgentRemoteConfig {
@@ -367,7 +367,7 @@ mod tests {
                     .map(|(name, body)| {
                         (
                             (*name).to_string(),
-                            AgentConfigFile {
+                            AgentConfigObject {
                                 body: body.as_bytes().to_vec(),
                                 ..Default::default()
                             },

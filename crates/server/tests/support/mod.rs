@@ -181,7 +181,7 @@ pub async fn distribute(addr: SocketAddr, name: &str, selector: &[(&str, &str)],
     distribute_with_role(addr, name, selector, body, "").await;
 }
 
-/// [`distribute`] with the Baseline's `AgentConfigFile.role` set (ADR-0016); an empty role is the
+/// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0016); an empty role is the
 /// ordinary top-level configuration and stays out of the request.
 pub async fn distribute_with_role(
     addr: SocketAddr,

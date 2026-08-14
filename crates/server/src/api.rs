@@ -316,7 +316,7 @@ struct ConfigurationView {
     name: String,
     selector: std::collections::BTreeMap<String, String>,
     body: String,
-    /// The Baseline's `AgentConfigFile.role` (ADR-0016); absent means top-level configuration.
+    /// The Baseline's `AgentConfigObject.role` (ADR-0016); absent means top-level configuration.
     #[serde(skip_serializing_if = "String::is_empty")]
     role: String,
     /// The Agent type this Configuration is for (ADR-0054); absent means every type.
