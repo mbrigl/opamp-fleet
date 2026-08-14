@@ -188,6 +188,47 @@ The forces:
   globals as trust anchors; the program path inside a block is carried along by "the same loader",
   not decided on its own merits. The owned-only rule decides it.
 
+### A removed Supervisor's directory
+
+When a Supervisor leaves the set — the apply of point 11 diffs the offered
+`[[supervisor]]` blocks against the running ones and retires what left — the Client stops its
+Managed Process and sends the Agent's `agent_disconnect`
+([`engine.rs`](../../crates/client/src/engine.rs#L636-L662)). Stopping alone does not touch the
+disk: the whole per-Supervisor directory stays behind —
+
+```
+<supervisor_dir>/<name>/
+  instance-uid            # the Agent identity that just said goodbye
+  remote-config.pb        # its last received configuration
+  installed-package.json  # what was installed
+  config/                 # the written configuration entries
+  program/                # the Client-owned binary — a Collector is hundreds of megabytes
+  packages/               # download staging
+```
+
+Without a purge, nothing ever reclaims it. There is no other cleanup keyed to a retired Supervisor
+anywhere in the Client (the only `remove_dir_all` calls are package-staging housekeeping), and no
+startup pass over `supervisors_root()` looks for directories no block names. The e2e test pins
+exactly this contract: after a removal, the goodbye arrives and the file no longer names the block —
+the directory is not mentioned ([`e2e.rs`](../../crates/client/tests/e2e.rs#L465-L495)).
+
+The leftovers are not just disk waste, though on a host whose fleet role changes a few times they
+are that too (one Collector binary per removed Supervisor). They are **stale identity and stale
+trust**: a Supervisor later re-added under the same name silently inherits the old `instance-uid` —
+an Agent that formally disconnected resurrects with its predecessor's identity and history — plus
+the old remote configuration and whatever program version the old install left, instead of starting
+as the new Agent it is. The Consequences below flag the shape of this problem for a *moved* root
+("changing `supervisor_dir` on a running host leaves the old tree behind — `instance-uid`
+included") and leave it to the operator; a *Server-driven removal* has no operator on the host, so
+nobody is there to clean up.
+
+Constraints: the directory layout of point 1 and the ownership rule of the program path
+(a bare program name is Client-owned, an absolute path is the machine's file the Client never
+writes),
+the apply order of point 11 (stop, write `client.toml`, start; a failed write restarts
+the stopped Supervisors from the old file), and ADR-0015 (retention applies to a *superseded package
+version* of a living Supervisor — not to a Supervisor that no longer exists).
+
 ## Decision
 
 ### The Supervisor's directory and its program
@@ -364,6 +405,42 @@ to let a remote configuration touch anything else in the file.
    apply path (`reconfigure.rs`), which knows the blocks came from an offer, not in
    `resolve_program`, which cannot and must not tell the two principals apart.
 
+### A removed Supervisor is purged
+
+We will make the apply of point 11 **delete a removed Supervisor's directory** after its
+Agent has retired and the new `client.toml` is written: stop the Managed Process, say the goodbye,
+and then remove `<supervisor_dir>/<name>/` recursively — program, packages, configuration, and
+identity.
+
+17. **Removed means removed, not changed.** The purge applies only to names absent from
+   the new set. A *changed* block is stopped and restarted by the same apply (point
+   11) and keeps its directory — identity, program, and installed package ride through
+   a change exactly as they would without a purge.
+
+18. **The purge comes after the write, and only after it succeeds.** The apply order stays
+   stop → write → start, with the purge between write and start. A write that fails restarts the
+   stopped Supervisors from the still-standing old file (point 11) — their directories
+   must still be whole, so nothing is deleted before the file says the Supervisor is gone.
+
+19. **The Client deletes only what it owns.** The per-Supervisor directory is
+   Client-created state and is removed whole — including `program/` when the block named a bare
+   program, which is the Client-owned binary (point 2). A block whose program was an
+   absolute path keeps that rule's promise in the other direction: the machine's binary lies
+   outside the directory and is never touched; only the Supervisor's state directory goes.
+
+20. **A directory the apply cannot delete fails nothing.** The Supervisor is already
+   stopped, the file already written; a purge error (a file held open on Windows, permissions) is a
+   warning naming the path, not a `FAILED` apply — the set the Server asked for *is* running. The
+   directory becomes an orphan (point 21).
+
+21. **An orphaned directory is reported, not reaped.** At startup, a directory under
+   `supervisors_root()` that no `[[supervisor]]` block names is logged as a warning with its path —
+   whether it survived a purge error, a crash between write and purge, or a block removed from
+   `client.toml` by hand while the Client was down. It is **not** deleted: a hand edit is an
+   operator's act on the operator's file (the boundary of point 9), and a block
+   temporarily commented out must not cost the Agent its identity and program. The log line makes
+   the leftover visible; removing it stays the operator's call.
+
 ## Alternatives considered
 
 ### The program path and package consent
@@ -459,6 +536,30 @@ to let a remote configuration touch anything else in the file.
   offer is refused as a whole, consistent with how a merge that fails validation is treated (point
   10).
 
+### A removed Supervisor's directory
+
+- **Keep the data** — rejected: it leaks a program-sized directory per removal, and a re-added
+  Supervisor of the same name resurrects a disconnected Agent's identity and stale configuration
+  instead of starting fresh. The Server-driven removal path has no operator on the host to clean up
+  after it.
+- **Keep the identity, delete the rest** (preserve `instance-uid`, purge program and state) —
+  rejected: half-measures split the directory into kept and deleted parts nobody can reason about,
+  and a removed Supervisor's identity *should* end — its Agent said `agent_disconnect`; the
+  Baseline's goodbye is meaningless if the same identity reconnects later as something else.
+- **A retention window before deletion**, like ADR-0015's `retain_previous_secs` — rejected:
+  that retention exists so a *living* Supervisor can roll back to its previous version; a removed
+  Supervisor has no process left to roll back. Re-adding it is a fresh install by the same
+  delivery path that installed it the first time. A grace period would be machinery for an undo
+  nobody has asked for, against Simplicity first.
+- **Rename aside instead of deleting** (`<name>.removed-<timestamp>/`) — rejected: it converts a
+  leak into a slower leak and hands the operator a janitorial duty the removal was supposed to
+  perform.
+- **Also reap orphaned directories at startup** — rejected as the default (point 21 logs
+  instead): startup cannot tell a Server-driven removal's leftover from an operator's deliberate or
+  temporary hand edit, and the destructive reading of that ambiguity deletes an identity and a
+  program that were not meant to go. If the log line proves insufficient, a follow-up can revisit
+  reaping with an explicit opt-in.
+
 ## Sources / Prior art
 
 - **OpenTelemetry `opampsupervisor`** — a per-supervisor `storage.directory` (default
@@ -485,6 +586,8 @@ to let a remote configuration touch anything else in the file.
   <https://deepwiki.com/elastic/elastic-agent/6-version-management-and-upgrades>
 - **Bindplane** — distinguishes collectors it manages from detached ones, i.e. the same
   ownership boundary this decision draws, expressed as an install mode rather than as a path shape.
+  Its collector uninstall removes the collector's install directory and state as one act; the
+  managed-fleet precedent that removal means the files go.
   <https://docs.bindplane.com/deployment/virtual-machine/collector/install-and-uninstall-bindplane-collectors>
 - **systemd unit specifiers** — `%S` (state directory), `%t` (runtime directory) and friends expand
   in a unit's arguments, and the manual states the executable path itself may not contain them: the
@@ -498,6 +601,13 @@ to let a remote configuration touch anything else in the file.
   lifecycle point 13 adopts.
 - [`toml_edit`](https://docs.rs/toml_edit) (checked 2026-08-12) — format- and comment-preserving
   TOML editing; what `cargo add`/`cargo-edit` mutate manifests with.
+- **OpAMP specification `v0.20.0`** — `agent_disconnect` as the Agent's final word; an identity
+  that has said it should not silently return (the reasoning behind deleting `instance-uid`).
+  <https://github.com/open-telemetry/opamp-spec/blob/v0.20.0/specification.md>
+- **Debian/apt: `remove` vs `purge`** — the established distinction between stopping/removing a
+  thing and purging its configuration and state; the purge semantics of a Server-driven removal
+  follow it precisely because no operator is present to run the second step.
+  <https://www.debian.org/doc/manuals/debian-faq/uptodate.en.html>
 - The general principle behind the path rule — make the illegal state unrepresentable rather than
   validate it — is what removes a whole class of configuration error instead of reporting it.
 - The consent-by-ownership model the delivery rule builds on is the bare-name rule above together
@@ -505,6 +615,8 @@ to let a remote configuration touch anything else in the file.
 - In-repo: ADR-0011 (the `[[supervisor]]` blocks), ADR-0012 and ADR-0028 (the Server-side
   delivery path the Supervisor set completes), ADR-0018 (the self-Agent), ADR-0014 (the pattern of
   a verified, persisted Server offer changing what the Client runs).
+- In-repo: ADR-0015 (retention for the living, contrasted deliberately with the purge of a removed
+  Supervisor).
 
 ## Consequences
 
@@ -615,3 +727,23 @@ to let a remote configuration touch anything else in the file.
 - Follow-ups: a regression test that a pushed set with an absolute-path program is refused `FAILED`
   and touches neither the running set nor the file; the shipped example `client.toml` prose and the
   rollout/client manuals note that Server-delivered Supervisor blocks must name a bare program.
+
+### A removed Supervisor's directory
+
+- Positive: a removal is complete — no program-sized leftovers, no stale identity, no stale
+  configuration. Re-adding a Supervisor under the same name is a genuinely fresh Agent, installed
+  by the same package path as any new one.
+- Positive: the leftover-tree problem shrinks to the cases an operator causes by hand (moved root,
+  offline edit), and those become visible in the log instead of silent.
+- Negative / trade-offs: **removal is destructive and final.** A Supervisor removed by a
+  mis-scoped Selector loses its identity, its Server-side history continuity, and its locally
+  installed program; re-adding restores service, not history. This is accepted as the honest
+  meaning of "removed" — the alternative (stale resurrection) is worse, and rollout scoping is
+  the Server-side gate for it.
+- Negative / trade-offs: a crash between the `client.toml` write and the purge, or a purge error,
+  leaves an orphan directory that startup only reports — a human closes that loop.
+- Negative / trade-offs: the e2e removal contract widens — the test pins goodbye and file; it must
+  additionally pin "directory gone" (and "directory kept" for a changed block).
+- Follow-ups: whether the startup report of orphaned directories should grow an explicit,
+  opt-in reap; whether `service uninstall` (which deliberately keeps all state) should
+  offer a purge of the whole `supervisors_root()` by the same rule.
