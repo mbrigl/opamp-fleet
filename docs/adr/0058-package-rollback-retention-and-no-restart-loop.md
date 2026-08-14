@@ -108,7 +108,7 @@ logged; a marker whose `.rollback` is already gone is simply cleared.
 - This project's own [ADR-0020](0020-client-self-update.md) (the Client self-update: staged version,
   three-attempt give-up, marker across restart) is the precedent this aligns the Managed-Process
   path to.
-- The versioned-layout-with-pointer model of [ADR-0010](0010-versioned-install-layout.md) is the
+- The versioned-layout-with-pointer model of [ADR-0010](0010-client-os-service-and-cli.md) is the
   contrast that justifies keeping only *one* predecessor here rather than a full version store.
 
 ## Consequences
