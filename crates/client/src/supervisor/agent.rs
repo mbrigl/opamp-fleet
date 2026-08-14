@@ -94,6 +94,10 @@ pub struct AgentState {
     managed: bool,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
+    /// The self-Agent's configuration in flight (ADR-0056): stored only once the apply succeeded,
+    /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
+    /// `APPLIED` on restart must mean the file was actually rewritten.
+    applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The Managed Process's health — derived or self-reported (ADR-0011). Absent for the
@@ -196,6 +200,7 @@ impl AgentState {
             send_status: false,
             managed: false,
             pending_apply: None,
+            applying: None,
             pending_restart: false,
             process_health: None,
             send_health: false,
@@ -378,9 +383,20 @@ impl AgentState {
         self.pending_apply.take()
     }
 
-    /// The process adapter's verdict on an [`ApplyConfig`](super::ports::ProcessCommand): closes
-    /// the `APPLYING` → `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
+    /// The verdict on an apply — the process adapter's for a Supervisor-backed Agent, the
+    /// Engine's Supervisor-set apply for the self-Agent (ADR-0056): closes the `APPLYING` →
+    /// `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
+        // The self-Agent's offer is persisted only now, on success: its hash is what a restarted
+        // Client reports as applied, and that must never get ahead of the file (ADR-0056).
+        if let Some(applying) = self.applying.take() {
+            if result.is_ok() && applying.config_hash == hash {
+                match self.storage.store_remote_config(&applying) {
+                    Ok(()) => self.applied = Some(applying),
+                    Err(e) => warn!(error = %e, "cannot store the applied configuration"),
+                }
+            }
+        }
         self.status = Some(match result {
             Ok(()) => RemoteConfigStatus {
                 last_remote_config_hash: hash,
@@ -848,39 +864,46 @@ impl AgentState {
         self.send_package_status = true;
     }
 
-    /// Takes an offered configuration in: store it, then either acknowledge it directly (the
-    /// self-Agent: storing *is* applying) or report `APPLYING` and leave it pending for the
-    /// process adapter, whose outcome closes the lifecycle. Success and failure alike carry the
-    /// hash the status refers to (a rejected configuration is a report, not a silence).
+    /// Takes an offered configuration in and reports `APPLYING`; the outcome closes the
+    /// lifecycle through [`config_applied`](Self::config_applied). Success and failure alike
+    /// carry the hash the status refers to (a rejected configuration is a report, not a silence).
+    ///
+    /// For a Supervisor-backed Agent the entry files are stored now — the process adapter is
+    /// pointed at them — and the apply is handed over as pending. The self-Agent's configuration
+    /// is its Supervisor set (ADR-0056): it is left pending for the Engine's apply and stored
+    /// only once that succeeded, so a restart mid-apply reports nothing as applied and the
+    /// Server offers again.
     fn apply(&mut self, config: &AgentRemoteConfig) {
-        match self.storage.store_remote_config(config) {
-            Ok(()) if self.managed => {
-                info!(hash = %hex::encode(&config.config_hash), "remote configuration stored; applying");
-                self.applied = Some(config.clone());
-                self.status = Some(RemoteConfigStatus {
-                    last_remote_config_hash: config.config_hash.clone(),
-                    status: RemoteConfigStatuses::Applying as i32,
-                    error_message: String::new(),
-                });
-                self.pending_apply = Some(config.clone());
+        if self.managed {
+            match self.storage.store_remote_config(config) {
+                Ok(()) => {
+                    info!(hash = %hex::encode(&config.config_hash), "remote configuration stored; applying");
+                    self.applied = Some(config.clone());
+                    self.status = Some(RemoteConfigStatus {
+                        last_remote_config_hash: config.config_hash.clone(),
+                        status: RemoteConfigStatuses::Applying as i32,
+                        error_message: String::new(),
+                    });
+                    self.pending_apply = Some(config.clone());
+                }
+                Err(e) => {
+                    error!(error = %e, "cannot store the remote configuration");
+                    self.status = Some(RemoteConfigStatus {
+                        last_remote_config_hash: config.config_hash.clone(),
+                        status: RemoteConfigStatuses::Failed as i32,
+                        error_message: format!("cannot store the configuration: {e}"),
+                    });
+                }
             }
-            Ok(()) => {
-                info!(hash = %hex::encode(&config.config_hash), "remote configuration applied");
-                self.applied = Some(config.clone());
-                self.status = Some(RemoteConfigStatus {
-                    last_remote_config_hash: config.config_hash.clone(),
-                    status: RemoteConfigStatuses::Applied as i32,
-                    error_message: String::new(),
-                });
-            }
-            Err(e) => {
-                error!(error = %e, "cannot store the remote configuration");
-                self.status = Some(RemoteConfigStatus {
-                    last_remote_config_hash: config.config_hash.clone(),
-                    status: RemoteConfigStatuses::Failed as i32,
-                    error_message: format!("cannot store the configuration: {e}"),
-                });
-            }
+        } else {
+            info!(hash = %hex::encode(&config.config_hash), "remote configuration received; applying to the supervisor set");
+            self.status = Some(RemoteConfigStatus {
+                last_remote_config_hash: config.config_hash.clone(),
+                status: RemoteConfigStatuses::Applying as i32,
+                error_message: String::new(),
+            });
+            self.pending_apply = Some(config.clone());
+            self.applying = Some(config.clone());
         }
         self.send_status = true;
     }
@@ -2474,6 +2497,9 @@ mod tests {
         assert_eq!(second.sequence_num, 2);
     }
 
+    /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
+    /// Supervisor-set apply (ADR-0056); the verdict closes the lifecycle, and only then does the
+    /// configuration echo as effective.
     #[test]
     fn an_offer_is_applied_and_acknowledged() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2488,11 +2514,21 @@ mod tests {
 
         let ack = agent.next_report();
         let status = ack.remote_config_status.expect("status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
+        assert_eq!(status.last_remote_config_hash, b"hash-1");
+        assert!(agent.take_pending_apply().is_some());
+
+        agent.config_applied(b"hash-1".to_vec(), Ok(()));
+        let done = agent.next_report();
+        let status = done.remote_config_status.expect("status");
         assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
         assert_eq!(status.last_remote_config_hash, b"hash-1");
-        assert!(ack.effective_config.is_some());
+        assert!(done.effective_config.is_some());
     }
 
+    /// A restart reports `APPLIED` only for a configuration whose apply actually finished
+    /// (ADR-0056): the offer is persisted on the verdict, never on receipt, so a Client
+    /// restarted mid-apply reports nothing and the Server offers again.
     #[test]
     fn the_applied_config_survives_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2503,6 +2539,16 @@ mod tests {
                 remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
                 ..Default::default()
             });
+        }
+        // Interrupted mid-apply: nothing was persisted, the restarted Agent reports no status.
+        {
+            let mut interrupted = make_agent(dir.path());
+            assert!(interrupted.next_report().remote_config_status.is_none());
+            interrupted.handle(&ServerToAgent {
+                remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
+                ..Default::default()
+            });
+            interrupted.config_applied(b"hash-1".to_vec(), Ok(()));
         }
         let mut restarted = make_agent(dir.path());
         let report = restarted.next_report();

@@ -28,7 +28,7 @@ use utoipa::ToSchema;
 use crate::agent_store::{AgentStore, FsAgentStore, PersistedAgent};
 use crate::ca::ClientCa;
 use crate::config::ConnectionOfferConfig;
-use crate::configs::{ConfigStore, Configuration, DesiredConfig};
+use crate::configs::{ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::PackageStore;
 
@@ -43,6 +43,12 @@ pub const DEFAULT_MAX_TOTAL_PACKAGE_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 G
 
 /// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0038).
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
+
+/// The most Agent records the fleet holds when nothing configures a ceiling (see `server.toml`,
+/// `max_agents`). Generous enough that a real fleet never meets it, low enough that the in-memory
+/// map and the per-Agent files it mirrors to disk stay bounded when an unauthenticated endpoint is
+/// flooded with fresh, self-asserted UIDs (ADR-0047).
+pub const DEFAULT_MAX_AGENTS: usize = 100_000;
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
 pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
@@ -321,6 +327,13 @@ pub struct AppState {
     /// calls it stale (ADR-0038). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
     stale_after: Duration,
+    /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
+    /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
+    /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
+    /// disk (a self-asserted UID is free to mint, ADR-0047). Existing Agents keep reporting; only
+    /// growth past the ceiling is refused. The real defence against an anonymous flood is admission
+    /// (`[auth]`, ADR-0013); this is the backstop that bounds the damage while it is off.
+    max_agents: usize,
 }
 
 impl AppState {
@@ -378,6 +391,7 @@ impl AppState {
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
             max_total_package_bytes: DEFAULT_MAX_TOTAL_PACKAGE_SIZE,
             stale_after: DEFAULT_STALE_AFTER,
+            max_agents: DEFAULT_MAX_AGENTS,
         })
     }
 
@@ -439,6 +453,14 @@ impl AppState {
     #[must_use]
     pub fn with_stale_after(mut self, stale_after: Duration) -> Self {
         self.stale_after = stale_after;
+        self
+    }
+
+    /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
+    /// fresh UIDs to exhaust memory and disk on an endpoint left without `[auth]` (ADR-0013).
+    #[must_use]
+    pub fn with_max_agents(mut self, max_agents: usize) -> Self {
+        self.max_agents = max_agents;
         self
     }
 
@@ -521,14 +543,38 @@ impl AppState {
         &self.configs
     }
 
-    /// Creates or replaces a Configuration, persists it, and wakes every WebSocket loop — the
-    /// matching Agents are offered the change without being asked.
-    pub fn put_configuration(&self, config: Configuration) -> Result<(), String> {
-        let name = config.name.clone();
-        self.configs.put(config)?;
+    /// Creates a Configuration or replaces its draft revision, and persists it. **Saving only
+    /// saves** (ADR-0055): nothing is offered and no WebSocket loop wakes — the fleet keeps
+    /// running the published revision, if any, until [`Self::set_configuration_published`]
+    /// releases the draft.
+    pub fn save_configuration(
+        &self,
+        name: &str,
+        revision: Revision,
+    ) -> Result<Configuration, String> {
+        let config = self.configs.put_draft(name, revision)?;
+        info!(configuration = %name, "configuration draft stored — nothing distributed");
+        Ok(config)
+    }
+
+    /// Releases a Configuration's draft to the fleet as one snapshot, or retracts the published
+    /// revision (ADR-0055), and wakes every WebSocket loop either way — this, not saving, is the
+    /// moment the fleet changes. `Ok(None)` when no Configuration of that name exists.
+    pub fn set_configuration_published(
+        &self,
+        name: &str,
+        published: bool,
+    ) -> Result<Option<Configuration>, String> {
+        let Some(config) = self.configs.set_published(name, published)? else {
+            return Ok(None);
+        };
         self.push.send_modify(|rev| *rev += 1);
-        info!(configuration = %name, "configuration stored and distributed");
-        Ok(())
+        if published {
+            info!(configuration = %name, "configuration published and distributed");
+        } else {
+            info!(configuration = %name, "configuration retracted — its entry leaves every composed map");
+        }
+        Ok(Some(config))
     }
 
     /// Queues a restart for one Agent (`AcceptsRestartCommand`) and wakes the WebSocket loops so
@@ -785,6 +831,24 @@ impl AppState {
         }
 
         let known = fleet.contains_key(&uid);
+        // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
+        // UIDs (ADR-0047) grow the in-memory map and its per-Agent disk mirror without bound. Known
+        // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
+        // that legitimately raced in retries rather than gives up. The real gate is admission
+        // (ADR-0013); this bounds the damage while the endpoint is open.
+        if !known && fleet.len() >= self.max_agents {
+            drop(fleet);
+            warn!(
+                agent = %uid,
+                max_agents = self.max_agents,
+                "refusing a new agent: the fleet is at its record ceiling"
+            );
+            return Processed {
+                reply: unavailable("the Server is at its Agent-record ceiling; retry later"),
+                uid: None,
+                disconnected: false,
+            };
+        }
         // Labels outlive the record (ADR-0042): a host that was forgotten, or that this Server has
         // only just restarted into, comes back in the ring the operator put it in.
         let persisted_labels = self.labels.get(&uid);
@@ -1424,6 +1488,9 @@ pub struct AgentView {
     pub connected: bool,
     pub healthy: bool,
     pub health_status: String,
+    /// Why the Agent is unhealthy — `ComponentHealth.last_error`, which the Baseline says SHOULD
+    /// be set when `healthy` is false. Empty when the Agent is healthy or gave no reason.
+    pub health_error: String,
     pub effective_config: String,
     pub remote_config_status: String,
     pub remote_config_error: String,
@@ -1657,6 +1724,11 @@ impl AgentView {
                 .as_ref()
                 .map(|h| h.status.clone())
                 .unwrap_or_default(),
+            health_error: record
+                .health
+                .as_ref()
+                .map(|h| h.last_error.clone())
+                .unwrap_or_default(),
             effective_config: record.effective_config.clone().unwrap_or_default(),
             remote_config_status: status_name.to_string(),
             remote_config_error: status.map(|s| s.error_message.clone()).unwrap_or_default(),
@@ -1724,6 +1796,21 @@ pub fn bad_request(message: &str) -> ServerToAgent {
         capabilities: SERVER_CAPABILITIES,
         error_response: Some(ServerErrorResponse {
             r#type: ServerErrorResponseType::BadRequest as i32,
+            error_message: message.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
+/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up.
+/// Used when a new Agent arrives past the record ceiling.
+pub fn unavailable(message: &str) -> ServerToAgent {
+    ServerToAgent {
+        capabilities: SERVER_CAPABILITIES,
+        error_response: Some(ServerErrorResponse {
+            r#type: ServerErrorResponseType::Unavailable as i32,
             error_message: message.to_string(),
             ..Default::default()
         }),
@@ -1971,6 +2058,48 @@ mod tests {
             !snapshot[0].connected,
             "connectedness is runtime-only and never restored"
         );
+    }
+
+    /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
+    /// so a peer minting fresh self-asserted UIDs (ADR-0047) cannot grow the fleet — and its
+    /// in-memory map and per-Agent disk mirror — without bound. Agents already known keep reporting.
+    #[test]
+    fn a_new_agent_past_the_ceiling_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let state = AppState::new(dir).expect("state").with_max_agents(2);
+
+        let a = InstanceUid::default();
+        let b = InstanceUid::default();
+        state.process(report(&a, 1), Transport::Http, None);
+        state.process(report(&b, 1), Transport::Http, None);
+        assert_eq!(state.snapshot().len(), 2, "the fleet filled to its ceiling");
+
+        // A third, genuinely new UID: refused, and told to retry rather than give up.
+        let c = InstanceUid::default();
+        let processed = state.process(report(&c, 1), Transport::Http, None);
+        let error = processed.reply.error_response.expect("an error response");
+        assert_eq!(
+            error.r#type,
+            ServerErrorResponseType::Unavailable as i32,
+            "a full fleet answers Unavailable, not BadRequest"
+        );
+        assert!(
+            processed.uid.is_none(),
+            "the refused report has no identity to route a config to"
+        );
+        assert_eq!(
+            state.snapshot().len(),
+            2,
+            "no record was created for the refused UID"
+        );
+
+        // An Agent already in the fleet keeps reporting even at the ceiling.
+        let processed = state.process(report(&a, 2), Transport::Http, None);
+        assert!(
+            processed.reply.error_response.is_none(),
+            "a known Agent is never refused by the ceiling"
+        );
+        assert_eq!(state.snapshot().len(), 2);
     }
 
     /// ADR-0051: a restored sequence number means the next compressed heartbeat is accepted in

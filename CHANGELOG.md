@@ -15,6 +15,126 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.3.0]
+
+### Fixed
+
+- **The Client stops its Managed Processes cleanly when it updates itself.** The self-update
+  restart path exited without running the graceful shutdown ADR-0020 specifies, so the Managed
+  Processes were left to the service manager. On systemd the unit's cgroup reaped them; on a manager
+  that does not (launchd, the Windows SCM, a foreground or non-cgroup container run) they were
+  orphaned, and the restarted Client spawned duplicates that fought over their ports. The self-update
+  exit now stops the Managed Processes and sends the goodbyes first, on both transports, exactly as
+  an ordinary shutdown does.
+  **What to do:** nothing.
+
+### Changed
+
+- **A Managed Process's package updates no longer loop, and keep a fallback**
+  ([ADR-0058](docs/adr/0058-package-rollback-retention-and-no-restart-loop.md)). Three changes to
+  how a Supervisor applies a package (ADR-0015):
+  - A **first** install that will not start is no longer discarded — the verified program is kept in
+    place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
+    the Server re-offering the same artifact in a download-crash-rollback loop.
+  - A program that **keeps failing to start** is held after a few attempts instead of being
+    restarted forever (the give-up the Client's own self-update already uses). The Agent reports
+    `not restarting: the program keeps failing to start`.
+  - A **successful** update keeps the version it superseded for a window before deleting it, so an
+    operator has a fallback. New `[updates] retain_previous_secs` (default one day), overridable per
+    `[[supervisor]]` block with `retain_previous_secs`; `0` restores the old delete-on-success.
+
+  **What to do:** nothing to keep working. If a rollout of a package that crashes on start had been
+  looping, it now stops on its own; and a superseded version now occupies disk for up to a day per
+  Supervisor — lower `retain_previous_secs`, globally or per block, on a host that cannot spare it.
+
+## [0.2.6]
+
+### Added
+
+- **The fleet table shows each Agent's reported health.** A new *Health* column carries the
+  Agent's own status string (e.g. `no process installed`) with the reported reason beneath it,
+  so a Supervisor whose Managed Process will not start is visible at a glance instead of hiding
+  behind a green *Connected* — which only ever said the connection is open. Agents that report
+  no health show a neutral `—`. For API consumers, `GET /api/v1/agents` gains `health_error`
+  (`ComponentHealth.last_error`) beside the existing `healthy` and `health_status`.
+  **What to do:** nothing — the column and field appear on upgrade.
+
+### Security
+
+- **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
+  ([ADR-0057](docs/adr/0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md)).
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0056) is now refused
+  (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
+  that would let the Server spawn a machine binary that never passed through package signing. A
+  bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
+  Supervisor an operator writes in `client.toml` by hand.
+  **What to do:** if you deliver a Supervisor set over the wire, name each program with a bare file
+  name (delivered by package); machine binaries stay in the host's local `client.toml`.
+
+- **The Server bounds how many Agent records it holds** — a new `max_agents` in `server.toml`
+  (default 100 000). A report bearing a *new* `instance_uid` past the ceiling is answered
+  `Unavailable` (retry later) instead of admitted, so a peer minting fresh self-asserted UIDs
+  (ADR-0047) cannot exhaust memory and disk; Agents already known keep reporting.
+  **What to do:** nothing for a normal fleet. A very large deployment can raise `max_agents`; the
+  real defence against an anonymous flood is `[auth]` (ADR-0013), and this is the backstop while it
+  is off.
+
+- **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
+  `[connection_offer]` credential (ADR-0014) or `[telemetry_offer]` headers (ADR-0036) are handed
+  to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
+  peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
+  unchanged.
+  **What to do:** set `[auth]` to gate credential delivery, or accept the exposure knowingly.
+
+- **Hardening, no operator action.** A Server-offered package whose name could escape the staging
+  directory is refused (path traversal); `client.toml` keeps its `0600` mode when a Supervisor set
+  is rewritten, so the OpAMP credential is not left world-readable; archive listing and member
+  skipping are bounded against a decompression bomb; the certificate the Server issues to an Agent
+  is forced to a client-auth leaf regardless of what the CSR requested (no CA certificate from a
+  crafted request); and the bundled UI escapes `'` and `` ` `` so agent-reported strings cannot
+  break out of an HTML attribute.
+
+## [0.2.5] - 2026-08-12
+
+### Changed
+
+- **Saving a Configuration no longer distributes it** ([ADR-0055](docs/adr/0055-a-configuration-is-published-before-it-is-offered.md)).
+  `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
+  `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
+  published Configuration stages the change (`pending_changes: true`) until the next publication.
+  In the bundled UI the button that used to read *Save & distribute* is now *Save*, and *Publish*
+  is what changes the fleet. Retracting (`{"published": false}`) removes the entry from every
+  composed config map, which matching Agents apply.
+  **What to do:** Configurations stored before the upgrade load as published and stay in force —
+  running fleets are untouched. Scripts that `PUT` a Configuration and expect delivery need the
+  one extra publication call.
+
+- **A configuration offered to the Client's own Agent now means something — its Supervisor set**
+  ([ADR-0056](docs/adr/0056-the-client-accepts-its-supervisor-set-from-the-server.md)). A
+  Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
+  stops what left the set, writes the blocks into its own `client.toml` (preserving the
+  operator's comments and everything outside them), and starts what arrived — unchanged
+  Supervisors are not touched. Every other top-level key in the offered document is ignored: the
+  endpoint, credentials, and state directory can never arrive over the wire. Previously the
+  Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
+  **What to do:** state whom your Configurations are for
+  (`service_name`, [ADR-0054](docs/adr/0054-a-configuration-may-state-the-agent-type-it-is-for.md)). An
+  *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
+  body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
+  `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
+  configurations, and a fleet that never publishes a `opamp-fleet-client`-typed Configuration
+  keeps running its locally written blocks.
+
+### Added
+
+- **A Configuration can state the Agent type it is for**
+  ([ADR-0054](docs/adr/0054-a-configuration-may-state-the-agent-type-it-is-for.md)). The optional
+  `service_name` field is compared raw against the `service.name` an Agent reports, before the
+  Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
+  currently reports as suggestions.
+  **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
+  field over a `service.name` Selector pair when creating new ones.
+
 ## [0.2.4] - 2026-08-12
 
 ### Added

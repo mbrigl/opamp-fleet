@@ -1,7 +1,10 @@
 //! End to end (ADR-0011): the real Server in-process, the real Client binary with two
 //! Supervisors — a Collector-type on the stub and a command-type Foreign Agent — over one
 //! WebSocket connection. A configuration change reaches both Agents, restarts their processes
-//! on the written files, and comes back `APPLIED` and in sync.
+//! on the written files, and comes back `APPLIED` and in sync. A Configuration typed for the
+//! Client itself then changes its Supervisor set at runtime (ADR-0056): an added block starts
+//! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops and
+//! says goodbye — and `client.toml` is rewritten around the operator's globals each time.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -76,6 +79,38 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
 /// What this Client presents: its two Supervisors, plus itself (ADR-0020).
 const AGENTS: usize = 3;
 
+/// The stub binary's own file name — what a **bare** program name resolves to inside a Supervisor's
+/// owned `program/` directory. Blocks below name their program bare (not by absolute path), because
+/// a Server-delivered Supervisor set may run only a program this Client owns (ADR-0057), and the
+/// operator-local blocks use the same shape so the delivered set can restate them verbatim.
+fn stub_program_name() -> String {
+    Path::new(env!("CARGO_BIN_EXE_stub_agent"))
+        .file_name()
+        .expect("the stub binary has a file name")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Places the stub binary where a bare program name resolves — `<state_dir>/supervisors/<name>/
+/// program/<program>` (ADR-0021) — standing in for the package install that would normally put it
+/// there. A Supervisor whose owned program is present starts it; one whose program is absent waits
+/// for a package, which is not what this test exercises.
+fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
+    let program_dir = state_dir
+        .join("supervisors")
+        .join(supervisor)
+        .join("program");
+    std::fs::create_dir_all(&program_dir).expect("create the owned program directory");
+    let dest = program_dir.join(program);
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &dest).expect("stage the stub binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+            .expect("make the staged program executable");
+    }
+}
+
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -83,6 +118,32 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let stub_marker = dir.path().join("stub-marker");
     let otelcol_marker = dir.path().join("otelcol-marker");
 
+    let program = stub_program_name();
+    let otelcol_block = format!(
+        concat!(
+            "[[supervisor]]\n",
+            "type = \"collector\"\n",
+            "name = \"otelcol\"\n",
+            "binary = {program:?}\n",
+            "args = [\"--touch\", {otelcol_marker:?}]\n",
+        ),
+        program = program,
+        otelcol_marker = otelcol_marker.to_string_lossy(),
+    );
+    let stub_block = format!(
+        concat!(
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {stub_marker:?}]\n",
+            "version_args = [\"--version\"]\n",
+            "[supervisor.attributes]\n",
+            "role = \"edge\"\n",
+        ),
+        program = program,
+        stub_marker = stub_marker.to_string_lossy(),
+    );
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -90,28 +151,21 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "heartbeat_interval_secs = 1\n\n",
             "[attributes]\n",
             "env = \"prod\"\n\n",
-            "[[supervisor]]\n",
-            "type = \"collector\"\n",
-            "name = \"otelcol\"\n",
-            "binary = {stub:?}\n",
-            "args = [\"--touch\", {otelcol_marker:?}]\n\n",
-            "[[supervisor]]\n",
-            "type = \"command\"\n",
-            "name = \"stub\"\n",
-            "command = {stub:?}\n",
-            "args = [\"--touch\", {stub_marker:?}]\n",
-            "version_args = [\"--version\"]\n",
-            "[supervisor.attributes]\n",
-            "role = \"edge\"\n",
+            "{otelcol_block}\n",
+            "{stub_block}",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
-        otelcol_marker = otelcol_marker.to_string_lossy(),
-        stub_marker = stub_marker.to_string_lossy(),
+        otelcol_block = otelcol_block,
+        stub_block = stub_block,
     );
     let config_path = dir.path().join("client.toml");
     std::fs::write(&config_path, toml).expect("write client.toml");
+
+    // Both owned Supervisors have their program staged before the Client starts, so they run at
+    // once rather than waiting for a package (ADR-0057 makes the delivery path owned-only).
+    stage_owned_program(&state_dir, "otelcol", &program);
+    stage_owned_program(&state_dir, "stub", &program);
 
     let _client = spawn_client(&config_path);
 
@@ -153,26 +207,36 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.healthy);
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
-    // The operator distributes a fleet-wide Configuration; the Server pushes it over the socket.
+    // The operator distributes a fleet-wide Configuration — saved, then published, because
+    // saving alone stages a draft (ADR-0055); the Server pushes the release over the socket.
     state
-        .put_configuration(server::configs::Configuration {
-            name: "fleet".to_string(),
-            selector: Default::default(),
-            body: "receivers: {}\n".to_string(),
-            role: String::new(),
-        })
-        .expect("distribute the fleet configuration");
+        .save_configuration(
+            "fleet",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the fleet configuration");
+    state
+        .set_configuration_published("fleet", true)
+        .expect("publish the fleet configuration")
+        .expect("the configuration exists");
 
-    // Every Agent acknowledges APPLIED and is in sync; the processes restarted on the files. The
-    // fleet-wide Configuration has an empty Selector, so it reaches the Client's own Agent too —
-    // which stores it and is done, having no process to restart.
-    wait_until("every agent in sync", || {
+    // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
+    // files. The fleet-wide Configuration has an empty Selector, so it reaches the Client's own
+    // Agent too — whose configuration is its Supervisor set (ADR-0056), and a YAML body is not
+    // one: the Client refuses it loudly rather than pretend it took effect.
+    wait_until("the supervised agents in sync, the client refusing", || {
         let snapshot = state.snapshot();
-        (snapshot.len() == AGENTS
-            && snapshot
-                .iter()
-                .all(|a| a.in_sync && a.remote_config_status == "APPLIED"))
-        .then_some(())
+        let supervised = ["otelcol", "stub"].iter().all(|name| {
+            view(&snapshot, name).is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED")
+        });
+        let refused = view(&snapshot, "opamp-fleet-client")
+            .is_some_and(|a| a.remote_config_status == "FAILED");
+        (supervised && refused).then_some(())
     })
     .await;
     let collector_pid = wait_until("the collector to start on the new config", || {
@@ -252,13 +316,20 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.non_identifying_attributes.contains_key("role"));
 
     state
-        .put_configuration(server::configs::Configuration {
-            name: "edge-extra".to_string(),
-            selector: [("role".to_string(), "edge".to_string())].into(),
-            body: "processors: {}\n".to_string(),
-            role: String::new(),
-        })
-        .expect("distribute the targeted configuration");
+        .save_configuration(
+            "edge-extra",
+            server::configs::Revision {
+                selector: [("role".to_string(), "edge".to_string())].into(),
+                body: "processors: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the targeted configuration");
+    state
+        .set_configuration_published("edge-extra", true)
+        .expect("publish the targeted configuration")
+        .expect("the configuration exists");
     wait_until("the stub to apply both entries", || {
         let snapshot = state.snapshot();
         let stub = view(&snapshot, "stub")?;
@@ -309,4 +380,119 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         },
     )
     .await;
+
+    // ——— The Server manages the Client's own Supervisor set (ADR-0056) ———
+
+    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is
+    // YAML), so the operator first states whom it is for (ADR-0054): the type both Supervisors
+    // report. Their own maps carry the same entry with the same body, so nothing restarts.
+    let snapshot = state.snapshot();
+    let supervised_type = view(&snapshot, "otelcol")
+        .expect("otelcol view")
+        .service_name
+        .clone();
+    state
+        .save_configuration(
+            "fleet",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: supervised_type,
+            },
+        )
+        .expect("retype the fleet configuration");
+    state
+        .set_configuration_published("fleet", true)
+        .expect("republish the fleet configuration")
+        .expect("the configuration exists");
+
+    // A Configuration typed for the Client itself carries `[[supervisor]]` blocks: the running
+    // two, verbatim, plus a third. Unchanged blocks ride through — the stub must keep its pid.
+    let added_marker = dir.path().join("added-marker");
+    let added_block = format!(
+        concat!(
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"added\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {added_marker:?}]\n",
+        ),
+        program = program,
+        added_marker = added_marker.to_string_lossy(),
+    );
+    // The added Supervisor is owned too (ADR-0057): stage its program before the set is delivered,
+    // so the block the Server pushes starts a process instead of waiting for a package.
+    stage_owned_program(&state_dir, "added", &program);
+    let stub_pid_before = stub_pid(&stub_marker).expect("the stub runs");
+    state
+        .save_configuration(
+            "client-supervisors",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: format!("{otelcol_block}\n{stub_block}\n{added_block}"),
+                role: String::new(),
+                service_name: "opamp-fleet-client".to_string(),
+            },
+        )
+        .expect("save the supervisor set");
+    state
+        .set_configuration_published("client-supervisors", true)
+        .expect("publish the supervisor set")
+        .expect("the configuration exists");
+
+    wait_until("the added supervisor to connect, the set applied", || {
+        let snapshot = state.snapshot();
+        let added = view(&snapshot, "added").is_some_and(|a| a.connected);
+        let applied = view(&snapshot, "opamp-fleet-client")
+            .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
+        (added && applied).then_some(())
+    })
+    .await;
+    let _ = wait_until("the added stub to run", || stub_pid(&added_marker)).await;
+    let rewritten = std::fs::read_to_string(&config_path).expect("read back client.toml");
+    assert!(rewritten.contains("name = \"added\""), "{rewritten}");
+    assert!(
+        rewritten.contains("env = \"prod\"") && rewritten.contains("heartbeat_interval_secs = 1"),
+        "the operator's globals survive the rewrite: {rewritten}"
+    );
+    assert_eq!(
+        stub_pid(&stub_marker),
+        Some(stub_pid_before),
+        "an unchanged supervisor rides through the apply untouched"
+    );
+
+    // Removing the block stops its Supervisor and retires its Agent: the goodbye arrives, the
+    // file no longer names it — and the unchanged neighbours still ride through.
+    state
+        .save_configuration(
+            "client-supervisors",
+            server::configs::Revision {
+                selector: Default::default(),
+                body: format!("{otelcol_block}\n{stub_block}"),
+                role: String::new(),
+                service_name: "opamp-fleet-client".to_string(),
+            },
+        )
+        .expect("shrink the supervisor set");
+    state
+        .set_configuration_published("client-supervisors", true)
+        .expect("publish the shrunken set")
+        .expect("the configuration exists");
+
+    wait_until("the added supervisor to say goodbye", || {
+        let snapshot = state.snapshot();
+        let gone = view(&snapshot, "added").is_some_and(|a| !a.connected);
+        let applied = view(&snapshot, "opamp-fleet-client")
+            .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
+        (gone && applied).then_some(())
+    })
+    .await;
+    let rewritten = std::fs::read_to_string(&config_path).expect("read back client.toml");
+    assert!(!rewritten.contains("\"added\""), "{rewritten}");
+    assert_eq!(
+        stub_pid(&stub_marker),
+        Some(stub_pid_before),
+        "the unchanged supervisors ride through the removal too"
+    );
 }

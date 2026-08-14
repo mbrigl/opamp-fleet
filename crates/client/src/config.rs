@@ -72,6 +72,10 @@ pub struct ClientConfig {
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// How Managed-Process package updates behave once applied (ADR-0058) — the retention of a
+    /// superseded version. Absent takes the defaults: one day.
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     /// The `[packages].verification_key` decoded once at load — the Ed25519 public key a package
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
@@ -82,6 +86,11 @@ pub struct ClientConfig {
     /// never disagree). `None` when no file exists and the defaults run.
     #[serde(skip)]
     pub source: Option<String>,
+    /// The path this configuration was loaded from — where an accepted Supervisor set is written
+    /// back to (ADR-0056). Kept even when the file does not exist yet: the first applied offer
+    /// creates it. `None` only for a configuration never loaded from a path (tests, defaults).
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
@@ -136,6 +145,10 @@ pub struct SupervisorBlock {
     /// configuration is acknowledged `APPLIED`; exiting within the grace reports `FAILED`
     /// (the health-gated acknowledgement ADR-0011 names). `0` acknowledges on start, as before.
     pub apply_grace_secs: u64,
+    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0058): how
+    /// long the version a successful update supersedes is kept before deletion. `None` — the
+    /// default — takes the global value.
+    pub retain_previous_secs: Option<u64>,
     /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
     pub attributes: BTreeMap<String, String>,
     /// Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g.
@@ -294,6 +307,12 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: apply_grace_secs must not be negative")
             })?,
         };
+        let retain_previous_secs = match take_integer(&mut table, "retain_previous_secs")? {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
+                format!("supervisor {name:?}: retain_previous_secs must not be negative")
+            })?),
+        };
         let attributes = take_string_table(&mut table, "attributes")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
         let program_path = match take_string(&mut table, "program_path")
@@ -332,6 +351,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             endpoint_port,
             stop_timeout_secs,
             apply_grace_secs,
+            retain_previous_secs,
             attributes,
             program_path,
             settings: table,
@@ -566,6 +586,30 @@ impl Default for LoggingConfig {
     }
 }
 
+/// The `[updates]` section (ADR-0058): how a Managed Process's package updates behave once applied.
+/// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// How long the version a successful update supersedes is kept before it is deleted, so an
+    /// operator has a fallback window (ADR-0058). `0` deletes it on success, the pre-ADR-0058
+    /// behaviour. A per-Supervisor `retain_previous_secs` overrides this for one block.
+    #[serde(default = "default_retain_previous_secs")]
+    pub retain_previous_secs: u64,
+}
+
+fn default_retain_previous_secs() -> u64 {
+    24 * 60 * 60 // one day
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            retain_previous_secs: default_retain_previous_secs(),
+        }
+    }
+}
+
 /// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
 /// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
 /// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
@@ -725,6 +769,7 @@ impl Default for ClientConfig {
             endpoint: default_endpoint(),
             name: default_name(),
             logging: LoggingConfig::default(),
+            updates: UpdatesConfig::default(),
             service_namespace: None,
             poll_interval_secs: default_poll_interval_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
@@ -739,6 +784,7 @@ impl Default for ClientConfig {
             self_update: None,
             package_key: None,
             source: None,
+            path: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
@@ -751,7 +797,10 @@ impl ClientConfig {
     /// parse is an error — never silently ignored.
     pub fn load(path: &Path) -> Result<Self, String> {
         if !path.exists() {
-            return Ok(ClientConfig::default());
+            return Ok(ClientConfig {
+                path: Some(path.to_path_buf()),
+                ..ClientConfig::default()
+            });
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -760,6 +809,7 @@ impl ClientConfig {
         // Redacted once, here, so no later reader can reach for the unredacted text by mistake:
         // everything downstream — the effective-configuration report above all — sees the mask.
         config.source = Some(redact_secrets(&text));
+        config.path = Some(path.to_path_buf());
         config.check_supervisor_names()?;
         if let Some(auth) = &config.auth {
             // A half-configured block must fail now, not at the first exchange.
@@ -863,17 +913,18 @@ impl ClientConfig {
         self.supervisors_root().join(name)
     }
 
-    /// Where the artifact offered to the Agent at `index` is staged. Inside that Supervisor's own
-    /// directory, so that the install which follows is a rename within one filesystem instead of a
-    /// copy across two (ADR-0021); the Client's own Agent stages under `state_dir`, beside the
-    /// versions a self-update writes (ADR-0020).
+    /// Where the artifact offered to an Agent is staged, by the name of the Supervisor behind it —
+    /// `None` for the Client's own Agent. Inside that Supervisor's own directory, so that the
+    /// install which follows is a rename within one filesystem instead of a copy across two
+    /// (ADR-0021); the Client's own Agent stages under `state_dir`, beside the versions a
+    /// self-update writes (ADR-0020). Keyed by name rather than by Engine index because the Agent
+    /// set can change at runtime (ADR-0056), which is exactly when an index stops naming a block.
     #[must_use]
-    pub fn staging_dir(&self, index: usize) -> PathBuf {
-        index
-            .checked_sub(crate::supervisor::SELF_AGENT_OFFSET)
-            .and_then(|block| self.supervisors.get(block))
-            .map(|block| self.supervisor_dir(&block.name).join(PACKAGES_DIR))
-            .unwrap_or_else(|| self.state_dir.join(PACKAGES_DIR))
+    pub fn staging_dir_for(&self, supervisor: Option<&str>) -> PathBuf {
+        match supervisor {
+            Some(name) => self.supervisor_dir(name).join(PACKAGES_DIR),
+            None => self.state_dir.join(PACKAGES_DIR),
+        }
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -1334,11 +1385,11 @@ mod tests {
         // The Client's own Agent keeps staging beside its versions; a Supervisor stages in its own
         // directory, which is what makes the install a rename rather than a copy.
         assert_eq!(
-            moved.staging_dir(crate::supervisor::SELF_AGENT_INDEX),
+            moved.staging_dir_for(None),
             PathBuf::from("/var/lib/fleet/state/packages")
         );
         assert_eq!(
-            moved.staging_dir(crate::supervisor::SELF_AGENT_OFFSET),
+            moved.staging_dir_for(Some("agent")),
             PathBuf::from("/opt/fleet/supervisors/agent/packages")
         );
     }
@@ -1404,6 +1455,58 @@ mod tests {
         let command = &cfg.supervisors[1];
         assert_eq!(command.endpoint_port, 0);
         assert!(command.settings.contains_key("args"));
+    }
+
+    /// ADR-0058: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
+    /// block overrides it for itself — the shape `apply_grace_secs` has.
+    #[test]
+    fn retention_defaults_globally_and_is_overridable_per_supervisor() {
+        let default: ClientConfig = toml::from_str("").expect("parse");
+        assert_eq!(
+            default.updates.retain_previous_secs,
+            24 * 60 * 60,
+            "one day by default"
+        );
+
+        let cfg: ClientConfig = toml::from_str(
+            r#"
+            [updates]
+            retain_previous_secs = 3600
+
+            [[supervisor]]
+            type = "command"
+            name = "keeps-default"
+            command = "agent"
+
+            [[supervisor]]
+            type = "command"
+            name = "overrides"
+            command = "agent"
+            retain_previous_secs = 0
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.updates.retain_previous_secs, 3600,
+            "the global override"
+        );
+        assert_eq!(
+            cfg.supervisors[0].retain_previous_secs, None,
+            "a block that says nothing takes the global"
+        );
+        assert_eq!(
+            cfg.supervisors[1].retain_previous_secs,
+            Some(0),
+            "a block may override to immediate deletion"
+        );
+
+        let negative = toml::from_str::<ClientConfig>(
+            "[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"a\"\nretain_previous_secs = -1\n",
+        );
+        assert!(negative
+            .unwrap_err()
+            .to_string()
+            .contains("retain_previous_secs"));
     }
 
     #[test]

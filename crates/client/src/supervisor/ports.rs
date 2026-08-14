@@ -120,6 +120,10 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
     pub apply_grace: Duration,
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0058),
+    /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
+    /// success.
+    pub retain_previous: Duration,
     /// The key that opens an encrypted `.7z` package artifact (ADR-0018); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<String>,
@@ -174,6 +178,15 @@ pub trait Plugin {
     /// # Errors
     /// Returns an error when the settings do not parse — startup fails loudly, nothing spawns.
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
+
+    /// The strict settings parse [`start`](Self::start) performs, without the side effects
+    /// (ADR-0056): what validates an offered Supervisor set *before* any running process is
+    /// touched. `settings` is the block's table with the program key already taken out, exactly
+    /// as `start` receives it.
+    ///
+    /// # Errors
+    /// Returns an error when the settings do not parse.
+    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
 }
 
 #[cfg(test)]
@@ -207,6 +220,7 @@ mod tests {
             )),
             stop_timeout: Duration::from_secs(1),
             apply_grace: Duration::from_secs(0),
+            retain_previous: Duration::from_secs(0),
             archive_key: None,
             settings: toml::Table::new(),
             events: EventSender::new(0, event_tx),

@@ -419,6 +419,7 @@ mod tests {
     /// development and sidecar shape, and nothing leaves the machine.
     #[test]
     fn a_loopback_destination_is_allowed_in_cleartext() {
+        crate::tls::install_ring_provider();
         let mut telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),

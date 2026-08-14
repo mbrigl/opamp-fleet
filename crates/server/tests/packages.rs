@@ -18,6 +18,8 @@ const PROTOBUF: &str = "application/x-protobuf";
 
 /// A Server with package delivery armed over a temp store; returns the server and its temp dir.
 async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
+    // What main() does at startup: without a process provider, reqwest refuses to build a client.
+    server::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = PackageStore::open(dir.path().join("packages")).expect("store");
     let state = Arc::new(

@@ -19,7 +19,7 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
-use crate::configs::{self, Configuration, ConfigurationSpec};
+use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
 use crate::fleet::{AgentView, AppState, ForgetError, RestartError};
 use crate::labels::LabelError;
 
@@ -50,6 +50,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             put_configuration,
             delete_configuration
         ))
+        .routes(routes!(put_configuration_publication))
         .routes(routes!(list_packages))
         .routes(routes!(
             get_package_set,
@@ -306,15 +307,68 @@ async fn forget_agent(
     }
 }
 
+/// One Configuration as the API shows it (ADR-0055): the **draft** revision — what editing
+/// operates on — plus the publication state. `published` says whether any revision is in force;
+/// `pending_changes` says the draft differs from it, so a fleet that is not changing after a
+/// save is explainable at a glance.
+#[derive(Serialize, ToSchema)]
+struct ConfigurationView {
+    name: String,
+    selector: std::collections::BTreeMap<String, String>,
+    body: String,
+    /// The Baseline's `AgentConfigFile.role` (ADR-0016); absent means top-level configuration.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    role: String,
+    /// The Agent type this Configuration is for (ADR-0054); absent means every type.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    service_name: String,
+    /// A published revision exists and is offered to whomever it fits and aims at.
+    published: bool,
+    /// The draft differs from the published revision — saved, reviewed, not yet released.
+    pending_changes: bool,
+}
+
+impl From<Configuration> for ConfigurationView {
+    fn from(config: Configuration) -> Self {
+        let pending_changes = config.pending_changes();
+        ConfigurationView {
+            name: config.name,
+            selector: config.draft.selector,
+            body: config.draft.body,
+            role: config.draft.role,
+            service_name: config.draft.service_name,
+            published: config.published.is_some(),
+            pending_changes,
+        }
+    }
+}
+
+/// Whether the fleet may have a Configuration (ADR-0055).
+#[derive(Deserialize, ToSchema)]
+struct ConfigurationPublicationSpec {
+    /// `true` releases the draft as one snapshot: every Agent it fits and aims at is offered it
+    /// from now on. `false` retracts it — and unlike a package, that is **not inert**: the entry
+    /// leaves every composed config map, which the matching Agents apply; only an Agent left
+    /// matching nothing keeps running what it runs (goal 9).
+    published: bool,
+}
+
 /// All Configurations, in name order.
 #[utoipa::path(
     get,
     path = "/api/v1/configurations",
     tag = "configurations",
-    responses((status = 200, description = "Every stored Configuration", body = [Configuration]))
+    responses((status = 200, description = "Every stored Configuration", body = [ConfigurationView]))
 )]
-async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<Configuration>> {
-    Json(state.configurations().list())
+async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<ConfigurationView>> {
+    Json(
+        state
+            .configurations()
+            .list()
+            .into_iter()
+            .map(ConfigurationView::from)
+            .collect(),
+    )
 }
 
 /// One Configuration by name.
@@ -324,7 +378,7 @@ async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<Con
     tag = "configurations",
     params(("name" = String, Path, description = "The Configuration's name")),
     responses(
-        (status = 200, description = "The Configuration", body = Configuration),
+        (status = 200, description = "The Configuration", body = ConfigurationView),
         (status = 404, description = "No Configuration of that name", body = ErrorBody)
     )
 )]
@@ -333,14 +387,14 @@ async fn get_configuration(
     Path(name): Path<String>,
 ) -> Response {
     match state.configurations().get(&name) {
-        Some(config) => Json(config).into_response(),
+        Some(config) => Json(ConfigurationView::from(config)).into_response(),
         None => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
     }
 }
 
-/// Creates or replaces a Configuration. Distribution follows from state: polling Agents pick the
-/// change up on their next exchange, WebSocket Agents whose attributes match are pushed
-/// immediately.
+/// Creates a Configuration or replaces its draft. **Saving only saves** (ADR-0055): nothing
+/// reaches any Agent, and a published revision keeps being offered untouched, until
+/// `PUT …/publication` releases the draft as one snapshot.
 #[utoipa::path(
     put,
     path = "/api/v1/configurations/{name}",
@@ -348,7 +402,7 @@ async fn get_configuration(
     params(("name" = String, Path, description = "The Configuration's name (ADR-0010 grammar)")),
     request_body = ConfigurationSpec,
     responses(
-        (status = 200, description = "The stored Configuration", body = Configuration),
+        (status = 200, description = "The stored Configuration — a draft until published", body = ConfigurationView),
         (status = 400, description = "Invalid name or empty body", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
@@ -368,25 +422,61 @@ async fn put_configuration(
     if body.trim().is_empty() {
         return error(
             StatusCode::BAD_REQUEST,
-            "the configuration body is empty; refusing to distribute it",
+            "the configuration body is empty; refusing to store it",
         );
     }
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    let config = Configuration {
-        name,
+    let revision = Revision {
         selector: spec.selector,
         body,
         // Carried verbatim (ADR-0016): the values are Agent-type-specific, so the Server never
         // validates one against a vocabulary of its own. Empty is top-level configuration.
         role: spec.role,
+        // Compared raw against the reported `service.name` (ADR-0054); empty is every type. Not
+        // validated against the fleet, because a Configuration may precede its first Agent.
+        service_name: spec.service_name,
     };
-    match state.put_configuration(config.clone()) {
-        Ok(()) => {
-            info!(configuration = %config.name, role = %config.role, bytes = config.body.len(), "configuration stored from the API");
-            Json(config).into_response()
+    match state.save_configuration(&name, revision) {
+        Ok(config) => {
+            info!(configuration = %config.name, role = %config.draft.role, service_name = %config.draft.service_name, bytes = config.draft.body.len(), "configuration draft stored from the API");
+            Json(ConfigurationView::from(config)).into_response()
         }
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Releases a Configuration's draft to the fleet, or retracts it (ADR-0055).
+///
+/// **This is the moment the fleet changes.** Saving stages a draft; publishing promotes it — the
+/// whole spec, as one snapshot — into what composition offers. Retracting removes the entry from
+/// every composed map, and that is **not inert**: matching Agents apply the map without it (the
+/// entry's file is removed and the process restarted); only an Agent left matching nothing keeps
+/// running what it runs.
+#[utoipa::path(
+    put,
+    path = "/api/v1/configurations/{name}/publication",
+    tag = "configurations",
+    params(("name" = String, Path, description = "The Configuration's name")),
+    request_body = ConfigurationPublicationSpec,
+    responses(
+        (status = 200, description = "The Configuration, with its new publication state", body = ConfigurationView),
+        (status = 404, description = "No Configuration of that name", body = ErrorBody),
+        (status = 500, description = "The publication state could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_configuration_publication(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<ConfigurationPublicationSpec>,
+) -> Response {
+    match state.set_configuration_published(&name, spec.published) {
+        Ok(Some(config)) => {
+            info!(configuration = %name, published = spec.published, "configuration publication state set from the API");
+            Json(ConfigurationView::from(config)).into_response()
+        }
+        Ok(None) => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

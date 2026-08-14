@@ -21,7 +21,7 @@ use opamp::endpoint::PROTOBUF_CONTENT_TYPE;
 
 pub async fn run(
     engine: &mut Engine,
-    config: &ClientConfig,
+    config: &mut ClientConfig,
     shutdown: &mut Shutdown,
 ) -> Result<RunOutcome, String> {
     let mut builder = reqwest::Client::builder()
@@ -58,6 +58,9 @@ pub async fn run(
     info!(endpoint = %config.endpoint, interval = ?poll, "polling");
     engine.force_full_all();
 
+    // Set when a self-update wants the process to exit for its restart (ADR-0020): the loop leaves
+    // through the same graceful shutdown a normal stop uses, then reports it as a restart.
+    let mut restarting = false;
     'poll: loop {
         // The routine cycle, then immediate follow-ups until no Agent owes a report — a config
         // outcome is acknowledged now, not a poll later.
@@ -129,20 +132,28 @@ pub async fn run(
                 }
             }
             // A package offer (ADR-0015): download and verify; the outcome rides the owed reports.
+            let endpoint = config.endpoint.clone();
             let mut sink = PollSink {
                 client: &client,
-                endpoint: &config.endpoint,
+                endpoint: &endpoint,
                 limit,
             };
             crate::transport::process_package_downloads(engine, config, &mut sink).await;
+            // The self-Agent's configuration is its Supervisor set (ADR-0056): apply it — stop
+            // what left, rewrite `client.toml`, start what arrived — and send the retired
+            // Agents' goodbyes; the outcome rides the owed reports below.
+            crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await;
             reports = engine.owed_reports();
             if engine.restart_for_update() {
-                // Send the owed `Installing` and stop: the pointer already points at the new
-                // version, and this process exists only to get out of its way (ADR-0020).
+                // Send the owed `Installing`, then leave through the graceful shutdown below so the
+                // Managed Processes are stopped and the goodbyes sent before this process exits for
+                // the restart (ADR-0020): the pointer already points at the new version, and this
+                // one exists only to get out of its way — cleanly, not by abandoning its children.
                 if !reports.is_empty() {
                     let _ = sink.send(reports).await;
                 }
-                return Ok(RunOutcome::RestartForUpdate);
+                restarting = true;
+                break 'poll;
             }
             if reports.is_empty() {
                 break;
@@ -164,7 +175,11 @@ pub async fn run(
         let _ = exchange(&client, &config.endpoint, goodbye, limit).await;
     }
     info!("disconnected");
-    Ok(RunOutcome::Shutdown)
+    Ok(if restarting {
+        RunOutcome::RestartForUpdate
+    } else {
+        RunOutcome::Shutdown
+    })
 }
 
 /// This transport's way of putting reports on the wire — one exchange each — for jobs that report
@@ -254,6 +269,7 @@ mod tests {
     /// never reaches the network, so no server has to refuse it.
     #[tokio::test]
     async fn an_oversized_report_is_never_sent() {
+        crate::tls::install_ring_provider();
         let report = AgentToServer {
             instance_uid: vec![9; 512],
             ..Default::default()
@@ -275,6 +291,7 @@ mod tests {
     /// with the limit applied as the body arrives instead of after it is buffered whole.
     #[tokio::test]
     async fn an_oversized_response_is_discarded() {
+        crate::tls::install_ring_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

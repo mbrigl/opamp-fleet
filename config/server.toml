@@ -5,7 +5,11 @@
 # share it. Port 4320 is the protocol's default.
 listen = "0.0.0.0:4320"
 
-# Where Configurations (ADR-0012) are persisted across Server restarts — one JSON file each.
+# Where Configurations (ADR-0012) are persisted across Server restarts — one JSON file each,
+# holding the draft revision an operator edits and, once released, the published revision the
+# fleet is offered. SAVING NEVER DISTRIBUTES (ADR-0055): a Configuration reaches the Agents of
+# its type (ADR-0054) that its Selector matches only after
+# PUT /api/v1/configurations/{name}/publication — body {"published": true}.
 config_dir = "fleet-configs"
 
 # The largest OpAMP message accepted or sent, on either transport and in either direction. The

@@ -65,6 +65,13 @@ pub struct ServerConfig {
     /// period this Server asked for is a better answer than a default.
     #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: u64,
+    /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
+    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0047)
+    /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
+    /// anonymous flood is `[auth]` (ADR-0013) — this is the backstop while it is off. `0` is refused
+    /// at load: a fleet that can hold no Agent is a misconfiguration, not a limit.
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -328,6 +335,12 @@ fn default_max_total_package_size() -> u64 {
     crate::fleet::DEFAULT_MAX_TOTAL_PACKAGE_SIZE
 }
 
+/// Far above any real fleet, so an authenticated deployment never meets it, yet low enough that the
+/// in-memory map and its per-Agent disk mirror stay bounded under a flood of self-asserted UIDs.
+fn default_max_agents() -> usize {
+    crate::fleet::DEFAULT_MAX_AGENTS
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -344,6 +357,7 @@ impl Default for ServerConfig {
             max_package_size_bytes: default_max_package_size(),
             max_total_package_bytes: default_max_total_package_size(),
             stale_after_secs: default_stale_after_secs(),
+            max_agents: default_max_agents(),
         }
     }
 }
@@ -416,7 +430,44 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        if config.max_agents == 0 {
+            return Err(format!(
+                "{}: max_agents must be greater than zero — a fleet that can hold no Agent is a \
+                 misconfiguration, not a limit",
+                path.display()
+            ));
+        }
         Ok(config)
+    }
+
+    /// The configured offers that hand a credential to any Agent that asks, while `[auth]` is unset
+    /// so the OpAMP endpoint admits anyone (ADR-0013). The connection-settings offer carries an
+    /// `Authorization` value (ADR-0014) and the telemetry offer carries headers that are "typically
+    /// an access token" (ADR-0036); with no admission in front of them, a report declaring the
+    /// matching capability is answered with those secrets. Names the sections so the operator can
+    /// act. Empty when `[auth]` is set or no offer carries a secret — nothing to warn about.
+    ///
+    /// This is a warning, not a refusal: ADR-0013 keeps the endpoint open by default so a lab runs
+    /// with zero configuration, and gating the offers on admission would break that. Surfacing the
+    /// exposure is the middle ground.
+    pub fn unauthenticated_secret_offers(&self) -> Vec<&'static str> {
+        if self.auth.is_some() {
+            return Vec::new();
+        }
+        let mut offers = Vec::new();
+        if self.connection_offer.as_ref().is_some_and(|offer| {
+            offer.bearer_token.is_some() || offer.username.is_some() || offer.password.is_some()
+        }) {
+            offers.push("[connection_offer]");
+        }
+        if self
+            .telemetry_offer
+            .as_ref()
+            .is_some_and(|offer| !offer.headers.is_empty())
+        {
+            offers.push("[telemetry_offer]");
+        }
+        offers
     }
 }
 
@@ -477,6 +528,57 @@ mod tests {
         std::fs::write(&path, "max_total_package_bytes = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_total_package_bytes"), "{err}");
+    }
+
+    #[test]
+    fn the_agent_ceiling_defaults_is_configurable_and_rejects_zero() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.max_agents, crate::fleet::DEFAULT_MAX_AGENTS);
+        let tightened: ServerConfig = toml::from_str("max_agents = 500").expect("parse");
+        assert_eq!(tightened.max_agents, 500);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "max_agents = 0\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("max_agents"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_bearing_offer_without_auth_is_flagged() {
+        // A connection offer carrying a credential, no [auth]: flagged.
+        let cfg: ServerConfig =
+            toml::from_str("[connection_offer]\nbearer_token = \"a-backend-token\"\n")
+                .expect("parse");
+        assert_eq!(
+            cfg.unauthenticated_secret_offers(),
+            vec!["[connection_offer]"]
+        );
+
+        // Telemetry headers (an access token) with no [auth]: flagged too.
+        let cfg: ServerConfig = toml::from_str(
+            "[telemetry_offer]\nmetrics_endpoint = \"https://otlp.example/v1/metrics\"\n\
+             [telemetry_offer.headers]\nAuthorization = \"Bearer t\"\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            cfg.unauthenticated_secret_offers(),
+            vec!["[telemetry_offer]"]
+        );
+
+        // The same offer with [auth] in front of it: nothing to warn about.
+        let cfg: ServerConfig = toml::from_str(
+            "[auth]\nbearer_tokens = [\"admit\"]\n\
+             [connection_offer]\nbearer_token = \"a-backend-token\"\n",
+        )
+        .expect("parse");
+        assert!(cfg.unauthenticated_secret_offers().is_empty());
+
+        // An offer that carries no secret (just an endpoint move) is not flagged.
+        let cfg: ServerConfig =
+            toml::from_str("[connection_offer]\nendpoint = \"wss://moved.example/v1/opamp\"\n")
+                .expect("parse");
+        assert!(cfg.unauthenticated_secret_offers().is_empty());
     }
 
     #[test]

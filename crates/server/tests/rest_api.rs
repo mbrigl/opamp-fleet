@@ -37,6 +37,11 @@ async fn configurations_crud_round_trips() {
     assert_eq!(stored["name"], "base");
     assert_eq!(stored["selector"]["os.type"], "linux");
     assert_eq!(stored["body"], "receivers: {}\n");
+    assert_eq!(
+        stored["published"], false,
+        "a fresh PUT stages a draft (ADR-0055)"
+    );
+    assert_eq!(stored["pending_changes"], false);
 
     // Read back, singly and as the list.
     let got: serde_json::Value = client
@@ -137,6 +142,132 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
+/// ADR-0055 over the wire: saving stages, publication distributes, retraction withdraws — and an
+/// edit of a published Configuration is pending, not in force, until released again.
+#[tokio::test]
+async fn a_configuration_is_a_draft_until_published() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+
+    // Saved: complete, aimed at everybody — and offered to nobody.
+    let put = client
+        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status(), 200);
+    assert!(
+        matched_configurations(&client, server.addr, &uid)
+            .await
+            .is_empty(),
+        "a draft reaches nobody, whatever it says"
+    );
+
+    // Published: its own act is what starts the rollout.
+    let published: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/fleet/publication"))
+        .json(&serde_json::json!({ "published": true }))
+        .send()
+        .await
+        .expect("publish")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(published["published"], true);
+    assert_eq!(published["pending_changes"], false);
+    assert_eq!(
+        matched_configurations(&client, server.addr, &uid).await,
+        ["fleet"]
+    );
+
+    // Edited: the save is pending, the fleet keeps the published revision.
+    let edited: serde_json::Value = client
+        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
+        .send()
+        .await
+        .expect("edit")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(edited["published"], true);
+    assert_eq!(
+        edited["pending_changes"], true,
+        "the edit is saved, reviewed, not yet released"
+    );
+    assert_eq!(
+        matched_configurations(&client, server.addr, &uid).await,
+        ["fleet"],
+        "the published revision stays in force"
+    );
+
+    // Retracted: the offer is withdrawn.
+    let retracted = client
+        .put(url(server.addr, "/api/v1/configurations/fleet/publication"))
+        .json(&serde_json::json!({ "published": false }))
+        .send()
+        .await
+        .expect("retract");
+    assert_eq!(retracted.status(), 200);
+    assert!(matched_configurations(&client, server.addr, &uid)
+        .await
+        .is_empty());
+
+    // Publication of a name the store does not hold is 404, never a silent create.
+    let missing = client
+        .put(url(
+            server.addr,
+            "/api/v1/configurations/missing/publication",
+        ))
+        .json(&serde_json::json!({ "published": true }))
+        .send()
+        .await
+        .expect("publish missing");
+    assert_eq!(missing.status(), 404);
+}
+
+/// ADR-0054 over the wire: a Configuration stating an Agent type reaches only Agents reporting
+/// that `service.name`, whatever its Selector says.
+#[tokio::test]
+async fn a_typed_configuration_reaches_only_agents_of_its_type() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+
+    for (name, service_name) in [
+        ("for-collectors", support::AGENT_TYPE),
+        ("for-clients", "opamp-fleet-client"),
+    ] {
+        let put = client
+            .put(url(server.addr, &format!("/api/v1/configurations/{name}")))
+            .json(&serde_json::json!({ "body": "x", "service_name": service_name }))
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(put.status(), 200);
+        let published = client
+            .put(url(
+                server.addr,
+                &format!("/api/v1/configurations/{name}/publication"),
+            ))
+            .json(&serde_json::json!({ "published": true }))
+            .send()
+            .await
+            .expect("publish");
+        assert_eq!(published.status(), 200);
+    }
+
+    assert_eq!(
+        matched_configurations(&client, server.addr, &uid).await,
+        ["for-collectors"],
+        "the type is a fit, not an aim: the other type's Configuration is no candidate"
+    );
+}
+
 #[tokio::test]
 async fn invalid_configurations_are_rejected_loudly() {
     let server = spawn().await;
@@ -198,8 +329,10 @@ async fn the_openapi_document_describes_the_contract() {
     );
     assert!(paths.contains_key("/api/v1/configurations"));
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
+    assert!(paths.contains_key("/api/v1/configurations/{name}/publication"));
     // The resource schemas ride along, so a client can be generated without the source.
-    assert!(document["components"]["schemas"]["Configuration"].is_object());
+    assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
+    assert!(document["components"]["schemas"]["ConfigurationSpec"].is_object());
     assert!(document["components"]["schemas"]["AgentView"].is_object());
 }
 
@@ -256,18 +389,29 @@ async fn configurations_survive_a_server_restart() {
     {
         let state = server::fleet::AppState::new(store_dir.clone()).expect("open");
         state
-            .put_configuration(server::configs::Configuration {
-                name: "keeper".to_string(),
-                selector: std::collections::BTreeMap::new(),
-                body: "receivers: {}\n".to_string(),
-                role: String::new(),
-            })
+            .save_configuration(
+                "keeper",
+                server::configs::Revision {
+                    selector: std::collections::BTreeMap::new(),
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                    service_name: String::new(),
+                },
+            )
             .expect("put");
+        state
+            .set_configuration_published("keeper", true)
+            .expect("publish")
+            .expect("the configuration exists");
     }
     let reopened = server::fleet::AppState::new(store_dir).expect("reopen");
     let restored = reopened.configurations().list();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].name, "keeper");
+    assert!(
+        restored[0].published.is_some(),
+        "publication survives the restart"
+    );
 }
 
 /// ADR-0039. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
@@ -453,7 +597,8 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it matches nobody.
+    // A Configuration aimed at the canary ring, published so it is in force (ADR-0055).
+    // Nothing reports `rollout`, so it matches nobody.
     let put = client
         .put(url(server.addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
@@ -461,6 +606,16 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
+    let published = client
+        .put(url(
+            server.addr,
+            "/api/v1/configurations/canary/publication",
+        ))
+        .json(&serde_json::json!({ "published": true }))
+        .send()
+        .await
+        .expect("publish");
+    assert_eq!(published.status(), 200);
     assert!(
         matched_configurations(&client, server.addr, &uid)
             .await
@@ -538,6 +693,57 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
         agents[0]["labels"].as_object().expect("labels").is_empty(),
         "a refused set leaves nothing behind"
     );
+}
+
+/// A Supervisor whose Managed Process will not start still reads Connected — truthfully, the
+/// Supervisor lives — so the reported health is the only place an operator can see that nothing
+/// is actually running. The view must carry it whole: the flag, the Agent's own status string,
+/// and the reason (`ComponentHealth.last_error`, which the Baseline says SHOULD be set when
+/// unhealthy).
+#[tokio::test]
+async fn the_view_carries_the_reported_health_and_its_reason() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+
+    // Before any health report, the view claims nothing either way.
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], false);
+    assert_eq!(view["health_status"], "");
+    assert_eq!(view["health_error"], "");
+
+    // The Supervisor's process would not start: unhealthy, with the situation and the reason.
+    let mut unhealthy = support::full_report(&uid, "host", 2);
+    unhealthy.capabilities |= opamp::proto::AgentCapabilities::ReportsHealth as u64;
+    unhealthy.health = Some(opamp::proto::ComponentHealth {
+        healthy: false,
+        status: "no process installed".to_string(),
+        last_error: "cannot spawn otelcol: No such file or directory".to_string(),
+        ..Default::default()
+    });
+    report(&client, server.addr, &unhealthy).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], false);
+    assert_eq!(view["health_status"], "no process installed");
+    assert_eq!(
+        view["health_error"],
+        "cannot spawn otelcol: No such file or directory"
+    );
+
+    // The process came up: the finding clears with the next report.
+    let mut healthy = support::full_report(&uid, "host", 3);
+    healthy.capabilities |= opamp::proto::AgentCapabilities::ReportsHealth as u64;
+    healthy.health = Some(opamp::proto::ComponentHealth {
+        healthy: true,
+        status: "running".to_string(),
+        ..Default::default()
+    });
+    report(&client, server.addr, &healthy).await;
+    let view = &agents(&client, server.addr).await[0];
+    assert_eq!(view["healthy"], true);
+    assert_eq!(view["health_status"], "running");
+    assert_eq!(view["health_error"], "");
 }
 
 /// Labels are the operator's decision, not something the Server learned, so forgetting an Agent

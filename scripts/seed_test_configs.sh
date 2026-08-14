@@ -3,9 +3,8 @@
 # Seeds one minimal test Configuration (ADR-0012) per example supervisor from config/client.toml,
 # each targeted by a Selector at the Agent that should receive it:
 #
-#   otelcol-conf        →  service.name = otelcol        (otelcol-contrib, opampextension)
-#   otelcol-plain-conf  →  service.name = otelcol-plain  (core otelcol, observed externally)
-#   fluent-bit-conf     →  service.name = fluent-bit     (Foreign Agent, reads the entry file)
+#   otelcol-contrib-conf  →  service.name = otelcol-contrib  (opampextension, self-reporting)
+#   otelcol-conf          →  service.name = otelcol          (core otelcol, observed externally)
 #
 # Two modes:
 #   scripts/seed_test_configs.sh [server-url]
@@ -18,18 +17,16 @@
 #       scripts/install_tools.sh runs after installing the processes.
 # Both modes replace an existing Configuration of the same name.
 #
-# Caveat for the contrib Collector: once its opampextension self-reports, the reported
-# service.name ("otelcol-contrib") replaces the supervisor's name in the Agent's description, so
-# the otelcol-conf Selector stops matching — the first configuration is delivered (that is what
-# starts the Collector), but a later update is only offered again after a Client restart. For
-# live updates, tag the supervisor with a stable operator attribute in client.toml
-# ([supervisor.attributes], e.g. role = "otelcol") and select on that instead.
+# Note on the contrib Collector: once its opampextension self-reports, the reported
+# service.name (the dist.name it was built with, "otelcol-contrib") replaces the name derived
+# from the binary's file name — which is also "otelcol-contrib", so the Selector matches before
+# and after and live updates keep flowing. That equality is why the example supervisor carries
+# that name; a supervisor whose reported type differs from its initial name should be tagged
+# with a stable operator attribute ([supervisor.attributes]) and selected on that instead.
 #
 # The bodies live in config/examples/; install the processes with scripts/install_tools.sh.
 # After seeding: start the Server, uncomment the [[supervisor]] blocks in config/client.toml,
-# and start the Client; each Agent then receives exactly its Configuration. For a repo-local
-# run, point the fluent-bit supervisor's -c argument at the entry file under the local
-# state_dir: client-state/supervisors/fluent-bit/config/fluent-bit-conf
+# and start the Client; each Agent then receives exactly its Configuration.
 
 set -euo pipefail
 
@@ -59,9 +56,8 @@ seed() {
     fi
 }
 
+seed otelcol-contrib-conf service.name otelcol-contrib "$examples/otelcol-contrib-conf.yaml"
 seed otelcol-conf service.name otelcol "$examples/otelcol-conf.yaml"
-seed otelcol-plain-conf service.name otelcol-plain "$examples/otelcol-plain-conf.yaml"
-seed fluent-bit-conf service.name fluent-bit "$examples/fluent-bit-conf.conf"
 
 if [ "$mode" = stage ]; then
     echo "Done — the Server offers these Configurations from its next start."

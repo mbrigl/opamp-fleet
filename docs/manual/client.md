@@ -482,6 +482,33 @@ Two plugin types ship today (ADR-0011): `collector` for an OpenTelemetry Collect
 for any other process — a **Foreign Agent** that speaks no OpAMP. A new kind of process means a new
 plugin, not a change to the core.
 
+### The Server can manage the set
+
+The `[[supervisor]]` blocks are the fleet-manageable half of `client.toml` (ADR-0056). A
+Configuration typed for the Client itself — `service_name = "opamp-fleet-client"` (ADR-0054) —
+carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
+
+- **Only the blocks are read.** Every other top-level key in the offered document is ignored —
+  the endpoint, the credential, the state directory stay the host's, and can never arrive over
+  the wire. You may publish a full `client.toml`-shaped document; exactly its supervisor half
+  takes effect. A duplicate `name` fails the offer, as it would fail the file.
+- **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
+  merged file is written, changed and added ones are started from it. An unchanged Supervisor's
+  process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
+- **`client.toml` stays the single truth.** The blocks are written into the file itself,
+  surgically: your comments, ordering, and formatting outside them survive. A Client restarting
+  offline starts the Server-delivered set, because it is in its file.
+- **The outcome is a status, not a silence.** The Client acknowledges `APPLYING`, then `APPLIED`
+  once the file is written and the starts are issued — or `FAILED` with the reason when the
+  offer does not parse, a block does not validate against this host's globals, or the write
+  fails (then nothing is applied and the running set stays in force). A body that is not TOML —
+  say, a Collector YAML published fleet-wide with no type — is refused the same way, which is
+  one more reason to state whom a Configuration is for (ADR-0054).
+
+A Client whose Server never publishes such a Configuration runs its locally written blocks
+exactly as before. Note that once one applied, the Server's set is authoritative: a later local
+edit to the blocks stands only until the next publication overwrites it.
+
 ### Keys every block accepts
 
 | Key | Default | Meaning |
@@ -492,6 +519,7 @@ plugin, not a change to the core.
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
 | `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
+| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion (ADR-0058), overriding the global default for this Supervisor. `0` deletes it on success. See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
 | `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
 | `[supervisor.attributes]` | none | Attributes for this Agent alone, overriding the Client's `[attributes]` per key. |
 
@@ -504,12 +532,20 @@ path decides, ADR-0021).
 | Key | Meaning |
 |---|---|
 | `binary` | The Collector program. See [Which programs take updates](#which-programs-take-updates). |
-| `args` | Extra arguments, appended **after** the `--config` flags the Supervisor builds. |
+| `args` | Extra arguments, appended **after** the `--config` flags the Supervisor builds — with [placeholder expansion](#path-placeholders). |
+| `[supervisor.env]` | Additional environment for the Collector process — the natural home for a value the config reads as `${env:VAR}`, e.g. a per-host endpoint. Expanded through the same placeholders. |
 
 The Supervisor writes every received config-map entry into its own `config/` directory under the
 Configuration's name and passes each **unroled** entry as its own `--config`; a `supplementary`
 entry is written but never passed (ADR-0016). A change restarts the Collector so it re-reads them.
 The version is probed once with `--version`, so even a Collector without the extension reports one.
+
+Prebuilt Collector distributions are published on the
+[collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+one `.tar.gz` per platform — ready to upload as a package as they are; the
+[rollout walkthrough](rollout.md#2-build-the-artifact) shows the download and what to check before
+uploading. Mind the member name: the binary inside is called after the distribution
+(`otelcol-contrib`, `otelcol`), and `binary` must say the same.
 
 A Collector **with** the `opampextension` reports its own description, health, and effective
 configuration through the Supervisor Endpoint instead of being watched from outside. The extension
@@ -589,9 +625,14 @@ because replacing a program means writing in the directory it sits in. The same 
 
 | What you write | What it means |
 |---|---|
-| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates.** |
-| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. |
+| a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates**, and it is the **only** shape a Server may deliver (ADR-0057). |
+| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. Only an operator may write it in `client.toml`; a Server-delivered block that names one is refused. |
 | anything else — `./x`, `bin/x` | A startup error, rather than a guess. |
+
+A block a Server pushes as part of a Supervisor set (ADR-0056) is held to the first row alone: it
+may name only a program this Client owns, so a delivered Supervisor can run only signed, packaged
+programs — never an arbitrary machine binary. An absolute-path Supervisor stays the operator's to
+write on the host.
 
 Two things to know about a bare name: it is **not** searched for in `$PATH` — it names a file in that
 one directory, and you put the first copy there yourself; every later one arrives by package. And on
@@ -607,8 +648,8 @@ accepted.
 A Foreign Agent is told where its configuration is *through its own command line*, and an absolute
 path written there drifts the moment `supervisor_dir` moves or the Supervisor is renamed —
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
-(ADR-0022) close that, in a `command` Supervisor's `args`, `working_dir`, and `[supervisor.env]`
-values:
+(ADR-0022) close that, in a Supervisor's operator-written strings — a `command`'s `args`,
+`working_dir`, and `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`:
 
 | Placeholder | Expands to |
 |---|---|
@@ -680,6 +721,30 @@ land.
 One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
 addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
 than written over the binary it was meant to extend.
+
+### Package updates: rollback and retention
+
+What happens when step 4's health gate is *not* passed is settled by ADR-0058:
+
+- **A failed update rolls back to the version it replaced** — but only when there *is* one. A
+  **first** install with nothing behind it is not rolled back to nothing: the verified program is
+  **kept in place** and reported `InstallFailed`, so `program/` never goes empty and the Server does
+  not re-offer the same artifact in a loop.
+- **A program that keeps failing to start is held, not restarted forever.** After a few attempts in
+  a row the Supervisor stops trying and waits for a change — a new configuration, a new package, or
+  a restart — rather than spinning (which would hammer the Server with re-downloads). A rolled-back
+  predecessor that also will not start is held the same way. The Agent reports it plainly
+  (`not restarting: the program keeps failing to start`).
+- **A successful update keeps the version it superseded for a window, then deletes it**, so an
+  operator has a fallback if the new version proves subtly wrong. The window is
+  `retain_previous_secs`: global in `[updates]`, overridable per `[[supervisor]]` block, **one day**
+  by default. `0` deletes on success. Each Supervisor keeps at most the immediately previous version.
+
+```toml
+# Global default for every Supervisor (one day shown; the built-in default):
+[updates]
+retain_previous_secs = 86400
+```
 
 ## Agents that are more than one file
 

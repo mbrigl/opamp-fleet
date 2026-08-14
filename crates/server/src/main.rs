@@ -44,9 +44,7 @@ async fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0007): ring, never a system library.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install the rustls ring provider");
+    server::tls::install_ring_provider();
 
     let config_path = parse_args();
     let config = match ServerConfig::load(&config_path) {
@@ -56,6 +54,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // A credential-bearing offer with no [auth] in front of it hands that credential to anyone who
+    // connects (ADR-0013/0014/0036). Open by default is intentional; leaking a backend token by
+    // default is not — so it is surfaced loudly rather than gated, which would break zero-config.
+    let unguarded = config.unauthenticated_secret_offers();
+    if !unguarded.is_empty() {
+        tracing::warn!(
+            offers = %unguarded.join(", "),
+            "these offers hand a credential to any Agent that connects, but [auth] is unset so the \
+             OpAMP endpoint admits anyone — set [auth] to gate credential delivery (ADR-0013)"
+        );
+    }
 
     let connection_offer = match config
         .connection_offer
@@ -131,7 +141,8 @@ async fn main() {
                 .with_max_message_size(config.max_message_size_bytes)
                 .with_max_package_size(config.max_package_size_bytes)
                 .with_max_total_package_bytes(config.max_total_package_bytes)
-                .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs)),
+                .with_stale_after(std::time::Duration::from_secs(config.stale_after_secs))
+                .with_max_agents(config.max_agents),
         ),
         Err(e) => {
             eprintln!("{e}");

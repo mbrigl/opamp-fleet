@@ -68,6 +68,16 @@ Agent comes up, connects, and reports `no process installed` — a Supervisor wi
 plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, so the first
 version arrives the same way every later one does.
 
+**The block does not have to be written on the host either.** A Configuration typed
+`opamp-fleet-client` (ADR-0054) whose body carries this `[[supervisor]]` block rolls the block
+itself out to every matching Client, which writes it into its own `client.toml` and starts the
+Supervisor (ADR-0056) — the walkthrough's remaining steps are the same either way. A
+Server-delivered block may name its program **only by a bare file name** — one this Client owns and
+updates from signed packages (ADR-0057); a block that names an absolute path is refused, because
+that would let the Server spawn a machine binary that never passed through package signing. An
+absolute-path Supervisor is the operator's to write in `client.toml` on the host, not the Server's
+to push.
+
 ## 2. Build the artifact
 
 `opamp-package-sign pack` writes the two containers the Client can open, with the member named the
@@ -109,12 +119,26 @@ archive_key = "…the same value…"
 ```
 
 Already have an upstream release? Then it is already a `.tar.gz` and needs no repacking — that is
-the point of ADR-0018. Check what it holds and whether the member name matches your block:
+the point of ADR-0018. The OpenTelemetry Collector, for instance, publishes its distributions on
+the [collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+one artifact per platform named `<distribution>_<version>_<os>_<arch>.tar.gz`:
+
+```console
+$ curl -LO https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.109.0/otelcol-contrib_0.109.0_linux_amd64.tar.gz
+```
+
+Check what it holds and whether the member name matches your block:
 
 ```console
 $ tar tzf otelcol-contrib_0.109.0_linux_amd64.tar.gz
 $ opamp-package-sign sha256 otelcol-contrib_0.109.0_linux_amd64.tar.gz
 ```
+
+The member is named after the **distribution** — `otelcol-contrib` in the Contrib archive,
+`otelcol` in the core one — so the receiving `[[supervisor]]` block must name its program the
+same way (`command = "otelcol-contrib"`, or `binary = …` for a `collector` block), or the
+install fails with *"the archive holds no member named …"*. Repack with `--program-name` when
+you want a different name on disk.
 
 ## 3. Sign it (optional, but decide fleet-wide)
 
@@ -196,12 +220,18 @@ pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from st
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
+       -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
        http://127.0.0.1:4320/api/v1/configurations/promtail-conf
+$ curl -X PUT -H 'Content-Type: application/json' \
+       -d '{"published": true}' \
+       http://127.0.0.1:4320/api/v1/configurations/promtail-conf/publication
 ```
 
-The Configuration's name and the file name in the argument are the same string. Change the
-Configuration and the Supervisor rewrites the file and restarts the process so it re-reads it.
+The first call only stores a draft — saving never distributes (ADR-0055); the second releases it,
+and the `service_name` keeps the body away from every Agent that is not a promtail, whatever the
+Selector says (ADR-0054). The Configuration's name and the file name in the argument are the same
+string. Change the Configuration and publish again: the Supervisor rewrites the file and restarts
+the process so it re-reads it.
 
 ## 7. Watch it land
 

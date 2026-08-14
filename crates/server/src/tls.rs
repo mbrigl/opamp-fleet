@@ -18,6 +18,17 @@ use axum_server::accept::Accept;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
+
+/// Installs the process-wide rustls provider — ring, never a system library (ADR-0007) — once;
+/// later calls are no-ops. The binary calls it at startup. Tests that build an HTTP client call
+/// it themselves: reqwest's `rustls-no-provider` feature refuses to build one without a process
+/// provider, which is the very guarantee that keeps aws-lc-rs and its cmake out of this build.
+pub fn install_ring_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // A concurrent second install can still lose the race; losing to the same provider is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
 use rustls::{RootCertStore, ServerConfig};
 use tokio::io::{AsyncRead, AsyncWrite};
 
