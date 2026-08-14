@@ -495,6 +495,12 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
 - **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
   merged file is written, changed and added ones are started from it. An unchanged Supervisor's
   process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
+- **A removed Supervisor is purged** (ADR-0059). Once the rewritten file no longer names it, its
+  whole directory `<supervisor_dir>/<name>/` is deleted — identity, written configuration,
+  staged packages, and the Client-owned program. A changed Supervisor restarts under its name
+  and keeps its directory; a program named by an absolute path is the machine's file and is
+  never touched. Removal is destructive on the host: re-adding the same name later starts a
+  genuinely fresh Agent, restoring service, not history.
 - **`client.toml` stays the single truth.** The blocks are written into the file itself,
   surgically: your comments, ordering, and formatting outside them survive. A Client restarting
   offline starts the Server-delivered set, because it is in its file.
@@ -691,6 +697,12 @@ Each Supervisor owns everything under its own directory (ADR-0021):
 <supervisor_dir>/<name>/program/tree/     # …or the whole unpacked package (ADR-0023)
 <supervisor_dir>/<name>/packages/         # staging its package downloads go through
 ```
+
+The directory lives exactly as long as its `[[supervisor]]` block: a Supervisor removed by an
+applied set takes it along, whole (ADR-0059). A directory no block names — left by a purge that
+could not finish, or by a block removed from `client.toml` by hand while the Client was down —
+is warned about at startup and never deleted automatically: remove it by hand once you are sure
+its Supervisor is gone for good.
 
 **Persisted connection settings override the file.** `<state_dir>/connection-settings.pb` takes
 precedence over `endpoint`, `[auth]`, and the intervals in `client.toml`. Delete it to revert to

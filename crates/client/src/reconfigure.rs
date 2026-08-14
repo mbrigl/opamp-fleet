@@ -5,9 +5,9 @@
 //! is ignored, because the rest of `client.toml` is host-local trust and wiring the Server must
 //! never write. The offered set is validated against the running configuration's globals first;
 //! then the Supervisors that left or changed are stopped, the merged document is written to
-//! `client.toml` — surgically, so the operator's comments and layout survive — and the changed
-//! and added Supervisors are started from the file just written. Unchanged Supervisors ride
-//! through untouched.
+//! `client.toml` — surgically, so the operator's comments and layout survive — the removed
+//! Supervisors' directories are purged (ADR-0059), and the changed and added Supervisors are
+//! started from the file just written. Unchanged Supervisors ride through untouched.
 
 use std::path::Path;
 
@@ -94,6 +94,7 @@ async fn apply_inner(
         .filter(|new| config.supervisors.iter().all(|old| old != *new))
         .map(|new| new.name.clone())
         .collect();
+    let removed = removed_names(&config.supervisors, &blocks);
 
     let goodbyes = engine.retire_supervisors(&stopping).await;
 
@@ -110,6 +111,11 @@ async fn apply_inner(
             return Err(Failed(error, goodbyes));
         }
     };
+
+    // Written: the file no longer names the removed Supervisors, so their directories go with
+    // them (ADR-0059) — program, packages, configuration, identity. The changed blocks in
+    // `stopping` restart under their names and keep theirs.
+    purge_removed(config, &removed);
 
     config.supervisors = blocks;
     let redacted = redact_secrets(&source);
@@ -137,6 +143,43 @@ async fn apply_inner(
         Ok(goodbyes)
     } else {
         Err(Failed(errors.join("; "), goodbyes))
+    }
+}
+
+/// The names the offered set removed: present in the running blocks, absent — **by name** — from
+/// the offered ones (ADR-0059). A changed block keeps its name and is stopped-and-restarted, not
+/// removed, so its directory rides through.
+fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Vec<String> {
+    running
+        .iter()
+        .filter(|old| offered.iter().all(|new| new.name != old.name))
+        .map(|old| old.name.clone())
+        .collect()
+}
+
+/// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
+/// `instance-uid` whose Agent has already said its goodbye (ADR-0059). Runs only after the
+/// rewritten `client.toml` no longer names the Supervisor: a failed write restarts the stopped
+/// set from the old file, which needs the data intact. A directory that will not delete is a
+/// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
+/// orphan the next startup reports.
+fn purge_removed(config: &ClientConfig, removed: &[String]) {
+    for name in removed {
+        let dir = config.supervisor_dir(name);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                info!(supervisor = %name, path = %dir.display(), "removed supervisor purged");
+            }
+            // Never materialized (a block that failed to start owns no directory yet): purged is
+            // what it already is.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                supervisor = %name,
+                path = %dir.display(),
+                error = %e,
+                "cannot purge the removed supervisor's directory"
+            ),
+        }
     }
 }
 
@@ -606,6 +649,54 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a new file is owner-only, got {mode:o}");
+    }
+
+    /// ADR-0059 point 1: removal is keyed by name. A block that *changed* keeps its name — it is
+    /// stopped and restarted, never purged; only a name absent from the offered set is removed.
+    #[test]
+    fn removed_is_by_name_so_a_changed_block_is_not_removed() {
+        let parse = |text: &str| -> Vec<SupervisorBlock> {
+            let config: ClientConfig = toml::from_str(text).expect("parse");
+            config.supervisors
+        };
+        let running = parse(
+            "[[supervisor]]\ntype = \"command\"\nname = \"changed\"\ncommand = \"old\"\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"gone\"\ncommand = \"gone\"\n",
+        );
+        let offered =
+            parse("[[supervisor]]\ntype = \"command\"\nname = \"changed\"\ncommand = \"new\"\n");
+        assert_eq!(
+            removed_names(&running, &offered),
+            vec!["gone".to_string()],
+            "the changed block stays; only the vanished name is removed"
+        );
+    }
+
+    /// ADR-0059: the purge deletes exactly the removed Supervisor's directory — whole, identity
+    /// included — leaves the neighbours untouched, and a directory that never materialized is
+    /// nothing to report.
+    #[test]
+    fn the_purge_deletes_exactly_the_removed_supervisors_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+        let gone = config.supervisor_dir("gone");
+        let stays = config.supervisor_dir("stays");
+        std::fs::create_dir_all(gone.join("program")).expect("create");
+        std::fs::write(gone.join("instance-uid"), "uid").expect("write");
+        std::fs::create_dir_all(&stays).expect("create");
+        std::fs::write(stays.join("instance-uid"), "uid").expect("write");
+
+        purge_removed(&config, &["gone".to_string(), "never-started".to_string()]);
+
+        assert!(!gone.exists(), "the removed supervisor's directory is gone");
+        assert!(
+            stays.join("instance-uid").is_file(),
+            "a neighbour keeps its directory and identity"
+        );
     }
 
     /// An offer whose entries carry no blocks empties the set: the file keeps its globals and

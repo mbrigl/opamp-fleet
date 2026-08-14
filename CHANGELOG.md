@@ -19,6 +19,19 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **Removing a Supervisor now deletes its directory**
+  ([ADR-0059](docs/adr/0059-a-removed-supervisor-is-purged.md)). When an applied Supervisor set
+  removes a Supervisor, the Client stops it as before and then deletes
+  `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
+  configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
+  fresh Agent with a new identity; the Server keeps the old Agent's record as disconnected. A
+  program named by an absolute path is the machine's file and stays untouched — only the state
+  directory goes. A directory the Client cannot delete, or one orphaned by editing
+  `client.toml` by hand while the Client was down, is reported in the log at startup and never
+  deleted automatically.
+  **What to do:** nothing before the upgrade. Be aware that removing a Supervisor from a Client
+  is now destructive on that host — re-adding it restores service, not history.
+
 - **The OpAMP Protocol Baseline moved to `v0.20.0`** ([PR #385](https://github.com/open-telemetry/opamp-spec/pull/385)).
   Upstream renamed the `AgentConfigFile` message to `AgentConfigObject` and clarified that an empty
   configuration-map key is always allowed. This is a **wire-compatible** change — the field numbers

@@ -15,7 +15,7 @@ pub mod process;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{ClientConfig, SupervisorBlock};
 use crate::engine::{Engine, EngineAgent};
@@ -48,6 +48,7 @@ fn registry() -> Vec<Box<dyn Plugin>> {
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
 /// unknown plugin, or a plugin rejects its settings — startup fails loudly, nothing runs half.
 pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine, String> {
+    report_orphaned_supervisor_dirs(config);
     let (event_tx, events) = mpsc::channel(64);
     let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
 
@@ -100,6 +101,37 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         agents.push(start_supervisor(config, block, index, &event_tx, shutdown)?);
     }
     Ok(Engine::with_processes(agents, events, event_tx))
+}
+
+/// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
+/// reaped (ADR-0059): it may be a purge a crash or an error cut short — or an operator's
+/// deliberate hand edit, a temporarily commented-out block whose identity and program are not the
+/// Client's to delete. The log line makes the leftover visible; removing it stays the operator's
+/// call.
+fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
+    let root = config.supervisors_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        // No root yet — nothing was ever supervised here, so there is nothing to be orphaned.
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        if config
+            .supervisors
+            .iter()
+            .any(|block| name == std::ffi::OsStr::new(&block.name))
+        {
+            continue;
+        }
+        warn!(
+            path = %entry.path().display(),
+            "no [[supervisor]] block names this directory; leaving it untouched — remove it by \
+             hand if its supervisor is gone for good"
+        );
+    }
 }
 
 /// Heartbeats are a Client-wide choice: enabled (interval > 0) every Agent declares the
@@ -471,6 +503,28 @@ mod tests {
             panic!("a block without a program must not start");
         };
         assert!(err.contains("needs a `command`"), "{err}");
+    }
+
+    /// ADR-0059 point 5: a directory no block names survives startup — reported, never reaped.
+    /// Startup cannot tell a purge a crash cut short from an operator's deliberate hand edit, and
+    /// the destructive reading of that ambiguity would delete an identity and a program that were
+    /// not meant to go.
+    #[tokio::test]
+    async fn an_orphaned_supervisor_directory_is_not_reaped_at_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let orphan = dir.path().join("state/supervisors/orphan");
+        std::fs::create_dir_all(&orphan).expect("create");
+        std::fs::write(orphan.join("instance-uid"), "uid").expect("write");
+
+        let parsed: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        build_engine(&parsed, &shutdown).expect("build");
+
+        assert!(
+            orphan.join("instance-uid").is_file(),
+            "an orphaned directory is reported, not deleted"
+        );
     }
 
     /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:

@@ -3,8 +3,9 @@
 //! WebSocket connection. A configuration change reaches both Agents, restarts their processes
 //! on the written files, and comes back `APPLIED` and in sync. A Configuration typed for the
 //! Client itself then changes its Supervisor set at runtime (ADR-0056): an added block starts
-//! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops and
-//! says goodbye — and `client.toml` is rewritten around the operator's globals each time.
+//! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops,
+//! says goodbye, and its directory is purged (ADR-0059) — and `client.toml` is rewritten around
+//! the operator's globals each time.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -494,5 +495,16 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         stub_pid(&stub_marker),
         Some(stub_pid_before),
         "the unchanged supervisors ride through the removal too"
+    );
+
+    // A removed Supervisor is purged (ADR-0059): its whole directory — identity, program, written
+    // configuration — goes with it, while the supervisors that stay keep theirs.
+    wait_until("the removed supervisor's directory to be purged", || {
+        (!state_dir.join("supervisors/added").exists()).then_some(())
+    })
+    .await;
+    assert!(
+        state_dir.join("supervisors/stub/instance-uid").is_file(),
+        "a supervisor that stays keeps its directory and identity"
     );
 }
