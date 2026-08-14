@@ -602,11 +602,12 @@ lifecycle into the protocol.
 | `working_dir` | The directory to start in. Optional. |
 | `[supervisor.env]` | Additional environment for the process. |
 | `version_args` | Arguments that make the program print its version, e.g. `["--version"]`. The program is invoked once with exactly these, and the first SemVer 2.0.0 version in its output becomes the Agent's `service.version`. Opt-in, because a Foreign Agent's version flag is its own convention. |
+| `reload_signal` | The signal that makes the program re-read its configuration in place: `"HUP"`, `"USR1"`, or `"USR2"` (a `SIG` prefix is accepted). When set, a configuration change is applied by sending this signal instead of restarting, and the process keeps its in-flight state; if the signal cannot be delivered or the process dies on it, the Supervisor falls back to the restart. Opt-in, because whether a daemon reloads on a signal is its own convention — and Linux/macOS only: on Windows the key is refused at startup. |
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
 cannot know what to do with them — a Foreign Agent reads its own configuration file. So you point it
 at the written entry with its own flag, and the Supervisor restarts the process on a change so it
-re-reads it:
+re-reads it — or, with `reload_signal` set, signals it to re-read in place:
 
 ```toml
 [[supervisor]]

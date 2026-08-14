@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use opamp::proto::{AgentRemoteConfig, AgentToServer, ConnectionSettingsOffers, ServerToAgent};
 use opamp::uid::InstanceUid;
 use tokio::sync::{mpsc, watch};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
@@ -529,7 +529,8 @@ impl Engine {
                                     ProcessCommand::ApplyConfig { config } => config.config_hash,
                                     ProcessCommand::ApplyPackage { .. }
                                     | ProcessCommand::Restart
-                                    | ProcessCommand::Shutdown => Vec::new(),
+                                    | ProcessCommand::Shutdown
+                                    | ProcessCommand::Uninstall => Vec::new(),
                                 },
                                 Err("the supervisor is not accepting commands".to_string()),
                             );
@@ -629,11 +630,21 @@ impl Engine {
         self.refresh_sampling();
     }
 
-    /// Retires the Agents whose `[[supervisor]]` blocks left the set (ADR-0056): fires each one's
-    /// own shutdown — its adapter stops the Managed Process within the stop budget, its Endpoint
-    /// releases the port — awaits the adapter's exit, and returns the goodbyes to send. The slots
-    /// stay (see [`SupervisedAgent::retired`]); unnamed Agents run on untouched.
-    pub async fn retire_supervisors(&mut self, names: &[String]) -> Vec<AgentToServer> {
+    /// Retires the Agents whose `[[supervisor]]` blocks left the set (ADR-0056): each one's
+    /// adapter stops the Managed Process within the stop budget, its Endpoint releases the port,
+    /// the adapter's exit is awaited, and the goodbyes to send are returned. The slots stay (see
+    /// [`SupervisedAgent::retired`]); unnamed Agents run on untouched.
+    ///
+    /// A name in `uninstalling` is leaving the set *for good* (ADR-0060): its adapter is told to
+    /// uninstall — stop, undo what installing it did, answer — before the caller purges its
+    /// directory (ADR-0059). A name only in `names` merely changed: it is stopped, restarts
+    /// under its name, and keeps what it installed. The adapter's own stop budget bounds either
+    /// path; an uninstall that cannot be delivered falls back to the plain stop.
+    pub async fn retire_supervisors(
+        &mut self,
+        names: &[String],
+        uninstalling: &[String],
+    ) -> Vec<AgentToServer> {
         let mut goodbyes = Vec::new();
         for index in 0..self.agents.len() {
             let agent = &mut self.agents[index];
@@ -645,15 +656,31 @@ impl Engine {
             {
                 continue;
             }
-            if let Some(stop) = agent.stop.take() {
-                let _ = stop.send(true);
+            let uninstall = agent
+                .block_name
+                .as_ref()
+                .is_some_and(|name| uninstalling.contains(name));
+            let commands = agent.commands.take();
+            let told_to_uninstall = uninstall
+                && commands
+                    .as_ref()
+                    .is_some_and(|commands| commands.try_send(ProcessCommand::Uninstall).is_ok());
+            // A plainly stopped adapter exits on its fired shutdown; one told to uninstall
+            // exits on the command itself, and its Endpoint's stop follows below.
+            if !told_to_uninstall {
+                if let Some(stop) = agent.stop.take() {
+                    let _ = stop.send(true);
+                }
             }
-            if let Some(commands) = agent.commands.take() {
-                // The command is not needed — the fired shutdown already stops the adapter — but
-                // its channel closing is how the adapter's exit is observed.
+            if let Some(commands) = commands {
+                // The channel closing is how the adapter's exit — and, for an uninstall, its
+                // answered outcome — is observed.
                 self.drain_events_until_closed(&commands).await;
             }
             let agent = &mut self.agents[index];
+            if let Some(stop) = agent.stop.take() {
+                let _ = stop.send(true);
+            }
             agent.retired = true;
             goodbyes.push(agent.state.disconnect_message());
         }
@@ -715,6 +742,20 @@ impl Engine {
             }
             ProcessEvent::PackageApplied { hash, result } => {
                 agent.state.package_applied(hash, result);
+            }
+            // The adapter's last word before retirement (ADR-0060). The goodbye carries no
+            // status, so the outcome is the operator's to read here — an `Err` names what the
+            // kind could not undo, which nothing else will ever mention again.
+            ProcessEvent::Uninstalled { result } => {
+                let name = agent.block_name.as_deref().unwrap_or("?");
+                match result {
+                    Ok(()) => info!(supervisor = %name, "supervisor uninstalled"),
+                    Err(e) => warn!(
+                        supervisor = %name,
+                        error = %e,
+                        "the retired supervisor could not undo its installation"
+                    ),
+                }
             }
         }
         agent.owes_report = true;
@@ -841,6 +882,67 @@ mod tests {
         let goodbyes = engine.disconnect_messages();
         assert_eq!(goodbyes.len(), 2);
         assert!(goodbyes.iter().all(|g| g.agent_disconnect.is_some()));
+    }
+
+    /// ADR-0060 at the Engine seam: a name in `uninstalling` is told to uninstall — its adapter
+    /// answers and exits on the command itself — while a name that merely changed is only
+    /// stopped, so it keeps what it installed for its restart. Both end retired with a goodbye.
+    #[tokio::test]
+    async fn retiring_uninstalls_the_removed_and_only_stops_the_changed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (event_tx, events) = mpsc::channel(8);
+        let mut agents = Vec::new();
+        let mut saw_uninstall = Vec::new();
+        for (index, name) in ["removed", "changed"].into_iter().enumerate() {
+            let storage = Storage::new(dir.path().join(name)).expect("storage");
+            let state = AgentState::new(name.to_string(), storage).expect("agent");
+            let (commands_tx, mut commands_rx) = mpsc::channel::<ProcessCommand>(4);
+            let (stop_tx, mut stop) = crate::service::runtime::shutdown_channel();
+            let saw = Arc::new(AtomicBool::new(false));
+            let events = crate::supervisor::ports::EventSender::new(index, event_tx.clone());
+            let flag = saw.clone();
+            // A stand-in adapter with the Runner's two exits: the command itself, answered,
+            // or the fired shutdown. Dropping the receiver is how either exit is observed.
+            tokio::spawn(async move {
+                tokio::select! {
+                    command = commands_rx.recv() => {
+                        if let Some(ProcessCommand::Uninstall) = command {
+                            flag.store(true, Ordering::SeqCst);
+                            events.send(ProcessEvent::Uninstalled { result: Ok(()) }).await;
+                        }
+                    }
+                    _ = stop.requested() => {}
+                }
+            });
+            saw_uninstall.push(saw);
+            agents.push(EngineAgent {
+                state,
+                commands: Some(commands_tx),
+                stop: Some(stop_tx),
+                block_name: Some(name.to_string()),
+            });
+        }
+        let mut engine = Engine::with_processes(agents, events, event_tx);
+
+        let goodbyes = engine
+            .retire_supervisors(
+                &["removed".to_string(), "changed".to_string()],
+                &["removed".to_string()],
+            )
+            .await;
+
+        assert_eq!(goodbyes.len(), 2, "both said their goodbye");
+        assert!(
+            saw_uninstall[0].load(Ordering::SeqCst),
+            "the removed adapter was told to uninstall"
+        );
+        assert!(
+            !saw_uninstall[1].load(Ordering::SeqCst),
+            "the changed adapter was only stopped"
+        );
     }
 
     #[test]

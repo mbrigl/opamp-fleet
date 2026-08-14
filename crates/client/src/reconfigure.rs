@@ -96,7 +96,9 @@ async fn apply_inner(
         .collect();
     let removed = removed_names(&config.supervisors, &blocks);
 
-    let goodbyes = engine.retire_supervisors(&stopping).await;
+    // A removed Supervisor is uninstalled (ADR-0060) — its adapter answers before the purge
+    // below — while a changed one is only stopped and restarts under its name.
+    let goodbyes = engine.retire_supervisors(&stopping, &removed).await;
 
     // Stopped, so the write comes next: a crash between the two restarts into the old file, one
     // after it into the new one — both build exactly what the file says, so both converge.

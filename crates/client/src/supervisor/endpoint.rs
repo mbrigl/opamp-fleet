@@ -271,6 +271,7 @@ mod tests {
                 ProcessEvent::AvailableComponents(_) => "components",
                 ProcessEvent::ConfigApplied { .. } => "applied",
                 ProcessEvent::PackageApplied { .. } => "package",
+                ProcessEvent::Uninstalled { .. } => "uninstalled",
             });
         }
         assert_eq!(

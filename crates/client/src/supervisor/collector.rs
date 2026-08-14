@@ -109,6 +109,9 @@ impl Plugin for CollectorPlugin {
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),
+            // The Collector has no reload convention — a configuration is applied by restart,
+            // the generic behaviour (ADR-0060), which is also what the reference supervisor does.
+            reload_signal: None,
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || collector_spec(&binary, &config_dir, &extra_args, &env)),

@@ -17,6 +17,18 @@ carries a date once its tag exists.
 
 ## [0.3.0]
 
+### Added
+
+- **A `command` Supervisor can reload instead of restart**
+  ([ADR-0060](docs/adr/0060-unified-supervisor-lifecycle-port.md)). A `[[supervisor]]` block of
+  `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
+  with or without a `SIG` prefix): a configuration change is then applied by sending that signal,
+  and the process keeps running with its in-flight state. If the signal cannot be delivered or
+  the process dies on it, the Supervisor falls back to the restart, so the apply still lands.
+  Linux/macOS only — on Windows a set key is refused at startup.
+  **What to do:** nothing; the key is opt-in. Set it only for a program that genuinely re-reads
+  its configuration on the signal.
+
 ### Changed
 
 - **Removing a Supervisor now deletes its directory**

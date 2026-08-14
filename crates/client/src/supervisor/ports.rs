@@ -42,6 +42,12 @@ pub enum ProcessCommand {
     Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
+    /// The Supervisor is retired for good (ADR-0060): stop the Managed Process, undo whatever
+    /// installing it left *outside* the Supervisor's directory — the generic implementation has
+    /// nothing there, so its uninstall is exactly the graceful stop — answer with
+    /// [`ProcessEvent::Uninstalled`], and exit. The directory itself is the core's to purge
+    /// (ADR-0059), after the answer.
+    Uninstall,
 }
 
 /// What a Managed-Process adapter reports back to the core.
@@ -74,6 +80,10 @@ pub enum ProcessEvent {
         hash: Vec<u8>,
         result: Result<String, String>,
     },
+    /// Outcome of a [`ProcessCommand::Uninstall`] (ADR-0060), the adapter's last event. The
+    /// Agent's goodbye carries no status, so the outcome is a log line — but an `Err` names what
+    /// the retired kind could not undo, which the operator otherwise learns from nothing.
+    Uninstalled { result: Result<(), String> },
 }
 
 /// The adapter's way back into the core: events tagged with the owning Agent's index on the
