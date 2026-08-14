@@ -166,14 +166,43 @@ fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Ve
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
 /// orphan the next startup reports.
 fn purge_removed(config: &ClientConfig, removed: &[String]) {
+    // Resolved once, so the confinement check below compares canonical against canonical — which
+    // catches a symlinked *parent* component as well as a symlinked directory. `None` if the root
+    // does not exist yet, in which case there is nothing under it to purge either.
+    let canon_root = config.supervisors_root().canonicalize().ok();
     for name in removed {
         let dir = config.supervisor_dir(name);
+        // The delete is confined to the Supervisor's own directory *self-containedly* (ADR-0059),
+        // not by trusting `remove_dir_all`'s symlink handling. `name` is already a validated single
+        // component (ADR-0057), so `dir` cannot traverse; the risk this guards is a symlink planted
+        // where the directory should be. Refuse to recurse through one — unlink the stray link
+        // itself — and refuse a resolved path that is not under the supervisors root.
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = std::fs::remove_file(&dir);
+                warn!(supervisor = %name, path = %dir.display(), "refusing to purge through a symlink; removed the link only");
+                continue;
+            }
+            Ok(_) => {
+                if let (Some(root), Ok(resolved)) = (&canon_root, dir.canonicalize()) {
+                    if !resolved.starts_with(root) {
+                        warn!(supervisor = %name, path = %dir.display(), "refusing to purge: the resolved path is outside the supervisors directory");
+                        continue;
+                    }
+                }
+            }
+            // Never materialized (a block that failed to start owns no directory yet): purged is
+            // what it already is.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot inspect the removed supervisor's directory");
+                continue;
+            }
+        }
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
                 info!(supervisor = %name, path = %dir.display(), "removed supervisor purged");
             }
-            // Never materialized (a block that failed to start owns no directory yet): purged is
-            // what it already is.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => warn!(
                 supervisor = %name,
@@ -699,6 +728,38 @@ mod tests {
             stays.join("instance-uid").is_file(),
             "a neighbour keeps its directory and identity"
         );
+    }
+
+    /// ADR-0059 hardening: the purge never recurses through a symlink planted where a Supervisor's
+    /// directory should be — it removes the link, not what it points at. A `name` cannot itself
+    /// traverse (ADR-0057), so this is the only way the delete could have escaped, and it does not.
+    #[cfg(unix)]
+    #[test]
+    fn the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+
+        // A precious directory outside the supervisors root, with a file the purge must not touch.
+        let outside = dir.path().join("precious");
+        std::fs::create_dir_all(&outside).expect("create");
+        std::fs::write(outside.join("keep"), "important").expect("write");
+
+        // A Supervisor directory that is really a symlink pointing at it.
+        std::fs::create_dir_all(config.supervisors_root()).expect("root");
+        let link = config.supervisor_dir("evil");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        purge_removed(&config, &["evil".to_string()]);
+
+        assert!(
+            outside.join("keep").is_file(),
+            "the symlink target and its contents survive"
+        );
+        assert!(!link.exists(), "the stray symlink itself is removed");
     }
 
     /// An offer whose entries carry no blocks empties the set: the file keeps its globals and
