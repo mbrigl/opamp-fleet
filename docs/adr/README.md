@@ -90,4 +90,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0059](0059-a-removed-supervisor-is-purged.md) | A removed Supervisor is purged — its Managed Process stops and its directory goes with it | 🟢 accepted |
 | [0060](0060-unified-supervisor-lifecycle-port.md) | One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin | 🟡 proposed |
 | [0061](0061-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟡 proposed |
+| [0062](0062-the-service-runs-under-an-operator-named-account.md) | The system service may run under an operator-named account — and the instance's files belong to that account | 🟡 proposed |
 
