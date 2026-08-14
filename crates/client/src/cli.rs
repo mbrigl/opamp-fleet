@@ -173,6 +173,17 @@ pub struct InstallArgs {
     /// and in the installer log; write it into the file afterwards, or use `--interactive`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
+    // ADR-0062.
+    /// Run the service as this account instead of root/`LocalSystem`, and hand the instance's
+    /// files — configuration, state, and the executable layout — over to it.
+    ///
+    /// System scope only: a `--user` service already runs as its user. On Linux and macOS the
+    /// account must exist. On Windows only passwordless account forms are accepted — the
+    /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`), or
+    /// `NT AUTHORITY\LocalService`/`NetworkService`; a password is never taken here, for the
+    /// same reason no credential is (ADR-0046).
+    #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
+    pub run_as: Option<String>,
 }
 
 /// Whether an action targets the system service or the current user's service.
@@ -370,6 +381,45 @@ mod tests {
             "--interactive",
             "--endpoint",
             "wss://fleet.example.com/v1/opamp",
+        ])
+        .expect_err("mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// ADR-0062: the account is named at install time and nowhere else. No password parameter
+    /// exists beside it — the accepted Windows forms are all passwordless.
+    #[test]
+    fn install_takes_a_run_as_account() {
+        let cli = parse(&["client", "service", "install", "--run-as", "opamp-fleet"]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = cli.command
+        else {
+            panic!("expected service install");
+        };
+        assert_eq!(args.run_as.as_deref(), Some("opamp-fleet"));
+
+        let none = parse(&["client", "service", "install"]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = none.command
+        else {
+            panic!("expected service install");
+        };
+        assert_eq!(args.run_as, None, "absent flag means today's behaviour");
+    }
+
+    /// ADR-0062: `--run-as` is system scope only — a `--user` service already runs as its user,
+    /// so naming an account beside it could only contradict it.
+    #[test]
+    fn run_as_and_user_scope_are_refused_together() {
+        let err = Cli::try_parse_from([
+            "client",
+            "service",
+            "install",
+            "--user",
+            "--run-as",
+            "opamp-fleet",
         ])
         .expect_err("mutually exclusive");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);

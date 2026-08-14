@@ -1,6 +1,6 @@
 # ADR-0062: The system service may run under an operator-named account — and the instance's files belong to that account
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 
@@ -49,10 +49,13 @@ We will add **`--run-as <account>`** to `service install`, system scope only (it
 `--user`), defaulting to today's behaviour when absent:
 
 - **The service runs as the account.** Linux: systemd `User=<account>`; macOS: launchd
-  `UserName`; both through the `username` field `service-manager` already carries. Windows: a
-  `ChangeServiceConfig` step in `windows_config` — the same "finish what the crate omits"
-  seam — sets the service's logon account and grants it the *Log on as a service* right through
-  the LSA policy, which `ChangeServiceConfig` alone does not do.
+  `UserName`; both through the `username` field `service-manager` already carries. Windows: an
+  `sc config obj=` step in `windows_config` — the same "finish what the crate omits" seam — sets
+  the service's logon account. No *Log on as a service* grant is performed: the default security
+  policy grants the right to `NT SERVICE\ALL SERVICES`, which covers the virtual account; the
+  built-in accounts carry it inherently; and a gMSA receives it from its domain's group policy,
+  where its rights are managed anyway. A host hardened to remove the default grant must restore
+  it for this service's account — the manual says so.
 - **Windows accepts only passwordless account forms**: the service's own virtual account
   (`NT SERVICE\<service name>`, the recommended form), a gMSA (`name$`), or
   `NT AUTHORITY\LocalService`/`NetworkService`. A password parameter does not exist, for
@@ -102,7 +105,8 @@ We will add **`--run-as <account>`** to `service install`, system scope only (it
   `NT SERVICE\<name>` accounts are provisioned per service with OS-managed passwords.
 - [Microsoft: `sc.exe config`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-config) /
   [`ChangeServiceConfig`](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-changeserviceconfiga) —
-  setting the logon account does not grant the *Log on as a service* right; the installer must.
+  setting the logon account does not itself grant the *Log on as a service* right; the default
+  security policy's grant to `NT SERVICE\ALL SERVICES` is what covers virtual accounts.
 - [Elastic Agent: unprivileged mode](https://www.elastic.co/docs/reference/fleet/elastic-agent-unprivileged) —
   the versioned-layout precedent from ADR-0010, installed by root but *running* as a dedicated
   `elastic-agent-user` that owns the agent's files, upgrades included.

@@ -84,6 +84,49 @@ $ opamp-fleet-client service uninstall      # deregisters; never deletes the ins
 | `--root <dir>` | `service install` | The install root: everything — the executable layout, `client.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
+| `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand the instance's files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
+
+### Running it under its own account
+
+By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
+`--run-as` drops that (ADR-0062): the service — and every Managed Process its Supervisors spawn —
+runs as the account you name, and the install hands the instance's files over to it: the
+configuration file, the state directory, **and the executable layout**. The layout too because
+the self-update runs *inside* the service — a layout the account cannot write would silently end
+[server-driven updates](#self_update) for that host.
+
+On Linux and macOS the account must already exist; the install refuses early if it does not:
+
+```console
+# useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin opamp-fleet
+# opamp-fleet-client service install --run-as opamp-fleet
+```
+
+On Windows only **passwordless** account forms are accepted — there is deliberately no password
+flag, for the same reason `--endpoint` takes no credential. The recommended form is the service's
+own virtual account, which Windows provisions and password-manages by itself:
+
+```console
+> opamp-fleet-client service install --run-as "NT SERVICE\opamp-fleet-client"
+```
+
+A group-managed service account (`DOMAIN\name$`) and the built-ins `NT AUTHORITY\LocalService` /
+`NT AUTHORITY\NetworkService` are accepted as well. The install grants the account Modify on the
+instance's directories; it does not touch the *Log on as a service* right — the default security
+policy grants it to `NT SERVICE\ALL SERVICES` (covering the virtual account), the built-ins carry
+it inherently, and a gMSA gets it from its domain's group policy. On a host hardened to remove
+that default grant, restore the right for the account or the service will not start.
+
+Two consequences to weigh before using it:
+
+- **The account is a trust boundary.** Whoever holds it can replace the binary in the layout, and
+  the packaged `/usr/bin/opamp-fleet-client` symlink resolves through that layout's `current`
+  pointer — an administrator invoking the CLI executes account-owned code.
+- **The account's limits are the fleet's.** Anything under this Client that needs a port below
+  1024 or root-only telemetry sources will fail — that trade-off is the point of the flag.
+
+Re-running `install` with a different `--run-as` re-registers and re-owns the same directories;
+without the flag it registers exactly as before — root/`LocalSystem`, no handover.
 
 ### The first configuration, on a host that has none
 

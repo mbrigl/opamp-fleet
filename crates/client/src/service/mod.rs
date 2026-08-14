@@ -8,6 +8,7 @@
 
 pub mod layout;
 pub mod manager;
+pub mod run_as;
 pub mod runtime;
 #[cfg(windows)]
 pub mod windows;

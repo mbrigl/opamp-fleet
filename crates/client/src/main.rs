@@ -9,7 +9,7 @@ use client::config::ClientConfig;
 use client::config_init;
 use client::selfupdate;
 use client::service::runtime::{self, RunSpec};
-use client::service::{layout, manager, windows_rights, ServiceControl, ServiceLevel};
+use client::service::{layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel};
 
 fn main() {
     // stderr as always, plus an empty slot the OTLP log bridge is dropped into once the Server
@@ -151,6 +151,14 @@ fn install(
     // and swung `current` at it and only then failed (ADR-0010: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
 
+    // Resolve the `--run-as` account with the same before-anything-is-written rule (ADR-0062): a
+    // name that does not exist, or a Windows form that would need a password, fails here.
+    let run_as = args
+        .run_as
+        .as_deref()
+        .map(|account| run_as::RunAs::resolve(account, &manager::service_name(&instance)))
+        .transpose()?;
+
     // Two roots, one flag: the executable layout and the instance's data default to different
     // places on Linux (ADR-0053 — systemd may not execute from `/var/lib` under SELinux), while
     // an explicit `--root` keeps ADR-0010's meaning and puts everything under the one directory
@@ -211,12 +219,26 @@ fn install(
         program: program.clone(),
         config_path: config_path.clone(),
         state_dir: state_dir.clone(),
+        run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
+
+    // The handover (ADR-0062): the instance's files belong to the account the service runs as —
+    // config and state because the service reads and rewrites them (ADR-0056), the executable
+    // layout because the self-update that stages into it *is* the service (ADR-0020). The state
+    // directory is created first: the daemon must not need rights on its parent to begin.
+    if let Some(run_as) = &run_as {
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+    }
 
     println!("installed {}", manager::service_name(&instance));
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
     println!("  state dir: {}", state_dir.display());
+    if let Some(run_as) = &run_as {
+        println!("  runs as:   {}", run_as.account());
+    }
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };

@@ -115,6 +115,9 @@ pub struct InstallSpec {
     /// Absolute state directory baked into the unit (a service's working directory is `/` or
     /// `System32`; relative paths would be meaningless).
     pub state_dir: PathBuf,
+    /// The account the service runs as instead of root/`LocalSystem` (ADR-0062) — already
+    /// resolved by [`run_as`](super::run_as), so what arrives here exists and needs no password.
+    pub run_as: Option<String>,
 }
 
 /// The installed command line: `run --service --config … --instance … --state-dir …`. The hidden
@@ -142,9 +145,15 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
 /// root/Administrator for a system-level service), or if the recovery actions cannot be set.
 pub fn install(spec: &InstallSpec) -> Result<(), String> {
     install_service(spec)?;
-    // What `service-manager` does not do on Windows, done here (see `windows_config`).
+    // What `service-manager` does not do on Windows, done here (see `windows_config`) — since
+    // ADR-0062 that includes the logon account, which its `sc.exe` backend ignores.
     let name = service_name(&spec.instance);
-    super::windows_config::configure(&name, &display_name(&spec.instance), WINDOWS_DESCRIPTION)
+    super::windows_config::configure(
+        &name,
+        &display_name(&spec.instance),
+        WINDOWS_DESCRIPTION,
+        spec.run_as.as_deref(),
+    )
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {
@@ -154,7 +163,9 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
             program: spec.program.clone(),
             args: service_args(spec),
             contents: None,
-            username: None,
+            // systemd `User=` / launchd `UserName` (ADR-0062). The Windows backend ignores this
+            // field, which is why `install` sets the logon account through `windows_config`.
+            username: spec.run_as.clone(),
             working_directory: None,
             // The Client is file-configured (ADR-0008): the unit carries the config path in the
             // arguments above, never settings as environment variables.
@@ -363,8 +374,13 @@ mod tests {
             program: PathBuf::from("/opt/fleet/current/client"),
             config_path: PathBuf::from("/etc/opamp/client.toml"),
             state_dir: PathBuf::from("/opt/fleet/state"),
+            run_as: Some("opamp-fleet".to_string()),
         };
         let args = service_args(&spec);
+        assert!(
+            !args.contains(&OsString::from("opamp-fleet")),
+            "the account decides who runs the command, it is never part of it (ADR-0062)"
+        );
         assert_eq!(args[0], OsString::from("run"));
         assert_eq!(args[1], OsString::from("--service"));
         assert!(args.contains(&OsString::from("/etc/opamp/client.toml")));

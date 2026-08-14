@@ -1,5 +1,6 @@
 //! What `service-manager` leaves undone on Windows: the recovery actions that make ADR-0010's
-//! "restart on failure" true there as well, and the display name of ADR-0030.
+//! "restart on failure" true there as well, the display name of ADR-0030, and the logon account
+//! of ADR-0062.
 //!
 //! On systemd and launchd the restart policy handed to `service-manager` is written straight into
 //! the unit (`Restart=on-failure`) or the plist (`KeepAlive{SuccessfulExit:false}`). Its Windows
@@ -38,24 +39,30 @@
 //!
 //! Everything here is a no-op on Unix.
 
-/// Configure what the Windows backend does not: failure recovery, the display name, and the
-/// description.
+/// Configure what the Windows backend does not: failure recovery, the display name, the
+/// description — and, when `--run-as` named one, the logon account (ADR-0062).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
-/// the service manager already carries the policy, and neither systemd nor launchd has a display
-/// name or a description column to fill.
+/// the service manager already carries the policy and the account (`User=`/`UserName`), and
+/// neither systemd nor launchd has a display name or a description column to fill.
 #[cfg(not(windows))]
 pub fn configure(
     _service_name: &str,
     _display_name: &str,
     _description: &str,
+    _run_as: Option<&str>,
 ) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(windows)]
-pub fn configure(service_name: &str, display_name: &str, description: &str) -> Result<(), String> {
+pub fn configure(
+    service_name: &str,
+    display_name: &str,
+    description: &str,
+    run_as: Option<&str>,
+) -> Result<(), String> {
     use std::time::Duration;
 
     use windows_service::service::{
@@ -112,7 +119,22 @@ pub fn configure(service_name: &str, display_name: &str, description: &str) -> R
         &["description", service_name],
         description,
         &format!("description of {service_name}"),
-    )
+    )?;
+
+    // The logon account (ADR-0062). `service-manager`'s `sc.exe` backend ignores the ctx's
+    // `username`, so the account is set here — and set *without* a `password=`, which every form
+    // `run_as` admits (the service's virtual account, a gMSA, the built-ins) is defined not to
+    // need. No *Log on as a service* grant follows: the default security policy grants it to
+    // `NT SERVICE\ALL SERVICES` (covering the virtual account), the built-ins carry it
+    // inherently, and a gMSA receives it from its domain's group policy — the manual says so.
+    if let Some(account) = run_as {
+        sc(
+            &["config", service_name, "obj="],
+            account,
+            &format!("logon account of {service_name}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// Runs `sc.exe` with a trailing value argument — the shape both fields above are set with, so
