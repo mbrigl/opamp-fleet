@@ -168,7 +168,8 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 ## Build, Test & Run
 
 The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
-with three crates — `opamp` (shared library), `server`, and `client` (the Client, in all its modes). 
+with four crates — `opamp` (shared library), `server`, `client` (the Client, in all its modes), and
+`package-tools` (the operator command-line tools, ADR-0065). 
 This section is the single source for build/test/run commands — both humans and agents rely on 
 it (AGENTS.md links here).
 
@@ -179,6 +180,10 @@ it (AGENTS.md links here).
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
 - **Run the Client:** `cargo run -p client -- --config config/client.toml`
+- **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
+  and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
+  sign an artifact out of any program) — both documented in
+  [the manual](docs/manual/tools.md); an installed release ships them beside the Client.
 
 Both binaries read a TOML configuration file ([ADR-0008](docs/adr/0008-toml-configuration.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
@@ -208,7 +213,8 @@ ready package artifact: the same file an operator downloads is the one a fleet i
 
 This section is a tour. The complete operator reference — every option and every configuration key
 of both ends — is the **[User Manual](docs/manual/README.md)**:
-[Server](docs/manual/server.md) · [Client](docs/manual/client.md).
+[Server](docs/manual/server.md) · [Client](docs/manual/client.md) ·
+[Command-line tools](docs/manual/tools.md).
 
 A minimal closed control loop on one machine:
 
@@ -337,11 +343,11 @@ service that will not start.
 README.md             # overview & setup for humans
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
-docs/manual/         # the user manual: Server and Client, option by option
+docs/manual/         # the user manual: Server, Client, and the operator tools, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/adr/             # Architecture Decision Records (+ template)
-crates/               # Cargo workspace: opamp (shared) · server · client
+crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, client.toml)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)

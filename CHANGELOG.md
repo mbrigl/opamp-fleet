@@ -15,7 +15,25 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.0]
+## [0.3.1]
+
+### Fixed
+
+- **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
+  decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
+  already rolled out and therefore immutable
+  ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)), a package store at its ceiling
+  ([ADR-0015](docs/adr/0015-package-delivery-for-managed-processes.md)). With hundreds of megabytes
+  already in flight that answer races the upload, the connection resets, and what the tool could
+  report was a transport error naming the one thing that was *not* the problem: the Server had
+  answered, and said why. It now asks a second time with an empty artifact — refused in its own
+  right, so the probe can store nothing — and reports the Server's status and message. Transport
+  errors that are genuine read better too: the cause beneath `reqwest`'s own layer is printed
+  rather than swallowed, on downloads as well as uploads.
+  **What to do:** nothing. An upload that has been failing with `cannot reach …` will name its
+  reason on the next run.
+
+## [0.3.0] - 2026-08-15
 
 ### Changed
 
@@ -37,6 +55,46 @@ carries a date once its tag exists.
 
 ### Added
 
+- **A package artifact may be a `.zip`**
+  ([ADR-0064](docs/adr/0064-self-contained-glpi-agent-packages-for-both-platforms.md)). The
+  Client now opens three containers, still decided by leading bytes: `.tar.gz`, `.7z`, and
+  `.zip` — as a single-file package and as a tree (`program_path`), held to the same member
+  rules as the others (no links, no paths climbing out, the same member and size bounds). Zip
+  support is **read-only and unencrypted**: an encrypted member is refused with a message
+  pointing at `.7z`, which is what `[packages] archive_key` opens. This exists so an upstream
+  build published as a zip — the GLPI Agent's portable Windows tree — can be uploaded or
+  referenced exactly as published, with upstream's own SHA-256 as the hash every Agent verifies.
+  **What to do:** nothing, unless you relied on a `.zip` artifact being installed *as* the
+  program. That was never useful — the agent would not start — but it did leave the file in
+  place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
+  right container for a tree on Unix, being the one that carries file modes.
+- **The operator tools moved to their own crate**
+  ([ADR-0065](docs/adr/0065-the-operator-package-tools-live-in-their-own-crate.md)).
+  `opamp-package-sign` and the new `opamp-package-fetch` are `crates/package-tools`, not binaries
+  of the Client: the crate that runs on every managed host no longer carries tooling that never
+  runs there. The binaries keep their names and their behaviour.
+  **What to do:** nothing, unless you build them by crate — `cargo build -p client --bin
+  opamp-package-sign` becomes `-p package-tools`. `cargo run --bin opamp-package-sign` is
+  unchanged, because `--bin` resolves across the workspace. A release ships neither tool, as
+  before.
+- **`opamp-package-fetch`, an operator tool that fetches an upstream release and makes it a
+  package.** It knows where the OpenTelemetry Collector (`otelcol`, `otelcol-contrib`), the GLPI
+  Agent, and Telegraf publish, offers the last five versions and the platforms that release
+  actually carries, verifies every download against the SHA-256 upstream published, and uploads
+  each artifact as its platform's entry when told to. Interactive by default; `--agent`,
+  `--version`, `--platform`, `--out-dir`, `--server` and `--no-upload` make it scriptable.
+  Artifacts travel **as published** wherever upstream's container is one a Client can open, so
+  the hash the fleet verifies is the one on the release page. See
+  [the tools page](docs/manual/tools.md#opamp-package-fetch).
+  **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
+  artifact out of any program you have.
+- **The GLPI Agent can be delivered by the fleet**
+  ([ADR-0064](docs/adr/0064-self-contained-glpi-agent-packages-for-both-platforms.md)). On
+  Windows the official portable zip is the artifact, uploaded (or referenced) as published; on
+  Linux the tool above builds one deterministically from the official AppImage — extracting it
+  once so no fleet host needs FUSE. Both are amd64; see the
+  [GLPI Agent recipe](docs/manual/glpi-agent.md#fleet-delivered-the-agent-as-a-package).
+  **What to do:** nothing — this is a new option beside supervising a machine-installed agent.
 - **A `command` Supervisor can reload instead of restart**
   ([ADR-0060](docs/adr/0060-unified-supervisor-lifecycle-port.md)). A `[[supervisor]]` block of
   `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,

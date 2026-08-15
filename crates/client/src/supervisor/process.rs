@@ -1029,6 +1029,11 @@ fn install_tree(
                 info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
                 Ok(())
             }
+            crate::archive::Kind::Zip => {
+                let summary = crate::archive::extract_tree_zip(artifact, program_path, staging)?;
+                info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
+                Ok(())
+            }
         }
     };
 

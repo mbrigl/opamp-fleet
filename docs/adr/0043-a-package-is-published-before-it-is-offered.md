@@ -1,6 +1,6 @@
 # ADR-0043: A package is published before it is offered — uploading stages it, releasing it is its own act
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0061](0061-a-rollout-is-an-explicit-act.md)
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 

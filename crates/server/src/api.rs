@@ -20,9 +20,7 @@ use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
 use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
-use crate::fleet::{
-    AgentView, AppState, ForgetError, RestartError, RolloutError, RolloutTarget,
-};
+use crate::fleet::{AgentView, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
 use crate::labels::LabelError;
 
 #[derive(OpenApi)]
@@ -321,22 +319,21 @@ async fn rollout_to_agent(
         );
     };
     let spec = body.map(|Json(spec)| spec).unwrap_or_default();
-    let target = match (spec.configuration, spec.package) {
-        (Some(_), Some(_)) => {
-            return error(
+    let target =
+        match (spec.configuration, spec.package) {
+            (Some(_), Some(_)) => return error(
                 StatusCode::BAD_REQUEST,
                 "name a configuration or a package, not both — or neither for everything waiting",
-            )
-        }
-        (Some(name), None) => RolloutTarget::Configuration(name),
-        (None, Some(package)) => {
-            match set_id(&package.name, &package.agent_type, &package.version) {
-                Ok(id) => RolloutTarget::Package(id),
-                Err(e) => return error(StatusCode::BAD_REQUEST, e),
+            ),
+            (Some(name), None) => RolloutTarget::Configuration(name),
+            (None, Some(package)) => {
+                match set_id(&package.name, &package.agent_type, &package.version) {
+                    Ok(id) => RolloutTarget::Package(id),
+                    Err(e) => return error(StatusCode::BAD_REQUEST, e),
+                }
             }
-        }
-        (None, None) => RolloutTarget::Everything,
-    };
+            (None, None) => RolloutTarget::Everything,
+        };
     match state.rollout_to_agent(&uid, &target) {
         Ok(()) => match state
             .snapshot()

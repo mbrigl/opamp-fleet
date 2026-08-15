@@ -32,10 +32,11 @@ Reading them first is cheaper than discovering them at rollout time.
   the whole archive instead of one member; see
   [Agents that are more than one file](client.md#agents-that-are-more-than-one-file). Everything
   below applies to both.
-- **Only `.tar.gz` and `.7z` are opened.** The Client decides what an artifact is by its **leading
-  bytes**, not its name, and anything that is neither gzip nor 7z is taken to *be* the program. A
-  `.zip` is therefore not an unsupported format that gets rejected — it is installed over the
-  binary unopened, and the agent no longer starts. There is no ZIP support to enable.
+- **`.tar.gz`, `.7z`, and `.zip` are opened.** The Client decides what an artifact is by its
+  **leading bytes**, not its name, and anything that is none of the three is taken to *be* the
+  program. Only `.7z` may be encrypted; an encrypted `.zip` is refused rather than opened. A
+  `.tar.gz` is the right container for a tree that runs on Unix, because it is the one that
+  carries file modes.
 - **The member name must match the configured program.** The Client looks inside the archive for
   the file name its `[[supervisor]]` block names, wherever the archive keeps it.
 
@@ -80,7 +81,26 @@ to push.
 
 ## 2. Build the artifact
 
-`opamp-package-sign pack` writes the two containers the Client can open, with the member named the
+**For four agents this step and the next two are one command.**
+[`opamp-package-fetch`](tools.md#opamp-package-fetch) knows where the OpenTelemetry Collector
+(`otelcol`, `otelcol-contrib`), the GLPI Agent, and Telegraf publish, and asks what it cannot
+know — which agent, which of the last five versions, which platforms, and where to upload:
+
+```console
+$ opamp-package-fetch
+```
+
+It verifies every download against the SHA-256 upstream published, leaves the artifact untouched
+wherever upstream's container is one a Client can open — so the hash the fleet verifies is the
+one on the release page — and repacks only where upstream ships no installable archive. It never
+rolls anything out: reaching a host is still [step 5](#5-aim-it-then-roll-it-out). The full
+option list is in [the tools page](tools.md#opamp-package-fetch); if you take that route, read
+on at [step 5](#5-aim-it-then-roll-it-out).
+
+For anything else — your own agent, or a project that tool has never heard of — the rest of this
+step is how an artifact is built by hand.
+
+`opamp-package-sign pack` writes the two containers worth writing, with the member named the
 way the Supervisor will look for it, and prints the artifact's SHA-256:
 
 ```console
@@ -312,7 +332,8 @@ one host.
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
-| The agent stops starting right after a successful install | The artifact was probably a `.zip` (or some other container): not being gzip or 7z, it was installed as if it *were* the program. Repack as `.tar.gz`. |
+| The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
+| `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
 | A signed package is refused | No `verification_key` on that Client — a Client without one refuses *signed* packages, not only unsigned ones. |
 | An Agent that accepts packages is offered nothing | Two equally specific Selectors reach it; see `package_conflict` on its fleet row. |

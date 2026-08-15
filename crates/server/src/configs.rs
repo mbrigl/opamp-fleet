@@ -426,10 +426,7 @@ impl ConfigStore {
     /// The candidates for one Agent (ADR-0061): each Configuration whose saved revision fits it,
     /// as `(name, hash of the saved revision)` in name order. What the fleet view diffs against
     /// the Agent's assignments to show what is waiting, and what "roll out everything" assigns.
-    pub fn candidates_for(
-        &self,
-        description: Option<&AgentDescription>,
-    ) -> Vec<(String, String)> {
+    pub fn candidates_for(&self, description: Option<&AgentDescription>) -> Vec<(String, String)> {
         self.configs
             .read()
             .expect("configs lock")
@@ -666,7 +663,9 @@ mod tests {
         let released = store.compose(&assignments).expect("offered");
         assert_eq!(released.entries[0].body, "v1\n");
 
-        store.put_saved("base", revision(&[], "v2\n")).expect("edit");
+        store
+            .put_saved("base", revision(&[], "v2\n"))
+            .expect("edit");
         assert_eq!(
             store.compose(&assignments).expect("offered").hash,
             released.hash,
@@ -693,7 +692,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
         let first = put_assigned(&store, "base", revision(&[], "v1\n"));
-        store.put_saved("base", revision(&[], "v2\n")).expect("edit");
+        store
+            .put_saved("base", revision(&[], "v2\n"))
+            .expect("edit");
         let second_hash = store.retain_saved("base").expect("retain");
         assert_eq!(store.get("base").expect("base").retained.len(), 2);
 
@@ -836,12 +837,18 @@ mod tests {
         let desired = store.compose(&assignments).expect("desired");
         let names: Vec<&str> = desired.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["aa-base", "zz-extra"]);
-        assert_eq!(desired.hash, store.compose(&assignments).expect("again").hash);
+        assert_eq!(
+            desired.hash,
+            store.compose(&assignments).expect("again").hash
+        );
 
         // The hash covers names and bodies: an edit changes it — once a rollout act pins it.
         let aa = put_assigned(&store, "aa-base", revision(&[], "a2"));
         let assignments = merge(&[&zz, &aa]);
-        assert_ne!(store.compose(&assignments).expect("edited").hash, desired.hash);
+        assert_ne!(
+            store.compose(&assignments).expect("edited").hash,
+            desired.hash
+        );
     }
 
     #[test]
@@ -877,7 +884,10 @@ mod tests {
         // Changing only the role changes the hash, so the edit actually reaches the fleet.
         let ruleset = put_assigned(&store, "ruleset", revision(&[], "rules: []\n"));
         let assignments = merge(&[&base, &ruleset]);
-        assert_ne!(store.compose(&assignments).expect("desired").hash, desired.hash);
+        assert_ne!(
+            store.compose(&assignments).expect("desired").hash,
+            desired.hash
+        );
         assert_ne!(store.compose(&assignments).expect("desired").hash, without);
     }
 

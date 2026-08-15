@@ -174,7 +174,7 @@ jobs:
         run: cargo build --release -p client --bin opamp-fleet-client --target ${{ matrix.target }} --locked
       # A host build: it runs here, on this runner, to pack the artifact.
       - name: Build the packer
-        run: cargo build --release -p client --bin opamp-package-sign --locked
+        run: cargo build --release -p package-tools --bin opamp-package-sign --locked
       - name: The binary agrees with the name it will be given
         if: matrix.native
         run: |

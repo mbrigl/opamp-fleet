@@ -264,7 +264,12 @@ async fn an_agent_that_appears_later_waits() {
 
     // The latecomer enrols: a candidate, pending, assigned nothing.
     let late = opamp::uid::InstanceUid::default();
-    report(&client, server.addr, &support::full_report(&late, "late", 1)).await;
+    report(
+        &client,
+        server.addr,
+        &support::full_report(&late, "late", 1),
+    )
+    .await;
     let view = agent_view(&client, server.addr, &late).await;
     assert!(
         view["assigned_configurations"]
@@ -321,7 +326,11 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
         .send()
         .await
         .expect("rollout");
-    assert_eq!(refused.status(), 409, "a non-candidate is refused, not assigned");
+    assert_eq!(
+        refused.status(),
+        409,
+        "a non-candidate is refused, not assigned"
+    );
 }
 
 #[tokio::test]

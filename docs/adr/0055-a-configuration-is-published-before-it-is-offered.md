@@ -1,6 +1,6 @@
 # ADR-0055: A Configuration is published before it is offered — saving stages a draft, releasing it is its own act
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0061](0061-a-rollout-is-an-explicit-act.md)
 - **Date:** 2026-08-12
 - **Deciders:** Markus Brigl
 

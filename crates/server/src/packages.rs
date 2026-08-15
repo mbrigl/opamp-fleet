@@ -1624,7 +1624,10 @@ mod tests {
             .expect("aim");
 
         let ringed = agent("linux", "amd64", &[("ring", "canary")]);
-        assert!(store.fits_agent(&old, Some(&ringed)).is_ok(), "a rollback target fits");
+        assert!(
+            store.fits_agent(&old, Some(&ringed)).is_ok(),
+            "a rollback target fits"
+        );
         assert!(store.fits_agent(&new, Some(&ringed)).is_ok());
         assert!(store
             .fits_agent(&old, Some(&agent("linux", "amd64", &[])))
@@ -1634,9 +1637,12 @@ mod tests {
             .fits_agent(&new, Some(&agent("windows", "amd64", &[])))
             .expect_err("wrong platform")
             .contains("no entry for"));
-        assert!(store
-            .fits_agent(&new, Some(&AgentDescription::default()))
-            .is_err(), "no platform and no type fits nothing");
+        assert!(
+            store
+                .fits_agent(&new, Some(&AgentDescription::default()))
+                .is_err(),
+            "no platform and no type fits nothing"
+        );
         assert!(store
             .fits_agent(&id("otelcol", "9.9.9"), Some(&ringed))
             .expect_err("unknown set")
@@ -1804,7 +1810,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let v1 = stored_set(&store, "otelcol", "1.0.0", b"v1");
-        let before = store.assigned_hash_for(&assigned(&[&v1]), Some(&agent("linux", "amd64", &[])));
+        let before =
+            store.assigned_hash_for(&assigned(&[&v1]), Some(&agent("linux", "amd64", &[])));
         assert!(!before.is_empty());
         assert!(store
             .assigned_hash_for(&assigned(&[&v1]), Some(&agent("windows", "amd64", &[])))
