@@ -674,34 +674,36 @@ impl AppState {
         let mut collected: Vec<String> = Vec::new();
         match target {
             RolloutTarget::Configuration(name) => {
-                let config = self
-                    .configs
-                    .get(name)
-                    .ok_or_else(|| RolloutError::UnknownResource(format!("no configuration {name:?}")))?;
+                let config = self.configs.get(name).ok_or_else(|| {
+                    RolloutError::UnknownResource(format!("no configuration {name:?}"))
+                })?;
                 if !configs::fits(&config.saved, record.effective_description().as_deref()) {
                     return Err(RolloutError::NotApplicable(format!(
                         "configuration {name:?} does not fit or aim at agent {uid}"
                     )));
                 }
-                let hash = self.configs.retain_saved(name).map_err(RolloutError::Storage)?;
+                let hash = self
+                    .configs
+                    .retain_saved(name)
+                    .map_err(RolloutError::Storage)?;
                 record.config_assignments.insert(name.clone(), hash);
                 collected.push(name.clone());
             }
             RolloutTarget::Package(id) => {
-                let store = self
-                    .packages()
-                    .ok_or_else(|| {
-                        RolloutError::UnknownResource(
-                            "package delivery is not configured on this Server".to_string(),
-                        )
-                    })?;
-                store.fits_agent(id, record.effective_description().as_deref()).map_err(|e| {
-                    if e.starts_with("no package set") {
-                        RolloutError::UnknownResource(e)
-                    } else {
-                        RolloutError::NotApplicable(e)
-                    }
+                let store = self.packages().ok_or_else(|| {
+                    RolloutError::UnknownResource(
+                        "package delivery is not configured on this Server".to_string(),
+                    )
                 })?;
+                store
+                    .fits_agent(id, record.effective_description().as_deref())
+                    .map_err(|e| {
+                        if e.starts_with("no package set") {
+                            RolloutError::UnknownResource(e)
+                        } else {
+                            RolloutError::NotApplicable(e)
+                        }
+                    })?;
                 assign_package(record, store, id);
             }
             RolloutTarget::Everything => {
@@ -709,7 +711,9 @@ impl AppState {
                 let description = effective_owned.as_ref();
                 for (name, hash) in self.configs.candidates_for(description) {
                     if record.config_assignments.get(&name) != Some(&hash) {
-                        self.configs.retain_saved(&name).map_err(RolloutError::Storage)?;
+                        self.configs
+                            .retain_saved(&name)
+                            .map_err(RolloutError::Storage)?;
                         record.config_assignments.insert(name.clone(), hash);
                         collected.push(name);
                     }
@@ -746,7 +750,10 @@ impl AppState {
             .configs
             .get(name)
             .ok_or_else(|| RolloutError::UnknownResource(format!("no configuration {name:?}")))?;
-        let hash = self.configs.retain_saved(name).map_err(RolloutError::Storage)?;
+        let hash = self
+            .configs
+            .retain_saved(name)
+            .map_err(RolloutError::Storage)?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut assigned = 0usize;
         for (uid, record) in fleet.iter_mut() {
@@ -879,7 +886,10 @@ impl AppState {
         let fleet = self.fleet.lock().expect("fleet lock");
         for record in fleet.values() {
             let effective = record.effective_description();
-            for id in store.candidate_ids(effective.as_deref()).unwrap_or_default() {
+            for id in store
+                .candidate_ids(effective.as_deref())
+                .unwrap_or_default()
+            {
                 *reach.entry(id.to_string()).or_insert(0) += 1;
             }
         }
@@ -1652,18 +1662,16 @@ impl AppState {
                     .configs
                     .candidates_for(effective.as_deref())
                     .into_iter()
-                    .filter_map(|(name, hash)| {
-                        match record.config_assignments.get(&name) {
-                            Some(assigned) if *assigned == hash => None,
-                            Some(_) => Some(PendingConfigurationView {
-                                name,
-                                change: "update".to_string(),
-                            }),
-                            None => Some(PendingConfigurationView {
-                                name,
-                                change: "new".to_string(),
-                            }),
-                        }
+                    .filter_map(|(name, hash)| match record.config_assignments.get(&name) {
+                        Some(assigned) if *assigned == hash => None,
+                        Some(_) => Some(PendingConfigurationView {
+                            name,
+                            change: "update".to_string(),
+                        }),
+                        None => Some(PendingConfigurationView {
+                            name,
+                            change: "new".to_string(),
+                        }),
                     })
                     .collect();
                 let pending_packages: Vec<PendingPackageView> = self
@@ -1722,10 +1730,7 @@ fn assign_package(record: &mut AgentRecord, store: &PackageStore, id: &SetId) {
 
 /// Every revision hash of `name` that any Agent's assignment still references — what
 /// [`ConfigStore::retain_only`] is told to keep.
-fn referenced_hashes(
-    fleet: &HashMap<InstanceUid, AgentRecord>,
-    name: &str,
-) -> BTreeSet<String> {
+fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> BTreeSet<String> {
     fleet
         .values()
         .filter_map(|record| record.config_assignments.get(name))
@@ -2640,7 +2645,10 @@ mod tests {
             .expect("save");
 
         let view = &state.snapshot()[0];
-        assert!(view.assigned_configurations.is_empty(), "saving assigns nothing");
+        assert!(
+            view.assigned_configurations.is_empty(),
+            "saving assigns nothing"
+        );
         assert_eq!(view.pending_configurations[0].change, "new");
 
         assert_eq!(

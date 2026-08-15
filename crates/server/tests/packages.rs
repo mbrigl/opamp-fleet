@@ -162,14 +162,20 @@ async fn rolling_out_the_older_version_is_the_rollback() {
     upload(&server, "otelcol", "0.157.0", b"new-binary").await;
 
     // Both versions are saved; the act names the one the operator releases.
-    assert_eq!(rollout(&server, "otelcol", "0.157.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "0.157.0").await["assigned_agents"],
+        1
+    );
     assert_eq!(
         offered(2).await.expect("an offer").packages["otelcol"].version,
         "0.157.0"
     );
 
     // The rollback: the same act, pointed at the older version — its artifact is still here.
-    assert_eq!(rollout(&server, "otelcol", "0.156.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "0.156.0").await["assigned_agents"],
+        1
+    );
     let fallback = offered(3).await.expect("the fallback offer");
     assert_eq!(fallback.packages["otelcol"].version, "0.156.0");
     let served = reqwest::Client::new()
@@ -444,7 +450,10 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
             .status(),
         200
     );
-    assert_eq!(rollout(&server, "otelcol", "2.0.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        1
+    );
     assert_eq!(
         rollout(&server, "otelcol-win", "2.0.0").await["assigned_agents"],
         0,
@@ -535,8 +544,14 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     }
 
     // The fleet version goes to everyone; the canary act reaches only the ring.
-    assert_eq!(rollout(&server, "otelcol", "2.0.0").await["assigned_agents"], 2);
-    assert_eq!(rollout(&server, "otelcol", "3.0.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        2
+    );
+    assert_eq!(
+        rollout(&server, "otelcol", "3.0.0").await["assigned_agents"],
+        1
+    );
     assert_eq!(
         version_offered_to(&server, &canary, "canary-host", 2).await,
         "3.0.0",
@@ -556,7 +571,10 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
             .status(),
         200
     );
-    assert_eq!(rollout(&server, "otelcol", "3.0.0").await["assigned_agents"], 2);
+    assert_eq!(
+        rollout(&server, "otelcol", "3.0.0").await["assigned_agents"],
+        2
+    );
     assert_eq!(
         version_offered_to(&server, &ordinary, "ordinary-host", 3).await,
         "3.0.0"
@@ -805,7 +823,10 @@ async fn a_set_reaches_only_agents_of_its_type() {
 
     // The same artifact under this fleet's type reaches it.
     upload(&server, "otelcol", "1.0.0", b"the-binary").await;
-    assert_eq!(rollout(&server, "otelcol", "1.0.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "1.0.0").await["assigned_agents"],
+        1
+    );
     let mut report = full_report(&uid, "edge-01", 3);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
@@ -927,7 +948,10 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     );
 
     // The label only aims (ADR-0061); the act distributes — to the ring, and nobody else.
-    assert_eq!(rollout(&server, "otelcol", "2.0.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        1
+    );
     let mut report = full_report(&canary, "canary-host", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
@@ -1013,7 +1037,10 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     assert_eq!(editable.status(), 200, "an unassigned set is editable");
 
     // The act is its own request, and the fleet has the package on the next exchange.
-    assert_eq!(rollout(&server, "otelcol", "2.0.0").await["assigned_agents"], 1);
+    assert_eq!(
+        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        1
+    );
     let offer = offered_now(&server, &uid, 3)
         .await
         .expect("the released package");
