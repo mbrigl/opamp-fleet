@@ -272,12 +272,13 @@ state_dir = "client-state"
 # from the Server — upload the .tar.gz InfluxData publishes exactly as published, and the member
 # whose file name matches `telegraf` is what gets installed. Telegraf re-reads its configuration
 # on SIGHUP, so declaring it as reload_signal applies a received Configuration (name it
-# `telegraf.conf`, matching args below) with an in-place reload instead of a restart; a reload
-# that fails still falls back to the restart. reload_signal is unix-only.
+# `telegraf-conf`, matching args below) with an in-place reload instead of a restart; a reload
+# that fails still falls back to the restart. reload_signal is unix-only. A Configuration name
+# carries no extension — like every name here it is lowercase letters, digits and `-`.
 # [[supervisor]]
 # type = "command"
 # name = "telegraf"
 # command = "telegraf"
-# args = ["--config", "${config_dir}/telegraf.conf"]
+# args = ["--config", "${config_dir}/telegraf-conf"]
 # version_args = ["--version"]          # Telegraf prints a Semantic Versioning version
 # reload_signal = "HUP"

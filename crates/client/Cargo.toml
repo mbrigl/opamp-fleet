@@ -66,6 +66,7 @@ webpki-roots.workspace = true
 flate2.workspace = true
 tar.workspace = true
 sevenz-rust2.workspace = true
+zip.workspace = true
 
 # ADR-0011: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
