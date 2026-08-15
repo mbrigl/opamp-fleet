@@ -3,7 +3,7 @@
 # resolve the same compiler and dependency versions and cannot drift apart on the wire format.
 [workspace]
 resolver = "2"
-members = ["crates/opamp", "crates/server", "crates/client"]
+members = ["crates/opamp", "crates/server", "crates/client", "crates/package-tools"]
 
 [workspace.package]
 version = "0.3.0"
@@ -52,9 +52,9 @@ flate2 = "1"
 # (ADR-0035).
 # `compress` adds the *writer*, which is behind that one feature in its entirety: it is what lets
 # `opamp-package-sign pack` build the artifact an operator has otherwise no supported way to
-# produce. The Client daemon never encodes, so the linker drops it — measured at +7 KB on the
-# release binary, against a build-time cost only.
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
+# produce. Only `crates/package-tools` and the Client's own tests ask for it (ADR-0065); the
+# Client daemon never encodes, and does not enable it.
+sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256"] }
 # Reading a `.zip` package artifact (ADR-0064) — the container the GLPI Agent's portable Windows
 # build is published in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;

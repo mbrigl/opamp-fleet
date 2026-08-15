@@ -1750,6 +1750,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "package-tools"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "client",
+ "dialoguer",
+ "flate2",
+ "hex",
+ "reqwest",
+ "ring",
+ "rustls",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

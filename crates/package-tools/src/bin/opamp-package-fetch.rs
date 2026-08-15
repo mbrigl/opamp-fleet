@@ -654,7 +654,7 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     download(&plan.url, &downloaded).await?;
 
     let published = published_sha256(&plan.checksum, &downloaded).await?;
-    let actual = hex(&sha256_file(&downloaded)?);
+    let actual = hex::encode(sha256_file(&downloaded)?);
     if actual != published {
         // The file stays for inspection: a mismatch is either a truncated download or something
         // that deserves a look, and deleting the evidence serves neither.
@@ -677,7 +677,10 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
             // The AppImage was a means, not a result; leaving it beside the artifact invites
             // uploading the wrong file.
             let _ = std::fs::remove_file(&downloaded);
-            eprintln!("  repacked  sha256 {}", hex(&sha256_file(&artifact)?));
+            eprintln!(
+                "  repacked  sha256 {}",
+                hex::encode(sha256_file(&artifact)?)
+            );
             Ok(artifact)
         }
     }
@@ -1037,10 +1040,6 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     std::io::copy(&mut file, &mut hasher)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ok(hasher.finalize().to_vec())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

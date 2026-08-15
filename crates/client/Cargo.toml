@@ -1,7 +1,8 @@
 [package]
 name = "client"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0003)"
-# The test stub (src/bin/stub_agent.rs) is a second binary; `cargo run -p client` means this one.
+# The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p client` means this one.
+# The operator tools are not here at all: they are `crates/package-tools` (ADR-0065).
 default-run = "opamp-fleet-client"
 version.workspace = true
 edition.workspace = true
@@ -131,10 +132,9 @@ post_trans_script = "../../packaging/linux/posttrans"
 
 [dev-dependencies]
 tempfile = "3"
-# Tests build the `.7z` fixtures they then open. The encoder used to ride here alone, because the
-# Client daemon only ever decompresses — it is now on for the workspace as well, since
-# `opamp-package-sign pack` is a shipped bin target of this crate and dev-dependencies do not reach
-# a bin. Stated here too: what the tests need does not depend on why the workspace enables it.
+# Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
+# encoder rides here alone again now that `pack` has moved to its own crate (ADR-0065) — a
+# dev-dependency reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.
 server = { path = "../server" }

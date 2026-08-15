@@ -2,19 +2,24 @@
 //! (ADR-0015, ADR-0018).
 //!
 //! Package signatures are **raw Ed25519** over the artifact bytes, verified by the Client with the
-//! `ring` provider (see `crate::packages::verify`). This tool produces exactly that format, so it
-//! lives alongside the code that defines it — a `keygen`/`sign` counterpart to the Client's verify.
-//! `pack` is the same idea one step earlier: it writes the two container formats
-//! [`crate::archive`] can open, with the member named the way the Supervisor will look for it. It
-//! is a standalone operator convenience: nothing the Server or Client runtime does depends on it.
+//! `ring` provider (see `client::packages::verify`). This tool produces exactly that format — a
+//! `keygen`/`sign` counterpart to the Client's verify. `pack` is the same idea one step earlier:
+//! it writes container formats [`client::archive`] can open, with the member named the way the
+//! Supervisor will look for it, and its tests open what it wrote with that same module.
+//!
+//! It is an operator tool, and lives in its own crate for that reason (ADR-0065): nothing the
+//! Server or Client runtime does depends on it, and a managed host never runs it.
 //!
 //! Typical use — build an artifact, sign it, upload it:
-//!   opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
-//!   # put that hex in the Client's `[packages] verification_key`
-//!   sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-//!   sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
-//!   curl -X PUT "http://<server>:4320/api/v1/packages/promtail?version=3.0.0&signature=$sig" \
-//!        --data-binary @promtail-3.0.0.tar.gz
+//!
+//! ```text
+//! opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
+//! # put that hex in the Client's `[packages] verification_key`
+//! sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
+//! sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+//! curl -X PUT "http://<server>:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
+//!      --data-binary @promtail-3.0.0.tar.gz
+//! ```
 //!
 //! Script-friendly: the hex output (public key, signature, or SHA-256) goes to stdout alone;
 //! status messages go to stderr.
@@ -66,10 +71,11 @@ enum Command {
     /// archive keeps it. Pack `./build/promtail` for a Supervisor whose `command = "promtail"` and
     /// the names already agree; `--program-name` is for when they do not.
     ///
-    /// Only the two containers the Client can open are produced. There is deliberately
-    /// no `zip`: the Client detects an artifact by its leading bytes, and anything that is neither
-    /// gzip nor 7z is taken to *be* the program, so a `.zip` would be installed over the binary
-    /// unopened.
+    /// Two of the three containers the Client can open are produced. There is deliberately no
+    /// `zip`: the Client reads one (ADR-0064) so that a build published as a zip travels as
+    /// published, which is the opposite of a reason to *write* one here — a zip carries no Unix
+    /// modes, and packing an artifact into it would be choosing the one container that cannot say
+    /// the program is executable.
     Pack {
         /// The program to pack — one file, since exactly one member is ever installed.
         program: PathBuf,
@@ -577,7 +583,7 @@ mod tests {
         let bytes = std::fs::read(&artifact).expect("read");
         let signature = keypair.sign(&bytes).as_ref().to_vec();
 
-        // The exact check from crate::packages::verify — raw Ed25519, public key, over the bytes.
+        // The exact check from client::packages::verify — raw Ed25519, public key, over the bytes.
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public)
             .verify(&bytes, &signature)
             .expect("the client verifier accepts the tool's signature");
