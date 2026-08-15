@@ -15,7 +15,25 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.0]
+## [0.3.1]
+
+### Fixed
+
+- **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
+  decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
+  already rolled out and therefore immutable
+  ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)), a package store at its ceiling
+  ([ADR-0015](docs/adr/0015-package-delivery-for-managed-processes.md)). With hundreds of megabytes
+  already in flight that answer races the upload, the connection resets, and what the tool could
+  report was a transport error naming the one thing that was *not* the problem: the Server had
+  answered, and said why. It now asks a second time with an empty artifact — refused in its own
+  right, so the probe can store nothing — and reports the Server's status and message. Transport
+  errors that are genuine read better too: the cause beneath `reqwest`'s own layer is printed
+  rather than swallowed, on downloads as well as uploads.
+  **What to do:** nothing. An upload that has been failing with `cannot reach …` will name its
+  reason on the next run.
+
+## [0.3.0] - 2026-08-15
 
 ### Changed
 

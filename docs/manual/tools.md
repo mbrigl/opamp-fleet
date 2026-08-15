@@ -136,6 +136,23 @@ Done. What a Supervisor needs to install these:
 With `--no-upload` (or a declined prompt) it also prints the two `curl` calls that would have
 uploaded the artifacts, so the step can be done later or from somewhere else.
 
+### When an upload is refused
+
+The Server decides some uploads before it reads a byte of the artifact, and says which:
+
+| What it answers | What to do |
+|---|---|
+| `409 … immutable` | The Set is already rolled out to an Agent, so its entries are fixed ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Set first. |
+| `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Set you no longer roll out, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
+| `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-distributing-software)). |
+| `413 …` | The artifact is past `max_package_size_bytes`. |
+
+Because the refusal arrives while the artifact is still being sent, the connection can reset before
+the answer is read; the tool then asks the Server once more with an empty body to recover the reason,
+so what you see is the status and message above rather than a bare connection error. A message that
+does still begin `cannot reach` is what it says — the Server was not answering — and it carries the
+underlying cause (DNS, refused connection, TLS) rather than only the request that failed.
+
 ### What it does not do
 
 - **It does not sign.** Signing needs a key, and where that key lives is a decision a tool should

@@ -935,22 +935,63 @@ async fn upload(
         .body("{}")
         .send()
         .await
-        .map_err(|e| format!("cannot reach {set}: {e}"))?;
+        .map_err(|e| format!("cannot reach {set}: {}", because(&e)))?;
     expect_ok(response, &set).await?;
 
     let entry = format!("{set}/entries/{}/{}", plan.os, plan.arch);
     eprintln!("  uploading {} …", artifact.display());
     let bytes =
         std::fs::read(artifact).map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-    let response = http()?
-        .put(&entry)
-        .body(bytes)
-        .send()
-        .await
-        .map_err(|e| format!("cannot reach {entry}: {e}"))?;
+    let response = match http()?.put(&entry).body(bytes).send().await {
+        Ok(response) => response,
+        Err(e) => return Err(refusal_behind(&entry, &e).await),
+    };
     expect_ok(response, &entry).await?;
     eprintln!("  stored as the {}/{} entry — not distributed: press the rollout when it should reach hosts", plan.os, plan.arch);
     Ok(())
+}
+
+/// Why an upload never came back with a status.
+///
+/// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
+/// created, a Set already assigned and therefore immutable (ADR-0061), a store at its ceiling
+/// (ADR-0015). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
+/// them back — HTTP's own remedy for exactly this, which this client does not speak — that
+/// response races the upload, the connection resets, and what arrives here is a transport error
+/// carrying no status at all. Reporting it as "cannot reach" would name the one thing that is not
+/// the problem: the Server answered, and said why.
+///
+/// So ask a second time with an empty artifact. The pre-body checks are the same ones and they run
+/// again, but the request is small enough to survive the trip. An empty artifact is itself refused
+/// (`400`), so the probe can never store anything — and a `400` is the answer that carries no news:
+/// it means the checks passed and the Server got as far as the body, leaving the transport error as
+/// the real story.
+async fn refusal_behind(entry: &str, error: &reqwest::Error) -> String {
+    let sent = match http() {
+        Ok(client) => client.put(entry).body(Vec::new()).send().await,
+        Err(e) => return e,
+    };
+    if let Ok(response) = sent {
+        let status = response.status();
+        if status != reqwest::StatusCode::BAD_REQUEST {
+            let body = response.text().await.unwrap_or_default();
+            return format!("{entry} answered {status}: {}", body.trim());
+        }
+    }
+    format!("cannot reach {entry}: {}", because(error))
+}
+
+/// A transport error with the cause that explains it. `reqwest::Error` displays only its own layer
+/// — "error sending request for url (…)" — while the sentence that says *what went wrong* sits one
+/// or two sources below it.
+fn because(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
 }
 
 async fn expect_ok(response: reqwest::Response, url: &str) -> Result<(), String> {
@@ -979,7 +1020,7 @@ async fn get(url: &str) -> Result<reqwest::Response, String> {
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("cannot reach {url}: {e}"))?;
+        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -999,7 +1040,7 @@ async fn download(url: &str, dest: &Path) -> Result<(), String> {
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("cannot download {url}: {e}"))?
+        .map_err(|e| format!("cannot download {url}: {}", because(&e)))?
     {
         file.write_all(&chunk)
             .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
@@ -1262,6 +1303,96 @@ mod tests {
             parse_sums("aaaa  something-else\n", &artifact),
             None,
             "a file with no line for this artifact is not a checksum for it"
+        );
+    }
+
+    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0061), an
+    /// unknown identity, a full store — leaves the operator with a transport error and no status:
+    /// the refusal races a body already in flight and loses. What the operator must still be told
+    /// is *why the Server said no*, never "cannot reach" about a Server that answered.
+    ///
+    /// The stand-in Server here drops the upload connection without answering at all, which is the
+    /// same thing seen from the client and the deterministic form of it: a race that sometimes
+    /// delivers the response would be a test that sometimes passes.
+    #[tokio::test]
+    async fn a_refusal_lost_with_the_upload_is_asked_for_again() {
+        use std::io::{Read, Write};
+
+        // What `main` does before anything builds a client (ADR-0007).
+        client::tls::install_ring_provider();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let server = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            let mut uploads = 0;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                // Byte at a time, stopping at the blank line: reading the head must never spill
+                // into a body this Server has decided not to read.
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                if !head.contains("/entries/") {
+                    // The Set call is answered as the real Server answers it — body read first,
+                    // so the response is not what a reset takes away.
+                    let length: usize = head
+                        .to_ascii_lowercase()
+                        .split("content-length:")
+                        .nth(1)
+                        .and_then(|rest| rest.split("\r\n").next())
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; length];
+                    let _ = stream.read_exact(&mut body);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    );
+                    continue;
+                }
+                uploads += 1;
+                if uploads == 1 {
+                    // The artifact is still being written; this connection ends with nothing on it.
+                    continue;
+                }
+                let refusal = b"{\"error\":\"set otelcol@0.0.1@otelcol is assigned to an Agent\"}";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        refusal.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.write_all(refusal);
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("otelcol_0.0.1_linux_amd64.tar.gz");
+        // Comfortably past any socket buffer, so the write is still in progress when the
+        // connection goes — the shape a real artifact has and a two-byte body would not.
+        std::fs::write(&artifact, vec![0u8; 8 * 1024 * 1024]).expect("write");
+        let plan = Plan {
+            os: "linux".into(),
+            arch: "amd64".into(),
+            url: String::new(),
+            checksum: ChecksumSource::BareDigest { url: String::new() },
+            action: Action::AsPublished,
+            out_name: "otelcol_0.0.1_linux_amd64.tar.gz".into(),
+            block_hint: String::new(),
+        };
+
+        let error = upload(&server, "otelcol", "0.0.1", &plan, &artifact)
+            .await
+            .expect_err("an upload nothing accepted is not a success");
+        assert!(
+            error.contains("409 Conflict") && error.contains("assigned to an Agent"),
+            "the operator is told what the Server refused, not that it could not be reached: {error}"
         );
     }
 }
