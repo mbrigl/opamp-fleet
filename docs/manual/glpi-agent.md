@@ -41,8 +41,8 @@ Three consequences follow:
 - **The block is the operator's to write.** A Server-delivered Supervisor set may name only
   Client-owned programs, so this block lives in each host's `client.toml` — written by hand or by
   the configuration management that installs the GLPI Agent anyway.
-- **The configuration is still central.** The agent's `agent.cfg` is a Configuration on the
-  Server, typed `glpi-agent`, rolled out and applied by restart like any other — that, plus
+- **The configuration is still central.** The agent's configuration file is a Configuration on
+  the Server, typed `glpi-agent`, rolled out and applied by restart like any other — that, plus
   health and restart, is what the fleet gains.
 
 ## The shape: a foreground daemon
@@ -94,7 +94,7 @@ service_name = "glpi-agent"
 command = "/usr/bin/glpi-agent"
 args = [
     "--daemon", "--no-fork",
-    "--conf-file=${config_dir}/agent.cfg",
+    "--conf-file=${config_dir}/glpi-agent-conf",
     "--logger=file", "--logfile=${supervisor_dir}/glpi-agent.log", "--logfile-maxsize=16",
 ]
 version_args = ["--version"]
@@ -106,8 +106,11 @@ What each line is doing:
   supervised but never written to.
 - `service_name = "glpi-agent"` is the Agent **type** every GLPI Configuration is aimed at. The
   block's `name` is yours; keeping it short (`glpi`) keeps the directory short.
-- `--conf-file=${config_dir}/agent.cfg` points the agent at the written Configuration entry —
-  `agent.cfg` is the *name of the Configuration on the Server*; see
+- `--conf-file=${config_dir}/glpi-agent-conf` points the agent at the written Configuration entry —
+  `glpi-agent-conf` is the *name of the Configuration on the Server*, and a name carries no
+  extension: Configuration names follow the same grammar as every other name here — 1–32
+  lowercase letters, digits and `-`, no dot — while `--conf-file` reads whatever path it is
+  given. See
   [step 4](#4-send-its-configuration) for what happens before the first one arrives.
 - The logger flags are optional but earn their keep: the agent logs to stderr by default, and a
   file under `${supervisor_dir}` is one you can find, sized in MB by `--logfile-maxsize`, and one
@@ -136,7 +139,7 @@ args = [
     '-IC:\Program Files\GLPI-Agent\perl\lib',
     'C:\Program Files\GLPI-Agent\perl\bin\glpi-agent',
     '--daemon', '--no-fork',
-    '--conf-file=${config_dir}/agent.cfg',
+    '--conf-file=${config_dir}/glpi-agent-conf',
     '--logger=file', '--logfile=${supervisor_dir}/glpi-agent.log', '--logfile-maxsize=16',
 ]
 version_args = ['--version']
@@ -154,16 +157,19 @@ version_args = ['--version']
 
 ## 4. Send its configuration
 
-The agent.cfg the fleet delivers is an ordinary Configuration — typed `glpi-agent` so it reaches
-no other kind of Agent, named `agent.cfg` because that is the file name the `--conf-file`
-argument expects, written in the GLPI Agent's own `key = value` format:
+The configuration the fleet delivers is an ordinary Configuration — typed `glpi-agent` so it
+reaches no other kind of Agent, named `glpi-agent-conf` because that is the file name the
+`--conf-file` argument expects, written in the GLPI Agent's own `key = value` format:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "glpi-agent", "selector": {}, "body": "server = https://glpi.example.com/front/inventory.php\n"}' \
-       http://127.0.0.1:4320/api/v1/configurations/agent.cfg
-$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/agent.cfg/rollout
+       http://127.0.0.1:4320/api/v1/configurations/glpi-agent-conf
+$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/glpi-agent-conf/rollout
 ```
+
+A minimal body to start from is `config/examples/glpi-agent-conf.cfg` in this repository;
+`scripts/seed_test_configs.sh` PUTs and rolls out exactly that one under this name.
 
 The delivered file is the agent's **whole** configuration — with `--conf-file` it does not read
 the native `/etc/glpi-agent/agent.cfg` or `etc\agent.cfg` the installer left behind. Any
@@ -190,7 +196,7 @@ rolled-out Configuration then lands in `config/` with nothing reading it.
 | `capabilities` | No `AcceptsPackages` — by design; the machine's package manager updates this program. `AcceptsRestartCommand` is there: the fleet-view restart works. |
 | `service_version` | Usually absent — see the `version_args` note in [step 2](#2-the-block-on-linux). The version is on the GLPI server's inventory anyway. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |
-| `remote_config_status`, `effective_config` | The `agent.cfg` round trip: `APPLIED` once the restarted agent survives `apply_grace_secs`. |
+| `remote_config_status`, `effective_config` | The `glpi-agent-conf` round trip: `APPLIED` once the restarted agent survives `apply_grace_secs`. |
 
 ## Fleet-delivered: the agent as a package
 
@@ -241,7 +247,7 @@ program_path = "AppRun"            # …and it is the tree's entry point
 args = [
     "--script=glpi-agent",         # the AppImage bundles several; this selects the agent
     "--daemon", "--no-fork",
-    "--conf-file=${config_dir}/agent.cfg",
+    "--conf-file=${config_dir}/glpi-agent-conf",
     "--vardir=${supervisor_dir}/agent-state",
 ]
 ```
@@ -262,7 +268,7 @@ args = [
     "-I${supervisor_dir}/program/tree/perl/lib",
     "${supervisor_dir}/program/tree/perl/bin/glpi-agent",
     "--daemon", "--no-fork",
-    "--conf-file=${config_dir}/agent.cfg",
+    "--conf-file=${config_dir}/glpi-agent-conf",
     "--vardir=${supervisor_dir}/agent-state",
 ]
 ```
@@ -311,8 +317,8 @@ as that account, and two things follow:
 
 | Symptom | Cause |
 |---|---|
-| The Agent holds with *"the program keeps failing to start"* right after setup | No `agent.cfg` Configuration has been rolled out yet — the agent exits on the missing `--conf-file`. Roll it out ([step 4](#4-send-its-configuration)); the apply ends the hold. The agent's log says `Config: non-existing file …`. |
-| The hold persists after a rollout | The Configuration does not reach this Agent: its name must be `agent.cfg` (the file name in `args`), its `service_name` must be `glpi-agent`, and its Selector must match — check the Agent's row for the entry. |
+| The Agent holds with *"the program keeps failing to start"* right after setup | No `glpi-agent-conf` Configuration has been rolled out yet — the agent exits on the missing `--conf-file`. Roll it out ([step 4](#4-send-its-configuration)); the apply ends the hold. The agent's log says `Config: non-existing file …`. |
+| The hold persists after a rollout | The Configuration does not reach this Agent: its name must be `glpi-agent-conf` (the file name in `args`, and a Configuration name admits no dot), its `service_name` must be `glpi-agent`, and its Selector must match — check the Agent's row for the entry. |
 | *"Can't write in /var/lib/glpi-agent"* in the agent's log | The Client runs under an account that does not own the agent's state directory — see [the account section](#running-under-an-account-that-is-not-root-or-localsystem). |
 | The host is inventoried twice, or the agent logs that port 62354 is in use | The native autostart is still active beside the Supervisor — [step 1](#1-hand-over-the-autostart) was skipped or a package upgrade re-enabled the service. |
 | Windows: the process exits immediately, log says *"Can't locate … in @INC"* | The `-I` paths do not match the installation — `INSTALLDIR` differs from `C:\Program Files\GLPI-Agent`. Fix all six paths in the block together. |
