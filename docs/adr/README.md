@@ -91,4 +91,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0060](0060-unified-supervisor-lifecycle-port.md) | One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin | 🟡 proposed |
 | [0061](0061-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟡 proposed |
 | [0062](0062-the-service-runs-under-an-operator-named-account.md) | The system service may run under an operator-named account — and the instance's files belong to that account | 🟢 accepted |
+| [0063](0063-the-glpi-agent-is-supervised-by-the-command-kind.md) | The GLPI Agent is supervised by the `command` kind — one documented recipe per platform, no new plugin | 🟡 proposed |
+| [0064](0064-self-contained-glpi-agent-packages-for-both-platforms.md) | Self-contained GLPI Agent packages — the Windows zip as published, the Linux AppImage repacked as a tree | 🟡 proposed |
 
