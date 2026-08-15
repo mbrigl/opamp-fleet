@@ -37,6 +37,27 @@ carries a date once its tag exists.
 
 ### Added
 
+- **A package artifact may be a `.zip`**
+  ([ADR-0064](docs/adr/0064-self-contained-glpi-agent-packages-for-both-platforms.md)). The
+  Client now opens three containers, still decided by leading bytes: `.tar.gz`, `.7z`, and
+  `.zip` — as a single-file package and as a tree (`program_path`), held to the same member
+  rules as the others (no links, no paths climbing out, the same member and size bounds). Zip
+  support is **read-only and unencrypted**: an encrypted member is refused with a message
+  pointing at `.7z`, which is what `[packages] archive_key` opens. This exists so an upstream
+  build published as a zip — the GLPI Agent's portable Windows tree — can be uploaded or
+  referenced exactly as published, with upstream's own SHA-256 as the hash every Agent verifies.
+  **What to do:** nothing, unless you relied on a `.zip` artifact being installed *as* the
+  program. That was never useful — the agent would not start — but it did leave the file in
+  place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
+  right container for a tree on Unix, being the one that carries file modes.
+- **The GLPI Agent can be delivered by the fleet**
+  ([ADR-0064](docs/adr/0064-self-contained-glpi-agent-packages-for-both-platforms.md)). On
+  Windows the official portable zip is the artifact, uploaded (or referenced) as published; on
+  Linux `scripts/pack-glpi-agent.sh <version>` builds one deterministically from the official
+  AppImage — verifying upstream's SHA-256, extracting without needing FUSE on any host, and
+  printing the artifact's hash. Both are amd64; see the
+  [GLPI Agent recipe](docs/manual/glpi-agent.md#fleet-delivered-the-agent-as-a-package).
+  **What to do:** nothing — this is a new option beside supervising a machine-installed agent.
 - **A `command` Supervisor can reload instead of restart**
   ([ADR-0060](docs/adr/0060-unified-supervisor-lifecycle-port.md)). A `[[supervisor]]` block of
   `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,

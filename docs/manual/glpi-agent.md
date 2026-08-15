@@ -10,6 +10,13 @@ Supervisor, so it appears to the Server as its own Agent — health, a restart t
 from the fleet view, and a centrally rolled-out configuration — with the same block shape on both
 platforms.
 
+Two routes lead there, and the page covers both:
+
+| Route | The agent is | Choose it when |
+|---|---|---|
+| **Machine-installed** (below) | installed by `apt`/`dnf` or the MSI, named by absolute path | the host's package manager should keep owning GLPI updates |
+| **[Fleet-delivered](#fleet-delivered-the-agent-as-a-package)** | a package the Server ships, owned by the Client | the fleet should install and update GLPI itself — nothing preinstalled, no Perl on the host |
+
 - [How this differs from the package walkthrough](#how-this-differs-from-the-package-walkthrough)
 - [The shape: a foreground daemon](#the-shape-a-foreground-daemon)
 - [1. Hand over the autostart](#1-hand-over-the-autostart)
@@ -17,6 +24,7 @@ platforms.
 - [3. The block on Windows](#3-the-block-on-windows)
 - [4. Send its configuration](#4-send-its-configuration)
 - [5. What to expect in the fleet view](#5-what-to-expect-in-the-fleet-view)
+- [Fleet-delivered: the agent as a package](#fleet-delivered-the-agent-as-a-package)
 - [Running under an account that is not root or LocalSystem](#running-under-an-account-that-is-not-root-or-localsystem)
 - [Troubleshooting](#troubleshooting)
 
@@ -183,6 +191,107 @@ rolled-out Configuration then lands in `config/` with nothing reading it.
 | `service_version` | Usually absent — see the `version_args` note in [step 2](#2-the-block-on-linux). The version is on the GLPI server's inventory anyway. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |
 | `remote_config_status`, `effective_config` | The `agent.cfg` round trip: `APPLIED` once the restarted agent survives `apply_grace_secs`. |
+
+## Fleet-delivered: the agent as a package
+
+Everything above supervises an agent the machine installed. The other route lets the **fleet**
+own the installation — nothing preinstalled, no Perl and no FUSE on the host, updates and
+rollback through the same package machinery every other agent uses. It exists because upstream
+publishes self-contained builds for both platforms; what changes is only the block's program
+(ADR-0064).
+
+**On Windows the artifact is upstream's own portable zip**, uploaded exactly as published:
+
+```console
+$ curl -LO https://github.com/glpi-project/glpi-agent/releases/download/1.19/GLPI-Agent-1.19-x64.zip
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+       http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19
+$ curl -X PUT --data-binary @GLPI-Agent-1.19-x64.zip \
+       "http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19/entries/windows/amd64"
+```
+
+Because nothing repacks it, the hash the Agents verify is the one upstream published — check it
+against the release's `glpi-agent-1.19.sha256` and you have verified what every host will run.
+The same file can stay on the release page instead: point a
+[referenced entry](rollout.md#4-give-it-to-the-server) at its URL with that hash.
+
+**On Linux the fleet artifact is built once from the AppImage**, upstream's self-contained Linux
+build. `scripts/pack-glpi-agent.sh` verifies the release's own SHA-256, extracts it (no FUSE
+needed), drops the symlinks a tree package cannot carry, and packs a deterministic `.tar.gz` —
+the same release always yields the same hash, so a repack never becomes a rollout nobody asked
+for:
+
+```console
+$ sha=$(scripts/pack-glpi-agent.sh 1.19)
+$ curl -X PUT --data-binary @glpi-agent_1.19_linux_amd64.tar.gz \
+       "http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19/entries/linux/amd64"
+```
+
+The blocks name the program by **bare name** — that is the consent that makes this Agent accept
+packages — and `program_path` says where it sits inside the tree:
+
+```toml
+# Linux
+[[supervisor]]
+type = "command"
+name = "glpi"
+service_name = "glpi-agent"
+command = "AppRun"                 # bare: the Client owns and updates it
+program_path = "AppRun"            # …and it is the tree's entry point
+args = [
+    "--script=glpi-agent",         # the AppImage bundles several; this selects the agent
+    "--daemon", "--no-fork",
+    "--conf-file=${config_dir}/agent.cfg",
+    "--vardir=${supervisor_dir}/agent-state",
+]
+```
+
+```toml
+# Windows
+[[supervisor]]
+type = "command"
+name = "glpi"
+service_name = "glpi-agent"
+command = "glpi-agent.exe"
+program_path = "perl/bin/glpi-agent.exe"
+working_dir = "${supervisor_dir}/program/tree"   # what the portable .bat does
+args = [
+    "-I${supervisor_dir}/program/tree/perl/agent",
+    "-I${supervisor_dir}/program/tree/perl/site/lib",
+    "-I${supervisor_dir}/program/tree/perl/vendor/lib",
+    "-I${supervisor_dir}/program/tree/perl/lib",
+    "${supervisor_dir}/program/tree/perl/bin/glpi-agent",
+    "--daemon", "--no-fork",
+    "--conf-file=${config_dir}/agent.cfg",
+    "--vardir=${supervisor_dir}/agent-state",
+]
+```
+
+`${supervisor_dir}/program/tree` is where a tree package lands — the same path
+[Where things live on disk](client.md#where-things-live-on-disk) shows — so the `-I` arguments
+follow the package instead of naming an install directory that does not exist on this route.
+
+Three things this route needs that the machine-installed one does not:
+
+- **`--vardir` must point outside the tree, and the directory must exist.** The agent never
+  creates it and exits if it is missing, and anything inside `program/tree/` is replaced
+  wholesale by the next update — which would discard the agent's `deviceid` and make the GLPI
+  server see a new asset. `${supervisor_dir}/agent-state` is Client-owned, survives every swap,
+  and is removed with the Supervisor. Create it once (configuration management, or by hand)
+  before the first start.
+- **The block may be rolled out from the Server.** Bare-named programs are the one shape a
+  Server-delivered Supervisor set may carry, so unlike the machine-installed route this block
+  can travel in a Configuration typed `opamp-fleet-client` — see
+  [The Server can manage the set](client.md#the-server-can-manage-the-set).
+- **Nothing native is installed, so [step 1](#1-hand-over-the-autostart) does not apply** —
+  there is no service to disable, unless a native GLPI Agent is also present, in which case
+  disable it as described there.
+
+Updating is the ordinary act: a new version is a new Set, uploaded and rolled out, health-gated
+on the host and rolled back if the new tree will not stay up
+([walkthrough step 8](rollout.md#8-ship-an-update-and-take-it-back)). One platform limit:
+upstream publishes the AppImage for **x86_64 only**, so Linux arm64 hosts stay on the
+machine-installed route above.
 
 ## Running under an account that is not root or LocalSystem
 

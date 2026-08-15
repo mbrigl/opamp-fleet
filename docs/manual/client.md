@@ -767,10 +767,10 @@ binary, whatever anyone forgot to aim. What then happens on the host:
    memory.
 2. It is **verified**: the content hash always, and the Ed25519 signature whenever
    `[packages] verification_key` is set.
-3. It is **unpacked** when it is a `.tar.gz` or a `.7z` — the member whose file name
+3. It is **unpacked** when it is a `.tar.gz`, a `.7z`, or a `.zip` — the member whose file name
    matches the configured program, so an upstream release can be uploaded exactly as published. An
-   encrypted `.7z` opens with `[packages] archive_key`. A bare program artifact is moved into place
-   rather than copied.
+   encrypted `.7z` opens with `[packages] archive_key`; an encrypted `.zip` is refused, because
+   encryption is what `.7z` is for. A bare program artifact is moved into place rather than copied.
 4. It is **swapped** over the program in `program/`, the process restarted, and the new version
    **health-gated** on `apply_grace_secs` — one that will not stay up is **rolled back**.
 5. Progress is reported throughout: `Downloading` (with percent and bytes per second, repeated every
@@ -848,10 +848,12 @@ Members outside the program's own directory — a `LICENSE` beside the wrapper �
 the count is logged rather than passed over in silence.
 
 Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
-tree**; a `.7z` is opened too, but 7z stores Windows attributes, so only the program is made
-executable and a helper binary beside it would not be. And **`program_path` and an absolute
-`binary`/`command` are refused together** — the machine's program is not something this Client
-unpacks into.
+tree** on Unix; a `.7z` and a `.zip` are opened too, but both store Windows attributes rather than
+Unix modes, so only the program is made executable and a helper binary beside it would not be —
+which costs nothing for a tree that runs on Windows, and is why the GLPI Agent's portable Windows
+build ships as the `.zip` upstream published (see the [GLPI Agent recipe](glpi-agent.md)). And
+**`program_path` and an absolute `binary`/`command` are refused together** — the machine's program
+is not something this Client unpacks into.
 
 ## Updating the Client itself
 
