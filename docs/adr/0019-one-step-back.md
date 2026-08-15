@@ -1,6 +1,6 @@
 # ADR-0019: One step back — the package store remembers the version it replaced
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0052](0052-a-package-is-a-versioned-set.md)
 - **Date:** 2026-08-06
 - **Deciders:** Markus Brigl
 

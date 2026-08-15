@@ -47,7 +47,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0016](0016-configuration-content-role.md) | Carry the Baseline's `AgentConfigFile.role` through the Configuration model | 🟢 accepted |
 | [0017](0017-selector-targeted-packages.md) | Selector-targeted packages, chosen by the Server rather than named on each host | 🟢 accepted |
 | [0018](0018-packages-imported-from-a-url.md) | A package is an uploaded archive or a URL the Agents fetch — unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
-| [0019](0019-one-step-back.md) | One step back — the package store remembers the version it replaced | 🟢 accepted |
+| [0019](0019-one-step-back.md) | One step back — the package store remembers the version it replaced | ⚪ superseded by [0052](0052-a-package-is-a-versioned-set.md) |
 | [0020](0020-client-self-update.md) | The Client updates itself — its own Agent, a staged version, and a restart it does not issue | 🟢 accepted |
 | [0021](0021-supervisor-directory-and-path-implied-package-consent.md) | One directory per Supervisor — a bare program name means the Client owns it and updates it, an absolute path means it does not | 🟢 accepted |
 | [0022](0022-supervisor-path-placeholders-in-process-arguments.md) | A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync | 🟢 accepted |
@@ -71,7 +71,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0040](0040-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
 | [0041](0041-the-client-logs-to-a-file-in-service-mode.md) | A Client running as a service logs to a file, on every platform | 🟢 accepted |
 | [0042](0042-server-set-labels.md) | The Server labels an Agent — rollout rings that are not a file on the host | 🟢 accepted |
-| [0043](0043-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | 🟢 accepted |
+| [0043](0043-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | ⚪ superseded by [0061](0061-a-rollout-is-an-explicit-act.md) |
 | [0044](0044-what-the-shared-crate-holds.md) | The shared crate holds what both ends implement *identically* — measured, not by category | 🟢 accepted |
 | [0045](0045-the-version-helper-lives-in-the-shared-crate.md) | The single version helper lives in `crates/opamp`, so both ends report one number | 🟢 accepted |
 | [0046](0046-a-release-ships-native-installers.md) | A release also ships native installers — `.deb`, `.rpm`, and an `.msi` that asks for the install root and the endpoint | 🟢 accepted |
@@ -83,7 +83,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟢 accepted |
 | [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟢 accepted |
 | [0054](0054-a-configuration-may-state-the-agent-type-it-is-for.md) | A Configuration may state the Agent type it is for — and then reaches no Agent of another | 🟢 accepted |
-| [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | 🟢 accepted |
+| [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | ⚪ superseded by [0061](0061-a-rollout-is-an-explicit-act.md) |
 | [0056](0056-the-client-accepts-its-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's | 🟢 accepted |
 | [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟢 accepted |
 | [0058](0058-package-rollback-retention-and-no-restart-loop.md) | A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion | 🟢 accepted |
