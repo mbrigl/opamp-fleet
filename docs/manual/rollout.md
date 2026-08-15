@@ -81,7 +81,26 @@ to push.
 
 ## 2. Build the artifact
 
-`opamp-package-sign pack` writes the two containers the Client can open, with the member named the
+**For four agents this step and the next two are one command.**
+[`opamp-package-fetch`](tools.md#opamp-package-fetch) knows where the OpenTelemetry Collector
+(`otelcol`, `otelcol-contrib`), the GLPI Agent, and Telegraf publish, and asks what it cannot
+know — which agent, which of the last five versions, which platforms, and where to upload:
+
+```console
+$ opamp-package-fetch
+```
+
+It verifies every download against the SHA-256 upstream published, leaves the artifact untouched
+wherever upstream's container is one a Client can open — so the hash the fleet verifies is the
+one on the release page — and repacks only where upstream ships no installable archive. It never
+rolls anything out: reaching a host is still [step 5](#5-aim-it-then-roll-it-out). The full
+option list is in [the tools page](tools.md#opamp-package-fetch); if you take that route, read
+on at [step 5](#5-aim-it-then-roll-it-out).
+
+For anything else — your own agent, or a project that tool has never heard of — the rest of this
+step is how an artifact is built by hand.
+
+`opamp-package-sign pack` writes the two containers worth writing, with the member named the
 way the Supervisor will look for it, and prints the artifact's SHA-256:
 
 ```console

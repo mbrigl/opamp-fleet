@@ -10,6 +10,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Client](client.md)** | run a managed host: the OS service, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[GLPI Agent recipe](glpi-agent.md)** | supervise a program the machine installs itself: the GLPI inventory agent as a foreground daemon, on Windows and Linux, configured from the Server |
+| **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a credential the Server accepts), **connection settings** (the Server can move

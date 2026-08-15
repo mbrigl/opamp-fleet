@@ -8,6 +8,9 @@ This decision draws the crate boundaries of the workspace by what each crate is 
 a library with a thin binary on top, so a test can reach what it tests; the shared crate `opamp`
 holds what both ends implement identically, measured rather than assumed.
 
+The operator package tools live in a crate of their own, which depends on the Client rather than
+shipping inside it.
+
 ## Context
 
 ### The Client has no library target
@@ -129,6 +132,40 @@ splits in two.
 - **Simplicity first, and YAGNI.** ADR-0005's rejection of more crates applies in the other
   direction too: a *wider* shared crate is the same speculative structure, differently shaped.
 
+### Operator tooling inside the Client crate
+
+Two operator command-line tools sit inside `crates/client`: `opamp-package-sign` (build, hash, sign
+an artifact) and `opamp-package-fetch` (fetch an upstream agent release, verify it, hand it to the
+Server). Both are *package management* tools: they exist to get software into a fleet, and nothing
+the Server or a Client does at runtime depends on either.
+
+They sit there for a reason that was sufficient when they were written and is no longer.
+ADR-0005 fixes the workspace at **exactly three crates** — `opamp`, `server`, `client` — and the
+Client's library target kept the other binaries (`stub_agent`, `opamp-package-sign`) in that crate:
+a second binary in an existing crate cost nothing, needed no new manifest, and could reach
+`crate::archive` by path.
+
+What that costs is visible:
+
+- **The crate that ships the daemon also carries operator tooling.** `cargo build -p client`
+  builds an interactive downloader; a reader of `crates/client` finds a GitHub release client and
+  a prompt library beside the supervision core. The Client is what runs on every managed host, and
+  the boundary of that crate should say so.
+- **The tools are not a Client concern at all.** They run on an operator's machine, and a release
+  ships neither of them: the `.7z` artifacts and the `.deb`/`.rpm`/`.msi` installers carry
+  `opamp-fleet-client` alone.
+- **Growth pressure.** `opamp-package-fetch` is 700 lines that know four upstream projects'
+  release conventions, and those conventions change (the Collector moved its checksum layout at
+  0.158.0). That is a maintenance surface with its own tempo, unrelated to the Client's.
+
+The coupling to the Client is real but small, and worth keeping rather than cutting:
+
+| What the tools use | Where | Why it should stay |
+|---|---|---|
+| `archive::unix_mode_attributes` | `opamp-package-sign`, at runtime | the 7z Unix-mode convention has one definition, beside the code that decodes it |
+| `archive::extract_*` | both tools, **in tests** | an artifact is checked by opening it with the Client's own unpacker — the property worth asserting is not "this is a valid archive" but "*this* code installs it" |
+| `tls::install_ring_provider` | `opamp-package-fetch`, at runtime | `reqwest` is built with `rustls-no-provider` (ADR-0007) and refuses to work without one |
+
 ## Decision
 
 ### The Client is a library
@@ -138,8 +175,9 @@ We will give `crates/client` a **library target** holding the modules it already
 
 1. **`src/lib.rs` declares the module tree; `src/main.rs` keeps only `fn main`** and whatever
    belongs to starting a process (argument parsing hand-off, the exit code). No module moves on
-   disk, no code moves between modules, and the two other binaries (`stub_agent`,
-   `opamp-package-sign`) stay binaries.
+   disk, and no code moves between modules. The test stubs (`stub_agent`, `stub_crasher`) stay
+   binaries of this package; the operator tool `opamp-package-sign` is a binary of the tools crate
+   (point 9).
 
 2. **Visibility is widened by need, not by default.** A module or item becomes `pub` when a test or
    another target in this package has to reach it, and stays private otherwise. The library's public
@@ -216,6 +254,38 @@ them genuinely written twice moves it, without needing to supersede this ADR.
 The extraction is **behaviour-preserving**. No existing test changes; a suite that needs editing
 means something moved that should not have.
 
+### The operator package tools have their own crate
+
+We will move both operator package tools into a **fourth crate, `package-tools`**, which depends
+on `client` as a library and produces the two binaries under their existing names.
+
+9. **`crates/package-tools/` holds `opamp-package-fetch` and `opamp-package-sign`.** The binary
+   names do not change: they are documented, and `opamp-package-sign` is named in the release
+   workflow.
+
+10. **The dependency arrow points one way: `package-tools` → `client`.** The tools use the Client's
+   `archive` and `tls` items rather than restating them, and their tests open what they produce
+   with the Client's own unpacker. Nothing in `client`, `server`, or `opamp` ever depends on
+   `package-tools`.
+
+11. **The test stubs stay in `client`.** `stub_agent` and `stub_crasher` are fixtures the Client's
+   own integration tests reach through `CARGO_BIN_EXE_*`, which resolves only within the crate
+   that declares them. They are not operator tools and have no business moving.
+
+12. **Tool-only dependencies move with the tools.** Whatever serves only the tools —
+   `dialoguer`'s prompts, the HTTP client's use for release listings — is declared by
+   `package-tools`, so `cargo build -p client` stops building them. Where the Client needs the
+   same crate for its own reasons (`dialoguer` for the interactive install, `reqwest` for the
+   polling transport), both declare it; a workspace dependency is shared, not duplicated.
+
+13. **The release workflow follows the crate.** Its packer step becomes
+   `cargo build --release -p package-tools --bin opamp-package-sign --locked`; nothing else about
+   the pipeline changes, and the artifacts it produces are unchanged.
+
+This **amends ADR-0005** — the workspace is four crates, not three; every other decision that ADR
+made (tokio, axum, one port, embedded UI) is untouched. The Client being a library so a test can
+reach what it tests (point 1) is what makes this move cheap.
+
 ## Alternatives considered
 
 ### For the Client's library target
@@ -266,6 +336,25 @@ means something moved that should not have.
   outbound side: a `watch` subscription over the fleet's desired state, versus an `mpsc` of replies
   coming back through the connection pool. Unifying them needs a trait *and* axum inside `opamp`,
   which is a materially larger decision than this one.
+
+### For the operator package tools
+
+- **Leave them in `crates/client`.** It costs nothing to type. Rejected: it is precisely the
+  boundary problem above — the crate that runs on every managed host would keep carrying tooling
+  that never runs there, and every reader of the Client would keep meeting it.
+- **Move only `opamp-package-fetch`.** Half the change for half the benefit: `opamp-package-sign`
+  is the *same kind of thing*, and splitting the two would leave a crate boundary that no one can
+  state a rule for. If package tooling has a home, both tools are in it.
+- **Move `archive` (and the provider helper) into the shared `opamp` crate so the tool crate need
+  not depend on `client`.** Rejected on the shared crate's rule above: it holds what **both ends
+  implement identically**, measured rather than assumed — unpacking a package artifact is the
+  Client's alone, and the Server explicitly never opens one (ADR-0017). Moving it would widen the
+  shared crate to make a dependency arrow prettier.
+- **A separate repository.** Rejected: the tools' correctness is defined by what the Client can
+  install, and their tests assert exactly that by calling into it. One workspace keeps that check
+  compiling; two repositories would replace it with a version constraint and a hope.
+- **Duplicate the few items the tools need.** Rejected: `unix_mode_attributes` is a convention
+  that must have one definition, and a second copy is how two of them drift apart.
 
 ## Sources / Prior art
 
@@ -320,6 +409,15 @@ means something moved that should not have.
   concrete need) and the Client's library target above (the same rule applied with a
   measurement) — the in-repository precedent the shared crate's rule follows rather than invents.
 
+- [ADR-0005](0005-workspace-and-server-runtime.md) (three crates) — the decision the tools crate
+  amends.
+- [The Cargo Book, workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html) — the
+  shape being used: several crates, one lockfile, one `cargo build --workspace`, per-crate
+  dependencies so a binary's dependency set is the crate's own.
+- Comparable splits in this ecosystem — `rust-analyzer`'s `xtask`-style tooling crates, and
+  Kubernetes' `kubectl` beside `kubelet` — where the operator's command-line tool is built and
+  versioned with the system it drives but is not part of what runs on a managed node.
+
 ## Consequences
 
 - Positive: the operations that write to a host — binary swap, health gate, rollback, tree install
@@ -339,6 +437,13 @@ means something moved that should not have.
 - Positive: the shared crate's charter is a stated rule — *what both ends implement identically* —
   instead of an accident of what was written first, so the next "should this be shared?" is answered
   by measuring.
+
+- Positive: `crates/client` is only what runs on a managed host, and its dependency list says so.
+  The tools have a manifest of their own, so a dependency added for a release-listing quirk is
+  visibly the tools' and not the daemon's. `cargo build -p client` gets smaller — and measurably so
+  in one place: the 7z **writer** (`sevenz-rust2/compress`) is not enabled for the whole workspace,
+  because `pack` is not a bin target of the client crate; it is a dependency of the tools and of
+  the Client's own tests only.
 
 - Negative / trade-offs: **items become `pub` that are not a public API in any meaningful sense.**
   The package is `publish = false`, so this binds nobody outside the workspace — but "pub" stops
@@ -370,6 +475,12 @@ means something moved that should not have.
 - Negative / trade-offs: the shared crate's rule answers "no" to the larger question. Someone will
   ask again. The "what stays where it is" list above is the answer, and it is why it is written down.
 
+- Negative / trade-offs: a fourth crate is a fourth manifest, and a workspace member whose only
+  purpose is two binaries. The tools build the Client library to compile — which they did anyway,
+  invisibly, as binaries inside it. One line of the release workflow changes, and any operator
+  muscle memory of `cargo run -p client --bin …` becomes `cargo run -p package-tools --bin …` (or
+  the unchanged `cargo run --bin …`, which resolves across the workspace).
+
 - Follow-ups: whether `crates/opamp`'s and `crates/server`'s test helpers should be shared through a
   small internal test-support target once two suites want the same stub. And whether the Windows
   coverage this unlocks changes what the manual smoke checklist in `README.md` still has to claim —
@@ -380,3 +491,7 @@ means something moved that should not have.
   `server::transport` and `gateway` sit on, with a trait for the differing outbound side. Worth its
   own ADR only if a third OpAMP-server surface appears; two implementations that share a well-tested
   helper module are not yet a reason to invert a dependency. Nothing in this decision forecloses it.
+
+- Follow-ups: whether a release should ship the operator tools at all — a release ships neither,
+  and an operator builds them from a checkout, which the manual states plainly; if that changes,
+  it is the release pipeline's decision to make, not this one's.

@@ -39,7 +39,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
 | [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟢 accepted |
 | [0010](0010-client-os-service.md) | The Client as a multi-instance native OS service, installed and run through its own CLI | 🟢 accepted |
-| [0011](0011-supervisor-mode-core-and-plugins.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins that own their process kind, n Agents over one connection | 🟡 proposed |
+| [0011](0011-supervisor-mode-core-and-plugins.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins that own their process kind, n Agents over one connection | 🟢 accepted |
 | [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
 | [0013](0013-agent-admission-on-the-opamp-endpoint.md) | Agent admission on the OpAMP endpoint — optional proofs, each enforced once configured, proving fleet membership | 🟢 accepted |
 | [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
@@ -56,7 +56,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0025](0025-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
 | [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
 | [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
-| [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟡 proposed |
+| [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
 | [0029](0029-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt`, and the system service may run under an operator-named account that owns the instance's files | 🟢 accepted |
-| [0030](0030-glpi-agent-supervision-and-packages.md) | The GLPI Agent through the fleet — supervised as the Supervisor's own child, machine-installed or from self-contained packages on both platforms | 🟡 proposed |
+| [0030](0030-glpi-agent-supervision-and-packages.md) | The GLPI Agent through the fleet — supervised as the Supervisor's own child, machine-installed or from self-contained packages on both platforms | 🟢 accepted |
 
