@@ -1,6 +1,6 @@
 # ADR-0063: The GLPI Agent is supervised by the `command` kind — one documented recipe per platform, no new plugin
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 
@@ -66,8 +66,10 @@ Concretely, the recipe binds:
 - **`service_name = "glpi-agent"`** is the Agent type every GLPI Configuration and package
   selector targets (ADR-0033, ADR-0054).
 - **Configuration arrives as a file and applies by restart**: the block passes
-  `--conf-file=${config_dir}/agent.cfg` (ADR-0022), so a rolled-out Configuration named
-  `agent.cfg` lands exactly where the process reads it. No `reload_signal` — the GLPI Agent
+  `--conf-file=${config_dir}/glpi-agent-conf` (ADR-0022), so a rolled-out Configuration named
+  `glpi-agent-conf` lands exactly where the process reads it — a Configuration name carries no
+  extension, following the same grammar as every other name here (ADR-0010: lowercase letters,
+  digits and `-`, no dot), while `--conf-file` reads whatever path it is given. No `reload_signal` — the GLPI Agent
   has no reload signal to send.
 - **`version_args = ["--version"]` is set, with a known gap**: only three-component releases
   (`1.7.1`) yield a `service.version`; two-component releases report none, because the probe
@@ -82,7 +84,7 @@ type = "command"
 name = "glpi"
 service_name = "glpi-agent"
 command = "/usr/bin/glpi-agent"
-args = ["--daemon", "--no-fork", "--conf-file=${config_dir}/agent.cfg"]
+args = ["--daemon", "--no-fork", "--conf-file=${config_dir}/glpi-agent-conf"]
 ```
 
 ## Alternatives considered
@@ -153,7 +155,7 @@ args = ["--daemon", "--no-fork", "--conf-file=${config_dir}/agent.cfg"]
   fleet cannot verify — a forgotten hand-over means two agents inventorying the host. The
   reported version is usually absent (two-component releases). Configuration applies by
   restart only, which for an inventory agent is harmless (no in-flight state worth keeping).
-- Before the first Configuration rollout, `${config_dir}/agent.cfg` is absent and the agent
+- Before the first Configuration rollout, `${config_dir}/glpi-agent-conf` is absent and the agent
   refuses to start (verified): the Supervisor crash-loops three times and holds, and the first
   apply ends the hold by restarting onto the written file. The recipe documents this window —
   and the static-`--server` variant for a host whose configuration stays local — rather than

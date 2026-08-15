@@ -1,6 +1,6 @@
 # ADR-0064: Self-contained GLPI Agent packages — the Windows zip as published, the Linux AppImage repacked as a tree
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-15
 - **Deciders:** Markus Brigl
 
@@ -50,9 +50,12 @@ Feasibility was verified empirically against 1.19 in the Dev Container:
   without FUSE, without root, from any directory. `AppRun` dispatches to the agent with
   `--script=glpi-agent` (or `GLPIAGENT_SCRIPT` in the environment).
 - The tree holds **219 symlinks, 38 of them dangling** (Debian packaging leftovers — systemd
-  units and the like). After deleting the dangling ones and **dereferencing the rest**, the
-  link-free tree (8 284 members, 259 MB unpacked — within the limits) still runs: `--version`
-  answers, and a foreground `--daemon --no-fork` run works from a moved directory.
+  units and the like). After dropping the dangling ones and **dereferencing the rest**, the
+  link-free tree (7 080 files, ~248 MB unpacked — inside both limits) still runs: `--version`
+  answers, and a foreground `--daemon --no-fork` run works from a moved directory. Five of the
+  links are **directories**, and one of them is load-bearing: `usr/share/perl/5.26` points at
+  `5.26.1`, and it is the linked name that the bundled `PERL5LIB` uses — packed as an empty
+  directory, the agent finds no module at all.
 - The agent **never creates a missing `--vardir`** — it exits at startup. Its state
   (`deviceid`, target caches) must live *outside* `program/tree/`, or every update would wipe
   it; `${supervisor_dir}` itself always exists, is Client-owned, and survives tree swaps.
@@ -76,16 +79,17 @@ packages** — and an official artifact that already *is* one travels **as publi
   own `.sha256` value** is the unbroken provenance line ADR-0018 was written for.
 - **Linux (linux/amd64): repacked, because upstream publishes no archive.** The official
   AppImage, verified against the release's `.sha256`, extracted (`--appimage-extract`),
-  dangling links deleted, remaining symlinks dereferenced, packed as `.tar.gz` with file
-  modes under one top-level directory by **a script this repository ships**
-  (`scripts/pack-glpi-agent.sh`, run on a Linux x86_64 host such as the Dev Container);
-  `program_path = "AppRun"`, and the block selects the agent with `--script=glpi-agent` as
-  its first argument.
-- **The repacked artifact is deterministic**: the script packs with fixed ordering, zeroed
-  times and ownership (as `opamp-package-sign pack` does for single files), so repacking the
-  same release yields the same hash and no accidental rollout.
+  dangling links deleted, remaining links dereferenced — a linked *directory* packed under the
+  linked name too, since that is the name the agent reaches its Perl library by — and packed as
+  `.tar.gz` with file modes under one top-level directory by **a tool this repository ships**
+  (`opamp-package-fetch`, whose repack step runs on a Linux x86_64 host such as the Dev
+  Container); `program_path = "AppRun"`, and the block selects the agent with
+  `--script=glpi-agent` as its first argument.
+- **The repacked artifact is deterministic**: it is packed with fixed ordering, zeroed times and
+  ownership (as `opamp-package-sign pack` does for single files), so repacking the same release
+  yields the same hash and no accidental rollout.
 - **State lives beside the tree, not in it**: the blocks pass `--vardir=${supervisor_dir}`
-  (and `--conf-file=${config_dir}/agent.cfg` as in ADR-0063's recipe), so identity and caches
+  (and `--conf-file=${config_dir}/glpi-agent-conf` as in ADR-0063's recipe), so identity and caches
   survive updates and rollbacks.
 - **One Set, `service_name = "glpi-agent"`, one entry per platform** (ADR-0031, ADR-0052),
   version taken from the upstream release. Hosts on other platforms — Linux arm64 has no
@@ -174,15 +178,14 @@ carries and the pure-Rust build (ADR-0006, ADR-0007) is undisturbed.
   and bound tests as the other two (the tree-rule table applies verbatim), and `.zip` support
   is read-only and unencrypted by design. **We still own the Linux repack** — every GLPI
   release the fleet should run needs one script invocation and an upload; the repacked
-  artifact no longer matches upstream's published hash, so the script verifies upstream's
+  artifact no longer matches upstream's published hash, so the tool verifies upstream's
   `.sha256` at packing time, and from there the fleet's own hash and Ed25519 signature are
   the chain of trust. The artifacts are large (~30–70 MB per platform and version, 259 MB
   unpacked on Linux — well inside the 2 GiB bound but not free), and dereferencing duplicates
   shared libraries on disk. `service.version` stays unreported (upstream's `1.19-1` is not
   strict SemVer); `packages[].version` is what tracks installs. Linux arm64 and every other
   platform stay on the ADR-0063 recipe.
-- Follow-ups (by topic): the packing script and a manual section for the packaged variant
-  (extending the GLPI recipe page and the rollout walkthrough); optionally teaching
+- Follow-ups (by topic): optionally teaching
   `opamp-package-sign pack` a reproducible `--tree` mode so tree artifacts get the same
   deterministic packing as single files without hand-rolled `tar` flags; a Linux arm64
   package built from the source distribution plus a relocatable Perl, should arm64 fleet

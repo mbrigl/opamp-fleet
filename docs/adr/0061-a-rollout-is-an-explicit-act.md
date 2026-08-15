@@ -1,6 +1,6 @@
 # ADR-0061: A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 

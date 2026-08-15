@@ -1,6 +1,6 @@
 # ADR-0060: One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 
