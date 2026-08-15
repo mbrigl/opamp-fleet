@@ -101,10 +101,15 @@ pub fn write_program(
             std::io::copy(&mut source, &mut out)
                 .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
         }
-        kind @ (crate::archive::Kind::TarGz | crate::archive::Kind::SevenZ) => {
+        kind @ (crate::archive::Kind::TarGz
+        | crate::archive::Kind::SevenZ
+        | crate::archive::Kind::Zip) => {
             let written = match kind {
                 crate::archive::Kind::SevenZ => {
                     crate::archive::extract_7z(artifact, member, &mut out, archive_key)?
+                }
+                crate::archive::Kind::Zip => {
+                    crate::archive::extract_zip(artifact, member, &mut out)?
                 }
                 _ => crate::archive::extract_tar_gz(artifact, member, &mut out)?,
             };

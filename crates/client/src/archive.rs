@@ -210,6 +210,10 @@ pub enum Kind {
     TarGz,
     /// A 7z container, which may be encrypted (ADR-0018).
     SevenZ,
+    /// A zip container (ADR-0064) — the form the GLPI Agent's portable Windows build is
+    /// published in, taken as published so the hash an Agent verifies stays upstream's own.
+    /// Read-only here, and never encrypted: a confidential artifact is a `.7z`.
+    Zip,
 }
 
 /// Reads the first bytes of `path` and says what it is.
@@ -228,6 +232,13 @@ pub fn detect(path: &Path) -> Result<Kind, String> {
     // "7z" followed by the rest of the 7z signature.
     if read == 6 && head == [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] {
         return Ok(Kind::SevenZ);
+    }
+    // "PK" and a local-file header — every non-empty zip starts with it. The empty-archive
+    // marker ("PK\x05\x06") counts too: an empty zip answered "holds no member" is a better
+    // message than the broken install that treating it as the program would produce.
+    if read >= 4 && (head[..4] == [0x50, 0x4b, 0x03, 0x04] || head[..4] == [0x50, 0x4b, 0x05, 0x06])
+    {
+        return Ok(Kind::Zip);
     }
     Ok(Kind::Raw)
 }
@@ -634,6 +645,184 @@ fn list_7z(
         }
     }
     Ok(members)
+}
+
+/// Extracts the member called `member` from the `.zip` at `archive`, writing it to `out` —
+/// [`extract_tar_gz`] for the third container (ADR-0064). Matching is by **file name**, exactly as
+/// there; the bound is [`MAX_UNPACKED_BYTES`] on what is written. Unlike a tar, a zip is read
+/// through its central directory, so members before the match are never decompressed and there is
+/// no skip budget to spend.
+///
+/// # Errors
+/// Returns an error when the archive cannot be read, holds no such member, holds it encrypted, or
+/// the member exceeds the limit.
+pub fn extract_zip(archive: &Path, member: &str, out: &mut File) -> Result<u64, String> {
+    extract_zip_within(archive, member, out, MAX_UNPACKED_BYTES)
+}
+
+fn extract_zip_within(
+    archive: &Path,
+    member: &str,
+    out: &mut File,
+    limit: u64,
+) -> Result<u64, String> {
+    let file =
+        File::open(archive).map_err(|e| format!("cannot read {}: {e}", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
+
+    // Find the member by metadata alone — `by_index_raw` reads the central directory and
+    // decompresses nothing.
+    let mut found: Option<usize> = None;
+    let mut seen: Vec<String> = Vec::new();
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index).map_err(zip_error)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = Path::new(entry.name())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name == member {
+            refuse_encrypted(&entry)?;
+            found = Some(index);
+            break;
+        }
+        if seen.len() < 8 && !name.is_empty() {
+            seen.push(name);
+        }
+    }
+    let Some(index) = found else {
+        return Err(format!(
+            "the archive holds no member named {member:?} (it holds: {})",
+            if seen.is_empty() {
+                "nothing".to_string()
+            } else {
+                seen.join(", ")
+            }
+        ));
+    };
+    let mut entry = zip.by_index(index).map_err(zip_error)?;
+    copy_within(&mut entry, out, limit)
+        .map_err(|e| format!("cannot unpack {member:?} from the archive: {e}"))
+}
+
+/// Extracts a `.zip` **whole** into `dest` (ADR-0023, ADR-0064), exactly as [`extract_tree_tar_gz`]
+/// does for a `.tar.gz`.
+///
+/// Modes are not taken from the archive, as for a `.7z`: zip carries host attributes a Windows
+/// packer never fills with Unix modes. The program is made executable by its caller; a tree with
+/// more executables than the program is a reason to ship a `.tar.gz`.
+///
+/// # Errors
+/// As [`extract_tree_tar_gz`], plus an encrypted member — encryption is the `.7z` format's job
+/// (ADR-0018), and a zip travels as its author published it or not at all.
+pub fn extract_tree_zip(
+    archive: &Path,
+    program_path: &Path,
+    dest: &Path,
+) -> Result<TreeSummary, String> {
+    extract_tree_zip_within(archive, program_path, dest, MAX_UNPACKED_BYTES)
+}
+
+fn extract_tree_zip_within(
+    archive: &Path,
+    program_path: &Path,
+    dest: &Path,
+    limit: u64,
+) -> Result<TreeSummary, String> {
+    let file =
+        File::open(archive).map_err(|e| format!("cannot read {}: {e}", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
+
+    let members = list_zip(&mut zip, limit)?;
+    let prefix = locate_program(&members, program_path)?;
+
+    let mut summary = TreeSummary {
+        files: 0,
+        bytes: 0,
+        skipped: 0,
+    };
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(zip_error)?;
+        let member = safe_member_path(Path::new(&entry.name().to_owned()))?;
+        let Ok(relative) = member.strip_prefix(&prefix) else {
+            summary.skipped += 1;
+            continue;
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let out_path = dest.join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("cannot create {}: {e}", out_path.display()))?;
+            continue;
+        }
+        prepare_parent(dest, &out_path)?;
+        let mut out = File::create(&out_path)
+            .map_err(|e| format!("cannot write {}: {e}", out_path.display()))?;
+        let written = copy_within(&mut entry, &mut out, limit - summary.bytes)
+            .map_err(|e| format!("cannot unpack {}: {e}", as_member(relative)))?;
+        summary.files += 1;
+        summary.bytes += written;
+    }
+    Ok(summary)
+}
+
+/// Reads every member of a `.zip` from its central directory, validating each — the counterpart to
+/// [`list_tar_gz`] and [`list_7z`], and like them it decompresses nothing.
+fn list_zip(
+    zip: &mut zip::ZipArchive<File>,
+    limit: u64,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    use unix_attributes::{S_IFLNK, S_IFMT};
+
+    let mut members = Vec::new();
+    let mut declared: u64 = 0;
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index).map_err(zip_error)?;
+        // The declared uncompressed sizes come from the central directory; a bomb is refused
+        // before the extraction that follows decodes a byte of it.
+        accrue_within(&mut declared, entry.size(), limit)?;
+        refuse_encrypted(&entry)?;
+        // Zip has no entry type of its own; a link shows up as a Unix mode a unix-side packer
+        // stored in the external attributes — the same convention the `.7z` check reads.
+        if let Some(mode) = entry.unix_mode() {
+            if mode & S_IFMT == S_IFLNK {
+                return Err(format!(
+                    "the archive holds a link ({:?}), which names a path outside itself — \
+                     refusing the whole archive",
+                    entry.name()
+                ));
+            }
+        }
+        members.push(safe_member_path(Path::new(entry.name()))?);
+        if members.len() > MAX_TREE_MEMBERS {
+            return Err(format!(
+                "the archive holds more than {MAX_TREE_MEMBERS} members"
+            ));
+        }
+    }
+    Ok(members)
+}
+
+/// An encrypted zip member is refused by policy, not by inability: encryption is what `.7z` is for
+/// (ADR-0018), where the key handling already exists — a second scheme with the same key would be
+/// one more way to hold it wrong.
+fn refuse_encrypted(entry: &zip::read::ZipFile<'_, File>) -> Result<(), String> {
+    if entry.encrypted() {
+        return Err(format!(
+            "the archive holds an encrypted member ({:?}) — an encrypted artifact is a .7z with \
+             [packages] archive_key, not a zip",
+            entry.name()
+        ));
+    }
+    Ok(())
+}
+
+fn zip_error(e: zip::result::ZipError) -> String {
+    format!("cannot read the archive: {e}")
 }
 
 /// The two failures an operator actually causes when opening a `.7z`, named as such rather than as
@@ -1348,6 +1537,248 @@ mod tests {
         };
         assert_eq!(mode("bin/fluent-bit"), 0o755);
         assert_eq!(mode("etc/parsers.conf"), 0o644);
+    }
+
+    // ── Zip (ADR-0064) ──────────────────────────────────────────────────────────
+
+    /// Builds a `.zip` holding `members` — (path inside the archive, contents). A name ending in
+    /// `/` becomes a directory entry, the way zip spells one.
+    fn zip_archive(dir: &Path, members: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let path = dir.join("release.zip");
+        let file = File::create(&path).expect("create");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, content) in members {
+            if name.ends_with('/') {
+                writer.add_directory(*name, options).expect("directory");
+                continue;
+            }
+            writer.start_file(*name, options).expect("start");
+            writer.write_all(content).expect("write");
+        }
+        writer.finish().expect("finish");
+        path
+    }
+
+    /// Builds a single-member **stored** zip byte by byte, so a test can write what no honest
+    /// packer would: a traversal in the member name, a link in the attributes, the encryption
+    /// flag. `made_by` is the central directory's version-made-by field (`3 << 8` marks unix,
+    /// which is what makes `external` carry a mode); `flags` bit 0 is the encryption flag.
+    fn raw_zip(
+        path: &Path,
+        name: &str,
+        content: &[u8],
+        flags: u16,
+        made_by: u16,
+        external: u32,
+    ) -> std::path::PathBuf {
+        let mut crc = flate2::Crc::new();
+        crc.update(content);
+        let crc = crc.sum();
+        let (name_len, size) = (name.len() as u16, content.len() as u32);
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let put16 = |b: &mut Vec<u8>, v: u16| b.extend_from_slice(&v.to_le_bytes());
+        let put32 = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
+        // Local file header.
+        put32(&mut bytes, 0x0403_4b50);
+        put16(&mut bytes, 20); // version needed
+        put16(&mut bytes, flags);
+        put16(&mut bytes, 0); // stored
+        put16(&mut bytes, 0); // time
+        put16(&mut bytes, 0); // date
+        put32(&mut bytes, crc);
+        put32(&mut bytes, size);
+        put32(&mut bytes, size);
+        put16(&mut bytes, name_len);
+        put16(&mut bytes, 0); // extra
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(content);
+        // Central directory.
+        let central_offset = bytes.len() as u32;
+        put32(&mut bytes, 0x0201_4b50);
+        put16(&mut bytes, made_by);
+        put16(&mut bytes, 20);
+        put16(&mut bytes, flags);
+        put16(&mut bytes, 0);
+        put16(&mut bytes, 0);
+        put16(&mut bytes, 0);
+        put32(&mut bytes, crc);
+        put32(&mut bytes, size);
+        put32(&mut bytes, size);
+        put16(&mut bytes, name_len);
+        put16(&mut bytes, 0); // extra
+        put16(&mut bytes, 0); // comment
+        put16(&mut bytes, 0); // disk start
+        put16(&mut bytes, 0); // internal attributes
+        put32(&mut bytes, external);
+        put32(&mut bytes, 0); // local header offset
+        bytes.extend_from_slice(name.as_bytes());
+        let central_size = bytes.len() as u32 - central_offset;
+        // End of central directory.
+        put32(&mut bytes, 0x0605_4b50);
+        put16(&mut bytes, 0);
+        put16(&mut bytes, 0);
+        put16(&mut bytes, 1);
+        put16(&mut bytes, 1);
+        put32(&mut bytes, central_size);
+        put32(&mut bytes, central_offset);
+        put16(&mut bytes, 0);
+        std::fs::write(path, bytes).expect("write the zip");
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn detects_a_zip_by_its_signature_and_an_empty_one_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = zip_archive(dir.path(), &[("glpi-agent.bat", b"wrapper")]);
+        assert_eq!(detect(&archive).expect("detect"), Kind::Zip);
+
+        // An empty zip is nothing but the end-of-central-directory marker. Detecting it as a zip
+        // turns it into "holds no member" instead of a broken install of the marker bytes.
+        let empty = dir.path().join("empty.zip");
+        let mut bytes = vec![0x50, 0x4b, 0x05, 0x06];
+        bytes.extend_from_slice(&[0u8; 18]);
+        std::fs::write(&empty, bytes).expect("write");
+        assert_eq!(detect(&empty).expect("detect"), Kind::Zip);
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        let err = extract_zip(&empty, "anything", &mut out).expect_err("nothing inside");
+        assert!(err.contains("holds no member"), "{err}");
+    }
+
+    #[test]
+    fn extracts_the_named_member_from_a_zip_wherever_the_archive_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = zip_archive(
+            dir.path(),
+            &[
+                ("LICENSE", b"text"),
+                ("GLPI-Agent/perl/bin/glpi-agent.exe", b"the-program"),
+            ],
+        );
+        let out_path = dir.path().join("out");
+        let mut out = File::create(&out_path).expect("create");
+        let written = extract_zip(&archive, "glpi-agent.exe", &mut out).expect("extract");
+        assert_eq!(written, b"the-program".len() as u64);
+        assert_eq!(std::fs::read(&out_path).expect("read"), b"the-program");
+
+        let mut out = File::create(dir.path().join("out2")).expect("create");
+        let err = extract_zip(&archive, "nope.exe", &mut out).expect_err("no such member");
+        assert!(err.contains("LICENSE"), "names what it holds: {err}");
+    }
+
+    /// The case ADR-0064 adds the format for: the GLPI portable zip, taken as published — the
+    /// tree lands whole, directory entries and all, with the member outside counted as skipped.
+    #[test]
+    fn a_zip_tree_lands_whole_with_the_wrapper_directory_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = zip_archive(
+            dir.path(),
+            &[
+                ("stray-readme", b"outside"),
+                ("GLPI-Agent/etc/", b""),
+                ("GLPI-Agent/etc/agent.cfg", b"server ="),
+                ("GLPI-Agent/perl/bin/glpi-agent.exe", b"the-program"),
+                ("GLPI-Agent/perl/bin/glpi-agent", b"the-script"),
+            ],
+        );
+        let dest = dest(dir.path());
+
+        let summary = extract_tree_zip(&archive, Path::new("perl/bin/glpi-agent.exe"), &dest)
+            .expect("unpack the tree");
+
+        assert_eq!(summary.files, 3, "every file member is written");
+        assert_eq!(
+            summary.skipped, 1,
+            "the stray member is counted, not silent"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("perl/bin/glpi-agent.exe")).expect("the program"),
+            b"the-program"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("etc/agent.cfg")).expect("the config"),
+            b"server ="
+        );
+        assert!(!dest.join("stray-readme").exists());
+    }
+
+    /// The same refusals the other containers earn, read from what zip has: the name for the
+    /// traversal, the unix mode in the external attributes for the link, the flag bit for
+    /// encryption — each refusing the whole archive before anything is written.
+    #[test]
+    fn a_hostile_zip_member_refuses_the_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dest(dir.path());
+        let program = Path::new("bin/agent");
+
+        let climbing = raw_zip(
+            &dir.path().join("climb.zip"),
+            "../../outside",
+            b"evil",
+            0,
+            20,
+            0,
+        );
+        let err = extract_tree_zip(&climbing, program, &dest).expect_err("must be refused");
+        assert!(err.contains("climbs out"), "{err}");
+
+        let linked = raw_zip(
+            &dir.path().join("link.zip"),
+            "app/lib/passwd",
+            b"/etc/passwd",
+            0,
+            3 << 8,
+            0o120_777 << 16,
+        );
+        let err = extract_tree_zip(&linked, program, &dest).expect_err("must be refused");
+        assert!(err.contains("holds a link"), "{err}");
+
+        let encrypted = raw_zip(
+            &dir.path().join("enc.zip"),
+            "app/bin/agent",
+            b"sealed",
+            1, // general-purpose bit 0: encrypted
+            20,
+            0,
+        );
+        let err = extract_tree_zip(&encrypted, program, &dest).expect_err("must be refused");
+        assert!(err.contains("encrypted"), "{err}");
+        assert!(
+            err.contains(".7z"),
+            "points at the format that does this: {err}"
+        );
+
+        assert_eq!(
+            std::fs::read_dir(&dest).expect("read").count(),
+            0,
+            "nothing was written from any of them"
+        );
+    }
+
+    /// The bomb guard reads the central directory's declared sizes, so a zip that expands past
+    /// the budget is refused while it is merely being listed — and a single member is bounded as
+    /// it is written, which catches a header that lies small.
+    #[test]
+    fn a_zip_past_the_budget_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = zip_archive(
+            dir.path(),
+            &[
+                ("app/bin/agent", &[0u8; 3072]),
+                ("app/lib/big.bin", &[0u8; 3072]),
+            ],
+        );
+        let dest = dest(dir.path());
+        let err = extract_tree_zip_within(&archive, Path::new("bin/agent"), &dest, 4096)
+            .expect_err("the members sum past the budget");
+        assert!(err.contains("decompression bomb"), "{err}");
+
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        let err = extract_zip_within(&archive, "agent", &mut out, 1024)
+            .expect_err("the member exceeds the limit as it is written");
+        assert!(err.contains("limit"), "{err}");
     }
 
     /// The encrypted case: a whole tree, unreadable without the key wherever it was stored.

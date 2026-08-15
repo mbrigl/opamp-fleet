@@ -55,6 +55,12 @@ flate2 = "1"
 # produce. The Client daemon never encodes, so the linker drops it — measured at +7 KB on the
 # release binary, against a build-time cost only.
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "compress"] }
+# Reading a `.zip` package artifact (ADR-0064) — the container the GLPI Agent's portable Windows
+# build is published in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
+# `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
+# reading stays pure Rust (ADR-0006, ADR-0007). Read-only and unencrypted: the Client never
+# writes a zip, and a confidential artifact is a `.7z` (ADR-0018).
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust and no system library,
 # which is what ADR-0006 and ADR-0007 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.

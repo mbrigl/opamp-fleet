@@ -374,8 +374,8 @@ mod tests {
             archive::Kind::SevenZ => {
                 archive::extract_7z(archive, member, &mut out, key).expect("extract 7z")
             }
-            archive::Kind::Raw => {
-                panic!("the packer wrote something the Client takes for a bare program")
+            archive::Kind::Raw | archive::Kind::Zip => {
+                panic!("the packer wrote something it never produces (a bare program or a zip)")
             }
         };
         drop(out);
