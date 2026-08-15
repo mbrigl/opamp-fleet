@@ -351,25 +351,53 @@ async fn ack_and_spawned_pids(
     }
 }
 
+/// Waits until the stub has written its marker file, which it does only *after* installing its
+/// signal disposition — so a reload sent from here cannot race the handler.
+///
+/// A pid says the process was spawned, not that it has run any of its own code yet: between
+/// `spawn` and the stub's first statement lie process creation and dynamic loading, which under a
+/// loaded machine is long enough for a `SIGHUP` to arrive while the default disposition — the one
+/// that terminates it — is still in force.
+#[cfg(unix)]
+async fn wait_until_started(marker: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the stub to start"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// A kind that declared a reload applies a configuration in place (ADR-0060): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_declared_reload_applies_without_a_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("started");
+    let marker_arg = marker.clone();
     let mut harness = runner_full(
         None,
         Duration::from_millis(300),
         Duration::ZERO,
         None,
         Some(libc::SIGHUP),
-        || {
+        move || {
             let mut spec = spec(&stub_agent());
-            spec.args = vec!["--ignore-hup".to_string()];
+            spec.args = vec![
+                "--ignore-hup".to_string(),
+                "--touch".to_string(),
+                marker_arg.display().to_string(),
+            ];
             Some(spec)
         },
     );
     let pid = next_spawned_pid(&mut harness.events).await;
+    // The reload is only in place if the process is there to receive it with SIGHUP ignored.
+    wait_until_started(&marker).await;
 
     apply(&harness, b"reload").await;
     let (result, spawned) = ack_and_spawned_pids(&mut harness.events).await;
