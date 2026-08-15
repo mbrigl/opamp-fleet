@@ -50,12 +50,31 @@ carries a date once its tag exists.
   program. That was never useful — the agent would not start — but it did leave the file in
   place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
   right container for a tree on Unix, being the one that carries file modes.
+- **The operator tools moved to their own crate**
+  ([ADR-0065](docs/adr/0065-the-operator-package-tools-live-in-their-own-crate.md)).
+  `opamp-package-sign` and the new `opamp-package-fetch` are `crates/package-tools`, not binaries
+  of the Client: the crate that runs on every managed host no longer carries tooling that never
+  runs there. The binaries keep their names and their behaviour.
+  **What to do:** nothing, unless you build them by crate — `cargo build -p client --bin
+  opamp-package-sign` becomes `-p package-tools`. `cargo run --bin opamp-package-sign` is
+  unchanged, because `--bin` resolves across the workspace. A release ships neither tool, as
+  before.
+- **`opamp-package-fetch`, an operator tool that fetches an upstream release and makes it a
+  package.** It knows where the OpenTelemetry Collector (`otelcol`, `otelcol-contrib`), the GLPI
+  Agent, and Telegraf publish, offers the last five versions and the platforms that release
+  actually carries, verifies every download against the SHA-256 upstream published, and uploads
+  each artifact as its platform's entry when told to. Interactive by default; `--agent`,
+  `--version`, `--platform`, `--out-dir`, `--server` and `--no-upload` make it scriptable.
+  Artifacts travel **as published** wherever upstream's container is one a Client can open, so
+  the hash the fleet verifies is the one on the release page. See
+  [the tools page](docs/manual/tools.md#opamp-package-fetch).
+  **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
+  artifact out of any program you have.
 - **The GLPI Agent can be delivered by the fleet**
   ([ADR-0064](docs/adr/0064-self-contained-glpi-agent-packages-for-both-platforms.md)). On
   Windows the official portable zip is the artifact, uploaded (or referenced) as published; on
-  Linux `scripts/pack-glpi-agent.sh <version>` builds one deterministically from the official
-  AppImage — verifying upstream's SHA-256, extracting without needing FUSE on any host, and
-  printing the artifact's hash. Both are amd64; see the
+  Linux the tool above builds one deterministically from the official AppImage — extracting it
+  once so no fleet host needs FUSE. Both are amd64; see the
   [GLPI Agent recipe](docs/manual/glpi-agent.md#fleet-delivered-the-agent-as-a-package).
   **What to do:** nothing — this is a new option beside supervising a machine-installed agent.
 - **A `command` Supervisor can reload instead of restart**

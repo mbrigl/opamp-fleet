@@ -206,32 +206,26 @@ rollback through the same package machinery every other agent uses. It exists be
 publishes self-contained builds for both platforms; what changes is only the block's program
 (ADR-0064).
 
-**On Windows the artifact is upstream's own portable zip**, uploaded exactly as published:
+**Both artifacts come from one command** —
+[`opamp-package-fetch`](tools.md#opamp-package-fetch) fetches the release, verifies it against
+the checksum upstream published, repacks what has to be repacked, and uploads if you let it:
 
 ```console
-$ curl -LO https://github.com/glpi-project/glpi-agent/releases/download/1.19/GLPI-Agent-1.19-x64.zip
-$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19
-$ curl -X PUT --data-binary @GLPI-Agent-1.19-x64.zip \
-       "http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19/entries/windows/amd64"
+$ opamp-package-fetch --agent glpi-agent --version 1.19 \
+      --platform windows/amd64 --platform linux/amd64 --server http://127.0.0.1:4320
 ```
 
-Because nothing repacks it, the hash the Agents verify is the one upstream published — check it
-against the release's `glpi-agent-1.19.sha256` and you have verified what every host will run.
-The same file can stay on the release page instead: point a
-[referenced entry](rollout.md#4-give-it-to-the-server) at its URL with that hash.
+What that does differs per platform, and the difference is worth knowing:
 
-**On Linux the fleet artifact is built once from the AppImage**, upstream's self-contained Linux
-build. `scripts/pack-glpi-agent.sh` verifies the release's own SHA-256, extracts it (no FUSE
-needed), drops the symlinks a tree package cannot carry, and packs a deterministic `.tar.gz` —
-the same release always yields the same hash, so a repack never becomes a rollout nobody asked
-for:
-
-```console
-$ sha=$(scripts/pack-glpi-agent.sh 1.19)
-$ curl -X PUT --data-binary @glpi-agent_1.19_linux_amd64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/glpi-agent/glpi-agent/1.19/entries/linux/amd64"
-```
+- **Windows takes upstream's portable zip exactly as published.** Nothing repacks it, so the hash
+  the Agents verify is the one on the release page — check it against
+  `glpi-agent-1.19.sha256` and you have verified what every host will run. The file can stay
+  there instead of being uploaded: point a
+  [referenced entry](rollout.md#4-give-it-to-the-server) at its URL with that hash.
+- **Linux is built from the AppImage**, upstream's self-contained Linux build, because the
+  release's `.tar.gz` is source. It is extracted once here — which is what spares every fleet
+  host the FUSE dependency — and packed deterministically, so the same release always yields the
+  same artifact and a repack never becomes a rollout nobody asked for.
 
 The blocks name the program by **bare name** — that is the consent that makes this Agent accept
 packages — and `program_path` says where it sits inside the tree:
