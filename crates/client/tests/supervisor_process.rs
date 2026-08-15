@@ -320,6 +320,7 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
 // ── Reload and uninstall (ADR-0060) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
+#[cfg(unix)]
 async fn next_spawned_pid(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> u32 {
     loop {
         let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
@@ -334,6 +335,7 @@ async fn next_spawned_pid(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) ->
 
 /// Drains events until the apply's acknowledgement, collecting every pid spawned on the way — a
 /// reload keeps the process, so any pid before the ack means a restart happened.
+#[cfg(unix)]
 async fn ack_and_spawned_pids(
     events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
 ) -> (Result<(), String>, Vec<u32>) {
