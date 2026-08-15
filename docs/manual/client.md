@@ -669,6 +669,10 @@ FLB_LOG_LEVEL = "info"
 Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that is what the entry file
 is called.
 
+A complete worked example — the machine-installed GLPI Agent as a foreground daemon, with the
+Windows interpreter invocation and the bootstrap of its configuration — is the
+[GLPI Agent recipe](glpi-agent.md).
+
 ## Which programs take updates
 
 How a block names its program is also what decides whether the Server may replace it,
