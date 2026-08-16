@@ -57,7 +57,7 @@ struct Cli {
     /// Where to write the artifacts.
     #[arg(long, default_value = ".")]
     out_dir: PathBuf,
-    /// Upload to this Server when the artifacts are ready, e.g. `http://127.0.0.1:4320`.
+    /// Upload to this Server when the artifacts are ready, e.g. `http://127.0.0.1:4321`.
     #[arg(long, value_name = "URL")]
     server: Option<String>,
     /// Write the artifacts and stop — no upload, and no question about one.
@@ -379,7 +379,7 @@ fn upload_target(cli: &Cli) -> Result<Option<String>, String> {
     }
     let url: String = Input::new()
         .with_prompt("Server base URL")
-        .default("http://127.0.0.1:4320".to_string())
+        .default("http://127.0.0.1:4321".to_string())
         .interact_text()
         .map_err(|e| format!("cannot read the answer: {e}"))?;
     Ok(Some(url.trim_end_matches('/').to_string()))

@@ -906,10 +906,10 @@ platform is required with it, spelled as the Agent reports it:
 
 ```console
 $ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
-       "http://<server>:4320/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
+       "http://<server>:4321/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "opamp-fleet-client"}' \
-       http://<server>:4320/api/v1/packages/opamp-fleet-client/type
+       http://<server>:4321/api/v1/packages/opamp-fleet-client/type
 ```
 
 The second call is what arms the package: until a type is set it is offered to nobody, so

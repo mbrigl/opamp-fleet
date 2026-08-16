@@ -27,17 +27,12 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
             .expect("configs")
             .with_packages(Some(PackageOffering::new(store, String::new()))),
     );
-    let app = server::app(state.clone(), server::transport::Admission::open());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    let (addr, rest_addr) =
+        support::serve(state.clone(), server::transport::Admission::open()).await;
     (
         TestServer {
             addr,
+            rest_addr,
             state,
             _dir: dir,
         },
@@ -66,6 +61,16 @@ const HOST: &str = "linux/amd64";
 fn set_url(server: &TestServer, name: &str, version: &str) -> String {
     format!(
         "http://{}/api/v1/packages/{name}/{}/{version}",
+        server.rest_addr,
+        support::AGENT_TYPE
+    )
+}
+
+/// The artifact download of one Set — on the **Agent plane** (ADR-0066), which is where the
+/// `download_url` in an offer points and the one `/api/v1` route the Operator plane does not serve.
+fn download_url(server: &TestServer, name: &str, version: &str) -> String {
+    format!(
+        "http://{}/api/v1/packages/{name}/{}/{version}/file",
         server.addr,
         support::AGENT_TYPE
     )
@@ -180,8 +185,8 @@ async fn rolling_out_the_older_version_is_the_rollback() {
     assert_eq!(fallback.packages["otelcol"].version, "0.156.0");
     let served = reqwest::Client::new()
         .get(format!(
-            "{}/file?os=linux&arch=amd64",
-            set_url(&server, "otelcol", "0.156.0")
+            "{}?os=linux&arch=amd64",
+            download_url(&server, "otelcol", "0.156.0")
         ))
         .send()
         .await
@@ -190,6 +195,41 @@ async fn rolling_out_the_older_version_is_the_rollback() {
         .await
         .expect("bytes");
     assert_eq!(served.as_ref(), b"old-binary");
+}
+
+/// ADR-0066: the offered `download_url` is a path the Client resolves against **its own OpAMP
+/// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
+/// the Operator plane, which is where authentication is going and where no Agent will ever look.
+#[tokio::test]
+async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, "otelcol", "1.2.3", b"the-new-binary").await;
+    let path = format!(
+        "/api/v1/packages/otelcol/{}/1.2.3/file?os=linux&arch=amd64",
+        support::AGENT_TYPE
+    );
+
+    let served = reqwest::Client::new()
+        .get(format!("http://{}{path}", server.addr))
+        .send()
+        .await
+        .expect("download");
+    assert_eq!(served.status(), 200);
+    assert_eq!(
+        served.bytes().await.expect("bytes").as_ref(),
+        b"the-new-binary"
+    );
+
+    let elsewhere = reqwest::Client::new()
+        .get(format!("http://{}{path}", server.rest_addr))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        elsewhere.status(),
+        404,
+        "one resource, one address: the Operator plane does not serve artifacts"
+    );
 }
 
 #[tokio::test]
@@ -312,8 +352,8 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
 
     let downloaded = reqwest::Client::new()
         .get(format!(
-            "{}/file?os=linux&arch=amd64",
-            set_url(&server, "otelcol", "1.2.3")
+            "{}?os=linux&arch=amd64",
+            download_url(&server, "otelcol", "1.2.3")
         ))
         .send()
         .await
@@ -343,16 +383,11 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
             .with_packages(Some(PackageOffering::new(store, String::new())))
             .with_max_package_size(4096),
     );
-    let app = server::app(state.clone(), server::transport::Admission::open());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    let (addr, rest_addr) =
+        support::serve(state.clone(), server::transport::Admission::open()).await;
     let server = TestServer {
         addr,
+        rest_addr,
         state,
         _dir: dir,
     };
@@ -779,7 +814,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     let response = reqwest::Client::new()
         .put(format!(
             "http://{}/api/v1/packages/promtail/promtail/1.0.0",
-            server.addr
+            server.rest_addr
         ))
         .json(&serde_json::json!({}))
         .send()
@@ -789,7 +824,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     let response = reqwest::Client::new()
         .put(format!(
             "http://{}/api/v1/packages/promtail/promtail/1.0.0/entries/{HOST}",
-            server.addr
+            server.rest_addr
         ))
         .body(b"the-binary".to_vec())
         .send()
@@ -799,7 +834,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     let response = reqwest::Client::new()
         .post(format!(
             "http://{}/api/v1/packages/promtail/promtail/1.0.0/rollout",
-            server.addr
+            server.rest_addr
         ))
         .send()
         .await
@@ -847,7 +882,7 @@ async fn a_set_says_how_many_agents_it_reaches() {
 
     async fn list(server: &TestServer) -> serde_json::Value {
         reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.addr))
+            .get(format!("http://{}/api/v1/packages", server.rest_addr))
             .send()
             .await
             .expect("list packages")
@@ -919,7 +954,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     // Nobody reports `rollout`, so the aimed Set reaches no one — and the count says so.
     async fn reach(server: &TestServer) -> i64 {
         let list: serde_json::Value = reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.addr))
+            .get(format!("http://{}/api/v1/packages", server.rest_addr))
             .send()
             .await
             .expect("list")
@@ -934,7 +969,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     let labelled = reqwest::Client::new()
         .put(format!(
             "http://{}/api/v1/agents/{canary}/labels",
-            server.addr
+            server.rest_addr
         ))
         .json(&serde_json::json!({ "labels": { "rollout": "canary" } }))
         .send()
@@ -991,7 +1026,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     }
     async fn view(server: &TestServer, name: &str) -> serde_json::Value {
         reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.addr))
+            .get(format!("http://{}/api/v1/packages", server.rest_addr))
             .send()
             .await
             .expect("list")
@@ -1141,16 +1176,11 @@ async fn the_package_store_has_a_total_size_ceiling() {
             .with_packages(Some(PackageOffering::new(store, String::new())))
             .with_max_total_package_bytes(10 * 1024),
     );
-    let app = server::app(state.clone(), server::transport::Admission::open());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    let (addr, rest_addr) =
+        support::serve(state.clone(), server::transport::Admission::open()).await;
     let server = TestServer {
         addr,
+        rest_addr,
         state,
         _dir: dir,
     };

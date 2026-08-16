@@ -46,9 +46,10 @@ An installed deployment runs the same two programs under the names `server` and 
 This is the smallest complete deployment — one Server, one Client, one Configuration — and it needs
 no configuration file at all, because every setting has a default.
 
-1. **Start the Server.** It serves everything on one port (`4320` by default): the OpAMP endpoint at
-   `/v1/opamp`, the REST API under `/api/v1/`, the API docs at `/api/v1/docs`, and the bundled UI at
-   `/`.
+1. **Start the Server.** It serves two planes on two ports: the **Agent plane** on `4320` (the
+   OpAMP endpoint at `/v1/opamp` and the package downloads), and the **Operator plane** on
+   `127.0.0.1:4321` (the REST API under `/api/v1/`, the API docs at `/api/v1/docs`, and the bundled
+   UI at `/`). The operator half is on loopback because nothing authenticates it yet.
 
    ```console
    $ cargo run -p server -- --config config/server.toml
@@ -60,7 +61,7 @@ no configuration file at all, because every setting has a default.
    $ cargo run -p client -- --config config/client.toml
    ```
 
-3. **Open the UI** at <http://127.0.0.1:4320/>. The Agent is listed as *Connected*, with the
+3. **Open the UI** at <http://127.0.0.1:4321/>. The Agent is listed as *Connected*, with the
    attributes it reported.
 
 4. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
@@ -71,8 +72,8 @@ no configuration file at all, because every setting has a default.
    ```console
    $ curl -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {}, "body": "receivers: {}"}' \
-          http://127.0.0.1:4320/api/v1/configurations/base
-   $ curl -X POST http://127.0.0.1:4320/api/v1/configurations/base/rollout
+          http://127.0.0.1:4321/api/v1/configurations/base
+   $ curl -X POST http://127.0.0.1:4321/api/v1/configurations/base/rollout
    ```
 
 5. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its

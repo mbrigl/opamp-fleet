@@ -220,16 +220,18 @@ of both ends — is the **[User Manual](docs/manual/README.md)**:
 
 A minimal closed control loop on one machine:
 
-1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves
-   everything on one port (default `4320`): the OpAMP endpoint at `/v1/opamp` (plain HTTP **and**
-   WebSocket, [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)), the REST API under `/api/v1/`
-   ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), and the
-   bundled UI at `/`.
+1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves two
+   planes on two ports ([ADR-0066](docs/adr/0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md)).
+   The **Agent plane** on `4320`: the OpAMP endpoint at `/v1/opamp` (plain HTTP **and** WebSocket,
+   [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)) and the package downloads the offers point
+   at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
+   ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), the API
+   docs, and the bundled UI at `/` — on loopback, because nothing authenticates it yet.
 2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
-3. **Open the UI** at <http://127.0.0.1:4320/> — the Agent is listed as *Connected*. Press
+3. **Open the UI** at <http://127.0.0.1:4321/> — the Agent is listed as *Connected*. Press
    **Configurations**, name a Configuration, optionally give it a Selector (`key=value` pairs an
    Agent's reported attributes must equal; empty targets every Agent), enter the configuration
    text, and save.
@@ -244,33 +246,33 @@ The same operations are available to any portal through the REST API — the Ope
 `/api/v1/openapi.json` is the contract to generate a client from:
 
 ```console
-$ curl http://127.0.0.1:4320/api/v1/agents                   # the fleet, with reported attributes
-$ curl http://127.0.0.1:4320/api/v1/configurations           # every Configuration
+$ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
+$ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
-       http://127.0.0.1:4320/api/v1/configurations/linux-base  # distribute to a subset
-$ curl -X DELETE http://127.0.0.1:4320/api/v1/configurations/linux-base
+       http://127.0.0.1:4321/api/v1/configurations/linux-base  # distribute to a subset
+$ curl -X DELETE http://127.0.0.1:4321/api/v1/configurations/linux-base
 
 # Content the agent reads by path rather than is configured with (ADR-0016): written next to the
 # configuration under its own name, never passed to the process as configuration.
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
-       http://127.0.0.1:4320/api/v1/configurations/ruleset
+       http://127.0.0.1:4321/api/v1/configurations/ruleset
 
 # A package defines a Set (ADR-0052), identified by name, Agent type, and version, with one entry
 # per platform (ADR-0031); each Agent is offered the entry that fits it. Saving stages a draft —
 # nothing reaches the fleet until the Set is published (ADR-0043).
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 
 # Rolling back is a publication move (ADR-0052): retract the newest version, and the fleet falls
 # back to the newest one still published under the same name.
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or

@@ -183,7 +183,7 @@ this step reaches any host: a stored Set waits for the rollout act in the next o
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0
+       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0
 ```
 
 The **Agent type** (the middle path segment) is compared raw against the `service.name` the
@@ -196,7 +196,7 @@ Server offers an Agent only the entry built for the platform it reported.
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
+       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
 ```
 
 Their values are what an Agent reports as `os.type` and `host.arch` — `linux`, `darwin`, `windows`
@@ -208,7 +208,7 @@ host is offered its own binary:
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/arm64"
+       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/arm64"
 ```
 
 **Or reference** — the Server stores the address and *your* SHA-256, offers them
@@ -218,7 +218,7 @@ nothing else stands between the mirror and the fleet:
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\"}" \
-       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64/source
+       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64/source
 ```
 
 The package **name** (the first `promtail` in the URL) is the Server's name for the package. It
@@ -232,7 +232,7 @@ A Set with no Selector would reach every Agent of its type that accepts packages
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/selector
+       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/selector
 ```
 
 Each pair must equal an attribute the Agent reported — `env` here comes from `[attributes]` in
@@ -244,7 +244,7 @@ check it now, `0` means the type, the platforms, or the Selector missed.
 **The rollout act is what distributes** — nothing before this press changed any host:
 
 ```console
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/rollout
+$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/rollout
 {"assigned_agents": 3}
 ```
 
@@ -257,7 +257,7 @@ per-Agent one first:
 ```console
 $ curl -X POST -H 'Content-Type: application/json' \
        -d '{"package": {"name": "promtail", "agent_type": "promtail", "version": "3.0.0"}}' \
-       http://127.0.0.1:4320/api/v1/agents/<instance_uid>/rollout
+       http://127.0.0.1:4321/api/v1/agents/<instance_uid>/rollout
 ```
 
 ## 6. Send its configuration
@@ -269,8 +269,8 @@ pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from st
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
-       http://127.0.0.1:4320/api/v1/configurations/promtail-conf
-$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/promtail-conf/rollout
+       http://127.0.0.1:4321/api/v1/configurations/promtail-conf
+$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/promtail-conf/rollout
 ```
 
 The first call only stores — saving never distributes; the second is the rollout act that
@@ -283,7 +283,7 @@ it was rolled out — an edit waits, visible per Agent on the fleet view, until 
 ## 7. Watch it land
 
 ```console
-$ curl -s http://127.0.0.1:4320/api/v1/agents | jq '.[] | select(.service_name=="promtail")'
+$ curl -s http://127.0.0.1:4321/api/v1/agents | jq '.[] | select(.service_name=="promtail")'
 ```
 
 What to look for, in the order it happens:
@@ -309,12 +309,12 @@ one stays in the store beside it:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0
+       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0
 $ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0/entries/linux/amd64?signature=$sig"
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.1.0/rollout
+       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/entries/linux/amd64?signature=$sig"
+$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/rollout
 # …and if 3.1.0 turns out badly:
-$ curl -X POST http://127.0.0.1:4320/api/v1/packages/promtail/promtail/3.0.0/rollout
+$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/rollout
 ```
 
 The rollback is the same act pointed at the older Set; the Selector is untouched, and the old

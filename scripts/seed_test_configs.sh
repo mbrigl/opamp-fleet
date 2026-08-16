@@ -19,7 +19,7 @@
 #   scripts/seed_test_configs.sh [server-url]
 #       PUTs each Configuration to a running Server's REST API and rolls it out — the act that
 #       assigns it to the matching Agents (ADR-0061); a PUT alone reaches nobody.
-#       (default server-url: http://127.0.0.1:4320).
+#       (default server-url: http://127.0.0.1:4321).
 #   scripts/seed_test_configs.sh --offline [config-dir]
 #       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
 #       format, loaded at its next start; no running Server needed. Default config-dir is
@@ -55,7 +55,7 @@ if [ "${1:-}" = "--offline" ]; then
     config_dir="${2:-$examples/../../fleet-configs}"
     mkdir -p "$config_dir"
 else
-    server="${1:-http://127.0.0.1:4320}"
+    server="${1:-http://127.0.0.1:4321}"
 fi
 
 # seed <name> <file> <selector-json> [service_name]

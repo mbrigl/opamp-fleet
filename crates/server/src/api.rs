@@ -1,5 +1,6 @@
 //! The REST API v1 — the Server's integration contract (ADR-0005, ADR-0012) — and the bundled
-//! rudimentary UI.
+//! rudimentary UI. Both belong to the Operator plane and are served on its own listener
+//! (ADR-0066); the one exception, the Agent-facing artifact download, is [`download_router`].
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
 //! a route describe it, so contract and behaviour cannot drift. Any external portal generates a
@@ -65,7 +66,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(put_package_set_selector))
         .routes(routes!(rollout_package_set))
         .routes(routes!(put_package_entry_source))
-        .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -86,6 +86,22 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/v1/docs/redoc.js", get(redoc_js))
     .route("/", get(index))
     .with_state(state)
+}
+
+/// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
+/// It is served on the **Agent plane** (ADR-0066), because that is the audience — the
+/// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
+/// (ADR-0015), so this listener is where the offer already points. It keeps its `/api/v1` path,
+/// which every published Set's `download_url` names.
+///
+/// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
+pub fn download_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/packages/{name}/{agent_type}/{version}/file",
+            get(download_package),
+        )
+        .with_state(state)
 }
 
 /// The bundled UI: one embedded page, no frontend toolchain (ADR-0005).
@@ -666,7 +682,7 @@ impl PackageSetView {
 
 /// The Platform the download route names (ADR-0031): the artifact endpoint serves bytes, and a
 /// request naming bytes names the Platform they are for.
-#[derive(Deserialize, IntoParams)]
+#[derive(Deserialize)]
 struct PlatformQuery {
     /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
     /// off a release file name — are accepted and answered canonically.
@@ -1342,25 +1358,10 @@ async fn rollout_package_set(
     }
 }
 
-/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here. On the
-/// unauthenticated REST plane (ADR-0013); the artifact's content hash and Ed25519 signature are
-/// what the Agent verifies before it installs (ADR-0015).
-#[utoipa::path(
-    get,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/file",
-    tag = "packages",
-    params(
-        ("name" = String, Path, description = "The package name"),
-        ("agent_type" = String, Path, description = "The Agent type"),
-        ("version" = String, Path, description = "The version"),
-        PlatformQuery
-    ),
-    responses(
-        (status = 200, description = "The artifact bytes", content_type = "application/octet-stream"),
-        (status = 400, description = "Missing or invalid platform, or invalid identity", body = ErrorBody),
-        (status = 404, description = "No such Set, or no uploaded artifact for that platform", body = ErrorBody)
-    )
-)]
+/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
+///
+/// `200` with the bytes, `400` for a missing or invalid platform or identity, `404` for a Set
+/// without an uploaded artifact for that platform.
 async fn download_package(
     State(state): State<Arc<AppState>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,

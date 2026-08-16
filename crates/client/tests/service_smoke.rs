@@ -184,7 +184,7 @@ fn spawn_server() -> (
             tx.send(listener.local_addr().expect("addr")).expect("send");
             axum::serve(
                 listener,
-                server::app(served, server::transport::Admission::open()),
+                server::agent_app(served, server::transport::Admission::open()),
             )
             .await
             .expect("serve");

@@ -71,9 +71,14 @@ fn csr_for(name: &str) -> (Vec<u8>, KeyPair) {
     (csr.into_bytes(), key)
 }
 
-/// Serves the real router over TLS on an ephemeral port, with the acceptor that carries the peer
-/// certificate into the request — the thing under test.
-async fn serve(pki: &Pki, admission: Admission, client_ca: Option<ClientCa>) -> (String, String) {
+/// Serves both planes over TLS on ephemeral ports (ADR-0066), the Agent plane through the acceptor
+/// that carries the peer certificate into the request — the thing under test. Answers with the
+/// OpAMP endpoint, the Operator plane's port, and the CA a client must trust.
+async fn serve(
+    pki: &Pki,
+    admission: Admission,
+    client_ca: Option<ClientCa>,
+) -> (String, u16, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
@@ -98,20 +103,35 @@ async fn serve(pki: &Pki, admission: Admission, client_ca: Option<ClientCa>) -> 
     .expect("tls config");
     let rustls_config = server::tls::server_config(&tls).expect("server config");
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let agent_acceptor = server::tls::PeerCertAcceptor::new(rustls_config.clone());
+    let operator_acceptor = server::tls::PeerCertAcceptor::new(rustls_config);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
     let addr = listener.local_addr().expect("addr");
-    let app = server::app(state, admission);
+    let agents = server::agent_app(state.clone(), admission);
     tokio::spawn(async move {
         axum_server::from_tcp(listener)
-            .acceptor(server::tls::PeerCertAcceptor::new(rustls_config))
-            .serve(app.into_make_service())
+            .acceptor(agent_acceptor)
+            .serve(agents.into_make_service())
             .await
-            .expect("serve");
+            .expect("serve the Agent plane");
+    });
+    // The Operator plane, over the same certificate on its own listener (ADR-0066) — the half a
+    // browser reaches, and the reason the verifier stays optional is no longer that it is here.
+    let operator_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
+    let operator_addr = operator_listener.local_addr().expect("addr");
+    let operators = server::operator_app(state);
+    tokio::spawn(async move {
+        axum_server::from_tcp(operator_listener)
+            .acceptor(operator_acceptor)
+            .serve(operators.into_make_service())
+            .await
+            .expect("serve the Operator plane");
     });
     // The temp dir must outlive the server task; leak it deliberately for the test's lifetime.
     let endpoint = format!("https://localhost:{}/v1/opamp", addr.port());
     std::mem::forget(dir);
-    (endpoint, pki.ca_pem.clone())
+    (endpoint, operator_addr.port(), pki.ca_pem.clone())
 }
 
 fn client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
@@ -147,13 +167,14 @@ async fn post(
 }
 
 /// The channel half: with a client CA configured, a peer that presents a certificate reaches the
-/// OpAMP endpoint and one that presents none is refused — while the same listener keeps serving
-/// the REST API to a peer with no certificate at all, which is why client auth is optional at the
-/// TLS layer and required on the route (ADR-0035).
+/// OpAMP endpoint and one that presents none is refused — while the Operator plane on its own
+/// listener (ADR-0066) keeps serving the REST API to a peer with no certificate at all, and the
+/// package download on the *same* listener as OpAMP stays reachable without one too. Those two are
+/// why client authentication is optional at the TLS layer and required on the route (ADR-0035).
 #[tokio::test]
 async fn a_client_certificate_is_required_on_the_opamp_route_and_nowhere_else() {
     let pki = Pki::new();
-    let (endpoint, ca_pem) = serve(&pki, Admission::new(None, true), None).await;
+    let (endpoint, operator_port, ca_pem) = serve(&pki, Admission::new(None, true), None).await;
     let (cert, key) = pki.issue("edge-01");
 
     let with_certificate = client(&ca_pem, Some((&cert, &key)));
@@ -169,11 +190,25 @@ async fn a_client_certificate_is_required_on_the_opamp_route_and_nowhere_else() 
         "a peer with no certificate must not reach the OpAMP endpoint"
     );
 
-    // The REST API on the same listener stays reachable without one: a browser presents nothing,
-    // and ADR-0013 leaves the operator plane open on purpose.
-    let agents = endpoint.replace("/v1/opamp", "/api/v1/agents");
+    // The Operator plane, on its own listener, stays reachable without one: a browser presents
+    // nothing, and ADR-0013 leaves that plane open on purpose.
+    let agents = format!("https://localhost:{operator_port}/api/v1/agents");
     let response = without.get(&agents).send().await.expect("send");
     assert!(response.status().is_success(), "{:?}", response.status());
+
+    // And on the Agent plane the artifact download is deliberately outside the guard (ADR-0066):
+    // a Client fetching a package presents no certificate, so this must reach the handler — `404`
+    // for a package nobody uploaded, never the `401` the OpAMP route answers above.
+    let download = endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    let response = without.get(&download).send().await.expect("send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "the download must reach the handler without a certificate"
+    );
 }
 
 /// Every configured proof must succeed, not the first that happens to pass: with both a credential
@@ -185,7 +220,7 @@ async fn a_certificate_does_not_stand_in_for_the_credential() {
         &toml::from_str::<server::config::AuthConfig>("bearer_tokens = [\"secret\"]")
             .expect("auth config"),
     );
-    let (endpoint, ca_pem) = serve(&pki, Admission::new(Some(auth), true), None).await;
+    let (endpoint, _, ca_pem) = serve(&pki, Admission::new(Some(auth), true), None).await;
     let (cert, key) = pki.issue("edge-01");
     let client = client(&ca_pem, Some((&cert, &key)));
 
@@ -227,7 +262,7 @@ async fn a_csr_is_answered_with_an_issued_certificate() {
     )
     .expect("client ca");
 
-    let (endpoint, ca_pem) = serve(&pki, Admission::open(), Some(client_ca)).await;
+    let (endpoint, _, ca_pem) = serve(&pki, Admission::open(), Some(client_ca)).await;
     let (bootstrap_cert, bootstrap_key) = pki.issue("bootstrap");
     let http = client(&ca_pem, Some((&bootstrap_cert, &bootstrap_key)));
 
@@ -270,7 +305,7 @@ async fn a_csr_is_answered_with_an_issued_certificate() {
 #[tokio::test]
 async fn a_csr_to_a_server_that_signs_nothing_is_a_bad_request() {
     let pki = Pki::new();
-    let (endpoint, ca_pem) = serve(&pki, Admission::open(), None).await;
+    let (endpoint, _, ca_pem) = serve(&pki, Admission::open(), None).await;
     let (cert, key) = pki.issue("edge-01");
     let http = client(&ca_pem, Some((&cert, &key)));
 

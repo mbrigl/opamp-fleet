@@ -164,8 +164,8 @@ reaches no other kind of Agent, named `glpi-agent-conf` because that is the file
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "glpi-agent", "selector": {}, "body": "server = https://glpi.example.com/front/inventory.php\n"}' \
-       http://127.0.0.1:4320/api/v1/configurations/glpi-agent-conf
-$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/glpi-agent-conf/rollout
+       http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf
+$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf/rollout
 ```
 
 A minimal body to start from is `config/examples/glpi-agent-conf.cfg` in this repository;

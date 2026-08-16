@@ -16,7 +16,7 @@ async fn configurations_crud_round_trips() {
 
     // Nothing yet.
     let list: serde_json::Value = client
-        .get(url(server.addr, "/api/v1/configurations"))
+        .get(url(server.rest_addr, "/api/v1/configurations"))
         .send()
         .await
         .expect("list")
@@ -27,7 +27,7 @@ async fn configurations_crud_round_trips() {
 
     // Create; the stored resource comes back, body normalized to a trailing newline.
     let put = client
-        .put(url(server.addr, "/api/v1/configurations/base"))
+        .put(url(server.rest_addr, "/api/v1/configurations/base"))
         .json(&serde_json::json!({ "selector": { "os.type": "linux" }, "body": "receivers: {}" }))
         .send()
         .await
@@ -44,7 +44,7 @@ async fn configurations_crud_round_trips() {
 
     // Read back, singly and as the list.
     let got: serde_json::Value = client
-        .get(url(server.addr, "/api/v1/configurations/base"))
+        .get(url(server.rest_addr, "/api/v1/configurations/base"))
         .send()
         .await
         .expect("get")
@@ -53,7 +53,7 @@ async fn configurations_crud_round_trips() {
         .expect("json");
     assert_eq!(got, stored);
     let list: serde_json::Value = client
-        .get(url(server.addr, "/api/v1/configurations"))
+        .get(url(server.rest_addr, "/api/v1/configurations"))
         .send()
         .await
         .expect("list")
@@ -64,19 +64,19 @@ async fn configurations_crud_round_trips() {
 
     // Delete; a second delete and a read find nothing.
     let deleted = client
-        .delete(url(server.addr, "/api/v1/configurations/base"))
+        .delete(url(server.rest_addr, "/api/v1/configurations/base"))
         .send()
         .await
         .expect("delete");
     assert_eq!(deleted.status(), 204);
     let again = client
-        .delete(url(server.addr, "/api/v1/configurations/base"))
+        .delete(url(server.rest_addr, "/api/v1/configurations/base"))
         .send()
         .await
         .expect("delete again");
     assert_eq!(again.status(), 404);
     let gone = client
-        .get(url(server.addr, "/api/v1/configurations/base"))
+        .get(url(server.rest_addr, "/api/v1/configurations/base"))
         .send()
         .await
         .expect("get");
@@ -92,7 +92,7 @@ async fn a_configuration_carries_an_optional_role() {
 
     // Omitted: accepted, and absent from the response.
     let stored: serde_json::Value = client
-        .put(url(server.addr, "/api/v1/configurations/base"))
+        .put(url(server.rest_addr, "/api/v1/configurations/base"))
         .json(&serde_json::json!({ "body": "receivers: {}" }))
         .send()
         .await
@@ -107,7 +107,7 @@ async fn a_configuration_carries_an_optional_role() {
 
     // Set: stored verbatim and returned.
     let stored: serde_json::Value = client
-        .put(url(server.addr, "/api/v1/configurations/ruleset"))
+        .put(url(server.rest_addr, "/api/v1/configurations/ruleset"))
         .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
         .send()
         .await
@@ -118,7 +118,7 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "supplementary");
 
     let got: serde_json::Value = client
-        .get(url(server.addr, "/api/v1/configurations/ruleset"))
+        .get(url(server.rest_addr, "/api/v1/configurations/ruleset"))
         .send()
         .await
         .expect("get")
@@ -130,7 +130,7 @@ async fn a_configuration_carries_an_optional_role() {
     // A value this project has no word for is carried, not rejected — the vocabulary is
     // Agent-type-specific and the Server never guesses at one.
     let stored: serde_json::Value = client
-        .put(url(server.addr, "/api/v1/configurations/other"))
+        .put(url(server.rest_addr, "/api/v1/configurations/other"))
         .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
         .send()
         .await
@@ -152,13 +152,13 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
 
     // Saved: complete, aimed at everybody — a visible candidate, assigned to nobody.
     let put = client
-        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
         .json(&serde_json::json!({ "body": "receivers: {}" }))
         .send()
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
-    let view = agent_view(&client, server.addr, &uid).await;
+    let view = agent_view(&client, server.rest_addr, &uid).await;
     assert_eq!(view["matched_configurations"][0], "fleet", "a candidate");
     assert!(
         view["assigned_configurations"]
@@ -172,7 +172,10 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
 
     // The resource-level act: rolled out to every currently matching Agent.
     let rollout: serde_json::Value = client
-        .post(url(server.addr, "/api/v1/configurations/fleet/rollout"))
+        .post(url(
+            server.rest_addr,
+            "/api/v1/configurations/fleet/rollout",
+        ))
         .send()
         .await
         .expect("rollout")
@@ -180,7 +183,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
         .await
         .expect("json");
     assert_eq!(rollout["assigned_agents"], 1);
-    let view = agent_view(&client, server.addr, &uid).await;
+    let view = agent_view(&client, server.rest_addr, &uid).await;
     assert_eq!(view["assigned_configurations"][0], "fleet");
     assert!(view["pending_configurations"]
         .as_array()
@@ -189,13 +192,13 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
 
     // Edited: the Agent keeps its pinned revision; the edit waits as an update.
     let put = client
-        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
         .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
         .send()
         .await
         .expect("edit");
     assert_eq!(put.status(), 200);
-    let view = agent_view(&client, server.addr, &uid).await;
+    let view = agent_view(&client, server.rest_addr, &uid).await;
     assert_eq!(
         view["pending_configurations"][0]["change"], "update",
         "the edit is saved, waiting, not in force: {view}"
@@ -203,7 +206,10 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
 
     // The per-Agent act releases the edit to this one Agent.
     let per_agent = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/rollout"),
+        ))
         .json(&serde_json::json!({ "configuration": "fleet" }))
         .send()
         .await
@@ -217,13 +223,19 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
 
     // A rollout of a name the store does not hold is 404, never a silent create.
     let missing = client
-        .post(url(server.addr, "/api/v1/configurations/missing/rollout"))
+        .post(url(
+            server.rest_addr,
+            "/api/v1/configurations/missing/rollout",
+        ))
         .send()
         .await
         .expect("rollout missing");
     assert_eq!(missing.status(), 404);
     let missing = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/rollout"),
+        ))
         .json(&serde_json::json!({ "configuration": "missing" }))
         .send()
         .await
@@ -247,13 +259,16 @@ async fn an_agent_that_appears_later_waits() {
     .await;
 
     client
-        .put(url(server.addr, "/api/v1/configurations/fleet"))
+        .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
         .json(&serde_json::json!({ "body": "receivers: {}" }))
         .send()
         .await
         .expect("put");
     let rollout: serde_json::Value = client
-        .post(url(server.addr, "/api/v1/configurations/fleet/rollout"))
+        .post(url(
+            server.rest_addr,
+            "/api/v1/configurations/fleet/rollout",
+        ))
         .send()
         .await
         .expect("rollout")
@@ -270,7 +285,7 @@ async fn an_agent_that_appears_later_waits() {
         &support::full_report(&late, "late", 1),
     )
     .await;
-    let view = agent_view(&client, server.addr, &late).await;
+    let view = agent_view(&client, server.rest_addr, &late).await;
     assert!(
         view["assigned_configurations"]
             .as_array()
@@ -282,7 +297,10 @@ async fn an_agent_that_appears_later_waits() {
 
     // Its own act — the empty body releases everything waiting.
     let rolled = client
-        .post(url(server.addr, &format!("/api/v1/agents/{late}/rollout")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{late}/rollout"),
+        ))
         .send()
         .await
         .expect("rollout to agent");
@@ -305,7 +323,10 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
         ("for-clients", "opamp-fleet-client"),
     ] {
         let put = client
-            .put(url(server.addr, &format!("/api/v1/configurations/{name}")))
+            .put(url(
+                server.rest_addr,
+                &format!("/api/v1/configurations/{name}"),
+            ))
             .json(&serde_json::json!({ "body": "x", "service_name": service_name }))
             .send()
             .await
@@ -314,14 +335,17 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
     }
 
     assert_eq!(
-        matched_configurations(&client, server.addr, &uid).await,
+        matched_configurations(&client, server.rest_addr, &uid).await,
         ["for-collectors"],
         "the type is a fit, not an aim: the other type's Configuration is no candidate"
     );
 
     // And the per-Agent act refuses the one that does not fit (ADR-0061).
     let refused = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/rollout")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/rollout"),
+        ))
         .json(&serde_json::json!({ "configuration": "for-clients" }))
         .send()
         .await
@@ -345,7 +369,7 @@ async fn invalid_configurations_are_rejected_loudly() {
     ] {
         let response = client
             .put(url(
-                server.addr,
+                server.rest_addr,
                 &format!("/api/v1/configurations/{}", urlencoding(name)),
             ))
             .json(&serde_json::json!({ "body": body }))
@@ -366,7 +390,7 @@ fn urlencoding(s: &str) -> String {
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
     let response = reqwest::Client::new()
-        .get(url(server.addr, "/api/v1/openapi.json"))
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
         .send()
         .await
         .expect("get");
@@ -416,7 +440,7 @@ async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
 
     // The docs page renders the OpenAPI document and pulls its renderer from this same origin.
     let page = client
-        .get(url(server.addr, "/api/v1/docs"))
+        .get(url(server.rest_addr, "/api/v1/docs"))
         .send()
         .await
         .expect("get docs");
@@ -438,7 +462,7 @@ async fn the_docs_page_and_its_vendored_renderer_are_served_same_origin() {
 
     // The vendored bundle is served as JavaScript — no CDN, so the docs work offline.
     let js = client
-        .get(url(server.addr, "/api/v1/docs/redoc.js"))
+        .get(url(server.rest_addr, "/api/v1/docs/redoc.js"))
         .send()
         .await
         .expect("get renderer");
@@ -490,7 +514,7 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     report(&client, server.addr, &support::full_report(&uid, "live", 1)).await;
 
     let refused = client
-        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
         .send()
         .await
         .expect("delete");
@@ -503,7 +527,11 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
             .contains("still reporting"),
         "the refusal says why: {body}"
     );
-    assert_eq!(agents(&client, server.addr).await.len(), 1, "the row stays");
+    assert_eq!(
+        agents(&client, server.rest_addr).await.len(),
+        1,
+        "the row stays"
+    );
 }
 
 /// ADR-0039, points 1 and 3: forgetting drops the record and reaches no host, so a Client that is
@@ -517,17 +545,17 @@ async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
     let client = reqwest::Client::new();
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "gone", 1)).await;
-    assert_eq!(agents(&client, server.addr).await.len(), 1);
+    assert_eq!(agents(&client, server.rest_addr).await.len(), 1);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let forgotten = client
-        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
         .send()
         .await
         .expect("delete");
     assert_eq!(forgotten.status(), 204);
     assert!(
-        agents(&client, server.addr).await.is_empty(),
+        agents(&client, server.rest_addr).await.is_empty(),
         "the row is gone"
     );
 
@@ -539,7 +567,7 @@ async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
         "an Agent the Server does not know is asked for full state"
     );
     assert_eq!(
-        agents(&client, server.addr).await.len(),
+        agents(&client, server.rest_addr).await.len(),
         1,
         "and it is back"
     );
@@ -555,7 +583,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 
     let unknown = client
         .delete(url(
-            server.addr,
+            server.rest_addr,
             &format!("/api/v1/agents/{}", opamp::uid::InstanceUid::default()),
         ))
         .send()
@@ -564,7 +592,7 @@ async fn forgetting_what_is_not_there_is_reported() {
     assert_eq!(unknown.status(), 404);
 
     let malformed = client
-        .delete(url(server.addr, "/api/v1/agents/not-a-uid"))
+        .delete(url(server.rest_addr, "/api/v1/agents/not-a-uid"))
         .send()
         .await
         .expect("delete");
@@ -583,7 +611,10 @@ async fn a_cross_site_state_changing_post_is_refused() {
 
     // A browser marks a cross-site request: refused with 403, whether or not the Agent exists.
     let cross = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/restart"),
+        ))
         .header("sec-fetch-site", "cross-site")
         .send()
         .await
@@ -593,7 +624,10 @@ async fn a_cross_site_state_changing_post_is_refused() {
     // The same-site case from the bundled UI passes the guard — the request reaches the handler,
     // which then answers 404 for an Agent that is not there. The point is it is *not* 403.
     let same_origin = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/restart"),
+        ))
         .header("sec-fetch-site", "same-origin")
         .send()
         .await
@@ -611,7 +645,10 @@ async fn a_cross_site_state_changing_post_is_refused() {
 
     // A non-browser client (curl, a portal) sends no Sec-Fetch header and is unaffected.
     let no_header = client
-        .post(url(server.addr, &format!("/api/v1/agents/{uid}/restart")))
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/restart"),
+        ))
         .send()
         .await
         .expect("restart");
@@ -666,14 +703,14 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes
     // itself to nobody — and since ADR-0061 even a match only proposes.
     let put = client
-        .put(url(server.addr, "/api/v1/configurations/canary"))
+        .put(url(server.rest_addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
         .send()
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
     assert!(
-        matched_configurations(&client, server.addr, &uid)
+        matched_configurations(&client, server.rest_addr, &uid)
             .await
             .is_empty(),
         "an attribute nobody reports reaches nobody"
@@ -682,7 +719,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     // One call, no host access: the Agent is in the ring.
     let labelled = set_labels(
         &client,
-        server.addr,
+        server.rest_addr,
         &uid,
         serde_json::json!({"rollout": "canary"}),
     )
@@ -691,19 +728,19 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     let view: serde_json::Value = labelled.json().await.expect("json");
     assert_eq!(view["labels"]["rollout"], "canary");
     assert_eq!(
-        matched_configurations(&client, server.addr, &uid).await,
+        matched_configurations(&client, server.rest_addr, &uid).await,
         ["canary"],
         "the label is matched exactly like a reported attribute"
     );
 
     // And out again: an empty map clears them.
     assert_eq!(
-        set_labels(&client, server.addr, &uid, serde_json::json!({}))
+        set_labels(&client, server.rest_addr, &uid, serde_json::json!({}))
             .await
             .status(),
         200
     );
-    assert!(matched_configurations(&client, server.addr, &uid)
+    assert!(matched_configurations(&client, server.rest_addr, &uid)
         .await
         .is_empty());
 }
@@ -720,7 +757,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0031).
     let refused = set_labels(
         &client,
-        server.addr,
+        server.rest_addr,
         &uid,
         serde_json::json!({"os.type": "windows"}),
     )
@@ -734,7 +771,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     assert_eq!(
         set_labels(
             &client,
-            server.addr,
+            server.rest_addr,
             &uid,
             serde_json::json!({"rollout": ""})
         )
@@ -744,7 +781,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     );
 
     // Nothing was stored by either attempt.
-    let agents = agents(&client, server.addr).await;
+    let agents = agents(&client, server.rest_addr).await;
     assert!(
         agents[0]["labels"].as_object().expect("labels").is_empty(),
         "a refused set leaves nothing behind"
@@ -764,7 +801,7 @@ async fn the_view_carries_the_reported_health_and_its_reason() {
 
     // Before any health report, the view claims nothing either way.
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
-    let view = &agents(&client, server.addr).await[0];
+    let view = &agents(&client, server.rest_addr).await[0];
     assert_eq!(view["healthy"], false);
     assert_eq!(view["health_status"], "");
     assert_eq!(view["health_error"], "");
@@ -779,7 +816,7 @@ async fn the_view_carries_the_reported_health_and_its_reason() {
         ..Default::default()
     });
     report(&client, server.addr, &unhealthy).await;
-    let view = &agents(&client, server.addr).await[0];
+    let view = &agents(&client, server.rest_addr).await[0];
     assert_eq!(view["healthy"], false);
     assert_eq!(view["health_status"], "no process installed");
     assert_eq!(
@@ -796,7 +833,7 @@ async fn the_view_carries_the_reported_health_and_its_reason() {
         ..Default::default()
     });
     report(&client, server.addr, &healthy).await;
-    let view = &agents(&client, server.addr).await[0];
+    let view = &agents(&client, server.rest_addr).await[0];
     assert_eq!(view["healthy"], true);
     assert_eq!(view["health_status"], "running");
     assert_eq!(view["health_error"], "");
@@ -813,7 +850,7 @@ async fn forgetting_an_agent_keeps_its_labels() {
     assert_eq!(
         set_labels(
             &client,
-            server.addr,
+            server.rest_addr,
             &uid,
             serde_json::json!({"rollout": "canary"})
         )
@@ -824,16 +861,16 @@ async fn forgetting_an_agent_keeps_its_labels() {
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let forgotten = client
-        .delete(url(server.addr, &format!("/api/v1/agents/{uid}")))
+        .delete(url(server.rest_addr, &format!("/api/v1/agents/{uid}")))
         .send()
         .await
         .expect("delete");
     assert_eq!(forgotten.status(), 204);
-    assert!(agents(&client, server.addr).await.is_empty());
+    assert!(agents(&client, server.rest_addr).await.is_empty());
 
     // It comes back — still in its ring, without anyone re-labelling it.
     report(&client, server.addr, &support::full_report(&uid, "host", 2)).await;
-    let agents = agents(&client, server.addr).await;
+    let agents = agents(&client, server.rest_addr).await;
     assert_eq!(agents[0]["labels"]["rollout"], "canary");
 }
 

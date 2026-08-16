@@ -20,9 +20,21 @@ use axum::Router;
 
 use fleet::AppState;
 
-/// The complete application: OpAMP endpoint, REST API, and UI on one router (ADR-0005). Admission
-/// guards the OpAMP endpoint alone (ADR-0013, ADR-0035) — REST API and UI stay open,
-/// operator-facing auth being a separate decision.
-pub fn app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    transport::router(state.clone(), admission).merge(api::router(state))
+/// The **Agent plane** (ADR-0066): the OpAMP endpoint, guarded by Admission (ADR-0013, ADR-0035),
+/// and the package download route beside it — outside that guard, because a downloading Client
+/// presents neither credential nor certificate and the artifact's hash and signature are what
+/// protect it (ADR-0015).
+///
+/// The download lives here rather than with the rest of `/api/v1` because the split between the
+/// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
+/// `download_url` is resolved against the Agent's own endpoint.
+pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
+    transport::router(state.clone(), admission).merge(api::download_router(state))
+}
+
+/// The **Operator plane** (ADR-0066): the REST API, its OpenAPI document and docs page, and the
+/// bundled UI — on their own listener. Nothing guards it yet; that is the decision this ADR makes
+/// possible rather than takes.
+pub fn operator_app(state: Arc<AppState>) -> Router {
+    api::router(state)
 }
