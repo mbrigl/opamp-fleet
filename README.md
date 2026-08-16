@@ -11,7 +11,9 @@ OpAMP — and that can equally run as a **gateway** multiplexing other clients u
 **specification** ([`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)) and **Architecture Decision
 Records** ([`docs/adr/`](docs/adr/)), so intent and the reasoning behind every structural choice stay
 explicit and reviewable. How much of the protocol each end implements is tracked in
-[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md); candidate measures for hardening the Client–Server
+link further are collected — as a backlog, not as decisions — in
+[`docs/HARDENING.md`](docs/HARDENING.md).
 
 > **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
 > start it, and every configuration key, split into [Server](docs/manual/server.md) and
@@ -346,6 +348,7 @@ AGENTS.md             # single source of truth for coding agents
 docs/manual/         # the user manual: Server, Client, and the operator tools, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
+docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
 crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, client.toml)
