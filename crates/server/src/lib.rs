@@ -8,6 +8,7 @@ pub mod api;
 pub mod ca;
 pub mod config;
 pub mod configs;
+pub mod credentials;
 pub mod fleet;
 pub mod labels;
 pub mod packages;
@@ -33,8 +34,8 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
 }
 
 /// The **Operator plane** (ADR-0066): the REST API, its OpenAPI document and docs page, and the
-/// bundled UI — on their own listener. Nothing guards it yet; that is the decision this ADR makes
-/// possible rather than takes.
-pub fn operator_app(state: Arc<AppState>) -> Router {
-    api::router(state)
+/// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
+/// (ADR-0067). Without it the plane is open, which is what its loopback default is for.
+pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
+    api::router(state, auth)
 }

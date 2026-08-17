@@ -187,7 +187,25 @@ async fn main() {
         state.clone(),
         server::transport::Admission::new(auth, mutual_tls),
     );
-    let operators = server::operator_app(state.clone());
+    let operator_auth = config
+        .rest
+        .auth
+        .as_ref()
+        .map(server::api::OperatorAuth::from_config);
+    if operator_auth.is_some() {
+        // ADR-0067.
+        info!("the REST API and the UI require authentication");
+        // Basic puts a reusable password on the wire on every request. On loopback that stays on
+        // the host; published in cleartext it does not, and the operator should hear so once.
+        if config.tls.is_none() && !config.rest.listen.ip().is_loopback() {
+            tracing::warn!(
+                listen = %config.rest.listen,
+                "[rest.auth] sends its password in the clear on a listener that is not loopback — \
+                 add [tls], or put a TLS-terminating proxy in front (ADR-0067)"
+            );
+        }
+    }
+    let operators = server::operator_app(state.clone(), operator_auth);
 
     match &config.tls {
         Some(tls) => {

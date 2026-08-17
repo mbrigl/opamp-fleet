@@ -74,11 +74,12 @@ you talk to.
 | `/api/v1/docs` | Interactive API documentation (Redoc, vendored and served from this origin, so it works offline). |
 | `/` | The bundled UI: one embedded page, no frontend toolchain. It is deliberately rudimentary — the API is the product. |
 
-Nothing authenticates the Operator plane yet — `[auth]` guards the OpAMP endpoint and nothing else
-— which is why its default address is **loopback**: this port carries the authority to reconfigure
+`[auth]` guards the OpAMP endpoint and nothing else; the Operator plane has its own credential,
+[`[rest.auth]`](#the-operator-plane-restauth), and without it that plane is open to whoever reaches
+it. That is why its default address is **loopback**: this port carries the authority to reconfigure
 and re-package the whole fleet. Reach it from another host through an SSH tunnel
-(`ssh -L 4321:127.0.0.1:4321 <server-host>`), or open it deliberately with
-`[rest] listen = "0.0.0.0:4321"`.
+(`ssh -L 4321:127.0.0.1:4321 <server-host>`), or publish it deliberately with
+`[rest] listen = "0.0.0.0:4321"` — and then guard it.
 
 ## Configuration reference
 
@@ -111,6 +112,20 @@ listen = "127.0.0.1:4321"   # "0.0.0.0:4321" publishes the REST API and the UI t
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. |
+
+#### `[rest.auth]`
+
+Optional Basic authentication over that whole plane — see
+[Authentication](#the-operator-plane-restauth). Absent means open.
+
+```toml
+[rest.auth.basic_users]
+fleet-admin = "a-strong-password"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "password"`. A section without one, or an entry with an empty name or password, fails startup. |
 
 ### `[tls]`
 
@@ -444,8 +459,10 @@ and names the member the way the receiving Supervisor will look for it. There is
 no way to add one: an artifact that is neither gzip nor 7z is taken to *be* the program.
 [The rollout walkthrough](rollout.md) puts the whole sequence together.
 
-The download route sits on the unauthenticated REST plane deliberately: the content hash and the
-signature are what protect an installed binary, not who was allowed to fetch it.
+The download route sits on the **Agent plane**, unauthenticated, deliberately: the content hash and
+the signature are what protect an installed binary, not who was allowed to fetch it — and a Client
+downloading one presents no credential, which is exactly why guarding the Operator plane cannot
+break a rollout.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
 Once a Client has a key configured, an unsigned package is refused; without one, a *signed* package
@@ -455,7 +472,8 @@ is refused too. Decide fleet-wide, not per host.
 
 The OpenAPI document at `/api/v1/openapi.json` is the contract; `/api/v1/docs` renders it. Every
 error response carries a JSON body with an `error` field, so a generated client has something to
-show.
+show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) and, when
+[`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic credentials.
 
 | Method & path | What it does |
 |---|---|
@@ -478,7 +496,7 @@ show.
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}/selector` | Set whom a rollout act would release it to. Never distributes. |
 | `POST /api/v1/packages/{name}/{agent_type}/{version}/rollout` | Roll the Set out to every Agent it fits and its Selector aims at — the moment a rollout starts. An older version here is the rollback. `409` while the Set holds no entries. |
 | `DELETE /api/v1/packages/{name}/{agent_type}/{version}` | Remove the Set — and every per-Agent assignment that referenced it. Uninstalls nothing. |
-| `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. |
+| `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 
@@ -613,12 +631,47 @@ fleet = "a-strong-password"
 Both schemes may be configured at once, and several valid credentials may be listed — which is what
 makes an overlapping rotation possible.
 
-**The REST API and the UI are not guarded by this.** Neither is the package download route. Put the
-API behind whatever fronts it (a reverse proxy, an existing portal's authentication) if it must not
-be public, and rely on signatures rather than access control for artifacts.
+**The REST API and the UI are not guarded by this** — they are a different plane with a credential
+of their own, `[rest.auth]` below. Neither is the package download route, deliberately: an Agent
+fetches an artifact without presenting anything, and its content hash and signature are what protect
+it.
 
 Without TLS the credentials travel in cleartext — a Client warns when it sends one beyond the
 loopback interface, but it still sends it. Pair `[auth]` with `[tls]` for anything real.
+
+### The Operator plane: `[rest.auth]`
+
+`[rest.auth]` guards **the whole Operator plane** — `/api/v1/…`, the OpenAPI document, the API docs,
+and the UI at `/`. Without the section that plane is open, which is why its default address is
+loopback; with it, every request needs Basic credentials and anything else is answered `401` with a
+`WWW-Authenticate: Basic` challenge.
+
+```toml
+[rest]
+listen = "0.0.0.0:4321"          # publishing it is the reason to add the section below
+
+[rest.auth.basic_users]
+fleet-admin = "a-strong-password"
+```
+
+Basic, and only Basic, because the audience is a browser and `curl`: the browser answers the
+challenge by itself, so the bundled UI needs no login page, no session, and no cookie. Several users
+are how a credential is rotated — add the new one, hand it out, remove the old — or how one
+operator's is withdrawn without touching anyone else's.
+
+**The operator tools carry it in the URL** they are given, which needs no new flag:
+
+```console
+$ curl -u fleet-admin:secret http://127.0.0.1:4321/api/v1/agents
+$ opamp-package-fetch … --server http://fleet-admin:secret@127.0.0.1:4321
+```
+
+Two limits worth stating plainly. It is **authentication, not authorization**: everyone listed can
+do everything the plane offers — there are no roles, and one Server still manages one fleet. And
+Basic sends a reusable password on **every** request, so it is only as private as the channel under
+it: pair `[rest.auth]` with `[tls]`, or put a TLS-terminating proxy in front. The Server logs a
+warning at startup when the plane is published in cleartext with a credential configured. Passwords
+are stored in `server.toml` verbatim, exactly as `[auth]`'s are.
 
 ## TLS
 
@@ -690,7 +743,8 @@ them, which is the Server half of the missing mutual-TLS support.
 
 ## What the Server does not do
 
-- **It does not authenticate the REST API or the UI**, by design — see above.
+- **It authenticates the REST API and the UI only if you ask it to** — `[rest.auth]`, Basic, off by
+  default, with the plane on loopback until you publish it.
 - **It does not throttle.** It honours the protocol's error and retry semantics and answers
   malformed input with `BAD_REQUEST`, but it never tells an Agent to slow down.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;

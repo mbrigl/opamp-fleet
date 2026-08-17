@@ -17,6 +17,23 @@ carries a date once its tag exists.
 
 ## [0.3.1]
 
+### Added
+
+- **Basic authentication for the REST API and the UI**
+  ([ADR-0067](docs/adr/0067-basic-authentication-on-the-operator-plane.md)). `[rest.auth.basic_users]`
+  in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
+  `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
+  credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
+  browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
+  plane stays open exactly as before — the loopback default of ADR-0066 is what protects it then.
+  **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
+  with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
+  Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
+  the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two limits, stated
+  plainly: everyone listed can do everything (authentication, not authorization), and passwords sit
+  in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched — Agents and
+  package downloads carry no operator credential and never will.
+
 ### Changed
 
 - **The REST API and the UI moved to their own port, on loopback**

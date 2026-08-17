@@ -226,7 +226,9 @@ A minimal closed control loop on one machine:
    [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)) and the package downloads the offers point
    at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
    ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), the API
-   docs, and the bundled UI at `/` — on loopback, because nothing authenticates it yet.
+   docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
+   with Basic credentials
+   ([ADR-0067](docs/adr/0067-basic-authentication-on-the-operator-plane.md)).
 2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport

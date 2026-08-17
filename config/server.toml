@@ -62,7 +62,7 @@ max_message_size_bytes = 67108864
 # OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching
 # any listed credential; anything else is answered 401. Both schemes may be configured at once;
 # several valid credentials allow overlapping rotation. Without [auth] the endpoint stays open.
-# REST API and UI are not guarded by this.
+# REST API and UI are not guarded by this — that is [rest.auth] at the end of this file (ADR-0067).
 # [auth]
 # bearer_tokens = ["a-long-random-token"]
 # [auth.basic_users]
@@ -148,11 +148,26 @@ max_package_size_bytes = 1073741824
 # advertised_url = "https://fleet.example:4320"
 
 # THE OPERATOR PLANE (ADR-0066): the REST API, the API docs, and the bundled UI, on their own
-# listener. Nothing authenticates them yet, so reachability is their only protection — and this
-# port carries the authority to reconfigure and re-package the entire fleet. Hence loopback by
-# default: reach it through an SSH tunnel, or open it deliberately with listen = "0.0.0.0:4321".
+# listener. This port carries the authority to reconfigure and re-package the entire fleet, and
+# without [rest.auth] below it is open to whoever reaches it — hence loopback by default. Reach it
+# through an SSH tunnel, or publish it deliberately with listen = "0.0.0.0:4321".
 #
 # It must differ from the Agent plane's `listen` above; equal addresses are refused at startup,
 # by name, instead of surfacing later as "address already in use".
 [rest]
 listen = "127.0.0.1:4321"
+
+# Optional Basic authentication over the WHOLE Operator plane (ADR-0067): the REST API, the
+# OpenAPI document, the API docs, and the UI. Absent means open, as it has been. Every request
+# then needs `Authorization: Basic <base64(user:password)>`; anything else is answered 401 with a
+# challenge, which is what makes a browser ask for the password instead of showing a bare error —
+# so the UI needs no login page.
+#
+# Several users are how a credential is rotated, or one operator's is withdrawn on its own. The
+# operator tools carry it in the URL they are given: --server http://fleet-admin:secret@host:4321
+#
+# This is authentication, not authorization: everyone listed can do everything the plane offers.
+# Basic sends the password on every request, so pair it with [tls] — or a TLS-terminating proxy —
+# whenever this plane is not on loopback. The Server warns at startup if it is not.
+# [rest.auth.basic_users]
+# fleet-admin = "a-strong-password"

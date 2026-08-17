@@ -120,7 +120,7 @@ async fn serve(
     let operator_listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let operator_addr = operator_listener.local_addr().expect("addr");
-    let operators = server::operator_app(state);
+    let operators = server::operator_app(state, None);
     tokio::spawn(async move {
         axum_server::from_tcp(operator_listener)
             .acceptor(operator_acceptor)

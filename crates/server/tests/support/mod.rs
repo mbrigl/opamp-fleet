@@ -102,14 +102,24 @@ async fn spawn_full(
 }
 
 /// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0066), and
-/// answers with the address of each.
+/// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
     state: Arc<AppState>,
     admission: server::transport::Admission,
 ) -> (SocketAddr, SocketAddr) {
+    serve_guarded(state, admission, None).await
+}
+
+/// The same two planes, with the Operator plane's credential check active (ADR-0067).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn serve_guarded(
+    state: Arc<AppState>,
+    admission: server::transport::Admission,
+    operator_auth: Option<server::api::OperatorAuth>,
+) -> (SocketAddr, SocketAddr) {
     let agents = server::agent_app(state.clone(), admission);
-    let operators = server::operator_app(state);
+    let operators = server::operator_app(state, operator_auth);
     let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind the Agent plane");

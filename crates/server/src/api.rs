@@ -9,8 +9,9 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -20,7 +21,9 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
+use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
+use crate::credentials::Credentials;
 use crate::fleet::{AgentView, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
 use crate::labels::LabelError;
 
@@ -39,7 +42,37 @@ use crate::labels::LabelError;
 )]
 struct ApiDoc;
 
-pub fn router(state: Arc<AppState>) -> Router {
+/// The Operator plane's credential check (ADR-0067), precomputed from `[rest.auth]`. Basic only,
+/// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
+/// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
+/// page and a session.
+pub struct OperatorAuth(Credentials);
+
+impl OperatorAuth {
+    pub fn from_config(auth: &RestAuthConfig) -> Self {
+        OperatorAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
+    }
+}
+
+/// Refuses every request that carries no configured credential, before any handler sees it.
+async fn authenticate(
+    State(auth): State<Arc<OperatorAuth>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !auth.0.permits(request.headers()) {
+        // The challenge is what turns this into a browser prompt rather than a dead end.
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
+            "the REST API and the UI require authentication",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
@@ -70,22 +103,29 @@ pub fn router(state: Arc<AppState>) -> Router {
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
         serde_json::to_string_pretty(&document).expect("the OpenAPI document serializes");
-    api.route(
-        "/api/v1/openapi.json",
-        get(move || {
-            let body = (
-                [(header::CONTENT_TYPE, "application/json")],
-                document.clone(),
-            );
-            std::future::ready(body.into_response())
-        }),
-    )
-    // The interactive API docs (ADR-0005): a Redoc page rendering /api/v1/openapi.json, with
-    // Redoc vendored and served from this same origin so the docs work offline.
-    .route("/api/v1/docs", get(docs))
-    .route("/api/v1/docs/redoc.js", get(redoc_js))
-    .route("/", get(index))
-    .with_state(state)
+    let router = api
+        .route(
+            "/api/v1/openapi.json",
+            get(move || {
+                let body = (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    document.clone(),
+                );
+                std::future::ready(body.into_response())
+            }),
+        )
+        // The interactive API docs (ADR-0005): a Redoc page rendering /api/v1/openapi.json, with
+        // Redoc vendored and served from this same origin so the docs work offline.
+        .route("/api/v1/docs", get(docs))
+        .route("/api/v1/docs/redoc.js", get(redoc_js))
+        .route("/", get(index))
+        .with_state(state);
+    match auth {
+        // The outermost layer, so the guard covers every route on this listener — including the
+        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0067).
+        Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
+        None => router,
+    }
 }
 
 /// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.

@@ -42,7 +42,9 @@ has:
   `transport::Admission`). Not "either one", which is what keeps switching mutual TLS on from ever
   admitting more than before.
 - Constant-time comparison of the presented `Authorization` value, so a comparison leaks nothing
-  about how far it matched.
+  about how far it matched — on both planes, from one primitive (`credentials.rs`).
+- Optional Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
+  ADR-0067), on a listener that is loopback until an operator publishes it (ADR-0066).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
@@ -142,7 +144,9 @@ host" to "eject the whole fleet by accident".
 
 **H7 — Store admission credentials hashed, and referenced rather than inline.**
 `server.toml` holds Bearer tokens and Basic passwords verbatim, so they reach backups, diffs, and
-config management. Two different answers are needed for the two schemes, and conflating them would
+config management. Since ADR-0067 this is **two** sections — `[auth]` for the fleet and
+`[rest.auth]` for the operators — and they have to change together, or the file ends up carrying two
+credential formats. Two different answers are needed for the two schemes, and conflating them would
 be a mistake: Basic passwords want a password hash (Argon2/bcrypt), while running a KDF per Bearer
 request is itself a denial-of-service vector — a plain SHA-256 over a high-entropy token is the
 right shape there. Either way the constant-time comparison already in place has to survive the
