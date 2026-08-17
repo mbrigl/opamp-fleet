@@ -96,4 +96,9 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0065](0065-the-operator-package-tools-live-in-their-own-crate.md) | The operator package tools live in their own crate, depending on the Client rather than shipping inside it | 🟢 accepted |
 | [0066](0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md) | The Agent plane and the Operator plane get their own listeners — OpAMP and package downloads on `4320`, REST API and UI on loopback `4321` | 🟢 accepted |
 | [0067](0067-basic-authentication-on-the-operator-plane.md) | Basic authentication on the Operator plane — one credential set for the REST API and the UI, optional by default | 🟢 accepted |
+| [0068](0068-icinga-2-is-supervised-by-a-kind-of-its-own.md) | Icinga 2 is supervised by a kind of its own — the relocation arguments, the directories, and the validation are the Supervisor's | 🟢 accepted |
+| [0069](0069-the-icinga-master-signs-the-ticket-travels-as-a-configuration.md) | The Icinga master stays the CA — the ticket travels as a Configuration, and the Supervisor enrols once | 🟢 accepted |
+| [0070](0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md) | Repacked vendor packages as relocatable Icinga 2 trees — everything but glibc rides along | 🟢 accepted |
+| [0071](0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md) | One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion | 🟡 proposed |
+| [0072](0072-the-windows-artifact-is-verified-by-its-publisher.md) | The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH | 🟡 proposed |
 
