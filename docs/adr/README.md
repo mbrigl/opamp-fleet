@@ -95,4 +95,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0064](0064-self-contained-glpi-agent-packages-for-both-platforms.md) | Self-contained GLPI Agent packages — the Windows zip as published, the Linux AppImage repacked as a tree | 🟢 accepted |
 | [0065](0065-the-operator-package-tools-live-in-their-own-crate.md) | The operator package tools live in their own crate, depending on the Client rather than shipping inside it | 🟢 accepted |
 | [0066](0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md) | The Agent plane and the Operator plane get their own listeners — OpAMP and package downloads on `4320`, REST API and UI on loopback `4321` | 🟡 proposed |
+| [0067](0067-basic-authentication-on-the-operator-plane.md) | Basic authentication on the Operator plane — one credential set for the REST API and the UI, optional by default | 🟡 proposed |
 
