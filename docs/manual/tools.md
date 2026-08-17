@@ -85,7 +85,7 @@ Which platforms (space to select, enter to confirm)
   [x] windows/amd64
   [ ] darwin/arm64
 Upload these to a fleet Server? yes
-Server base URL› http://127.0.0.1:4320
+Server base URL› http://127.0.0.1:4321
 ```
 
 The version list is the **five most recent releases**, newest first — enough to reach the one
@@ -105,7 +105,7 @@ Every prompt has a flag; give all of them and nothing is asked:
 ```console
 $ opamp-package-fetch --agent telegraf --version 1.39.3 \
       --platform linux/amd64 --platform windows/amd64 \
-      --out-dir ./artifacts --server http://127.0.0.1:4320
+      --out-dir ./artifacts --server http://127.0.0.1:4321
 ```
 
 | Option | Meaning |

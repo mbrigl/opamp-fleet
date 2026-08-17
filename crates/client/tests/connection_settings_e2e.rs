@@ -44,7 +44,7 @@ async fn spawn_armed_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile:
                 ConnectionOffer::from_config(&offer_config).expect("offer"),
             )),
     );
-    let app = server::app(state.clone(), server::transport::Admission::open());
+    let app = server::agent_app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind the server");

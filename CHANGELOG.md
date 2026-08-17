@@ -15,7 +15,45 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.1]
+## [0.3.2]
+
+### Added
+
+- **Basic authentication for the REST API and the UI**
+  ([ADR-0031](docs/adr/0031-agent-plane-and-operator-plane.md)). `[rest.auth.basic_users]`
+  in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
+  `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
+  credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
+  browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
+  plane stays open exactly as before — the loopback default of ADR-0031 is what protects it then.
+  **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
+  with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
+  Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
+  the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two limits, stated
+  plainly: everyone listed can do everything (authentication, not authorization), and passwords sit
+  in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched — Agents and
+  package downloads carry no operator credential and never will.
+
+### Changed
+
+- **The REST API and the UI moved to their own port, on loopback**
+  ([ADR-0031](docs/adr/0031-agent-plane-and-operator-plane.md),
+  superseding the single-listener decision of
+  [ADR-0005](docs/adr/0005-workspace-and-server-runtime.md)). The Server now serves two planes,
+  split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint and the
+  package download an offer's `download_url` points at. The **Operator plane** is new — `[rest]
+  listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the bundled UI.
+  Nothing authenticates that plane yet ([`[auth]`](config/server.toml) guards the OpAMP endpoint and
+  nothing else), so its reachability is its only protection, and it carries the authority to
+  reconfigure and re-package the whole fleet: hence loopback. Authenticating it is now a decision
+  about one listener instead of a per-path exemption on a shared one — which is the point of the
+  move.
+  **What to do:** change the address in every operator tool, script, and bookmark from
+  `:4320/api/v1/…` to `:4321/api/v1/…`, and open the UI at `http://<server>:4321/`. To reach it from
+  another host, either tunnel (`ssh -L 4321:127.0.0.1:4321 <server-host>`) or put
+  `[rest]` / `listen = "0.0.0.0:4321"` in `server.toml` deliberately. **Clients need no change at
+  all** — the endpoint, the offered `download_url`, and `advertised_url` all keep working as they
+  are. The two addresses must differ; equal ones are refused at startup by name.
 
 ### Fixed
 

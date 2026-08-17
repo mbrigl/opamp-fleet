@@ -79,7 +79,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     assert!(first.remote_config.is_none());
 
     // The operator distributes a configuration; the connected Agent hears about it immediately.
-    distribute(server.addr, "fleet", &[], "exporters: {}\n").await;
+    distribute(server.rest_addr, "fleet", &[], "exporters: {}\n").await;
 
     let pushed = recv(&mut socket).await;
     let offer = pushed.remote_config.expect("a pushed offer");
@@ -96,7 +96,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     let reply = recv(&mut socket).await;
     assert!(reply.remote_config.is_none());
 
-    distribute(server.addr, "fleet", &[], "exporters: {}\n").await;
+    distribute(server.rest_addr, "fleet", &[], "exporters: {}\n").await;
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
 }
@@ -111,9 +111,16 @@ async fn a_configuration_role_reaches_the_agent_verbatim() {
     send(&mut socket, &full_report(&uid, "collector", 1)).await;
     recv(&mut socket).await;
 
-    distribute(server.addr, "base", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
     recv(&mut socket).await;
-    distribute_with_role(server.addr, "ruleset", &[], "rules: []\n", "supplementary").await;
+    distribute_with_role(
+        server.rest_addr,
+        "ruleset",
+        &[],
+        "rules: []\n",
+        "supplementary",
+    )
+    .await;
 
     let map = recv(&mut socket)
         .await
@@ -145,7 +152,7 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     recv(&mut socket).await;
 
     // A fleet-wide Configuration (empty Selector) reaches both Agents.
-    distribute(server.addr, "base", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
     let mut offered = std::collections::HashMap::new();
     for _ in 0..2 {
         let pushed = recv(&mut socket).await;
@@ -171,7 +178,7 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     // A Configuration selecting `service.name = left` reaches only that Agent, composed with the
     // fleet-wide one as two named entries.
     distribute(
-        server.addr,
+        server.rest_addr,
         "left-only",
         &[("service.instance.name", "left")],
         "exporters: {}\n",
@@ -218,7 +225,7 @@ async fn a_restart_is_pushed_to_a_connected_agent_as_its_own_frame() {
     let response = reqwest::Client::new()
         .post(format!(
             "http://{}/api/v1/agents/{uid}/restart",
-            server.addr
+            server.rest_addr
         ))
         .send()
         .await

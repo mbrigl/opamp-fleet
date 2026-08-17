@@ -42,7 +42,9 @@ has:
   `transport::Admission`). Not "either one", which is what keeps switching mutual TLS on from ever
   admitting more than before.
 - Constant-time comparison of the presented `Authorization` value, so a comparison leaks nothing
-  about how far it matched.
+  about how far it matched — on both planes, from one primitive (`credentials.rs`).
+- Optional Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
+  ADR-0031), on a listener that is loopback until an operator publishes it (ADR-0031).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
@@ -142,7 +144,9 @@ host" to "eject the whole fleet by accident".
 
 **H7 — Store admission credentials hashed, and referenced rather than inline.**
 `server.toml` holds Bearer tokens and Basic passwords verbatim, so they reach backups, diffs, and
-config management. Two different answers are needed for the two schemes, and conflating them would
+config management. Since ADR-0031 this is **two** sections — `[auth]` for the fleet and
+`[rest.auth]` for the operators — and they have to change together, or the file ends up carrying two
+credential formats. Two different answers are needed for the two schemes, and conflating them would
 be a mistake: Basic passwords want a password hash (Argon2/bcrypt), while running a KDF per Bearer
 request is itself a denial-of-service vector — a plain SHA-256 over a high-entropy token is the
 right shape there. Either way the constant-time comparison already in place has to survive the
@@ -159,14 +163,22 @@ the document.
 
 ## Stage 4 — Shrink the surface and bound the abuse
 
-**H9 — Give `/v1/opamp` its own listener.**
-One port serves OpAMP, the REST API, and the UI (ADR-0005). That is exactly why client
-authentication has to stay *optional* at the TLS layer — a browser presents no certificate — and be
-required later, on the route ([`tls.rs`](../crates/server/src/tls.rs)). A separate port, or a
-separate interface, allows the verifier to require a certificate in the handshake itself: an
-unauthorized peer then dies before it reaches any handler, and the route-level check becomes a
-second line rather than the only one. Structurally the cleanest reduction of surface available here.
-Needs an ADR, since ADR-0005 put the three on one listener on purpose.
+**H9 — Require the client certificate in the TLS handshake on the Agent plane.** *(half taken —
+ADR-0031)*
+The listener split this measure asked for is **done**: the REST API and the UI have their own
+listener (ADR-0031, superseding ADR-0005 on that point), and the OpAMP endpoint no longer shares a
+port with a browser. What has *not* changed is the verifier: client authentication is still
+*optional* at the TLS layer and required on the route
+([`tls.rs`](../crates/server/src/tls.rs)) — and the reason is now a different one. The Agent plane
+also serves the **package download**, which a Client fetches presenting no certificate (the artifact
+is protected by its hash and signature, ADR-0015), so requiring one in the handshake today would
+break every rollout.
+**To work out:** whether the Client's downloader should present its certificate when the artifact
+host is its own Server — and what that means for a `download_url` pointing at a mirror, where
+sending it would be wrong — or whether the download plane gets a listener of its own. Only then can
+the handshake require the certificate, so that an unauthorized peer dies before it reaches any
+handler and the route check becomes a second line rather than the only one. Needs an ADR for
+whichever shape wins.
 
 **H10 — Throttle, as the Baseline's SHOULD asks.**
 `ServerErrorResponse` with `ServerErrorResponseType_Unavailable` and `retry_info` is not emitted;
@@ -250,7 +262,7 @@ measure that has not been taken.
 | H6 | Renewal is observed to complete **before** expiry in a fleet left running longer than one validity period. Not a unit test — this one needs a soak, and shortening validity without that evidence is the failure mode the measure is meant to avoid. |
 | H7 | No credential appears in `server.toml` in a form that authenticates on its own; a correct credential still authenticates; a wrong one is still rejected in constant time. The last clause matters: the point of the change is not to lose the property already held. |
 | H8 | The CSR-obtained private key and the rotated-credential cache carry mode `0600` on Unix and the equivalent ACL on Windows. The Windows half is `cfg(windows)` code and therefore invisible to a local `cargo test` — it needs cross-compilation to typecheck, and CI to run. |
-| H9 | A peer presenting no client certificate fails in the **TLS handshake** on the OpAMP listener — an error at the transport, not a `401` from a handler — while the UI and REST listener still serves a browser that presents none. The distinction between those two failures is the whole measure. |
+| H9 | The listener split is in force and covered: the REST API answers on the Operator plane and `404`s on the Agent plane, and the artifact download does the reverse (ADR-0031, `auth.rs` and `packages.rs` integration tests). What remains unverified is the handshake half: a peer presenting no client certificate must fail in the **TLS handshake** on the Agent plane — an error at the transport, not a `401` from a handler — while a browser reaching the Operator plane with none is served. The distinction between those two failures is the rest of the measure. |
 | H10 | Connection or enrolment attempts past the configured rate are answered `ServerErrorResponse` of type `Unavailable` carrying `retry_info`, and the Client backs off accordingly (the Client half is already implemented, so this verifies the pair). |
 | H11 | A peer offering only TLS 1.2 fails the handshake against both ends. |
 | H12 | A package offered to a Client with no signing key configured is **not applied**, and is reported `InstallFailed` with a reason. Today it is applied, hash-verified only. |
