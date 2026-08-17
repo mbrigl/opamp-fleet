@@ -1,6 +1,6 @@
 # ADR-0067: Basic authentication on the Operator plane — one credential set for the REST API and the UI, optional by default
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-16
 - **Deciders:** Markus Brigl
 

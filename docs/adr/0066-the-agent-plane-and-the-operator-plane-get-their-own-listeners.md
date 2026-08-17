@@ -1,6 +1,6 @@
 # ADR-0066: The Agent plane and the Operator plane get their own listeners — OpAMP and package downloads on `4320`, REST API and UI on loopback `4321`
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-16
 - **Deciders:** Markus Brigl
 
