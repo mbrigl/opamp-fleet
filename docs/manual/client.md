@@ -669,6 +669,30 @@ FLB_LOG_LEVEL = "info"
 Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that is what the entry file
 is called.
 
+### `type = "icinga2"`
+
+For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
+its state, its template library and its account are on **every** invocation, it creates none of
+those directories itself, and it obtains a certificate from an Icinga master before it can do
+anything ([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)).
+
+| Key | Meaning |
+|---|---|
+| `binary` | The program. A bare name is the delivered tree's, an absolute path the machine's — as everywhere (ADR-0021). |
+| `main_config` | The **name of the Configuration** that is Icinga's root configuration file. Icinga reads one file and `include`s the rest. |
+| `include_dir` | Where the template library is inside the tree — reached with `-D IncludeConfDir`, which `include <itl>` resolves against. |
+| `plugin_dir` | Where the check plugins are, for `PluginDir`. Optional. |
+| `data_dir`, `log_dir`, `cache_dir`, `spool_dir`, `run_dir` | Where Icinga writes. Default to `${supervisor_dir}/…`, i.e. beside the tree, so a package update keeps the certificates. |
+| `node_name` | This node's name: `NodeName`, and the common name its certificate is issued for. Defaults to the Supervisor's name. |
+| `parent_host`, `parent_port` | The Icinga master or satellite. Absent means a standalone node with no enrolment. |
+| `ticket_file`, `trusted_cert_file` | Where the enrolment ticket and the pinned parent certificate are read from — both delivered as `supplementary` Configurations (ADR-0069). The pinned file is the parent's *own* certificate, not its CA. |
+| `renew_before_days` | How close to expiry a certificate may come before the Supervisor renews it at start. Default 30. |
+| `run_as_user`, `run_as_group` | The account the daemon may drop to. Defaults to the account this Client runs as. |
+| `log_level`, `args`, `[supervisor.env]` | Console severity, extra daemon arguments, and additional environment. |
+
+The recipe with everything around it — building the artifact, the ticket, the configuration, and
+what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md).
+
 A complete worked example — the machine-installed GLPI Agent as a foreground daemon, with the
 Windows interpreter invocation and the bootstrap of its configuration — is the
 [GLPI Agent recipe](glpi-agent.md).

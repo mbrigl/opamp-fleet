@@ -33,6 +33,21 @@
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
+  // System packages the base image does not carry, installed once when the container is created.
+  // All four are *developer tooling* — nothing shipped depends on them, which is why they need no
+  // ADR (AGENTS.md §3.6) — and each earns its place:
+  //
+  //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
+  //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
+  //             ordinary local run, so a Windows-only compile error reaches CI instead of the
+  //             author. See README → "Build, Test & Run".
+  //   msitools  `msiextract`, which unpacks the Icinga 2 Windows MSI payload (ADR-0070).
+  //   osslsigncode  verifies that payload's Authenticode signature and who signed it, since
+  //             Windows artifacts publish no digest to check against (ADR-0072).
+  //   rpm2cpio  the RPM half of the same repack. That path is not built; the tools are here
+  //   cpio      because inspecting the payload is how the decision whether to build it gets made.
+  "postCreateCommand": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio",
+
   "customizations": {
     // VS Code extensions installed inside the container
     "vscode": {

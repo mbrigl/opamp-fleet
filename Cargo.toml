@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/opamp", "crates/server", "crates/client", "crates/package-tools"]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -89,7 +89,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 # The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
 # validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in
 # the tree as rcgen's own dependency, and preferable to hand-rolling calendar arithmetic.
-time = { version = "0.3", default-features = false, features = ["std"] }
+# `parsing`/`macros` additionally: reading the `Valid Until` line of `icinga2 pki verify` to decide
+# whether a certificate is inside its renewal window (ADR-0069) — the same reason as above, applied
+# to a date somebody else printed rather than one we compute.
+time = { version = "0.3", default-features = false, features = ["std", "parsing", "macros"] }
 # Reading back the validity of the certificate the Client holds, which is what decides when to
 # renew (ADR-0035). rcgen parses X.509 only behind a private, test-only path, so this is the
 # public way in — and it is the very parser rcgen itself uses, already in the tree.

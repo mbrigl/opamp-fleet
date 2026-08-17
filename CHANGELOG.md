@@ -15,7 +15,53 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.2]
+## [0.4.0]
+
+### Added
+
+- **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`
+  ([ADR-0068](docs/adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)), enrolment against an
+  Icinga master ([ADR-0069](docs/adr/0069-the-icinga-master-signs-the-ticket-travels-as-a-configuration.md)),
+  and artifacts repacked from the vendor's packages
+  ([ADR-0070](docs/adr/0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md)). The fleet
+  ships the program, creates its directories, obtains its certificate, distributes its
+  configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf`, or an
+  MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
+  something. `opamp-package-fetch --agent icinga2` builds it for Linux and Windows alike, the
+  Windows one verified by Icinga's own Authenticode signature
+  ([ADR-0072](docs/adr/0072-the-windows-artifact-is-verified-by-its-publisher.md)) since that
+  download publishes no digest; the recipe is
+  [docs/manual/icinga2.md](docs/manual/icinga2.md). **What to do:** nothing, unless you run Icinga.
+  Today this covers **Linux amd64** — one artifact, built on the oldest glibc you serve, reaches
+  Debian, Ubuntu and Red Hat hosts alike
+  ([ADR-0071](docs/adr/0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md)); on
+  Windows the same kind supervises a machine-installed Icinga 2 by absolute path.
+
+### Changed
+
+- **A package is proved to run before it replaces what runs.** Every Supervisor kind may now name a
+  cheap check — Icinga 2 uses its version banner — that the *staged* program must pass before
+  anything is stopped. A package that cannot run on the host is refused with the dynamic linker's
+  own message (`version 'GLIBC_2.39' not found`) instead of costing a stop, a swap, a failed start
+  and a rollback. The health gate and rollback of
+  [ADR-0058](docs/adr/0058-package-rollback-retention-and-no-restart-loop.md) are unchanged behind
+  it. **What to do:** nothing — the Collector and `command` kinds behave exactly as before.
+- **A Managed Process may be stopped as a process group.** A daemon that runs a worker of its own —
+  Icinga 2 does — otherwise leaves that worker running when the bounded stop escalates to a kill.
+  Opt-in per kind; the existing kinds are unaffected.
+- **`opamp-package-fetch` uploads the agent's default configuration with the package.** A package
+  alone leaves an Agent with nothing to run — the Supervisor holds at *awaiting configuration*
+  until a Configuration of the name its block reads arrives — so an upload now stores that default
+  too: `telegraf-conf`, `glpi-agent-conf`, the two Collector ones, and Icinga 2's `icinga2-conf`
+  plus `icinga2-zones`. The bodies are the ones in `config/examples/`, compiled into the tool.
+  **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
+  untouched**, edits included, so a second upload changes nothing; and saving still distributes
+  nothing ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)) — read the default over and
+  roll it out yourself, since it carries example values such as Icinga's `master.example.com`.
+  Icinga 2's per-host pair, the enrolment ticket and the parent's certificate, is deliberately not
+  among them.
+
+## [0.3.2] - 2026-08-17
 
 ### Added
 

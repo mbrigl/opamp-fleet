@@ -9,7 +9,7 @@ depends on them, and a fleet can be operated entirely through the REST API witho
 
 | Tool | Use it to |
 |---|---|
-| **[`opamp-package-fetch`](#opamp-package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Telegraf — verify it, and hand it to the Server |
+| **[`opamp-package-fetch`](#opamp-package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Telegraf, Icinga 2 — verify it, and hand it to the Server with its default configuration |
 | **[`opamp-package-sign`](#opamp-package-sign)** | build, hash, and sign a package artifact out of *any* program you have |
 
 Reach for `opamp-package-fetch` first: for the agents it knows, it replaces every step of
@@ -51,7 +51,7 @@ $ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For four agent types it knows where the release lives, what the assets are called, and which
+For five agent types it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -60,16 +60,20 @@ checksum file goes with them:
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `telegraf` | `dl.influxdata.com` (versions from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
+| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0072) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 
-Three things it does on every run:
+Four things it does on every run:
 
 - **It verifies the download against the SHA-256 upstream published**, before the artifact is
   used for anything. A mismatch stops that platform and leaves the file for inspection.
 - **It leaves the artifact alone** wherever upstream's container is one a Client can open — so
   the hash the fleet verifies is the hash on the release page, and the line from the release to
   the host is unbroken ([ADR-0018](../adr/0018-packages-imported-from-a-url.md)).
-- **It never distributes anything.** Uploading stores a Set; reaching a host is the rollout act,
-  which stays yours ([step 5 of the walkthrough](rollout.md#5-aim-it-then-roll-it-out)).
+- **It uploads the agent's default configuration with the package** — but only the ones the
+  Server does not already have, see [below](#the-default-configuration).
+- **It never distributes anything.** Uploading stores a Set and saves a Configuration; reaching a
+  host is the rollout act, which stays yours
+  ([step 5 of the walkthrough](rollout.md#5-aim-it-then-roll-it-out)).
 
 ### Interactive
 
@@ -110,7 +114,7 @@ $ opamp-package-fetch --agent telegraf --version 1.39.3 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, or `telegraf`. |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, `telegraf`, or `icinga2`. |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -134,7 +138,50 @@ Done. What a Supervisor needs to install these:
 ```
 
 With `--no-upload` (or a declined prompt) it also prints the two `curl` calls that would have
-uploaded the artifacts, so the step can be done later or from somewhere else.
+uploaded the artifacts, so the step can be done later or from somewhere else, and names the
+default configuration that was not uploaded either.
+
+### The default configuration
+
+A package alone leaves an Agent with nothing to run: a Supervisor holds at *awaiting
+configuration* until a Configuration of the name its block reads arrives. So an upload carries
+the agent's default with it — the same bodies as
+[`config/examples/`](../../config/examples/), compiled into the tool so they travel with the
+released binary:
+
+| `--agent` | Configuration | Aimed at |
+|---|---|---|
+| `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
+| `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
+| `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
+| `telegraf` | `telegraf-conf` | Agent type `telegraf` |
+| `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
+
+Two rules keep this from surprising anyone:
+
+- **An existing Configuration is never written over.** The name is asked for first, and one the
+  Server already holds is left exactly as you left it, edits and all. That is what makes a second
+  upload of a newer version safe.
+- **Nothing is distributed.** Saving only saves
+  ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)), so the default reaches
+  no host until you roll it out. Read it first: these bodies carry example values — Icinga's
+  parent is `master.example.com`.
+
+```console
+  stored as the linux/amd64 entry — not distributed: press the rollout when it should reach hosts
+  storing the default configuration telegraf-conf …
+  saved — read it over and press its rollout when it should reach hosts, since it carries example values
+```
+
+and on the next upload of the same agent:
+
+```console
+  telegraf-conf is already on the Server — left as it is
+```
+
+What is *not* uploaded, for Icinga 2, is the per-host pair: the enrolment ticket and the parent's
+certificate. Both differ per host, one is a secret, and neither has a default worth shipping —
+[the Icinga 2 recipe](icinga2.md) says where they come from.
 
 ### When an upload is refused
 
