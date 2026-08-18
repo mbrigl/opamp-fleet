@@ -59,5 +59,6 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
 | [0029](0029-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt`, and the system service may run under an operator-named account that owns the instance's files | 🟢 accepted |
 | [0030](0030-glpi-agent-supervision-and-packages.md) | The GLPI Agent through the fleet — supervised as the Supervisor's own child, machine-installed or from self-contained packages on both platforms | 🟢 accepted |
-| [0031](0031-agent-plane-and-operator-plane.md) | The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane | 🟢 accepted |
+| [0031](0031-agent-plane-and-operator-plane.md) | The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane | 🟡 proposed |
+| [0032](0032-icinga-2-through-the-fleet.md) | Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source | 🟡 proposed |
 

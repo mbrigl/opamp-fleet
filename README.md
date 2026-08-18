@@ -178,6 +178,12 @@ it (AGENTS.md links here).
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Check the Windows build:**
+  `cargo xwin clippy -p client --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
+  (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
+  Container carries the `llvm-lib` it requires). Worth running whenever a change touches
+  platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
+  `#[cfg(unix)]` mistake compiles perfectly well on Linux.
 - **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`

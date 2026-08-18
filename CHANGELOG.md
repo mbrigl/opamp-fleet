@@ -15,7 +15,71 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.2]
+## [0.4.0]
+
+### Added
+
+- **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`
+  ([ADR-0032](docs/adr/0032-icinga-2-through-the-fleet.md)), enrolment against an
+  Icinga master ([ADR-0032](docs/adr/0032-icinga-2-through-the-fleet.md)),
+  and artifacts repacked from the vendor's packages
+  ([ADR-0032](docs/adr/0032-icinga-2-through-the-fleet.md)). The fleet
+  ships the program, creates its directories, obtains its certificate, distributes its
+  configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf`, or an
+  MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
+  something. `opamp-package-fetch --agent icinga2` builds it for Linux and Windows alike, the
+  Windows one verified by Icinga's own Authenticode signature
+  ([ADR-0032](docs/adr/0032-icinga-2-through-the-fleet.md)) since that
+  download publishes no digest; the recipe is
+  [docs/manual/icinga2.md](docs/manual/icinga2.md). **What to do:** nothing, unless you run Icinga.
+  Today this covers **Linux amd64** — one artifact, built on the oldest glibc you serve, reaches
+  Debian, Ubuntu and Red Hat hosts alike
+  ([ADR-0032](docs/adr/0032-icinga-2-through-the-fleet.md)); on
+  Windows the same kind supervises a machine-installed Icinga 2 by absolute path.
+
+### Changed
+
+- **Both of the Server's listeners now hang up on a connection that never finishes its request**
+  ([ADR-0031](docs/adr/0031-agent-plane-and-operator-plane.md)). A peer gets 30 seconds for
+  its request line and headers and 10 seconds for the TLS handshake; until now it got forever,
+  because hyper's own 30-second default is silently discarded while no timer is installed and
+  neither axum nor axum-server installs one. The bound is on connection *setup* only: an established
+  WebSocket session, a package download, and a package upload are all unaffected, whatever they take.
+  Shutdown also drains both planes within ten seconds instead of dropping them (TLS) or waiting on
+  every open Agent connection (plain). **What to do:** nothing — no configuration key changed. Only
+  a client that needs more than 30 seconds to send its *headers* would notice, and none exists here.
+- **A package is proved to run before it replaces what runs.** Every Supervisor kind may now name a
+  cheap check — Icinga 2 uses its version banner — that the *staged* program must pass before
+  anything is stopped. A package that cannot run on the host is refused with the dynamic linker's
+  own message (`version 'GLIBC_2.39' not found`) instead of costing a stop, a swap, a failed start
+  and a rollback. The health gate and rollback of
+  [ADR-0015](docs/adr/0015-package-delivery-for-managed-processes.md) are unchanged behind
+  it. **What to do:** nothing — the Collector and `command` kinds behave exactly as before.
+- **`opamp-package-fetch` names the systems each agent is published for**, in the agent menu
+  itself, so a choice is no longer made blind — the Collectors by operating system (their
+  architectures come from the release), Telegraf and the GLPI Agent by platform, and Icinga 2 with
+  the distributions its artifact will actually reach, versions and all
+  (`Debian 12+/Ubuntu 22.04+/RHEL 9+`). That last line is read off the build host's own
+  `/etc/os-release`, because the reach *is* the host: the artifact bundles the libraries found
+  there, so a `bullseye` container states a wider reach and a `trixie` one a narrower, each true of
+  the build that follows it. A host Icinga publishes nothing for is offered the Windows artifact
+  alone. **What to do:** nothing.
+- **A Managed Process may be stopped as a process group.** A daemon that runs a worker of its own —
+  Icinga 2 does — otherwise leaves that worker running when the bounded stop escalates to a kill.
+  Opt-in per kind; the existing kinds are unaffected.
+- **`opamp-package-fetch` uploads the agent's default configuration with the package.** A package
+  alone leaves an Agent with nothing to run — the Supervisor holds at *awaiting configuration*
+  until a Configuration of the name its block reads arrives — so an upload now stores that default
+  too: `telegraf-conf`, `glpi-agent-conf`, the two Collector ones, and Icinga 2's `icinga2-conf`
+  plus `icinga2-zones`. The bodies are the ones in `config/examples/`, compiled into the tool.
+  **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
+  untouched**, edits included, so a second upload changes nothing; and saving still distributes
+  nothing ([ADR-0028](docs/adr/0028-a-rollout-is-an-explicit-act.md)) — read the default over and
+  roll it out yourself, since it carries example values such as Icinga's `master.example.com`.
+  Icinga 2's per-host pair, the enrolment ticket and the parent's certificate, is deliberately not
+  among them.
+
+## [0.3.2] - 2026-08-17
 
 ### Added
 
