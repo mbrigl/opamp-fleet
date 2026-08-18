@@ -81,7 +81,12 @@ Run it with no arguments and it asks for what it cannot know:
 
 ```console
 $ opamp-package-fetch
-Which agent› otelcol-contrib
+Which agent:
+  otelcol          linux, darwin, windows — as the release publishes
+> otelcol-contrib  linux, darwin, windows — as the release publishes
+  glpi-agent       linux/amd64 windows/amd64
+  telegraf         linux/amd64+arm64+386 darwin/amd64+arm64 windows/amd64+arm64
+  icinga2          linux/amd64 (Debian 12+/Ubuntu 22.04+/RHEL 9+) windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
 Which platforms (space to select, enter to confirm)
@@ -91,6 +96,29 @@ Which platforms (space to select, enter to confirm)
 Upload these to a fleet Server? yes
 Server base URL› http://127.0.0.1:4321
 ```
+
+The systems beside each agent are what it is published for — enough to see before the choice that
+an agent offers nothing for the hosts you run. They are a hint, not the offer: the platform
+question below shows what *that release* actually has. Two need a word:
+
+- The **Collectors** add platforms between releases, so only their operating systems are named
+  here; the architectures come from the release itself a step later.
+- **Icinga 2** is the one line that is not the same on every machine: it names distributions with
+  versions, across families, and it reads them off **this host**. Its Linux artifact is built *on*
+  the distribution it is built for — the tree bundles the libraries found there — so the only
+  artifact a run can produce is that host's, and its reach is that build's glibc floor. glibc is
+  backward compatible, so the floor is the whole criterion and the family is none of it
+  ([ADR-0071](../adr/0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md)). The
+  transcript above was taken in a `bookworm` container, whose vendor packages declare
+  `libc6 >= 2.34`; run it in `bullseye` and the same line reads `Debian 11+/Ubuntu 20.04+/RHEL 9+`,
+  in `trixie` `Debian 13+/Ubuntu 24.04+/RHEL 10+`. **Which container you start this in is therefore
+  the decision that sets the reach** — build in the oldest one you must serve — and the tool prints
+  the floor it really got, from the vendor's own index, before anything is uploaded. On a host
+  Icinga publishes no packages for, the line offers `windows/amd64` alone and says which hosts
+  would build the other. The recipe is [the Icinga 2 walkthrough](icinga2.md#1-build-the-artifact),
+  with one caveat for Red Hat hosts under
+  [its limits](icinga2.md#limits-worth-knowing-before-you-start); the Windows artifact comes from
+  the MSI and needs no such host.
 
 The version list is the **five most recent releases**, newest first — enough to reach the one
 before last when a release turns out badly. Release candidates and the tags a repository keeps

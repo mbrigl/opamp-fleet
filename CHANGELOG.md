@@ -55,6 +55,15 @@ carries a date once its tag exists.
   and a rollback. The health gate and rollback of
   [ADR-0058](docs/adr/0058-package-rollback-retention-and-no-restart-loop.md) are unchanged behind
   it. **What to do:** nothing — the Collector and `command` kinds behave exactly as before.
+- **`opamp-package-fetch` names the systems each agent is published for**, in the agent menu
+  itself, so a choice is no longer made blind — the Collectors by operating system (their
+  architectures come from the release), Telegraf and the GLPI Agent by platform, and Icinga 2 with
+  the distributions its artifact will actually reach, versions and all
+  (`Debian 12+/Ubuntu 22.04+/RHEL 9+`). That last line is read off the build host's own
+  `/etc/os-release`, because the reach *is* the host: the artifact bundles the libraries found
+  there, so a `bullseye` container states a wider reach and a `trixie` one a narrower, each true of
+  the build that follows it. A host Icinga publishes nothing for is offered the Windows artifact
+  alone. **What to do:** nothing.
 - **A Managed Process may be stopped as a process group.** A daemon that runs a worker of its own —
   Icinga 2 does — otherwise leaves that worker running when the bounded stop escalates to a kill.
   Opt-in per kind; the existing kinds are unaffected.

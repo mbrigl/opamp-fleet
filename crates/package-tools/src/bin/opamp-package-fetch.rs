@@ -171,6 +171,41 @@ impl AgentKind {
         }
     }
 
+    /// The systems this agent can be fetched for, as the agent menu states them.
+    ///
+    /// A hint, not the plan: what is actually offered comes from the release itself a step later,
+    /// and for Icinga 2 also from the host this tool runs on. It is here because the menu asks for
+    /// an agent before any of that is known, and picking one only to be told that this host builds
+    /// nothing for it is a round trip the operator should not have to make.
+    ///
+    /// The Collectors publish per platform and add new ones between releases, so naming their
+    /// architectures here would be a table going stale — the operating systems are the honest
+    /// answer, and the platform question that follows shows the release's own list.
+    ///
+    /// `host` is this machine's distribution codename where it has one, because Icinga 2's answer
+    /// depends on it and no other agent's does.
+    fn platforms(self, host: Option<&str>) -> String {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib => {
+                "linux, darwin, windows — as the release publishes".to_string()
+            }
+            AgentKind::GlpiAgent => {
+                group_platforms([("linux", "amd64"), ("windows", "amd64")].into_iter())
+            }
+            AgentKind::Telegraf => group_platforms(
+                TELEGRAF_PLATFORMS
+                    .iter()
+                    .map(|(os, arch, _, _)| (*os, *arch)),
+            ),
+            // This column answers one question for every agent alike — does it run on the hosts I
+            // have — so Icinga 2 states its *reach*, and the reach is this host's (ADR-0070): the
+            // tree bundles the libraries found here, so the artifact this run can produce is the
+            // one for the distribution this run is on, and no other. Asking the host is therefore
+            // not a convenience, it is the only way the line can be true of the build that follows.
+            AgentKind::Icinga2 => icinga2_reach(host),
+        }
+    }
+
     /// Whether the release's assets have to be listed to plan the fetch. Telegraf's GitHub
     /// releases carry no assets at all — its binaries are on a CDN, at a URL built from the
     /// version — so listing them would be a wasted request against a rate-limited API.
@@ -418,13 +453,100 @@ async fn run(cli: Cli) -> Result<(), String> {
 
 // ── The questions ───────────────────────────────────────────────────────────
 
-fn choose_agent() -> Result<AgentKind, String> {
+/// What a Linux artifact built on one Debian host reaches, by that host's codename.
+///
+/// Each row is the vendor's own `libc6 (>= …)` floor for that build, read back as the systems it
+/// covers — glibc is backward compatible, so a floor is the whole of it and the distribution
+/// family is none of it (ADR-0071). The floors are Icinga's, from the `Depends` of the
+/// `icinga2-bin` each build publishes, and they are what this tool prints for real once the
+/// repository index has been read (`icinga2_plans`).
+///
+/// The table is small because the source of truth is not it: it translates a floor into the names
+/// an operator recognises, one row per distribution Icinga publishes for. `--distro` accepts the
+/// same three, and the test below holds the two lists together.
+const ICINGA2_REACH: &[(&str, &str)] = &[
+    // libc6 >= 2.30 — Debian 11 is 2.31, Ubuntu 20.04 is 2.31, RHEL 9 is 2.34. RHEL 8 (2.28) is
+    // the one this misses, and no build of Icinga's reaches it.
+    ("bullseye", "Debian 11+/Ubuntu 20.04+/RHEL 9+"),
+    // libc6 >= 2.34 — Ubuntu 22.04 is 2.35, RHEL 9 is 2.34 exactly.
+    ("bookworm", "Debian 12+/Ubuntu 22.04+/RHEL 9+"),
+    // libc6 >= 2.38 — Ubuntu 24.04 is 2.39, RHEL 10 is 2.39. RHEL 9 drops out here.
+    ("trixie", "Debian 13+/Ubuntu 24.04+/RHEL 10+"),
+];
+
+/// Icinga 2's line in the agent menu, for the host this tool is running on.
+///
+/// A host that is none of the three builds no Linux artifact — the repack needs vendor packages
+/// for *this* distribution — so the line says which hosts do rather than naming a reach that this
+/// run cannot deliver. That is the one case where a codename belongs in this column: it is then a
+/// statement about the build host, which is then the operator's actual problem.
+fn icinga2_reach(host: Option<&str>) -> String {
+    match host.and_then(|codename| {
+        ICINGA2_REACH
+            .iter()
+            .find(|(name, _)| *name == codename)
+            .map(|(_, reach)| *reach)
+    }) {
+        Some(reach) => format!("linux/amd64 ({reach}) windows/amd64"),
+        None => "windows/amd64 — linux needs a bullseye/bookworm/trixie host".to_string(),
+    }
+}
+
+/// Platform pairs as one menu line: `linux/amd64+arm64 windows/amd64`.
+///
+/// Grouped by operating system, and tightly, because the menu is one line per agent and a line
+/// that wraps at eighty columns is one `dialoguer` redraws wrongly when the selection moves.
+fn group_platforms<'p>(pairs: impl Iterator<Item = (&'p str, &'p str)>) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (os, arch) in pairs {
+        match groups.iter_mut().find(|(name, _)| *name == os) {
+            Some((_, arches)) => arches.push(arch),
+            None => groups.push((os, vec![arch])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(os, arches)| format!("{os}/{}", arches.join("+")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The agent menu's lines, name and systems in two columns.
+///
+/// Its own function so the width rule below is testable against the very lines the menu shows,
+/// rather than against a copy of them that drifts.
+fn agent_menu_labels(host: Option<&str>) -> Vec<String> {
     // Asked of clap rather than written out again. A second list of the same agents is exactly how
     // `icinga2` came to be missing from this prompt while `--agent icinga2` worked: adding a
     // variant is one place, and the menu now follows it whether or not anyone remembers this
     // function.
     let agents = AgentKind::value_variants();
-    let labels: Vec<&str> = agents.iter().map(|a| a.source().service_name).collect();
+    // The systems beside each name, in a column: the choice that follows this one is a platform,
+    // and an agent that publishes nothing for the systems an operator runs is better seen here
+    // than after two more questions.
+    let width = agents
+        .iter()
+        .map(|a| a.source().service_name.len())
+        .max()
+        .unwrap_or(0);
+    agents
+        .iter()
+        .map(|a| {
+            format!(
+                "{name:<width$}  {platforms}",
+                name = a.source().service_name,
+                platforms = a.platforms(host)
+            )
+        })
+        .collect()
+}
+
+fn choose_agent() -> Result<AgentKind, String> {
+    let agents = AgentKind::value_variants();
+    // Not an error when it fails: a host without a `VERSION_CODENAME` still fetches every other
+    // agent, and Icinga 2's line then says so instead of the menu refusing to appear.
+    let host = host_codename().ok();
+    let labels = agent_menu_labels(host.as_deref());
     let picked = Select::new()
         .with_prompt("Which agent")
         .items(&labels)
@@ -971,18 +1093,23 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
 /// and the CDN that holds the binaries serves no directory listing. The list is therefore this
 /// tool's own — kept to the platforms this fleet has a name for — and a URL that has gone away is
 /// reported as the 404 it is rather than hidden.
+///
+/// Each entry is (fleet os, fleet arch, upstream os, upstream arch). It sits at file scope because
+/// the agent menu names these same platforms ([`AgentKind::platforms`]), and a second copy of the
+/// list is a second thing to keep current.
+const TELEGRAF_PLATFORMS: [(&str, &str, &str, &str); 7] = [
+    ("linux", "amd64", "linux", "amd64"),
+    ("linux", "arm64", "linux", "arm64"),
+    ("linux", "386", "linux", "i386"),
+    ("darwin", "amd64", "darwin", "amd64"),
+    ("darwin", "arm64", "darwin", "arm64"),
+    ("windows", "amd64", "windows", "amd64"),
+    ("windows", "arm64", "windows", "arm64"),
+];
+
+/// What Telegraf offers, built from that list — the release itself is never asked.
 fn telegraf_plans(version: &str) -> Vec<Plan> {
-    // (fleet os, fleet arch, upstream os, upstream arch)
-    const PLATFORMS: [(&str, &str, &str, &str); 7] = [
-        ("linux", "amd64", "linux", "amd64"),
-        ("linux", "arm64", "linux", "arm64"),
-        ("linux", "386", "linux", "i386"),
-        ("darwin", "amd64", "darwin", "amd64"),
-        ("darwin", "arm64", "darwin", "arm64"),
-        ("windows", "amd64", "windows", "amd64"),
-        ("windows", "arm64", "windows", "arm64"),
-    ];
-    PLATFORMS
+    TELEGRAF_PLATFORMS
         .iter()
         .map(|(os, arch, up_os, up_arch)| {
             let ext = if *os == "windows" { "zip" } else { "tar.gz" };
@@ -2070,6 +2197,126 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use clap::ValueEnum as _;
+
+    /// The agent menu names the systems each agent can be fetched for, and the one that needs it
+    /// most is Icinga 2: its Linux artifact exists only on a host of the distribution it is built
+    /// for, which is not something to discover three questions later. Every variant answers —
+    /// adding one without a line here is the omission this catches — and Telegraf's answer is the
+    /// table `telegraf_plans` builds from, so the menu cannot claim a platform the tool then fails
+    /// to fetch.
+    #[test]
+    fn the_agent_menu_states_the_systems_each_agent_is_published_for() {
+        for agent in super::AgentKind::value_variants() {
+            let platforms = agent.platforms(Some("bookworm"));
+            assert!(
+                platforms.contains('/') || platforms.contains("linux"),
+                "{agent:?} names no system: {platforms:?}"
+            );
+        }
+
+        // Read back what the grouping wrote: every platform `telegraf_plans` fetches is named,
+        // and none that it does not.
+        let telegraf = super::AgentKind::Telegraf.platforms(None);
+        let named: Vec<(String, String)> = telegraf
+            .split(' ')
+            .flat_map(|group| {
+                let (os, arches) = group.split_once('/').expect("os/arch group");
+                arches
+                    .split('+')
+                    .map(move |arch| (os.to_string(), arch.to_string()))
+            })
+            .collect();
+        let fetched: Vec<(String, String)> = super::TELEGRAF_PLATFORMS
+            .iter()
+            .map(|(os, arch, _, _)| (os.to_string(), arch.to_string()))
+            .collect();
+        assert_eq!(
+            named, fetched,
+            "the menu and the fetch disagree: {telegraf:?}"
+        );
+    }
+
+    /// Icinga 2's line is the reach of the artifact *this host* can build, so it is asserted per
+    /// host rather than once. Three properties hold for every row: the systems are named with
+    /// versions — "Debian" alone still leaves a RHEL 8 or Ubuntu 18.04 operator guessing — both
+    /// platforms are offered, and no build-host codename appears. That last one is the defect this
+    /// test exists for: a line that named the container was read as the reach, and left every Red
+    /// Hat host looking unserved (ADR-0071).
+    #[test]
+    fn icinga_2s_line_is_the_reach_of_the_host_it_is_read_on() {
+        for (codename, _) in super::ICINGA2_REACH {
+            let line = super::icinga2_reach(Some(codename));
+            assert!(
+                line.contains("linux/amd64") && line.contains("windows/amd64"),
+                "{codename} offers less than both platforms: {line:?}"
+            );
+            for family in ["Debian", "Ubuntu", "RHEL"] {
+                assert!(
+                    line.contains(family),
+                    "{codename} names no {family} version: {line:?}"
+                );
+            }
+            for other in super::ICINGA2_REACH {
+                assert!(
+                    !line.contains(other.0),
+                    "{:?} is a build host, not a reach: {line:?}",
+                    other.0
+                );
+            }
+        }
+
+        // A host Icinga publishes no packages for builds the Windows artifact and nothing else,
+        // and the line says which hosts would — the one place a codename is the honest answer,
+        // because there it *is* the operator's problem.
+        for stranger in [None, Some("noble"), Some("sid")] {
+            let line = super::icinga2_reach(stranger);
+            assert!(
+                !line.contains("linux/"),
+                "{stranger:?} cannot build a Linux artifact, yet is offered one: {line:?}"
+            );
+            assert!(
+                line.contains("windows/amd64"),
+                "{stranger:?} still builds the Windows artifact: {line:?}"
+            );
+        }
+    }
+
+    /// The reach table and the `--distro` flag describe the same three builds, so a codename added
+    /// to one and not the other is a menu that promises what the build refuses, or a build nobody
+    /// is told about. `docs/manual/tools.md` and `docs/manual/icinga2.md` name them too.
+    #[test]
+    fn every_distro_the_tool_builds_for_has_a_stated_reach() {
+        let documented: Vec<&str> = super::ICINGA2_REACH.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            documented,
+            vec!["bullseye", "bookworm", "trixie"],
+            "the reach table and the distributions Icinga publishes for have drifted apart"
+        );
+    }
+
+    /// `group_platforms` states that a menu line wrapping at eighty columns is one `dialoguer`
+    /// redraws wrongly as the selection moves — but nothing held anyone to it, and a line written
+    /// by hand rather than by that function promptly ran to ninety-five. The rule is measured here
+    /// on the lines the menu really shows, with the two columns `dialoguer` prefixes them with.
+    ///
+    /// Columns, not bytes: the Collectors' line carries an em dash.
+    #[test]
+    fn no_agent_menu_line_wraps() {
+        const SELECTION_PREFIX: usize = 2;
+        let hosts = super::ICINGA2_REACH
+            .iter()
+            .map(|(codename, _)| Some(*codename))
+            .chain([None]);
+        for label in hosts.flat_map(super::agent_menu_labels) {
+            let columns = SELECTION_PREFIX + label.chars().count();
+            assert!(
+                columns <= 80,
+                "this line renders {columns} columns wide and will wrap: {label:?}"
+            );
+        }
+    }
+
     /// ADR-0072: the Windows artifact publishes no digest, so what stands in for one is its own
     /// signature — and the verdict is read from the two things that matter, not from the tool's
     /// overall result, which says `Failed` on a Linux host for want of Authenticode roots even when
