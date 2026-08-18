@@ -39,6 +39,15 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **Both of the Server's listeners now hang up on a connection that never finishes its request**
+  ([ADR-0073](docs/adr/0073-both-listeners-bound-connection-setup.md)). A peer gets 30 seconds for
+  its request line and headers and 10 seconds for the TLS handshake; until now it got forever,
+  because hyper's own 30-second default is silently discarded while no timer is installed and
+  neither axum nor axum-server installs one. The bound is on connection *setup* only: an established
+  WebSocket session, a package download, and a package upload are all unaffected, whatever they take.
+  Shutdown also drains both planes within ten seconds instead of dropping them (TLS) or waiting on
+  every open Agent connection (plain). **What to do:** nothing — no configuration key changed. Only
+  a client that needs more than 30 seconds to send its *headers* would notice, and none exists here.
 - **A package is proved to run before it replaces what runs.** Every Supervisor kind may now name a
   cheap check — Icinga 2 uses its version banner — that the *staged* program must pass before
   anything is stopped. A package that cannot run on the host is refused with the dynamic linker's

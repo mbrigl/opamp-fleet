@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum_server::accept::DefaultAcceptor;
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue,
 };
@@ -120,24 +121,22 @@ pub async fn serve_guarded(
 ) -> (SocketAddr, SocketAddr) {
     let agents = server::agent_app(state.clone(), admission);
     let operators = server::operator_app(state, operator_auth);
-    let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind the Agent plane");
-    let operator_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind the Operator plane");
+    let agent_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
+    let operator_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let addr = agent_listener.local_addr().expect("local addr");
     let rest_addr = operator_listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(agent_listener, agents)
-            .await
-            .expect("serve the Agent plane");
-    });
-    tokio::spawn(async move {
-        axum::serve(operator_listener, operators)
-            .await
-            .expect("serve the Operator plane");
-    });
+    // Through `listen::plane`, as the binary serves them (ADR-0073), so the whole suite runs
+    // against a Server whose connection setup is bounded the way a real one's is.
+    let handle = axum_server::Handle::new();
+    tokio::spawn(
+        server::listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+            .serve(agents.into_make_service()),
+    );
+    tokio::spawn(
+        server::listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+            .serve(operators.into_make_service()),
+    );
     (addr, rest_addr)
 }
 

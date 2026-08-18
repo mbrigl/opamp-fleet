@@ -121,6 +121,12 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0073): hyper defaults
+# that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
+# neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
+# `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
+# adds an entry to a manifest and no code to either binary.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
 utoipa = "5"

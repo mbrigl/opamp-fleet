@@ -51,11 +51,44 @@ has:
   powers of a CA ([`ca.rs`](../crates/server/src/ca.rs)).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
+- **Connection setup bounded on both of the Server's planes** (ADR-0073): a peer has 30 seconds to
+  send its request line and headers, and 10 seconds to complete the TLS handshake, before it is hung
+  up on — enforced below every other limit in this list, because it applies before a request exists
+  and therefore before Admission ever runs.
 - Package content hashed always, and Ed25519-verified when a key is configured; archive members
   validated before anything is written.
 - `TLSConnectionSettings` and `ProxyConnectionSettings` refused on merit, so a Server cannot command
   a Client to weaken its own verification
   ([`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
+
+### Where each bound applies today
+
+The list above is per mechanism; this is the same state per **surface**, since a rule that holds on
+one listener and not on its neighbour is the failure mode worth seeing at a glance. ✅ in force,
+⚠️ partial, ❌ absent.
+
+- **Agent plane** — `0.0.0.0:4320`, public by default (ADR-0066).
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
+    ✅ gzip bounded *after* decompression · ✅ Admission, cumulative
+  - ❌ concurrent connections: uncapped (**H16**) · ❌ HTTP/2 has no header bound (**H17**) ·
+    ❌ attempt rate: unthrottled (**H10**)
+- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0066).
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ optional Basic over the whole plane (ADR-0067) ·
+    ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
+  - ⚠️ the package upload is unbounded in **time** and, by decision, in size (ADR-0008) — the one
+    route where that is intended · ❌ H16, H17, H10 as above
+- **Client → Server**, outbound (`transport/http.rs`, `transport/ws.rs`).
+  - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
+    ✅ reconnect backoff · ✅ message size in both directions
+- **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0037).
+  - ✅ message size, gzip after decompression, per-hop exchange timeout, `max_carried_agents`
+  - ❌ **no header-read bound**: it runs on `axum::serve` and `axum_server` without a timer, which is
+    exactly the state the Server was in before ADR-0073 (**H18**)
+- **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
+  - ✅ message size in both directions
+  - ❌ **no handshake bound**, and connections are served one at a time by design: a local process
+    that connects and never completes the WebSocket upgrade holds the endpoint against the Agent it
+    exists for (**H18**)
 
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
 which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
@@ -192,6 +225,33 @@ only — the default is not a weak position). TLS 1.3 only is a small change and
 every peer in a deployment can do it; the reason to write it down rather than just do it is that it
 is a compatibility decision, not a code decision.
 
+**H16 — Cap concurrent connections per plane.**
+ADR-0073 made each connection cheap and short-lived while it is still unproven, but not *few*:
+nothing bounds how many a peer may hold open at once, and `max_agents` bounds the fleet, not the
+sockets. The cap belongs at the accept loop, where refusing costs one `accept` and a close — and it
+has to be a number an operator can raise, since a legitimate fleet reconnecting after a Server
+restart arrives all at once. Related to H10 and separate from it: H10 bounds the *rate* of attempts
+with the Baseline's own answer (`retry_info`), this bounds the *number* held simultaneously, which
+no protocol message expresses.
+
+**H17 — Bound HTTP/2 the way HTTP/1 is now bounded.**
+The TLS listeners offer `h2` by ALPN, and hyper's header-read timeout is HTTP/1 only — HTTP/2 has no
+equivalent, because there is no header phase to time. Its analogues are `max_concurrent_streams`, the
+header-list size, and keep-alive pings that evict a peer which stops answering. None is set today, so
+an h2 peer is bounded by message size and by nothing else. Cheap to take, but it is a set of numbers
+that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0073 says
+"HTTP/1" and not "the transport".
+
+**H18 — Give the Client's own listeners the bound the Server's have.**
+Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0073:
+the **Gateway** endpoint (ADR-0037), which runs on `axum::serve` and `axum_server` with no timer
+installed and is therefore in exactly the state the Server was in; and the **Supervisor Endpoint**,
+which wraps `accept_async_with_config` in no timeout at all and serves connections one at a time, so
+a half-finished handshake does not merely cost memory — it holds the endpoint against the Managed
+Process it exists for. The Gateway half is the same three lines as ADR-0073 applied to a different
+binary. The Supervisor Endpoint half is a `tokio::time::timeout` around the upgrade, and is the
+cheapest item in this document.
+
 ## Stage 5 — The channels that put code on the host
 
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
@@ -236,9 +296,13 @@ the planning rather than inside it.
 
 ## Suggested order
 
-**H1 + H2 + H10 as one decision, then H3, H9, H12.** That is the largest gain in what the Server can
-actually enforce, for the smallest architectural commitment — and of those, H3, H11, H12, and H13
-need no ADR at all.
+**H18 first — it is the smallest item here and it closes a gap the Server no longer has.** ADR-0073
+bounded the Server's two planes; leaving the Client's two listeners unbounded means the fleet's
+weakest surface is now the one running on the hosts, and the fix is already written next door.
+
+**Then H1 + H2 + H10 as one decision, then H3, H9, H12.** That is the largest gain in what the Server
+can actually enforce, for the smallest architectural commitment — and of those, H3, H11, H12, H13,
+H17, and H18 need no ADR at all.
 
 **H4 last of the identity work, not first.** A sharper identity is only worth what the revocation
 path behind it is worth: binding certificates to Agents while still being unable to withdraw one
@@ -269,6 +333,9 @@ measure that has not been taken.
 | H13 | A referenced package whose host is not allow-listed is refused **before** any byte is fetched — the assertion is on the absence of the request, not on the outcome of the download. |
 | H14 | First a written statement of what a remote configuration can and cannot cause on a host, derived from ADR-0021 and ADR-0057. Only then, one check per "cannot". Writing checks before that statement would test the implementation against itself. |
 | H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
+| H16 | Connections past the configured cap are refused while the ones already established keep working, and the cap is reached by opening sockets that send nothing — the same peer ADR-0073 hangs up on, in quantity. |
+| H17 | An HTTP/2 peer that opens streams past `max_concurrent_streams` is refused, and one that stops answering keep-alive pings is dropped. Neither happens today, which is what the check must first show. |
+| H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
 
 Two further points hold across the table. **H3 and H9 belong in the interoperability suite**, not only
 in this project's own tests: both concern what the Server does with a peer it did not write, and

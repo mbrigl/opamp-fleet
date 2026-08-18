@@ -2418,6 +2418,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "hyper-util",
  "opamp",
  "prost",
  "rcgen",

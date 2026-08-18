@@ -101,4 +101,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0070](0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md) | Repacked vendor packages as relocatable Icinga 2 trees — everything but glibc rides along | 🟢 accepted |
 | [0071](0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md) | One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion | 🟡 proposed |
 | [0072](0072-the-windows-artifact-is-verified-by-its-publisher.md) | The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH | 🟡 proposed |
+| [0073](0073-both-listeners-bound-connection-setup.md) | Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it | 🟡 proposed |
 

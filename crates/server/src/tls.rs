@@ -123,9 +123,18 @@ pub struct PeerCertAcceptor {
 impl PeerCertAcceptor {
     pub fn new(config: Arc<ServerConfig>) -> Self {
         PeerCertAcceptor {
-            inner: RustlsAcceptor::new(RustlsConfig::from_config(config)),
+            inner: rustls_acceptor(config),
         }
     }
+}
+
+/// The acceptor both planes hand their TLS connections to, with the handshake deadline stated
+/// rather than inherited (ADR-0073). It is `axum_server`'s own default value; naming it here is
+/// what makes it a decision, and what keeps the Operator plane — which needs no peer certificate
+/// and therefore no wrapper — bounded by the same one.
+pub fn rustls_acceptor(config: Arc<ServerConfig>) -> RustlsAcceptor {
+    RustlsAcceptor::new(RustlsConfig::from_config(config))
+        .handshake_timeout(crate::listen::TLS_HANDSHAKE_TIMEOUT)
 }
 
 impl<I> Accept<I, Router> for PeerCertAcceptor

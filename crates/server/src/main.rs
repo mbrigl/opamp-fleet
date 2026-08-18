@@ -1,13 +1,19 @@
 //! Entry point: load `server.toml`, bind the two listeners (plain or TLS) — the Agent plane and
 //! the Operator plane (ADR-0066) — and serve both until interrupted.
+//!
+//! Both planes are served the same way whether or not TLS is configured, so that what bounds a
+//! connection before it becomes a request holds on all four surfaces (ADR-0073). Only the acceptor
+//! differs.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::accept::DefaultAcceptor;
+use axum_server::Handle;
 use server::config::ServerConfig;
 use server::fleet::AppState;
+use server::listen;
 use tracing::info;
 
 fn usage() -> ! {
@@ -39,8 +45,12 @@ fn parse_args() -> PathBuf {
 
 /// Binds one plane's listener, or explains which one could not be bound and stops. A busy port is
 /// an operator's mistake, not a panic — and with two listeners the message has to say *which*.
-async fn bind(address: SocketAddr, plane: &str) -> tokio::net::TcpListener {
-    match tokio::net::TcpListener::bind(address).await {
+///
+/// Bound up front, before either plane starts serving, so a busy port is reported as the message
+/// above rather than as a failure out of a running server — and the TLS case gets that too, which
+/// it did not while it bound lazily inside `serve`.
+fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
+    match std::net::TcpListener::bind(address) {
         Ok(listener) => listener,
         Err(e) => {
             eprintln!("cannot bind {plane} on {address}: {e}");
@@ -207,6 +217,20 @@ async fn main() {
     }
     let operators = server::operator_app(state.clone(), operator_auth);
 
+    let agent_listener = bind(config.listen, "the Agent plane");
+    let operator_listener = bind(config.rest.listen, "the Operator plane");
+    // One signal, both planes: the interrupt is watched once, and the handle both servers hold
+    // drains them together within a bounded window (ADR-0073).
+    let handle = Handle::new();
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("shutting down");
+            listen::shut_down(&handle);
+        }
+    });
+
     match &config.tls {
         Some(tls) => {
             let rustls_config = match server::tls::server_config(tls) {
@@ -218,48 +242,35 @@ async fn main() {
             };
             info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
             info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
-            tokio::select! {
-                // The acceptor's own, rather than `bind_rustls`: it is what carries the
-                // handshake's peer certificate into the request the OpAMP route checks. The
-                // Operator plane needs nothing of the sort — no route there reads a certificate —
-                // so it serves with the same certificate and key through the plain binding.
-                served = axum_server::bind(config.listen)
-                    .acceptor(server::tls::PeerCertAcceptor::new(rustls_config.clone()))
-                    .serve(agents.into_make_service()) => {
-                    served.expect("serve the Agent plane");
-                }
-                served = axum_server::bind_rustls(
-                    config.rest.listen,
-                    RustlsConfig::from_config(rustls_config),
+            // The Agent plane's acceptor is its own: it is what carries the handshake's peer
+            // certificate into the request the OpAMP route checks. The Operator plane needs
+            // nothing of the sort — no route there reads a certificate — so it serves with the
+            // same certificate and key through the plain rustls acceptor.
+            let (agents, operators) = tokio::join!(
+                listen::plane(
+                    agent_listener,
+                    server::tls::PeerCertAcceptor::new(rustls_config.clone()),
+                    handle.clone(),
                 )
-                    .serve(operators.into_make_service()) => {
-                    served.expect("serve the Operator plane");
-                }
-                _ = tokio::signal::ctrl_c() => info!("shutting down"),
-            }
+                .serve(agents.into_make_service()),
+                listen::plane(
+                    operator_listener,
+                    server::tls::rustls_acceptor(rustls_config),
+                    handle,
+                )
+                .serve(operators.into_make_service()),
+            );
+            agents.expect("serve the Agent plane");
+            operators.expect("serve the Operator plane");
         }
         None => {
-            let agent_listener = bind(config.listen, "the Agent plane").await;
-            let operator_listener = bind(config.rest.listen, "the Operator plane").await;
             info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads");
             info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI");
-            // One signal, both planes: the interrupt is watched once and both listeners stop on
-            // it, each still finishing the requests it already accepted.
-            let (stop, _) = tokio::sync::watch::channel(false);
-            let mut agents_stop = stop.subscribe();
-            let mut operators_stop = stop.subscribe();
-            tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                info!("shutting down");
-                let _ = stop.send(true);
-            });
             let (agents, operators) = tokio::join!(
-                axum::serve(agent_listener, agents).with_graceful_shutdown(async move {
-                    let _ = agents_stop.changed().await;
-                }),
-                axum::serve(operator_listener, operators).with_graceful_shutdown(async move {
-                    let _ = operators_stop.changed().await;
-                }),
+                listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+                    .serve(agents.into_make_service()),
+                listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+                    .serve(operators.into_make_service()),
             );
             agents.expect("serve the Agent plane");
             operators.expect("serve the Operator plane");

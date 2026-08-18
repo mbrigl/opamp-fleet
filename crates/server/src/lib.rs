@@ -11,6 +11,7 @@ pub mod configs;
 pub mod credentials;
 pub mod fleet;
 pub mod labels;
+pub mod listen;
 pub mod packages;
 pub mod tls;
 pub mod transport;
