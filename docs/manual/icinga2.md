@@ -47,16 +47,33 @@ and reloads with `SIGHUP` where the platform has signals.
 
 Icinga publishes distribution packages and an MSI, no portable tree — so the artifact is repacked
 from the vendor's own packages
-([ADR-0070](../adr/0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md)):
+([ADR-0070](../adr/0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md)).
+
+Build it in a container of the distribution you are building **for** — the tree carries the
+libraries the build host resolves, so the container is the decision, not a flag (see the two rules
+below). To build the Debian 12 artifact:
 
 ```console
-$ opamp-package-fetch --agent icinga2 --version 2.16.4 --distro bookworm \
-      --platform linux/amd64 --platform windows/amd64 --server http://127.0.0.1:4321
-  this build needs glibc >= 2.36 on every host it is rolled out to
+$ docker run --rm -v "$PWD:/src" -w /src --network host rust:bookworm bash -lc \
+    'cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.4 --distro bookworm \
+       --platform linux/amd64 --platform windows/amd64 --server http://127.0.0.1:4321'
+  this build needs glibc >= 2.34 on every host it is rolled out to
   provided /usr/lib/nagios/plugins/check_http as the package's own installation would
   bundled 49 shared libraries
   repacked  sha256 c1a1ef6d…
 ```
+
+Three things about that command line, each of which costs an attempt to discover:
+
+- **`--distro bookworm` is the guard, not a choice.** Omitted, the tool builds for whatever the host
+  is and says so; named, it refuses when the container is not that distribution. In a recipe meant
+  to be copied, the refusal is the point — a wrong container then fails loudly instead of quietly
+  producing an artifact for a different reach.
+- **`cargo run` rather than the binary from this checkout.** The tool is glibc-bound like everything
+  else it builds: compiled in this project's Dev Container (Debian 13) it needs `GLIBC_2.39` and
+  will not start under bookworm or bullseye at all. Build it where it runs.
+- **`--network host`** is only needed for `--server`, and only on Linux. Without an upload, use
+  `--no-upload`, and upload the artifacts from outside afterwards.
 
 The tree carries the daemon, the template library, **the check plugins**
 (`monitoring-plugins`, some 56 of them, with the libraries they need), and the vendor copyright
@@ -70,7 +87,9 @@ Two rules follow from what the tree carries:
 - **Build it on the distribution you are building for.** The tree carries the libraries the build
   host resolves; everything except glibc travels with it. `--distro` states which build you mean and
   is checked against the host; omit it and the host's own is used. Either way the tool refuses to
-  build for a distribution this host is not — run it in a container of that distribution.
+  build for a distribution this host is not — which is why the recipe above is a container and not a
+  flag. This project's own Dev Container is Debian 13, so building there without a container gives
+  the **narrowest** reach the tool can produce.
 - **The glibc line it prints is the artifact's reach.** A tree built on Debian 13 does not run on
   Debian 12 or RHEL 9; one built on Debian 11 runs on all of them, across families, because glibc is
   backward compatible (ADR-0071). Build on the oldest distribution you must serve — that is the one
@@ -78,10 +97,13 @@ Two rules follow from what the tree carries:
 
 If the build host is missing a library any of the packages depend on, the tool stops rather than
 packing an incomplete tree — and prints the `apt-get install` line that fixes it, assembled from
-what those packages themselves declare. A fresh container needs it once:
+what those packages themselves declare. A fresh container needs it once, before the run above
+succeeds — inside that same container, and without `sudo`, since a container's shell is already
+root:
 
 ```console
-$ sudo apt-get install -y --no-install-recommends libboost-thread1.83.0 libssl3t64 liburiparser1 …
+$ apt-get update && apt-get install -y --no-install-recommends \
+      libboost-thread1.83.0 libssl3t64 liburiparser1 …
 ```
 
 ## 2. The block
