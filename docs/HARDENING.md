@@ -93,12 +93,18 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
 which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
 
+**Status of each measure below:** 🔴 not taken · 🟡 partly in force · ⚪ cannot be judged until the
+check under [Unverified claims](#unverified-claims) is run · 🟢 in force. Nothing is 🟢 here by
+construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
+way the connection-setup bound did when ADR-0073 took it. The ✅/⚠️/❌ marks in that section are the
+same three states seen per *surface* rather than per measure.
+
 ## Stage 1 — Separate rotation from revocation
 
 The theme of this stage: today a credential can be *replaced*, but not *withdrawn*. Until that
 changes, every other identity measure is advisory.
 
-**H1 — End an established WebSocket session when the credential behind it changes.**
+🔴 **H1 — End an established WebSocket session when the credential behind it changes.**
 `[auth]` is checked on every plain-HTTP POST but exactly once per WebSocket connection, at the
 upgrade (ADR-0013) — which is all the transport offers, since the header rides the upgrade request
 and nothing after it. A credential rotated through a connection-settings offer (ADR-0014), or one
@@ -114,13 +120,13 @@ worth of handshakes; and how it behaves in Gateway Mode (ADR-0037), where one up
 carries many Agents and closing it disconnects all of them at once. Needs an ADR for that last
 reason, and H10 belongs in the same decision — the churn this creates is the churn that one bounds.
 
-**H2 — A Server-side revocation list, checked in `Admission`.**
+🔴 **H2 — A Server-side revocation list, checked in `Admission`.**
 Keyed by certificate serial number and by credential. This deliberately avoids CRL and OCSP: the
 Server is the only party that verifies anything on this link, so revocation can be Server state
 rather than infrastructure. On its own it only takes effect at the next connection — H1 is what
 makes it immediate, which is why the two are one piece of work and not two.
 
-**H3 — Verify a CSR's `instance_uid` against its sender.**
+🔴 **H3 — Verify a CSR's `instance_uid` against its sender.**
 The Baseline: *"When the Server receives a CSR containing the instance_uid in CSR fields the Server
 MUST verify that the instance_uid field in AgentToServer message matches the instance_uid in the CSR
 fields"*, justified as what *"prevents Agents impersonating other Agents"*. This Server performs no
@@ -140,7 +146,7 @@ ADR — it changes no interface, adds no state, and refuses something already re
 
 ## Stage 2 — Sharpen identity
 
-**H4 — Decide what a client certificate proves: fleet membership, or a specific Agent.**
+🔴 **H4 — Decide what a client certificate proves: fleet membership, or a specific Agent.**
 Today it proves membership only, and that is a recorded decision with a real reason: binding the
 issued certificate to an `instance_uid` would mean a re-key through `AgentIdentification` kills a
 certificate the Server itself issued (ADR-0035, ADR-0047). Hardening this means *resolving* that
@@ -159,7 +165,7 @@ would need an ADR superseding ADR-0035 on this specific point, and that ADR is w
 authorization boundary named under [Scope](#scope) has to be drawn explicitly — otherwise it moves
 unnoticed.
 
-**H5 — Make enrolment an approval, not a side effect of admission.**
+🔴 **H5 — Make enrolment an approval, not a side effect of admission.**
 Today the endpoint's own admission *is* the approval: whatever satisfies `/v1/opamp` gets a
 certificate signed. That is a defensible reading of the Baseline, which leaves the approval policy
 open — but it means one leaked fleet credential yields certificates, not just access. Harder: a
@@ -167,7 +173,7 @@ single-use bootstrap credential per host, consumed by the first issuance, plus a
 queue surfaced in the UI. Note the interaction with H4: an approval queue is only meaningful if what
 is approved is an identity rather than a membership.
 
-**H6 — Shorten certificate validity once renewal is proven.**
+🔴 **H6 — Shorten certificate validity once renewal is proven.**
 `validity_days` defaults to 90. Short validity is what stands in for revocation today, so it is
 currently set far too coarse for that job. This measure is cheap but must follow H1/H2, not precede
 them: shortening validity without a revocation path just moves the failure from "cannot eject a
@@ -175,7 +181,7 @@ host" to "eject the whole fleet by accident".
 
 ## Stage 3 — Stop storing secrets in the clear
 
-**H7 — Store admission credentials hashed, and referenced rather than inline.**
+🔴 **H7 — Store admission credentials hashed, and referenced rather than inline.**
 `server.toml` holds Bearer tokens and Basic passwords verbatim, so they reach backups, diffs, and
 config management. Since ADR-0067 this is **two** sections — `[auth]` for the fleet and
 `[rest.auth]` for the operators — and they have to change together, or the file ends up carrying two
@@ -186,7 +192,7 @@ right shape there. Either way the constant-time comparison already in place has 
 change. Secondly, allowing a credential to be named by file or environment reference keeps it out of
 the configuration file altogether.
 
-**H8 — Confirm the file mode of issued key material.** *(verify first — see
+⚪ **H8 — Confirm the file mode of issued key material.** *(verify first — see
 [Unverified claims](#unverified-claims))*
 The Client writes its configuration with mode `0600`
 ([`reconfigure.rs`](../crates/client/src/reconfigure.rs)). Whether the private key obtained through
@@ -196,7 +202,7 @@ the document.
 
 ## Stage 4 — Shrink the surface and bound the abuse
 
-**H9 — Require the client certificate in the TLS handshake on the Agent plane.** *(half taken —
+🟡 **H9 — Require the client certificate in the TLS handshake on the Agent plane.** *(half taken —
 ADR-0066)*
 The listener split this measure asked for is **done**: the REST API and the UI have their own
 listener (ADR-0066, superseding ADR-0005 on that point), and the OpAMP endpoint no longer shares a
@@ -213,19 +219,19 @@ the handshake require the certificate, so that an unauthorized peer dies before 
 handler and the route check becomes a second line rather than the only one. Needs an ADR for
 whichever shape wins.
 
-**H10 — Throttle, as the Baseline's SHOULD asks.**
+🔴 **H10 — Throttle, as the Baseline's SHOULD asks.**
 `ServerErrorResponse` with `ServerErrorResponseType_Unavailable` and `retry_info` is not emitted;
 nothing in the Server rate-limits anything today, and `max_agents` bounds the fleet but not the
 attempt rate. This bounds enrolment flooding and credential guessing — and it bounds the reconnect
 storm H1 can itself cause, which is why it is part of that decision rather than a separate one.
 
-**H11 — Pin the TLS version floor.**
+🔴 **H11 — Pin the TLS version floor.**
 Neither end sets `min_version`, so both inherit the rustls default (TLS 1.2 and 1.3, safe suites
 only — the default is not a weak position). TLS 1.3 only is a small change and worth taking once
 every peer in a deployment can do it; the reason to write it down rather than just do it is that it
 is a compatibility decision, not a code decision.
 
-**H16 — Cap concurrent connections per plane.**
+🔴 **H16 — Cap concurrent connections per plane.**
 ADR-0073 made each connection cheap and short-lived while it is still unproven, but not *few*:
 nothing bounds how many a peer may hold open at once, and `max_agents` bounds the fleet, not the
 sockets. The cap belongs at the accept loop, where refusing costs one `accept` and a close — and it
@@ -234,7 +240,7 @@ restart arrives all at once. Related to H10 and separate from it: H10 bounds the
 with the Baseline's own answer (`retry_info`), this bounds the *number* held simultaneously, which
 no protocol message expresses.
 
-**H17 — Bound HTTP/2 the way HTTP/1 is now bounded.**
+🔴 **H17 — Bound HTTP/2 the way HTTP/1 is now bounded.**
 The TLS listeners offer `h2` by ALPN, and hyper's header-read timeout is HTTP/1 only — HTTP/2 has no
 equivalent, because there is no header phase to time. Its analogues are `max_concurrent_streams`, the
 header-list size, and keep-alive pings that evict a peer which stops answering. None is set today, so
@@ -242,7 +248,7 @@ an h2 peer is bounded by message size and by nothing else. Cheap to take, but it
 that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0073 says
 "HTTP/1" and not "the transport".
 
-**H18 — Give the Client's own listeners the bound the Server's have.**
+🔴 **H18 — Give the Client's own listeners the bound the Server's have.**
 Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0073:
 the **Gateway** endpoint (ADR-0037), which runs on `axum::serve` and `axum_server` with no timer
 installed and is therefore in exactly the state the Server was in; and the **Supervisor Endpoint**,
@@ -257,18 +263,18 @@ cheapest item in this document.
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
 Agent's host. They deserve at least as much attention as the transport, and arguably more.
 
-**H12 — Make package signature verification mandatory instead of conditional.**
+🟡 **H12 — Make package signature verification mandatory instead of conditional.**
 Today the content hash is always checked and the Ed25519 signature is checked *when a key is
 configured* — which means an unconfigured Client fails open. The hardened form is fail-closed: no
 signing key, no package applied. The cost is operational, not technical: every fleet must then
 manage a key before it can distribute anything.
 
-**H13 — Allow-list the sources of referenced packages.**
+🔴 **H13 — Allow-list the sources of referenced packages.**
 A referenced package (ADR-0018) is fetched from an operator-supplied URL. The hash and TLS
 verification already apply, so this is not an open hole — but the set of hosts a Client will fetch
 from is currently unbounded, and bounding it is cheap.
 
-**H14 — Establish how far remote configuration is already constrained.** *(verify first)*
+⚪ **H14 — Establish how far remote configuration is already constrained.** *(verify first)*
 The Baseline asks that the Server restrict what configuration can be set remotely and what the Agent
 accepts. ADR-0021 (path-implied package consent) and ADR-0057 (a Server-pushed Supervisor block
 names only what the Client already owns) plainly cover part of this ground. **How much** they cover
@@ -277,7 +283,7 @@ unexamined one would be the wrong order.
 
 ## Stage 6 — Make it provable after the fact
 
-**H15 — An audit record for admission, issuance, rotation, revocation, and package application.**
+🔴 **H15 — An audit record for admission, issuance, rotation, revocation, and package application.**
 Every measure above changes what the Server permits; none of them is demonstrable afterwards without
 a record of what was permitted and to whom. This is last in order but not in importance — it is what
 turns an incident into an investigation.
