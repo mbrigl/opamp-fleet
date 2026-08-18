@@ -15,7 +15,109 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.3.1]
+## [0.4.0]
+
+### Added
+
+- **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`
+  ([ADR-0068](docs/adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)), enrolment against an
+  Icinga master ([ADR-0069](docs/adr/0069-the-icinga-master-signs-the-ticket-travels-as-a-configuration.md)),
+  and artifacts repacked from the vendor's packages
+  ([ADR-0070](docs/adr/0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md)). The fleet
+  ships the program, creates its directories, obtains its certificate, distributes its
+  configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf`, or an
+  MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
+  something. `opamp-package-fetch --agent icinga2` builds it for Linux and Windows alike, the
+  Windows one verified by Icinga's own Authenticode signature
+  ([ADR-0072](docs/adr/0072-the-windows-artifact-is-verified-by-its-publisher.md)) since that
+  download publishes no digest; the recipe is
+  [docs/manual/icinga2.md](docs/manual/icinga2.md). **What to do:** nothing, unless you run Icinga.
+  Today this covers **Linux amd64** — one artifact, built on the oldest glibc you serve, reaches
+  Debian, Ubuntu and Red Hat hosts alike
+  ([ADR-0071](docs/adr/0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md)); on
+  Windows the same kind supervises a machine-installed Icinga 2 by absolute path.
+
+### Changed
+
+- **Both of the Server's listeners now hang up on a connection that never finishes its request**
+  ([ADR-0073](docs/adr/0073-both-listeners-bound-connection-setup.md)). A peer gets 30 seconds for
+  its request line and headers and 10 seconds for the TLS handshake; until now it got forever,
+  because hyper's own 30-second default is silently discarded while no timer is installed and
+  neither axum nor axum-server installs one. The bound is on connection *setup* only: an established
+  WebSocket session, a package download, and a package upload are all unaffected, whatever they take.
+  Shutdown also drains both planes within ten seconds instead of dropping them (TLS) or waiting on
+  every open Agent connection (plain). **What to do:** nothing — no configuration key changed. Only
+  a client that needs more than 30 seconds to send its *headers* would notice, and none exists here.
+- **A package is proved to run before it replaces what runs.** Every Supervisor kind may now name a
+  cheap check — Icinga 2 uses its version banner — that the *staged* program must pass before
+  anything is stopped. A package that cannot run on the host is refused with the dynamic linker's
+  own message (`version 'GLIBC_2.39' not found`) instead of costing a stop, a swap, a failed start
+  and a rollback. The health gate and rollback of
+  [ADR-0058](docs/adr/0058-package-rollback-retention-and-no-restart-loop.md) are unchanged behind
+  it. **What to do:** nothing — the Collector and `command` kinds behave exactly as before.
+- **`opamp-package-fetch` names the systems each agent is published for**, in the agent menu
+  itself, so a choice is no longer made blind — the Collectors by operating system (their
+  architectures come from the release), Telegraf and the GLPI Agent by platform, and Icinga 2 with
+  the distributions its artifact will actually reach, versions and all
+  (`Debian 12+/Ubuntu 22.04+/RHEL 9+`). That last line is read off the build host's own
+  `/etc/os-release`, because the reach *is* the host: the artifact bundles the libraries found
+  there, so a `bullseye` container states a wider reach and a `trixie` one a narrower, each true of
+  the build that follows it. A host Icinga publishes nothing for is offered the Windows artifact
+  alone. **What to do:** nothing.
+- **A Managed Process may be stopped as a process group.** A daemon that runs a worker of its own —
+  Icinga 2 does — otherwise leaves that worker running when the bounded stop escalates to a kill.
+  Opt-in per kind; the existing kinds are unaffected.
+- **`opamp-package-fetch` uploads the agent's default configuration with the package.** A package
+  alone leaves an Agent with nothing to run — the Supervisor holds at *awaiting configuration*
+  until a Configuration of the name its block reads arrives — so an upload now stores that default
+  too: `telegraf-conf`, `glpi-agent-conf`, the two Collector ones, and Icinga 2's `icinga2-conf`
+  plus `icinga2-zones`. The bodies are the ones in `config/examples/`, compiled into the tool.
+  **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
+  untouched**, edits included, so a second upload changes nothing; and saving still distributes
+  nothing ([ADR-0061](docs/adr/0061-a-rollout-is-an-explicit-act.md)) — read the default over and
+  roll it out yourself, since it carries example values such as Icinga's `master.example.com`.
+  Icinga 2's per-host pair, the enrolment ticket and the parent's certificate, is deliberately not
+  among them.
+
+## [0.3.2] - 2026-08-17
+
+### Added
+
+- **Basic authentication for the REST API and the UI**
+  ([ADR-0067](docs/adr/0067-basic-authentication-on-the-operator-plane.md)). `[rest.auth.basic_users]`
+  in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
+  `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
+  credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
+  browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
+  plane stays open exactly as before — the loopback default of ADR-0066 is what protects it then.
+  **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
+  with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
+  Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
+  the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two limits, stated
+  plainly: everyone listed can do everything (authentication, not authorization), and passwords sit
+  in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched — Agents and
+  package downloads carry no operator credential and never will.
+
+### Changed
+
+- **The REST API and the UI moved to their own port, on loopback**
+  ([ADR-0066](docs/adr/0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md),
+  superseding the single-listener decision of
+  [ADR-0005](docs/adr/0005-workspace-and-server-runtime.md)). The Server now serves two planes,
+  split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint and the
+  package download an offer's `download_url` points at. The **Operator plane** is new — `[rest]
+  listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the bundled UI.
+  Nothing authenticates that plane yet ([`[auth]`](config/server.toml) guards the OpAMP endpoint and
+  nothing else), so its reachability is its only protection, and it carries the authority to
+  reconfigure and re-package the whole fleet: hence loopback. Authenticating it is now a decision
+  about one listener instead of a per-path exemption on a shared one — which is the point of the
+  move.
+  **What to do:** change the address in every operator tool, script, and bookmark from
+  `:4320/api/v1/…` to `:4321/api/v1/…`, and open the UI at `http://<server>:4321/`. To reach it from
+  another host, either tunnel (`ssh -L 4321:127.0.0.1:4321 <server-host>`) or put
+  `[rest]` / `listen = "0.0.0.0:4321"` in `server.toml` deliberately. **Clients need no change at
+  all** — the endpoint, the offered `download_url`, and `advertised_url` all keep working as they
+  are. The two addresses must differ; equal ones are refused at startup by name.
 
 ### Fixed
 

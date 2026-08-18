@@ -50,7 +50,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
 
     let agents: serde_json::Value = serde_json::from_slice(
         &client
-            .get(format!("http://{}/api/v1/agents", server.addr))
+            .get(format!("http://{}/api/v1/agents", server.rest_addr))
             .send()
             .await
             .expect("get")
@@ -92,10 +92,10 @@ async fn the_offer_is_gated_by_the_config_hash() {
 
     // The operator distributes a configuration through the REST API; the fleet view names the
     // hash this Agent's composed configuration should have.
-    distribute(server.addr, "fleet", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "fleet", &[], "receivers: {}\n").await;
     let agents: serde_json::Value = serde_json::from_slice(
         &client
-            .get(format!("http://{}/api/v1/agents", server.addr))
+            .get(format!("http://{}/api/v1/agents", server.rest_addr))
             .send()
             .await
             .expect("get")
@@ -144,11 +144,11 @@ async fn a_queued_restart_is_delivered_once_as_a_command_only_reply() {
     exchange(&client, &url, &report).await;
 
     // A configuration is pending too — the command must never be combined with the offer.
-    distribute(server.addr, "fleet", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "fleet", &[], "receivers: {}\n").await;
     let restart = client
         .post(format!(
             "http://{}/api/v1/agents/{uid}/restart",
-            server.addr
+            server.rest_addr
         ))
         .send()
         .await
@@ -184,7 +184,7 @@ async fn restart_requests_are_validated_against_the_fleet() {
     let response = client
         .post(format!(
             "http://{}/api/v1/agents/nonsense/restart",
-            server.addr
+            server.rest_addr
         ))
         .send()
         .await
@@ -195,7 +195,7 @@ async fn restart_requests_are_validated_against_the_fleet() {
     let response = client
         .post(format!(
             "http://{}/api/v1/agents/{}/restart",
-            server.addr,
+            server.rest_addr,
             InstanceUid::default()
         ))
         .send()
@@ -209,7 +209,7 @@ async fn restart_requests_are_validated_against_the_fleet() {
     let response = client
         .post(format!(
             "http://{}/api/v1/agents/{uid}/restart",
-            server.addr
+            server.rest_addr
         ))
         .send()
         .await

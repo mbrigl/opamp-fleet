@@ -11,7 +11,9 @@ OpAMP — and that can equally run as a **gateway** multiplexing other clients u
 **specification** ([`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)) and **Architecture Decision
 Records** ([`docs/adr/`](docs/adr/)), so intent and the reasoning behind every structural choice stay
 explicit and reviewable. How much of the protocol each end implements is tracked in
-[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md); candidate measures for hardening the Client–Server
+link further are collected — as a backlog, not as decisions — in
+[`docs/HARDENING.md`](docs/HARDENING.md).
 
 > **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
 > start it, and every configuration key, split into [Server](docs/manual/server.md) and
@@ -176,6 +178,12 @@ it (AGENTS.md links here).
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Check the Windows build:**
+  `cargo xwin clippy -p client --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
+  (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
+  Container carries the `llvm-lib` it requires). Worth running whenever a change touches
+  platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
+  `#[cfg(unix)]` mistake compiles perfectly well on Linux.
 - **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
@@ -218,16 +226,20 @@ of both ends — is the **[User Manual](docs/manual/README.md)**:
 
 A minimal closed control loop on one machine:
 
-1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves
-   everything on one port (default `4320`): the OpAMP endpoint at `/v1/opamp` (plain HTTP **and**
-   WebSocket, [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)), the REST API under `/api/v1/`
-   ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), and the
-   bundled UI at `/`.
+1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves two
+   planes on two ports ([ADR-0066](docs/adr/0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md)).
+   The **Agent plane** on `4320`: the OpAMP endpoint at `/v1/opamp` (plain HTTP **and** WebSocket,
+   [ADR-0007](docs/adr/0007-dual-transport-and-tls.md)) and the package downloads the offers point
+   at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
+   ([ADR-0012](docs/adr/0012-selector-targeted-configurations-and-openapi-rest-api.md)), the API
+   docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
+   with Basic credentials
+   ([ADR-0067](docs/adr/0067-basic-authentication-on-the-operator-plane.md)).
 2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
-3. **Open the UI** at <http://127.0.0.1:4320/> — the Agent is listed as *Connected*. Press
+3. **Open the UI** at <http://127.0.0.1:4321/> — the Agent is listed as *Connected*. Press
    **Configurations**, name a Configuration, optionally give it a Selector (`key=value` pairs an
    Agent's reported attributes must equal; empty targets every Agent), enter the configuration
    text, and save.
@@ -242,33 +254,33 @@ The same operations are available to any portal through the REST API — the Ope
 `/api/v1/openapi.json` is the contract to generate a client from:
 
 ```console
-$ curl http://127.0.0.1:4320/api/v1/agents                   # the fleet, with reported attributes
-$ curl http://127.0.0.1:4320/api/v1/configurations           # every Configuration
+$ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
+$ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
-       http://127.0.0.1:4320/api/v1/configurations/linux-base  # distribute to a subset
-$ curl -X DELETE http://127.0.0.1:4320/api/v1/configurations/linux-base
+       http://127.0.0.1:4321/api/v1/configurations/linux-base  # distribute to a subset
+$ curl -X DELETE http://127.0.0.1:4321/api/v1/configurations/linux-base
 
 # Content the agent reads by path rather than is configured with (ADR-0016): written next to the
 # configuration under its own name, never passed to the process as configuration.
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
-       http://127.0.0.1:4320/api/v1/configurations/ruleset
+       http://127.0.0.1:4321/api/v1/configurations/ruleset
 
 # A package defines a Set (ADR-0052), identified by name, Agent type, and version, with one entry
 # per platform (ADR-0031); each Agent is offered the entry that fits it. Saving stages a draft —
 # nothing reaches the fleet until the Set is published (ADR-0043).
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 
 # Rolling back is a publication move (ADR-0052): retract the newest version, and the fleet falls
 # back to the newest one still published under the same name.
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 ```
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
@@ -346,6 +358,7 @@ AGENTS.md             # single source of truth for coding agents
 docs/manual/         # the user manual: Server, Client, and the operator tools, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
+docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
 crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, client.toml)

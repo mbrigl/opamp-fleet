@@ -391,7 +391,7 @@ jobs:
           five platforms release together (ADR-0043):
 
           \`\`\`console
-          set="http://<server>:4320/api/v1/packages/opamp-fleet-client/opamp-fleet-client/${{ needs.version.outputs.version }}"
+          set="http://<server>:4321/api/v1/packages/opamp-fleet-client/opamp-fleet-client/${{ needs.version.outputs.version }}"
           curl -X PUT -H 'Content-Type: application/json' -d '{}' "\$set"
           for f in *_${{ needs.version.outputs.version }}_*.7z; do
             p=\${f%.7z}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}

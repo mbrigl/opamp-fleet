@@ -327,8 +327,9 @@ pub struct PackageOffering {
 
 impl PackageOffering {
     /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
-    /// against its own endpoint. The download sits on the unauthenticated REST plane (ADR-0013);
-    /// the artifact's content hash and signature are what protect it, so no credential rides it.
+    /// against its own endpoint — which is the Agent plane, where the download is served
+    /// (ADR-0066). It sits outside Admission (ADR-0013): the artifact's content hash and signature
+    /// are what protect it, so no credential rides it.
     pub fn new(store: PackageStore, download_base: String) -> Self {
         PackageOffering {
             store,

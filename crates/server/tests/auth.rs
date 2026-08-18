@@ -95,11 +95,15 @@ async fn the_websocket_upgrade_is_checked_before_it_completes() {
         .expect("an authenticated upgrade succeeds");
 }
 
+/// `[auth]` guards the OpAMP endpoint and nothing else: the REST API answers on the Operator
+/// plane's own listener (ADR-0066), where authenticating it is the separate decision — and it is
+/// *not* served on the Agent plane at all, which is what the split is.
 #[tokio::test]
-async fn the_rest_api_stays_open_when_the_opamp_endpoint_is_guarded() {
+async fn the_rest_api_stays_open_on_its_own_listener_when_the_opamp_endpoint_is_guarded() {
     let server = spawn_guarded().await;
-    let response = reqwest::Client::new()
-        .get(format!("http://{}/api/v1/agents", server.addr))
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{}/api/v1/agents", server.rest_addr))
         .send()
         .await
         .expect("get");
@@ -107,5 +111,16 @@ async fn the_rest_api_stays_open_when_the_opamp_endpoint_is_guarded() {
         response.status(),
         200,
         "operator auth is a separate decision"
+    );
+
+    let on_the_agent_plane = client
+        .get(format!("http://{}/api/v1/agents", server.addr))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        on_the_agent_plane.status(),
+        404,
+        "the fleet view is not served where the Agents connect"
     );
 }

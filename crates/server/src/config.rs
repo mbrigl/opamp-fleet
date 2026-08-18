@@ -10,20 +10,31 @@ use serde::Deserialize;
 /// The default OpAMP endpoint port, from the Baseline.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:4320";
 
+/// The default Operator-plane address (ADR-0066): the port above the protocol's, on loopback.
+/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0067) — until then its
+/// reachability *is* its protection, so publishing it is a line an operator writes deliberately.
+pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
+
 /// `server.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
 /// startup instead of silently applying a default.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Address and port the single listener binds — OpAMP, REST API, and UI share it (ADR-0005).
+    /// Address and port the **Agent plane** binds: the OpAMP endpoint and the package download
+    /// route the offers point at (ADR-0066, superseding ADR-0005 on this point).
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// The **Operator plane** — REST API, API docs, and the bundled UI — on its own listener
+    /// (ADR-0066). Absent means the default, which is loopback.
+    #[serde(default)]
+    pub rest: RestConfig,
     /// Where Configurations are persisted — one JSON file each (ADR-0012) — so a Server restart
     /// does not lose what the fleet should be running. An empty or missing directory means: no
     /// Configuration to offer yet.
     #[serde(default = "default_config_dir")]
     pub config_dir: PathBuf,
-    /// Optional TLS; when present the listener serves HTTPS/WSS (ADR-0007).
+    /// Optional TLS; when present **both** listeners serve HTTPS/WSS, with one certificate and
+    /// key (ADR-0007, ADR-0066).
     pub tls: Option<TlsConfig>,
     /// Optional authentication on the OpAMP endpoint (ADR-0013); absent means open, as before.
     pub auth: Option<AuthConfig>,
@@ -41,8 +52,8 @@ pub struct ServerConfig {
     pub packages_dir: PathBuf,
     /// The absolute base URL the Server advertises for package downloads (ADR-0015), e.g.
     /// `https://fleet.example:4320`. When unset, the Server offers a path-only `download_url`
-    /// that the Client resolves against its own OpAMP endpoint — right for the common
-    /// single-listener deployment; set it when downloads must go through a different host.
+    /// that the Client resolves against its own OpAMP endpoint — the Agent plane, which is where
+    /// the download is served (ADR-0066); set it when downloads must go through a different host.
     pub advertised_url: Option<String>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
     /// direction. The Baseline requires the limit, recommends this default, and asks that it be
@@ -72,6 +83,80 @@ pub struct ServerConfig {
     /// at load: a fleet that can hold no Agent is a misconfiguration, not a limit.
     #[serde(default = "default_max_agents")]
     pub max_agents: usize,
+}
+
+/// The `[rest]` section (ADR-0066): the Operator plane's own listener. It is a section rather than
+/// a bare key because the plane is what grows next — an authentication decision belongs inside it,
+/// not beside it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestConfig {
+    /// Address and port the REST API, the API docs, and the bundled UI bind.
+    #[serde(default = "default_rest_listen")]
+    pub listen: SocketAddr,
+    /// Optional Basic authentication over the whole plane (ADR-0067); absent means open, which is
+    /// what the loopback default above is there to make tolerable.
+    pub auth: Option<RestAuthConfig>,
+}
+
+impl Default for RestConfig {
+    fn default() -> Self {
+        RestConfig {
+            listen: default_rest_listen(),
+            auth: None,
+        }
+    }
+}
+
+/// The `[rest.auth]` section (ADR-0067): who may reach the Operator plane. Basic only — the
+/// audience is a browser and `curl`, and Basic is the one scheme both speak without a login page.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestAuthConfig {
+    /// Accepted Basic credentials, `user = "password"`. Several allow a rotation, or an individual
+    /// operator's credential to be withdrawn on its own.
+    #[serde(default)]
+    pub basic_users: BTreeMap<String, String>,
+}
+
+impl RestAuthConfig {
+    /// The exact `Authorization` header values that authenticate, precomputed so the request path
+    /// is one constant-time comparison per candidate.
+    pub fn accepted_headers(&self) -> Vec<String> {
+        self.basic_users
+            .iter()
+            .map(|(user, password)| {
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                format!("Basic {encoded}")
+            })
+            .collect()
+    }
+
+    /// The `WWW-Authenticate` challenge — what makes a browser ask for the password rather than
+    /// show the operator a bare `401` (RFC 7617).
+    pub fn challenge(&self) -> String {
+        r#"Basic realm="opamp""#.to_string()
+    }
+
+    /// A section that authenticates nobody would lock the operator out of their own Server, and an
+    /// empty user or password is a half-written credential rather than an intent (ADR-0008).
+    fn check(&self) -> Result<(), String> {
+        if self.basic_users.is_empty() {
+            return Err(
+                "a [rest.auth] section needs at least one entry in [rest.auth.basic_users]"
+                    .to_string(),
+            );
+        }
+        for (user, password) in &self.basic_users {
+            if user.is_empty() || password.is_empty() {
+                return Err(format!(
+                    "the [rest.auth.basic_users] entry {user:?} needs a name and a password"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `[connection_offer]` section (ADR-0014): what every Agent declaring
@@ -253,9 +338,9 @@ pub struct TlsConfig {
     /// (ADR-0035). Present turns mutual TLS on for the OpAMP endpoint: every request to
     /// `/v1/opamp` must arrive over a connection bearing a certificate this bundle verifies.
     ///
-    /// Client authentication stays *optional at the TLS layer* — the same listener serves the
-    /// REST API and the UI (ADR-0005), and a browser presents nothing — so the requirement is
-    /// enforced on the OpAMP route rather than on the socket. A certificate that **is** presented
+    /// Client authentication stays *optional at the TLS layer* — the same listener also serves the
+    /// package download, which a Client fetches presenting no certificate (ADR-0066) — so the
+    /// requirement is enforced on the OpAMP route rather than on the socket. A certificate that **is** presented
     /// is always verified: rustls refuses a bad one before any route is reached.
     pub client_ca_file: Option<PathBuf>,
 }
@@ -298,6 +383,12 @@ impl ClientCaConfig {
 
 fn default_listen() -> SocketAddr {
     DEFAULT_LISTEN.parse().expect("default listen address")
+}
+
+fn default_rest_listen() -> SocketAddr {
+    DEFAULT_REST_LISTEN
+        .parse()
+        .expect("default REST listen address")
 }
 
 fn default_config_dir() -> PathBuf {
@@ -345,6 +436,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             listen: default_listen(),
+            rest: RestConfig::default(),
             config_dir: default_config_dir(),
             tls: None,
             auth: None,
@@ -360,6 +452,13 @@ impl Default for ServerConfig {
             max_agents: default_max_agents(),
         }
     }
+}
+
+/// Whether two listener addresses cannot both be bound: the same port on the same address, or on
+/// an address that covers every interface — `0.0.0.0:4320` and `127.0.0.1:4320` are two spellings
+/// of one socket as far as the second `bind` is concerned.
+fn listeners_collide(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port() && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified())
 }
 
 impl ServerConfig {
@@ -391,6 +490,22 @@ impl ServerConfig {
             telemetry
                 .check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if let Some(auth) = &config.rest.auth {
+            auth.check()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // The two planes are two listeners (ADR-0066). Addresses that collide would surface as the
+        // second bind failing with "address already in use" — a message about sockets for what is
+        // really a configuration mistake, so it is refused here, by name.
+        if listeners_collide(config.listen, config.rest.listen) {
+            return Err(format!(
+                "{}: listen ({}) and [rest] listen ({}) must be different addresses — the Agent \
+                 plane and the Operator plane are separate listeners",
+                path.display(),
+                config.listen,
+                config.rest.listen
+            ));
         }
         // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
         // this can only be a `[client_ca]` without one — issuing certificates for a channel that
@@ -496,6 +611,46 @@ mod tests {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen.port(), 4320);
         assert!(cfg.tls.is_none());
+    }
+
+    /// ADR-0066: the Operator plane is a second listener, and by default it is on loopback — the
+    /// only protection it has while nothing authenticates it.
+    #[test]
+    fn the_operator_plane_defaults_to_loopback_and_is_configurable() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.rest.listen.port(), 4321);
+        assert!(
+            cfg.rest.listen.ip().is_loopback(),
+            "the REST API is not published to the network by default"
+        );
+        let opened: ServerConfig =
+            toml::from_str("[rest]\nlisten = \"0.0.0.0:8080\"").expect("parse");
+        assert_eq!(opened.rest.listen.to_string(), "0.0.0.0:8080");
+    }
+
+    /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,
+    /// and it is named as one rather than surfacing as "address already in use" (ADR-0066).
+    #[test]
+    fn two_planes_on_one_address_are_refused() {
+        assert!(listeners_collide(
+            "0.0.0.0:4320".parse().unwrap(),
+            "0.0.0.0:4320".parse().unwrap()
+        ));
+        assert!(
+            listeners_collide(
+                "0.0.0.0:4320".parse().unwrap(),
+                "127.0.0.1:4320".parse().unwrap()
+            ),
+            "a listener on every interface covers the loopback one"
+        );
+        assert!(!listeners_collide(
+            "0.0.0.0:4320".parse().unwrap(),
+            "127.0.0.1:4321".parse().unwrap()
+        ));
+        assert!(!listeners_collide(
+            "127.0.0.1:4320".parse().unwrap(),
+            "192.168.0.1:4320".parse().unwrap()
+        ));
     }
 
     /// The Baseline requires a message size limit, recommends 64 MiB, and asks that it be
@@ -611,6 +766,49 @@ mod tests {
         let bearer_only: AuthConfig = toml::from_str("bearer_tokens = [\"tok\"]").expect("parse");
         assert_eq!(bearer_only.challenge(), "Bearer");
         assert!(bearer_only.check().is_ok());
+    }
+
+    /// ADR-0067: the Operator plane's own credentials, precomputed into the header values that
+    /// authenticate, with the challenge that makes a browser ask rather than give up.
+    #[test]
+    fn rest_auth_precomputes_the_accepted_headers_and_the_basic_challenge() {
+        let cfg: ServerConfig = toml::from_str(
+            r#"
+            [rest]
+            listen = "127.0.0.1:4321"
+            [rest.auth.basic_users]
+            fleet = "secret"
+            "#,
+        )
+        .expect("parse");
+        let auth = cfg.rest.auth.expect("rest auth");
+        // base64("fleet:secret")
+        assert_eq!(auth.accepted_headers(), vec!["Basic ZmxlZXQ6c2VjcmV0"]);
+        assert_eq!(auth.challenge(), r#"Basic realm="opamp""#);
+        assert!(auth.check().is_ok());
+
+        // Absent means open — the zero-configuration default this plane still has.
+        let open: ServerConfig = toml::from_str("").expect("parse");
+        assert!(open.rest.auth.is_none());
+    }
+
+    /// A section that authenticates nobody locks the operator out of their own Server, and a
+    /// half-written credential is a mistake rather than an intent — both fail at startup.
+    #[test]
+    fn an_unusable_rest_auth_section_is_rejected() {
+        let empty: RestAuthConfig = toml::from_str("").expect("parses; emptiness is semantic");
+        assert!(empty.check().is_err());
+        let blank: RestAuthConfig = toml::from_str("[basic_users]\nfleet = \"\"").expect("parse");
+        assert!(blank.check().is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "[rest.auth]\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("an empty section must fail startup");
+        assert!(err.contains("[rest.auth.basic_users]"), "{err}");
+
+        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0067).
+        assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 
     #[test]

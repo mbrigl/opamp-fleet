@@ -22,36 +22,21 @@ use prost::Message as _;
 use tracing::{debug, warn};
 
 use crate::config::AuthConfig;
+use crate::credentials::Credentials;
 use crate::fleet::{bad_request, AppState, Transport};
 
 /// The endpoint path the Baseline names as the default, and the protobuf media type it requires —
 /// both from the shared crate, because the Gateway serves the same endpoint (ADR-0044).
 pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
-/// The OpAMP endpoint's credential check (ADR-0013), precomputed from the `[auth]` section.
-pub struct OpampAuth {
-    /// Every `Authorization` value that authenticates — Bearer and Basic alike.
-    accepted: Vec<String>,
-    /// The `WWW-Authenticate` value a `401` carries.
-    challenge: String,
-}
+/// The OpAMP endpoint's credential check (ADR-0013), precomputed from the `[auth]` section — Bearer
+/// and Basic alike. The comparison itself lives in [`crate::credentials`], shared with the Operator
+/// plane's own check (ADR-0067).
+pub struct OpampAuth(Credentials);
 
 impl OpampAuth {
     pub fn from_config(auth: &AuthConfig) -> Self {
-        OpampAuth {
-            accepted: auth.accepted_headers(),
-            challenge: auth.challenge(),
-        }
-    }
-
-    fn permits(&self, headers: &HeaderMap) -> bool {
-        let presented = header_str(headers, header::AUTHORIZATION);
-        self.accepted
-            .iter()
-            // Constant-time per candidate, so a comparison never leaks how far it matched.
-            .any(|accepted| {
-                constant_time_eq::constant_time_eq(accepted.as_bytes(), presented.as_bytes())
-            })
+        OpampAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
     }
 }
 
@@ -130,10 +115,10 @@ async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: 
         }
     }
     if let Some(auth) = &admission.auth {
-        if !auth.permits(request.headers()) {
+        if !auth.0.permits(request.headers()) {
             return (
                 StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, auth.challenge.clone())],
+                [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
                 "the OpAMP endpoint requires authentication",
             )
                 .into_response();

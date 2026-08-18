@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum_server::accept::DefaultAcceptor;
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue,
 };
@@ -11,7 +12,11 @@ use server::fleet::AppState;
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct TestServer {
+    /// The Agent plane (ADR-0066): `/v1/opamp` and the package download.
     pub addr: SocketAddr,
+    /// The Operator plane (ADR-0066): the REST API, its docs, and the UI — a second listener, as
+    /// in a real deployment, so a test that calls the wrong one finds out.
+    pub rest_addr: SocketAddr,
     pub state: Arc<AppState>,
     // Held so the store directories outlive the test. Public so a test binary that wires its own
     // AppState (e.g. package delivery) can hand over the temp dir it kept alive.
@@ -84,22 +89,55 @@ async fn spawn_full(
             .with_max_message_size(limit)
             .with_stale_after(stale_after),
     );
-    let app = server::app(
+    let (addr, rest_addr) = serve(
         state.clone(),
         server::transport::Admission::new(auth, false),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    )
+    .await;
     TestServer {
         addr,
+        rest_addr,
         state,
         _dir: dir,
     }
+}
+
+/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0066), and
+/// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn serve(
+    state: Arc<AppState>,
+    admission: server::transport::Admission,
+) -> (SocketAddr, SocketAddr) {
+    serve_guarded(state, admission, None).await
+}
+
+/// The same two planes, with the Operator plane's credential check active (ADR-0067).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn serve_guarded(
+    state: Arc<AppState>,
+    admission: server::transport::Admission,
+    operator_auth: Option<server::api::OperatorAuth>,
+) -> (SocketAddr, SocketAddr) {
+    let agents = server::agent_app(state.clone(), admission);
+    let operators = server::operator_app(state, operator_auth);
+    let agent_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
+    let operator_listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
+    let addr = agent_listener.local_addr().expect("local addr");
+    let rest_addr = operator_listener.local_addr().expect("local addr");
+    // Through `listen::plane`, as the binary serves them (ADR-0073), so the whole suite runs
+    // against a Server whose connection setup is bounded the way a real one's is.
+    let handle = axum_server::Handle::new();
+    tokio::spawn(
+        server::listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+            .serve(agents.into_make_service()),
+    );
+    tokio::spawn(
+        server::listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+            .serve(operators.into_make_service()),
+    );
+    (addr, rest_addr)
 }
 
 /// The Agent type every scaffolded Agent reports as `service.name` (ADR-0033). It is a constant
@@ -178,14 +216,14 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 /// portal) does — two calls since ADR-0061, because saving alone distributes nothing and the
 /// rollout act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
-pub async fn distribute(addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
-    distribute_with_role(addr, name, selector, body, "").await;
+pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
+    distribute_with_role(rest_addr, name, selector, body, "").await;
 }
 
 /// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0016); an empty role is the
 /// ordinary top-level configuration and stays out of the request.
 pub async fn distribute_with_role(
-    addr: SocketAddr,
+    rest_addr: SocketAddr,
     name: &str,
     selector: &[(&str, &str)],
     body: &str,
@@ -198,7 +236,7 @@ pub async fn distribute_with_role(
     }
     let client = reqwest::Client::new();
     let response = client
-        .put(format!("http://{addr}/api/v1/configurations/{name}"))
+        .put(format!("http://{rest_addr}/api/v1/configurations/{name}"))
         .json(&spec)
         .send()
         .await
@@ -206,7 +244,7 @@ pub async fn distribute_with_role(
     assert_eq!(response.status(), 200, "the configuration is accepted");
     let response = client
         .post(format!(
-            "http://{addr}/api/v1/configurations/{name}/rollout"
+            "http://{rest_addr}/api/v1/configurations/{name}/rollout"
         ))
         .send()
         .await
@@ -224,16 +262,10 @@ pub async fn spawn_with_telemetry(offer: server::fleet::TelemetryOffer) -> TestS
             .expect("open the configuration store")
             .with_telemetry_offer(offer),
     );
-    let app = server::app(state.clone(), server::transport::Admission::open());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    let (addr, rest_addr) = serve(state.clone(), server::transport::Admission::open()).await;
     TestServer {
         addr,
+        rest_addr,
         state,
         _dir: dir,
     }

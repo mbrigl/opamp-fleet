@@ -111,6 +111,9 @@ impl Plugin for CommandPlugin {
         let version_probe = settings.version_args.clone().map(|args| VersionProbe {
             program: command.clone(),
             args,
+            // A Foreign Agent's version flag is its own convention, and so is its banner: the
+            // strict SemVer read stays the default here (ADR-0068).
+            parse: None,
         });
         let runner = Runner {
             name: ctx.name,
@@ -121,6 +124,9 @@ impl Plugin for CommandPlugin {
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
             version_probe,
+            // A Foreign Agent's invocation is the operator's; there is no argument this kind
+            // knows to be safe to run (ADR-0068).
+            preflight: None,
             reload_signal: reload,
             events: ctx.events,
             commands: command_rx,
@@ -131,6 +137,8 @@ impl Plugin for CommandPlugin {
                     args: args.clone(),
                     env: env.clone(),
                     working_dir: working_dir.clone(),
+                    // Whatever the operator points this at is supervised as one process.
+                    own_process_group: false,
                 })
             }),
         };

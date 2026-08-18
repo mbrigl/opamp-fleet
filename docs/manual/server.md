@@ -55,15 +55,31 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
 
-Everything is served on the single configured listener:
+There are **two listeners, split by audience** (ADR-0066): the one the fleet talks to, and the one
+you talk to.
+
+**The Agent plane** — `listen`, `0.0.0.0:4320` by default:
 
 | Path | What it is |
 |---|---|
 | `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both. |
+| `/api/v1/packages/{name}/{type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. Unauthenticated on purpose — a downloading Client presents no credential, and the content hash and signature are what protect the bytes. |
+
+**The Operator plane** — `[rest] listen`, `127.0.0.1:4321` by default:
+
+| Path | What it is |
+|---|---|
 | `/api/v1/…` | The REST API. |
-| `/api/v1/openapi.json` | The OpenAPI document — the contract to generate a client from. |
+| `/api/v1/openapi.json` | The OpenAPI document — the contract to generate a client from. It describes this plane, so the artifact download above is not in it. |
 | `/api/v1/docs` | Interactive API documentation (Redoc, vendored and served from this origin, so it works offline). |
 | `/` | The bundled UI: one embedded page, no frontend toolchain. It is deliberately rudimentary — the API is the product. |
+
+`[auth]` guards the OpAMP endpoint and nothing else; the Operator plane has its own credential,
+[`[rest.auth]`](#the-operator-plane-restauth), and without it that plane is open to whoever reaches
+it. That is why its default address is **loopback**: this port carries the authority to reconfigure
+and re-package the whole fleet. Reach it from another host through an SSH tunnel
+(`ssh -L 4321:127.0.0.1:4321 <server-host>`), or publish it deliberately with
+`[rest] listen = "0.0.0.0:4321"` — and then guard it.
 
 ## Configuration reference
 
@@ -74,7 +90,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"0.0.0.0:4320"` | The single listener, as `address:port`. `4320` is the protocol's default port. |
+| `listen` | `"0.0.0.0:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. |
 | `config_dir` | `"fleet-configs"` | Where Configurations are persisted — one JSON file per Configuration, named after it. Written atomically; read back at startup. |
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
@@ -82,13 +98,41 @@ optional and shown below with its default; an unknown key fails startup rather t
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
 | `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so a peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The real defence against an anonymous flood is [`[auth]`](#authentication) — this is the backstop while it is off. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
-| `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset for the ordinary single-listener case: the Client resolves the offered path against its own OpAMP endpoint. Set it only when downloads must go through a different host. |
+| `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset in the ordinary case: the Client then resolves the offered path against its own OpAMP endpoint, which is exactly where the download is served. Set it only when downloads must go through a different host, such as a mirror. |
+
+### `[rest]`
+
+The Operator plane's listener. Absent means the default.
+
+```toml
+[rest]
+listen = "127.0.0.1:4321"   # "0.0.0.0:4321" publishes the REST API and the UI to the network
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. |
+
+#### `[rest.auth]`
+
+Optional Basic authentication over that whole plane — see
+[Authentication](#the-operator-plane-restauth). Absent means open.
+
+```toml
+[rest.auth.basic_users]
+fleet-admin = "a-strong-password"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "password"`. A section without one, or an entry with an empty name or password, fails startup. |
 
 ### `[tls]`
 
-Present means the listener serves HTTPS and WSS instead of plain HTTP and WS.
-`cert_file` and `key_file` are required together; `client_ca_file` is optional and turns on mutual
-TLS (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
+Present means **both listeners** serve HTTPS and WSS instead of plain HTTP and WS, with the same
+certificate and key. `cert_file` and `key_file` are required together; `client_ca_file` is optional,
+belongs to the Agent plane alone, and turns on mutual TLS (see
+[Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 
 ```toml
 [tls]
@@ -158,8 +202,8 @@ client_ca_file = "client-ca.pem"
 ```
 
 Client authentication stays **optional at the TLS layer** and required on the OpAMP route alone.
-That is deliberate: the same listener serves the REST API and the UI, and a browser presents no
-certificate. A certificate that *is* presented is always verified — rustls refuses one it cannot
+That is deliberate: the Agent plane also serves the package download, and a Client fetching an
+artifact presents no certificate — the content hash and the signature are what protect those bytes. A certificate that *is* presented is always verified — rustls refuses one it cannot
 chain before any route sees it.
 
 **Every configured proof must succeed.** `[auth]` alone behaves as it always has. `client_ca_file`
@@ -252,8 +296,8 @@ Agent of the type (or every Agent, if no type is set either).
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "otelcol-contrib", "selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
-       http://127.0.0.1:4320/api/v1/configurations/linux-prod
-$ curl -X POST http://127.0.0.1:4320/api/v1/configurations/linux-prod/rollout
+       http://127.0.0.1:4321/api/v1/configurations/linux-prod
+$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/linux-prod/rollout
 ```
 
 **Several Configurations may match one Agent.** It receives all of them, as named entries in one
@@ -270,7 +314,7 @@ like `supplementary`.
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
-       http://127.0.0.1:4320/api/v1/configurations/ruleset
+       http://127.0.0.1:4321/api/v1/configurations/ruleset
 ```
 
 **Nothing is sent twice.** The Server composes the entries an Agent was **rolled out**, hashes
@@ -304,7 +348,7 @@ Configurations have: the Set's own act releases it to every Agent it fits and it
 at, and the per-Agent control on the fleet view releases it to one Agent:
 
 ```console
-$ curl -X POST http://<server>:4320/api/v1/packages/otelcol/otelcol-contrib/1.2.3/rollout
+$ curl -X POST http://<server>:4321/api/v1/packages/otelcol/otelcol-contrib/1.2.3/rollout
 ```
 
 So five platforms' artifacts can be uploaded, aimed, and then released together — and the window
@@ -336,9 +380,9 @@ error, and **`targeted_agents` is how you catch it** (the package list in the UI
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64.tar.gz \
-       "http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64?signature=$sig"
+       "http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64?signature=$sig"
 ```
 
 The create body takes `{"selector": {…}, "addon": true|false}` — an addon marks content a
@@ -355,7 +399,7 @@ when one is configured, is the whole of the protection:
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…"}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64/source
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/entries/linux/amd64/source
 ```
 
 The URL is probed once, to catch a typo while you are still looking at the screen. A definitive
@@ -369,7 +413,7 @@ accepts packages:
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/0.109.0/selector
+       http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/selector
 ```
 
 A Selector aims **every** platform of that Set at once, because the aim belongs to the Set — and
@@ -390,7 +434,7 @@ reports no type says so on its fleet row rather than leaving you with a rollout 
 a new version is a new Set — so taking a bad one back is rolling the previous version out again:
 
 ```console
-$ curl -X POST "http://127.0.0.1:4320/api/v1/packages/otelcol/otelcol-contrib/1.2.2/rollout"
+$ curl -X POST "http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/1.2.2/rollout"
 ```
 
 It reaches exactly the Agents the Set fits and aims at, which is also how a rollback can be
@@ -415,8 +459,10 @@ and names the member the way the receiving Supervisor will look for it. There is
 no way to add one: an artifact that is neither gzip nor 7z is taken to *be* the program.
 [The rollout walkthrough](rollout.md) puts the whole sequence together.
 
-The download route sits on the unauthenticated REST plane deliberately: the content hash and the
-signature are what protect an installed binary, not who was allowed to fetch it.
+The download route sits on the **Agent plane**, unauthenticated, deliberately: the content hash and
+the signature are what protect an installed binary, not who was allowed to fetch it — and a Client
+downloading one presents no credential, which is exactly why guarding the Operator plane cannot
+break a rollout.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
 Once a Client has a key configured, an unsigned package is refused; without one, a *signed* package
@@ -426,7 +472,8 @@ is refused too. Decide fleet-wide, not per host.
 
 The OpenAPI document at `/api/v1/openapi.json` is the contract; `/api/v1/docs` renders it. Every
 error response carries a JSON body with an `error` field, so a generated client has something to
-show.
+show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) and, when
+[`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic credentials.
 
 | Method & path | What it does |
 |---|---|
@@ -449,7 +496,7 @@ show.
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}/selector` | Set whom a rollout act would release it to. Never distributes. |
 | `POST /api/v1/packages/{name}/{agent_type}/{version}/rollout` | Roll the Set out to every Agent it fits and its Selector aims at — the moment a rollout starts. An older version here is the rollback. `409` while the Set holds no entries. |
 | `DELETE /api/v1/packages/{name}/{agent_type}/{version}` | Remove the Set — and every per-Agent assignment that referenced it. Uninstalls nothing. |
-| `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. |
+| `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 
@@ -510,7 +557,7 @@ editing a file **on that host** and restarting it.
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"labels": {"rollout": "canary"}}' \
-       http://127.0.0.1:4320/api/v1/agents/<instance-uid>/labels
+       http://127.0.0.1:4321/api/v1/agents/<instance-uid>/labels
 ```
 
 A label is matched exactly like a reported attribute, by **both** halves of the targeting: the
@@ -584,17 +631,52 @@ fleet = "a-strong-password"
 Both schemes may be configured at once, and several valid credentials may be listed — which is what
 makes an overlapping rotation possible.
 
-**The REST API and the UI are not guarded by this.** Neither is the package download route. Put the
-API behind whatever fronts it (a reverse proxy, an existing portal's authentication) if it must not
-be public, and rely on signatures rather than access control for artifacts.
+**The REST API and the UI are not guarded by this** — they are a different plane with a credential
+of their own, `[rest.auth]` below. Neither is the package download route, deliberately: an Agent
+fetches an artifact without presenting anything, and its content hash and signature are what protect
+it.
 
 Without TLS the credentials travel in cleartext — a Client warns when it sends one beyond the
 loopback interface, but it still sends it. Pair `[auth]` with `[tls]` for anything real.
 
+### The Operator plane: `[rest.auth]`
+
+`[rest.auth]` guards **the whole Operator plane** — `/api/v1/…`, the OpenAPI document, the API docs,
+and the UI at `/`. Without the section that plane is open, which is why its default address is
+loopback; with it, every request needs Basic credentials and anything else is answered `401` with a
+`WWW-Authenticate: Basic` challenge.
+
+```toml
+[rest]
+listen = "0.0.0.0:4321"          # publishing it is the reason to add the section below
+
+[rest.auth.basic_users]
+fleet-admin = "a-strong-password"
+```
+
+Basic, and only Basic, because the audience is a browser and `curl`: the browser answers the
+challenge by itself, so the bundled UI needs no login page, no session, and no cookie. Several users
+are how a credential is rotated — add the new one, hand it out, remove the old — or how one
+operator's is withdrawn without touching anyone else's.
+
+**The operator tools carry it in the URL** they are given, which needs no new flag:
+
+```console
+$ curl -u fleet-admin:secret http://127.0.0.1:4321/api/v1/agents
+$ opamp-package-fetch … --server http://fleet-admin:secret@127.0.0.1:4321
+```
+
+Two limits worth stating plainly. It is **authentication, not authorization**: everyone listed can
+do everything the plane offers — there are no roles, and one Server still manages one fleet. And
+Basic sends a reusable password on **every** request, so it is only as private as the channel under
+it: pair `[rest.auth]` with `[tls]`, or put a TLS-terminating proxy in front. The Server logs a
+warning at startup when the plane is published in cleartext with a credential configured. Passwords
+are stored in `server.toml` verbatim, exactly as `[auth]`'s are.
+
 ## TLS
 
-`[tls]` turns the single listener into an HTTPS/WSS listener — there is no second port,
-and no plaintext one left open beside it. Clients then use `wss://` or `https://` endpoints, and
+`[tls]` turns **both listeners** into HTTPS/WSS listeners, with one certificate and key — there is
+no plaintext port left open beside either of them. Clients then use `wss://` or `https://` endpoints, and
 Clients trusting a private CA additionally set `ca_file` in their own `[tls]` section.
 
 The Server can also **verify a client certificate**, which is the other half of the same section:
@@ -661,7 +743,8 @@ them, which is the Server half of the missing mutual-TLS support.
 
 ## What the Server does not do
 
-- **It does not authenticate the REST API or the UI**, by design — see above.
+- **It authenticates the REST API and the UI only if you ask it to** — `[rest.auth]`, Basic, off by
+  default, with the plane on loopback until you publish it.
 - **It does not throttle.** It honours the protocol's error and retry semantics and answers
   malformed input with `BAD_REQUEST`, but it never tells an Agent to slow down.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;

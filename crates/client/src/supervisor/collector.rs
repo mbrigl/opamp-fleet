@@ -61,6 +61,8 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
+        // One process, no worker of its own — signalling a group would gain nothing (ADR-0068).
+        own_process_group: false,
     })
 }
 
@@ -106,9 +108,14 @@ impl Plugin for CollectorPlugin {
             // The Runner asks at startup and again after every swap; an extension's self-report
             // overwrites the probed value.
             version_probe: Some(VersionProbe {
+                // The Collector's banner is strict SemVer; the default read is the right one.
+                parse: None,
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),
+            // A Collector's own `--version` would serve as a preflight, but nothing has asked for
+            // one: the swap has always been the first thing to try a new binary here (ADR-0068).
+            preflight: None,
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0060), which is also what the reference supervisor does.
             reload_signal: None,

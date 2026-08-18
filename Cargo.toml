@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/opamp", "crates/server", "crates/client", "crates/package-tools"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -89,7 +89,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 # The dates rcgen speaks in. It takes and returns `time::OffsetDateTime` for a certificate's
 # validity but re-exports none of it, so "now plus ninety days" needs the crate itself — already in
 # the tree as rcgen's own dependency, and preferable to hand-rolling calendar arithmetic.
-time = { version = "0.3", default-features = false, features = ["std"] }
+# `parsing`/`macros` additionally: reading the `Valid Until` line of `icinga2 pki verify` to decide
+# whether a certificate is inside its renewal window (ADR-0069) — the same reason as above, applied
+# to a date somebody else printed rather than one we compute.
+time = { version = "0.3", default-features = false, features = ["std", "parsing", "macros"] }
 # Reading back the validity of the certificate the Client holds, which is what decides when to
 # renew (ADR-0035). rcgen parses X.509 only behind a private, test-only path, so this is the
 # public way in — and it is the very parser rcgen itself uses, already in the tree.
@@ -118,6 +121,12 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+# The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0073): hyper defaults
+# that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
+# neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
+# `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
+# adds an entry to a manifest and no code to either binary.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
 utoipa = "5"

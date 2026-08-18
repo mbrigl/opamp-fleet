@@ -1,5 +1,6 @@
 //! The REST API v1 — the Server's integration contract (ADR-0005, ADR-0012) — and the bundled
-//! rudimentary UI.
+//! rudimentary UI. Both belong to the Operator plane and are served on its own listener
+//! (ADR-0066); the one exception, the Agent-facing artifact download, is [`download_router`].
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
 //! a route describe it, so contract and behaviour cannot drift. Any external portal generates a
@@ -8,8 +9,9 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -19,7 +21,9 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
+use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, ConfigurationSpec, Revision};
+use crate::credentials::Credentials;
 use crate::fleet::{AgentView, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
 use crate::labels::LabelError;
 
@@ -38,7 +42,37 @@ use crate::labels::LabelError;
 )]
 struct ApiDoc;
 
-pub fn router(state: Arc<AppState>) -> Router {
+/// The Operator plane's credential check (ADR-0067), precomputed from `[rest.auth]`. Basic only,
+/// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
+/// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
+/// page and a session.
+pub struct OperatorAuth(Credentials);
+
+impl OperatorAuth {
+    pub fn from_config(auth: &RestAuthConfig) -> Self {
+        OperatorAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
+    }
+}
+
+/// Refuses every request that carries no configured credential, before any handler sees it.
+async fn authenticate(
+    State(auth): State<Arc<OperatorAuth>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !auth.0.permits(request.headers()) {
+        // The challenge is what turns this into a browser prompt rather than a dead end.
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
+            "the REST API and the UI require authentication",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
         .routes(routes!(restart_agent))
@@ -65,27 +99,49 @@ pub fn router(state: Arc<AppState>) -> Router {
         .routes(routes!(put_package_set_selector))
         .routes(routes!(rollout_package_set))
         .routes(routes!(put_package_entry_source))
-        .routes(routes!(download_package))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
         serde_json::to_string_pretty(&document).expect("the OpenAPI document serializes");
-    api.route(
-        "/api/v1/openapi.json",
-        get(move || {
-            let body = (
-                [(header::CONTENT_TYPE, "application/json")],
-                document.clone(),
-            );
-            std::future::ready(body.into_response())
-        }),
-    )
-    // The interactive API docs (ADR-0005): a Redoc page rendering /api/v1/openapi.json, with
-    // Redoc vendored and served from this same origin so the docs work offline.
-    .route("/api/v1/docs", get(docs))
-    .route("/api/v1/docs/redoc.js", get(redoc_js))
-    .route("/", get(index))
-    .with_state(state)
+    let router = api
+        .route(
+            "/api/v1/openapi.json",
+            get(move || {
+                let body = (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    document.clone(),
+                );
+                std::future::ready(body.into_response())
+            }),
+        )
+        // The interactive API docs (ADR-0005): a Redoc page rendering /api/v1/openapi.json, with
+        // Redoc vendored and served from this same origin so the docs work offline.
+        .route("/api/v1/docs", get(docs))
+        .route("/api/v1/docs/redoc.js", get(redoc_js))
+        .route("/", get(index))
+        .with_state(state);
+    match auth {
+        // The outermost layer, so the guard covers every route on this listener — including the
+        // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0067).
+        Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
+        None => router,
+    }
+}
+
+/// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
+/// It is served on the **Agent plane** (ADR-0066), because that is the audience — the
+/// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
+/// (ADR-0015), so this listener is where the offer already points. It keeps its `/api/v1` path,
+/// which every published Set's `download_url` names.
+///
+/// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
+pub fn download_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/packages/{name}/{agent_type}/{version}/file",
+            get(download_package),
+        )
+        .with_state(state)
 }
 
 /// The bundled UI: one embedded page, no frontend toolchain (ADR-0005).
@@ -666,7 +722,7 @@ impl PackageSetView {
 
 /// The Platform the download route names (ADR-0031): the artifact endpoint serves bytes, and a
 /// request naming bytes names the Platform they are for.
-#[derive(Deserialize, IntoParams)]
+#[derive(Deserialize)]
 struct PlatformQuery {
     /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
     /// off a release file name — are accepted and answered canonically.
@@ -1342,25 +1398,10 @@ async fn rollout_package_set(
     }
 }
 
-/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here. On the
-/// unauthenticated REST plane (ADR-0013); the artifact's content hash and Ed25519 signature are
-/// what the Agent verifies before it installs (ADR-0015).
-#[utoipa::path(
-    get,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/file",
-    tag = "packages",
-    params(
-        ("name" = String, Path, description = "The package name"),
-        ("agent_type" = String, Path, description = "The Agent type"),
-        ("version" = String, Path, description = "The version"),
-        PlatformQuery
-    ),
-    responses(
-        (status = 200, description = "The artifact bytes", content_type = "application/octet-stream"),
-        (status = 400, description = "Missing or invalid platform, or invalid identity", body = ErrorBody),
-        (status = 404, description = "No such Set, or no uploaded artifact for that platform", body = ErrorBody)
-    )
-)]
+/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
+///
+/// `200` with the bytes, `400` for a missing or invalid platform or identity, `404` for a Set
+/// without an uploaded artifact for that platform.
 async fn download_package(
     State(state): State<Arc<AppState>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,

@@ -1,10 +1,19 @@
-//! Entry point: load `server.toml`, bind one listener (plain or TLS), serve until interrupted.
+//! Entry point: load `server.toml`, bind the two listeners (plain or TLS) — the Agent plane and
+//! the Operator plane (ADR-0066) — and serve both until interrupted.
+//!
+//! Both planes are served the same way whether or not TLS is configured, so that what bounds a
+//! connection before it becomes a request holds on all four surfaces (ADR-0073). Only the acceptor
+//! differs.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum_server::accept::DefaultAcceptor;
+use axum_server::Handle;
 use server::config::ServerConfig;
 use server::fleet::AppState;
+use server::listen;
 use tracing::info;
 
 fn usage() -> ! {
@@ -32,6 +41,22 @@ fn parse_args() -> PathBuf {
         }
     }
     config
+}
+
+/// Binds one plane's listener, or explains which one could not be bound and stops. A busy port is
+/// an operator's mistake, not a panic — and with two listeners the message has to say *which*.
+///
+/// Bound up front, before either plane starts serving, so a busy port is reported as the message
+/// above rather than as a failure out of a running server — and the TLS case gets that too, which
+/// it did not while it bound lazily inside `serve`.
+fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
+    match std::net::TcpListener::bind(address) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("cannot bind {plane} on {address}: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[tokio::main]
@@ -166,10 +191,45 @@ async fn main() {
     if mutual_tls {
         info!("the OpAMP endpoint requires a client certificate");
     }
-    let app = server::app(
+    // Two planes, two listeners (ADR-0066): Agents reach the OpAMP endpoint and the package
+    // downloads their offers point at; operators reach the REST API, its docs, and the UI.
+    let agents = server::agent_app(
         state.clone(),
         server::transport::Admission::new(auth, mutual_tls),
     );
+    let operator_auth = config
+        .rest
+        .auth
+        .as_ref()
+        .map(server::api::OperatorAuth::from_config);
+    if operator_auth.is_some() {
+        // ADR-0067.
+        info!("the REST API and the UI require authentication");
+        // Basic puts a reusable password on the wire on every request. On loopback that stays on
+        // the host; published in cleartext it does not, and the operator should hear so once.
+        if config.tls.is_none() && !config.rest.listen.ip().is_loopback() {
+            tracing::warn!(
+                listen = %config.rest.listen,
+                "[rest.auth] sends its password in the clear on a listener that is not loopback — \
+                 add [tls], or put a TLS-terminating proxy in front (ADR-0067)"
+            );
+        }
+    }
+    let operators = server::operator_app(state.clone(), operator_auth);
+
+    let agent_listener = bind(config.listen, "the Agent plane");
+    let operator_listener = bind(config.rest.listen, "the Operator plane");
+    // One signal, both planes: the interrupt is watched once, and the handle both servers hold
+    // drains them together within a bounded window (ADR-0073).
+    let handle = Handle::new();
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("shutting down");
+            listen::shut_down(&handle);
+        }
+    });
 
     match &config.tls {
         Some(tls) => {
@@ -180,30 +240,40 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            info!(listen = %config.listen, "serving OpAMP, REST API, and UI over TLS");
-            tokio::select! {
-                // The acceptor's own, rather than `bind_rustls`: it is what carries the
-                // handshake's peer certificate into the request the OpAMP route checks.
-                served = axum_server::bind(config.listen)
-                    .acceptor(server::tls::PeerCertAcceptor::new(rustls_config))
-                    .serve(app.into_make_service()) => {
-                    served.expect("serve");
-                }
-                _ = tokio::signal::ctrl_c() => info!("shutting down"),
-            }
+            info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
+            info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
+            // The Agent plane's acceptor is its own: it is what carries the handshake's peer
+            // certificate into the request the OpAMP route checks. The Operator plane needs
+            // nothing of the sort — no route there reads a certificate — so it serves with the
+            // same certificate and key through the plain rustls acceptor.
+            let (agents, operators) = tokio::join!(
+                listen::plane(
+                    agent_listener,
+                    server::tls::PeerCertAcceptor::new(rustls_config.clone()),
+                    handle.clone(),
+                )
+                .serve(agents.into_make_service()),
+                listen::plane(
+                    operator_listener,
+                    server::tls::rustls_acceptor(rustls_config),
+                    handle,
+                )
+                .serve(operators.into_make_service()),
+            );
+            agents.expect("serve the Agent plane");
+            operators.expect("serve the Operator plane");
         }
         None => {
-            let listener = tokio::net::TcpListener::bind(config.listen)
-                .await
-                .expect("bind the listener");
-            info!(listen = %config.listen, "serving OpAMP, REST API, and UI");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                    info!("shutting down");
-                })
-                .await
-                .expect("serve");
+            info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads");
+            info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI");
+            let (agents, operators) = tokio::join!(
+                listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+                    .serve(agents.into_make_service()),
+                listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+                    .serve(operators.into_make_service()),
+            );
+            agents.expect("serve the Agent plane");
+            operators.expect("serve the Operator plane");
         }
     }
     // The graceful-shutdown flush (ADR-0051): every record's current timestamp and sequence

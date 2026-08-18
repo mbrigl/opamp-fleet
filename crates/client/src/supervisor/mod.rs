@@ -9,6 +9,7 @@ pub mod agent;
 pub mod collector;
 pub mod command;
 pub mod endpoint;
+pub mod icinga2;
 pub mod ports;
 pub mod process;
 
@@ -39,6 +40,7 @@ fn registry() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin),
         Box::new(command::CommandPlugin),
+        Box::new(icinga2::Icinga2Plugin),
     ]
 }
 

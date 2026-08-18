@@ -1,11 +1,14 @@
 //! The listener's TLS, and the mutual half of it (ADR-0007, ADR-0035).
 //!
-//! Two things live here. [`server_config`] builds the rustls configuration the listener serves
+//! Two things live here. [`server_config`] builds the rustls configuration both listeners serve
 //! with — the certificate and key of ADR-0007, plus the optional client verifier that turns mutual
-//! TLS on. [`PeerCertAcceptor`] is what makes that verifier usable on *this* listener: one port
-//! serves OpAMP, the REST API, and the UI (ADR-0005), so client authentication has to stay optional
-//! at the TLS layer — a browser presents nothing — and be required on the OpAMP route instead. The
-//! acceptor carries what the handshake learned into the request, where that route can read it.
+//! TLS on. [`PeerCertAcceptor`] is what makes that verifier usable: client authentication stays
+//! optional at the TLS layer and is required on the OpAMP *route* instead. Since ADR-0066 the
+//! browser is no longer the reason — the UI has its own listener — but the Agent plane still
+//! carries one route that must stay reachable without a certificate: the package download, which a
+//! Client fetches presenting none (ADR-0015). Requiring the certificate in the handshake is a
+//! separate decision, and that route is what it has to answer for. The acceptor carries what the
+//! handshake learned into the request, where the OpAMP route can read it.
 
 use std::future::Future;
 use std::io;
@@ -36,8 +39,8 @@ use crate::config::TlsConfig;
 
 /// What the TLS handshake proved about the peer, carried into every request on that connection.
 ///
-/// `None` means the peer presented no certificate — which is fine for the UI and the REST API and
-/// refused on `/v1/opamp` while a client CA is configured. A certificate that is present has
+/// `None` means the peer presented no certificate — which is fine on the package download route
+/// and refused on `/v1/opamp` while a client CA is configured. A certificate that is present has
 /// already been verified against that CA: rustls refuses a bad one during the handshake, so this
 /// type never carries an unverified certificate.
 #[derive(Clone, Debug, Default)]
@@ -120,9 +123,18 @@ pub struct PeerCertAcceptor {
 impl PeerCertAcceptor {
     pub fn new(config: Arc<ServerConfig>) -> Self {
         PeerCertAcceptor {
-            inner: RustlsAcceptor::new(RustlsConfig::from_config(config)),
+            inner: rustls_acceptor(config),
         }
     }
+}
+
+/// The acceptor both planes hand their TLS connections to, with the handshake deadline stated
+/// rather than inherited (ADR-0073). It is `axum_server`'s own default value; naming it here is
+/// what makes it a decision, and what keeps the Operator plane — which needs no peer certificate
+/// and therefore no wrapper — bounded by the same one.
+pub fn rustls_acceptor(config: Arc<ServerConfig>) -> RustlsAcceptor {
+    RustlsAcceptor::new(RustlsConfig::from_config(config))
+        .handshake_timeout(crate::listen::TLS_HANDSHAKE_TIMEOUT)
 }
 
 impl<I> Accept<I, Router> for PeerCertAcceptor

@@ -21,7 +21,7 @@ use client::config::TREE_DIR;
 use client::service::runtime::shutdown_channel;
 use client::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent};
 use client::supervisor::process::{
-    probe_version, InstallTarget, ProcessSpec, Runner, VersionProbe,
+    probe_version, InstallTarget, Preflight, ProcessSpec, Runner, VersionProbe,
 };
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
@@ -54,6 +54,7 @@ fn spec(program: &Path) -> ProcessSpec {
         args: Vec::new(),
         env: Vec::new(),
         working_dir: None,
+        own_process_group: false,
     }
 }
 
@@ -88,6 +89,7 @@ fn runner_retaining(
         retain_previous,
         version_probe,
         None,
+        None,
         build,
     )
 }
@@ -97,6 +99,7 @@ fn runner_full(
     apply_grace: Duration,
     retain_previous: Duration,
     version_probe: Option<VersionProbe>,
+    preflight: Option<Preflight>,
     reload_signal: Option<i32>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
@@ -111,6 +114,7 @@ fn runner_full(
         install,
         archive_key: None,
         version_probe,
+        preflight,
         reload_signal,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
@@ -214,6 +218,7 @@ async fn the_probe_reports_a_version_description() {
     probe_version(
         stub_agent(),
         vec!["--version".to_string()],
+        None,
         EventSender::new(0, event_tx),
     )
     .await;
@@ -230,6 +235,7 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         PathBuf::from("nonexistent-definitely-not-here"),
         vec![],
+        None,
         EventSender::new(0, event_tx.clone()),
     )
     .await;
@@ -238,6 +244,7 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         stub_agent(),
         vec!["--exit-code".to_string(), "0".to_string()],
+        None,
         EventSender::new(0, event_tx),
     )
     .await;
@@ -296,6 +303,7 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
         Some(VersionProbe {
             program: binary.clone(),
             args: vec!["--version".to_string()],
+            parse: None,
         }),
         || None, // an unconfigured Collector: nothing runs, the version is still owed
     );
@@ -353,14 +361,13 @@ async fn ack_and_spawned_pids(
     }
 }
 
-/// Waits until the stub has written its marker file, which it does only *after* installing its
-/// signal disposition — so a reload sent from here cannot race the handler.
+/// Waits until the stub has written its marker file — the point at which it has run code of its
+/// own, rather than merely having been spawned.
 ///
-/// A pid says the process was spawned, not that it has run any of its own code yet: between
-/// `spawn` and the stub's first statement lie process creation and dynamic loading, which under a
-/// loaded machine is long enough for a `SIGHUP` to arrive while the default disposition — the one
-/// that terminates it — is still in force.
-#[cfg(unix)]
+/// A pid says the process exists, not that it has got anywhere: between `spawn` and the stub's
+/// first statement lie process creation and dynamic loading. Two tests need the distinction for
+/// different reasons — a reload must not race the signal disposition the stub installs (Unix), and
+/// a test that compares the marker across a package apply must have one to compare.
 async fn wait_until_started(marker: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !marker.exists() {
@@ -385,6 +392,7 @@ async fn a_declared_reload_applies_without_a_restart() {
         None,
         Duration::from_millis(300),
         Duration::ZERO,
+        None,
         None,
         Some(libc::SIGHUP),
         move || {
@@ -428,6 +436,7 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
         None,
         Duration::from_millis(300),
         Duration::ZERO,
+        None,
         None,
         Some(libc::SIGHUP),
         || Some(spec(&stub_agent())),
@@ -654,6 +663,74 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
         None,
         move || Some(spec(&program)),
     )
+}
+
+/// ADR-0068: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// nothing is swapped and — the point of the whole exercise — the running process is never stopped
+/// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
+/// start, roll back, restart: an outage bought for nothing.
+#[tokio::test]
+async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    let good = bytes_of(&stub_agent());
+    std::fs::write(&binary, &good).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let marker = dir.path().join("running");
+    let program = binary.clone();
+    let mut harness = runner_full(
+        Some(InstallTarget::Binary(binary.clone())),
+        Duration::from_millis(200),
+        Duration::ZERO,
+        None,
+        // The staged program is asked to exit non-zero: what a binary the host's libc cannot
+        // satisfy does, with the linker's message in its place.
+        Some(Preflight {
+            args: vec!["--exit-code".to_string(), "1".to_string()],
+            env: Vec::new(),
+        }),
+        None,
+        move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker.display().to_string()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+            })
+        },
+    );
+    let _ = next_health(&mut harness.events).await;
+    wait_until_started(&dir.path().join("running")).await;
+    let running = std::fs::read_to_string(dir.path().join("running")).expect("the marker");
+
+    let staged = dir.path().join("downloaded.staged");
+    std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
+    let (hash, result) = apply_package(&mut harness, &staged, "9.9.9").await;
+
+    assert_eq!(hash, b"9.9.9".to_vec());
+    let error = result.expect_err("a package that will not run is refused");
+    assert!(
+        error.contains("does not run on this host"),
+        "the refusal names what the program said: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&binary).expect("read"),
+        good,
+        "nothing was swapped"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("running")).expect("the marker"),
+        running,
+        "the running process was never restarted — the marker still holds its first pid"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
 }
 
 #[tokio::test]
