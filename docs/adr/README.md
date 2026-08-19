@@ -109,3 +109,4 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0078](0078-a-release-is-named-after-the-set-it-becomes.md) | A release is named after the Set it becomes, and packed as `.tar.gz` like every other package | 🟢 accepted |
 | [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | 🟢 accepted |
 | [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | 🟡 proposed |
+| [0081](0081-what-an-agent-runs-is-what-it-has.md) | What an Agent runs is what it has — a Set is held against the lower of the two versions it reports | 🟢 accepted |

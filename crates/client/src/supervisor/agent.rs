@@ -13,9 +13,10 @@ use opamp::attributes::{self, string_array_attr, string_attr};
 use opamp::proto::{
     AgentCapabilities, AgentDescription, AgentDisconnect, AgentRemoteConfig, AgentToServer,
     AvailableComponents, ComponentHealth, ConnectionSettingsOffers, ConnectionSettingsStatus,
-    ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageDownloadDetails, PackageStatus,
-    PackageStatusEnum, PackageStatuses, PackageType, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerCapabilities, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    ConnectionSettingsStatuses, EffectiveConfig, KeyValue, PackageAvailable,
+    PackageDownloadDetails, PackageStatus, PackageStatusEnum, PackageStatuses, PackageType,
+    RemoteConfigStatus, RemoteConfigStatuses, ServerCapabilities, ServerErrorResponseType,
+    ServerToAgent, ServerToAgentFlags,
 };
 use opamp::uid::InstanceUid;
 use tracing::{error, info, warn};
@@ -807,11 +808,7 @@ impl AgentState {
         self.offer_error.clear();
         self.offered_name = Some(name.clone());
         self.server_offered = Some((available.version.clone(), available.hash.clone()));
-        let installed_hash = self
-            .installed_package
-            .as_ref()
-            .map(|p| hex::decode(&p.hash_hex).unwrap_or_default());
-        if installed_hash.as_deref() == Some(available.hash.as_slice()) {
+        if self.already_has(available) {
             // Already running this package: in sync — echo the aggregate to end the offer.
             self.echoed_all_packages_hash = offer.all_packages_hash.clone();
             self.send_package_status = true;
@@ -842,6 +839,30 @@ impl AgentState {
         self.send_package_status = true;
         handled.send_report = true;
         handled.package_download = Some(download);
+    }
+
+    /// Whether this offer is what the Agent already has, so the offer ends with an echo rather
+    /// than a download.
+    ///
+    /// For the package that carries the Client itself (ADR-0020, ADR-0078) that question is
+    /// answered by the version *this process runs* — since ADR-0081, what a program reports about
+    /// itself outranks what a record says was once installed here. The record's hash would
+    /// otherwise end an offer of the very bytes this host is not running: a state directory that
+    /// outlived its binary claims a version, the Server offers it again, and the claim is what
+    /// swallows the offer.
+    ///
+    /// A Supervisor has no such answer — the Managed Process's version is the process's own, and a
+    /// package numbers it in whatever space the operator chose — so there the installed hash stays
+    /// the test: the same bytes are the same package.
+    fn already_has(&self, available: &PackageAvailable) -> bool {
+        if self.expected_package.is_some() {
+            return opamp::version::same_release(opamp::version::current(), &available.version);
+        }
+        self.installed_package
+            .as_ref()
+            .map(|p| hex::decode(&p.hash_hex).unwrap_or_default())
+            .as_deref()
+            == Some(available.hash.as_slice())
     }
 
     /// Records how far the artifact download has got (ADR-0015), so the next report carries
@@ -2180,14 +2201,72 @@ mod tests {
         assert_eq!(status.status, PackageStatusEnum::Installed as i32);
         assert!(dir.path().join("installed-package.json").exists());
 
-        // Offered the same bytes, this Client is in sync and downloads nothing.
+        // Offered the version it runs, this Client is in sync and downloads nothing.
+        let running = opamp::version::identity(opamp::version::current()).expect("this version");
         let handled = agent.handle(&ServerToAgent {
-            packages_available: Some(package_offer("opamp-client", "1.0.0", b"pkg-hash")),
+            packages_available: Some(package_offer("opamp-client", running, b"pkg-hash")),
             ..Default::default()
         });
         assert!(
             handled.package_download.is_none(),
             "a restarted Client must not reinstall the version it already runs"
+        );
+    }
+
+    /// ADR-0081 point 5: for the package that carries this Client, *already installed* is what this
+    /// process runs — never a hash in a record. The same bytes can be published under a new version,
+    /// and a record about a binary that is gone must not swallow the offer that would replace it:
+    /// the Server offers because the Agent reports running something older, and a Client that
+    /// answered "in sync" from its record would strand the host exactly where ADR-0081 found it.
+    #[test]
+    fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "opamp-client".to_string(),
+                version: opamp::version::identity(opamp::version::current())
+                    .expect("this version")
+                    .to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+
+        let mut agent = AgentState::new("opamp-fleet-client".to_string(), storage).expect("agent");
+        agent.accept_packages_named("opamp-client".to_string());
+
+        // The record's own hash, under a version this Client does not run: taken, not echoed.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("opamp-client", "9.9.9", b"pkg-hash")),
+            ..Default::default()
+        });
+        let download = handled
+            .package_download
+            .expect("a version this Client does not run is installed, whatever the record holds");
+        assert_eq!(download.version, "9.9.9");
+
+        // A Supervisor keeps the hash test: the Managed Process's version is numbered in whatever
+        // space the operator chose, so the same bytes are the same package and nothing else is.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::storage::InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "2.0.0".to_string(),
+                hash_hex: hex::encode(b"pkg-hash"),
+            })
+            .expect("store");
+        let mut supervised =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        supervised.accept_packages();
+        let handled = supervised.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "2.0.0", b"pkg-hash")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_none(),
+            "the same bytes are the package a Supervisor already installed"
         );
     }
 

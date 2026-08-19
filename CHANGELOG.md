@@ -267,6 +267,23 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **An agent that claims a package version it is not running is offered that version again.** Until
+  now the version an Agent reported *installed* for a package settled the matter, so a host whose
+  record outlived its binary — a version switch that did not take effect, or an older Client
+  reinstalled on top of the state directory — was held back for good: the fleet view showed
+  `pkg: supervisor 0.4.1` on an agent reporting 0.4.0, and neither the rollout act nor the waiting
+  list would offer it anything. A Set is now held against **both** versions an Agent reports
+  ([ADR-0081](docs/adr/0081-what-an-agent-runs-is-what-it-has.md)): it must be greater than the
+  lower of the two, and never lower than the version the package status claims — so what a program
+  says it is running can admit a package, and can never propose moving one backwards. The Client
+  side matches: an offer for its own package is settled by the version this process runs rather than
+  by a hash in its record, and a self-update is only reported as installed by the version that
+  actually came up.
+  **What to do:** upgrade the Server — this reaches the agents already out there without touching
+  them. Expect an agent whose program numbers itself below its package (a Collector calling itself
+  `0.98.0` under an `otelcol` Set at `2.0.0`) to appear as waiting for that Set; rolling it out
+  re-installs bytes it already has, and the per-agent refusal now names both versions it read.
+
 - **A Client is no longer offered the version it already runs — or an older one.** A Set reached
   Clients that were already running its version, and a Client running a newer development build was
   offered the older release — a downgrade of the program that manages the host. Both came from the same gap: since

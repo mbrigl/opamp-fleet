@@ -1014,19 +1014,21 @@ impl PackageStore {
             ));
         }
         if !upgrades(set, installed, description) {
-            // Which of the two versions was compared is the operator's first question here, so the
-            // refusal says both what it read and where it read it (ADR-0079).
-            return match installed.get(&set.id.name).filter(|has| !has.is_empty()) {
+            // Which versions were compared is the operator's first question here, so the refusal
+            // names both of them and where each was read (ADR-0079, ADR-0081) — the two now hold
+            // the Set in different directions, and a refusal that named only one would read like
+            // the wrong rule applied.
+            let runs = reported_service_version(description).unwrap_or_default();
+            return match claimed_version(set, installed) {
                 Some(has) => Err(format!(
                     "set {id} is not an upgrade for this Agent, which reports {has:?} installed \
-                     for package {:?}",
+                     for package {:?} and runs {runs:?}",
                     set.id.name
                 )),
                 None => Err(format!(
                     "set {id} is not an upgrade for this Agent, which reports no version for \
-                     package {:?} and runs {:?}",
-                    set.id.name,
-                    reported_service_version(description).unwrap_or_default()
+                     package {:?} and runs {runs:?}",
+                    set.id.name
                 )),
             };
         }
@@ -1123,18 +1125,23 @@ pub type InstalledVersions = BTreeMap<String, String>;
 
 /// ADR-0076's fourth matching test: a Set reaches an Agent only as an **upgrade**.
 ///
-/// The Set's version must be strictly greater than the version the Agent has, as ADR-0029 compares
-/// versions. `Equal` does not match: a Set the Agent already runs would reach it with nothing.
+/// An Agent reports up to two versions, and since ADR-0081 the test holds a Set against **both**,
+/// each in the direction it is good for. Compared as ADR-0029 compares versions.
 ///
-/// *What the Agent has* is read in two steps (ADR-0079). The **package status** for this Set's name
-/// is the authority whenever the Agent reports one: it is a statement about this very package, so a
-/// value that cannot be ordered refuses the match — the safe direction, and the Client's own
-/// (`selfupdate::install_offer`): what cannot be ordered must not be installed over what is
-/// running. Where there is no such status — every Client released before the one that reports its
-/// own version, and every Agent whose program a package never installed — the **`service.version`
-/// the Agent reports** stands in. That one is a best-effort signal rather than a claim about the
-/// package, so an unorderable value there says nothing at all instead of refusing: a program that
-/// numbers itself `1.19` or `24.04.1` must stay reachable by packages.
+/// *What it claims* is the **package status** for this Set's name — a statement about this very
+/// package, derived from what an install once wrote. It keeps the guard it is good for: a Set
+/// *lower* than the claim never matches, so a claim can still not be moved backwards, and a value
+/// that cannot be ordered refuses the match outright (ADR-0076 point 3) — the safe direction, and
+/// the Client's own (`selfupdate::install_offer`): what cannot be ordered must not be installed
+/// over what is running.
+///
+/// *What it runs* is the reported **`service.version`** — a statement about the present, which a
+/// record about the past cannot overrule. The Set must be strictly greater than the **lower** of
+/// the two, which is what lets a Set equal to a claim the Agent's own program denies running reach
+/// it again (ADR-0081), and what makes this the whole test where no package status is reported
+/// (ADR-0079). It never blocks on its own: a program numbering itself in its own space — `1.19`,
+/// `24.04.1`, or above the package that carries it — cannot hold back a Set the claim admits, and
+/// a value that cannot be ordered abstains rather than refusing.
 ///
 /// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
 fn upgrades(
@@ -1142,21 +1149,39 @@ fn upgrades(
     installed: &InstalledVersions,
     description: Option<&AgentDescription>,
 ) -> bool {
-    let greater = |has: &str| {
-        opamp::version::precedence(&set.id.version, has) == Some(std::cmp::Ordering::Greater)
-    };
-    match installed.get(&set.id.name).filter(|has| !has.is_empty()) {
-        Some(has) => greater(has),
-        None => match reported_service_version(description) {
-            // Unorderable: the stand-in abstains, and the Set matches on the other three tests.
-            Some(running) => greater(running) || opamp::version::parse(running).is_none(),
-            None => true,
+    use std::cmp::Ordering;
+    let greater =
+        |has: &str| opamp::version::precedence(&set.id.version, has) == Some(Ordering::Greater);
+    // An unorderable `service.version` says nothing at all — it is dropped here rather than
+    // refusing, so what remains is either a version to be greater than or no statement.
+    let runs = reported_service_version(description)
+        .filter(|running| opamp::version::parse(running).is_some());
+    match claimed_version(set, installed) {
+        Some(claimed) => match opamp::version::precedence(&set.id.version, claimed) {
+            // Ahead of the claim: already greater than the lower of the two, whatever runs.
+            Some(Ordering::Greater) => true,
+            // The version the claim names, which the Agent may or may not be running. Only its
+            // own program can admit it — and only by saying it runs something older.
+            Some(Ordering::Equal) => runs.is_some_and(greater),
+            // Behind the claim, or unorderable against it: never, in either direction.
+            _ => false,
         },
+        None => runs.is_none_or(greater),
     }
 }
 
+/// What an Agent claims to have installed under this Set's name, if it claims anything: a package
+/// status reported with an empty version is no claim (ADR-0076).
+fn claimed_version<'a>(set: &PackageSet, installed: &'a InstalledVersions) -> Option<&'a str> {
+    installed
+        .get(&set.id.name)
+        .map(String::as_str)
+        .filter(|has| !has.is_empty())
+}
+
 /// The version an Agent reports as `service.version` — its program's own number, and since ADR-0079
-/// what a Set is held against when the Agent reports no version for the package itself.
+/// what a Set is held against when the Agent reports no version for the package itself. Since
+/// ADR-0081 it is also read beside a reported one, as what the Agent actually runs.
 fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
         &description?.identifying_attributes,
@@ -1931,9 +1956,11 @@ mod tests {
         );
     }
 
-    /// The package status stays the authority where there is one (ADR-0079 point 1): it is a
-    /// statement about *this package*, which a program's own number is not — an addon or a repacked
-    /// tree may be numbered nothing like the program it belongs to.
+    /// The package status keeps the guard it is good for (ADR-0076, ADR-0079 point 1, ADR-0081
+    /// point 2): it is a statement about *this package*, which a program's own number is not — an
+    /// addon or a repacked tree may be numbered nothing like the program it belongs to. So a
+    /// program numbering itself above its package never holds a Set back, and no Set ever reaches
+    /// an Agent *below* what its package status claims.
     #[test]
     fn a_reported_package_version_wins_over_the_version_the_agent_runs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1949,14 +1976,80 @@ mod tests {
             [("otelcol".to_string(), "2.0.0".to_string())],
             "the package this Agent has is at 1.0.0, whatever the program calls itself"
         );
-        assert!(
+
+        // A Collector that numbers itself far below the Set that carries it: the low number admits
+        // the version the claim names, and never one behind it.
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        stored_set(&store, "otelcol", "1.5.0", b"v15");
+        assert_eq!(
             candidates_for(
                 &store,
-                &running_agent("1.0.0"),
+                &running_agent("0.98.0"),
                 &installed(&[("otelcol", "2.0.0")])
+            ),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+            "a program's own number must not propose moving its package backwards"
+        );
+        assert!(
+            store
+                .fits_agent(
+                    &id("otelcol", "1.5.0"),
+                    Some(&running_agent("0.98.0")),
+                    &installed(&[("otelcol", "2.0.0")])
+                )
+                .is_err(),
+            "and the act at the gate refuses the same downgrade"
+        );
+    }
+
+    /// ADR-0081: a claim the Agent's own program denies no longer holds the Set back. A Client that
+    /// reports `supervisor 0.4.1` installed while reporting that it runs 0.4.0 has a record about a
+    /// binary that is gone — and until this rule it was offered nothing, for good.
+    #[test]
+    fn a_claim_the_running_program_denies_no_longer_holds_the_set_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "supervisor", "0.4.1", b"v041");
+        let claims_041 = installed(&[("supervisor", "0.4.1")]);
+
+        assert_eq!(
+            candidates_for(&store, &running_agent("0.4.0"), &claims_041),
+            [("supervisor".to_string(), "0.4.1".to_string())],
+            "the version it runs is what it has; the record says only how it once got there"
+        );
+        assert!(
+            store
+                .fits_agent(
+                    &id("supervisor", "0.4.1"),
+                    Some(&running_agent("0.4.0")),
+                    &claims_041
+                )
+                .is_ok(),
+            "and the act at the gate agrees, as all three consumers must"
+        );
+
+        // Corroborated, and nothing changes: an Agent that runs what it claims is proposed nothing.
+        assert!(
+            candidates_for(&store, &running_agent("0.4.1"), &claims_041).is_empty(),
+            "a claim its program confirms is still the end of it"
+        );
+        let refusal = store
+            .fits_agent(
+                &id("supervisor", "0.4.1"),
+                Some(&running_agent("0.4.1+a1b2c3d")),
+                &claims_041,
             )
-            .is_empty(),
-            "and a package already at 2.0.0 is not re-proposed because the program says otherwise"
+            .expect_err("the version it runs is the version offered");
+        assert!(
+            refusal.contains("\"0.4.1\" installed") && refusal.contains("runs \"0.4.1+a1b2c3d\""),
+            "the refusal names both versions it read: {refusal}"
+        );
+
+        // A program that cannot be ordered abstains here too (ADR-0079 point 3): it neither admits
+        // the claim's own version nor blocks anything.
+        assert!(
+            candidates_for(&store, &running_agent("nightly"), &claims_041).is_empty(),
+            "an unorderable program version says nothing, and the claim stands"
         );
     }
 

@@ -318,16 +318,15 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
 
     let exe = layout::running_exe()?;
     let running_dir = Layout::enclosing(&exe).map(|(_, dir)| dir);
-    let is_new_version = running_dir.as_deref().is_some_and(|dir| {
-        std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&marker.new_dir).ok()
-    });
+    let is_new_version = took_over(opamp::version::current(), running_dir.as_deref(), &marker);
 
     if !is_new_version {
         // We are the *old* version and the marker is still here: the switch never took effect, or
         // a rollback already pointed back at us. Either way the update did not happen.
         let reason = format!(
-            "the new version {} did not take over; running {} instead",
+            "the new version {} did not take over; running {} from {} instead",
             marker.version,
+            opamp::version::current(),
             running_dir
                 .as_deref()
                 .unwrap_or(Path::new("an unknown directory"))
@@ -375,6 +374,24 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
         "running a freshly installed Client version on probation"
     );
     Ok(Startup::OnProbation(marker.into()))
+}
+
+/// Whether the process that came up is the update the marker describes — asked of the directory it
+/// runs from **and** of the version it reports for itself.
+///
+/// The directory alone answered this until ADR-0081, and it answers a slightly different question:
+/// which version was *pointed at*. On a platform where the running path is the `current` pointer
+/// rather than the version behind it, canonicalising it says where the pointer now leads, not which
+/// binary the service manager actually started. A commit that trusted that would tell the Server a
+/// version this host does not run — and the fleet then holds the package back over a claim the
+/// program itself denies, which is the state ADR-0081 is about. What a binary says about itself is
+/// the one thing no stale pointer can fake, so both must agree; the build metadata does not take
+/// part (ADR-0029).
+fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateMarker) -> bool {
+    opamp::version::same_release(running_version, &marker.version)
+        && running_dir.is_some_and(|dir| {
+            std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&marker.new_dir).ok()
+        })
 }
 
 /// Declares the version this process runs good: the marker goes, and the Server is owed
@@ -514,6 +531,38 @@ mod tests {
         ));
         clear_outcome(dir.path());
         assert_eq!(on_start(dir.path()).expect("start"), Startup::Ordinary);
+    }
+
+    /// ADR-0081: the directory a process runs from says which version was *pointed at*; only the
+    /// binary says which one came up. A commit that trusted the pointer would report a version this
+    /// host does not run, and the fleet would then hold the package back over a claim the program
+    /// denies — the state ADR-0081 is about, created by the very mechanism meant to end it.
+    #[test]
+    fn taking_over_needs_the_binary_to_be_the_version_the_marker_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = marker(dir.path(), 1);
+        std::fs::create_dir_all(&marker.new_dir).expect("the new version directory");
+
+        assert!(
+            took_over("2.0.0", Some(&marker.new_dir), &marker),
+            "the version the marker names, running from the directory it named"
+        );
+        assert!(
+            took_over("2.0.0+a1b2c3d", Some(&marker.new_dir), &marker),
+            "the build metadata takes no part in it (ADR-0029)"
+        );
+        assert!(
+            !took_over("1.0.0", Some(&marker.new_dir), &marker),
+            "the pointer leads to 2.0.0, but 1.0.0 is what came up: the update did not take effect"
+        );
+        assert!(
+            !took_over("2.0.0", Some(&marker.previous_dir), &marker),
+            "and the right version from the wrong directory is no take-over either"
+        );
+        assert!(
+            !took_over("2.0.0", None, &marker),
+            "a Client outside the layout has no version directory to have taken over"
+        );
     }
 
     /// The old version finding the marker means the switch never took hold — reported as a

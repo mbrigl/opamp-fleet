@@ -325,7 +325,9 @@ that Agent reports installed
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
 version it reports *running* instead
 ([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)),
-so this holds on a host the fleet has never installed anything on.
+so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
+the Set is held against the lower of the two and never reaches it below what its package status
+claims ([ADR-0081](../adr/0081-what-an-agent-runs-is-what-it-has.md)).
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for
 `retain_previous_secs`, and a binary that will not stay up past `apply_grace_secs` is put back
@@ -342,6 +344,7 @@ only moves forward.
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
+| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0081); the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |

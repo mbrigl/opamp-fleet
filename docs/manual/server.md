@@ -444,9 +444,20 @@ version the Agent reports.
 ([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)).
 That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
 installed no package and has none to report: no Client is offered the version it already runs, and
-none is moved backwards. A reported version for the package itself always wins over it — that one is
-a statement about the package — and a `service.version` nothing can order (`1.19`, `24.04.1`) simply
-says nothing, so an Agent whose program numbers itself its own way stays reachable.
+none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
+nothing, so an Agent whose program numbers itself its own way stays reachable.
+
+**Where an Agent reports both, each version guards one direction**
+([ADR-0081](../adr/0081-what-an-agent-runs-is-what-it-has.md)). A Set must be greater than the
+**lower** of the two, and never lower than the version the package status claims. What the Agent
+*runs* is a statement about the present and a record of an install is one about the past, so a claim
+its own program denies no longer holds the package back: a Client reporting `supervisor 0.4.1`
+installed while reporting that it runs 0.4.0 — a state directory that outlived its binary, a version
+switch that did not take effect — is offered 0.4.1 again instead of being stranded on 0.4.0 for
+good. The claim still forbids the other direction, so a program numbered below the package that
+carries it (a Collector calling itself `0.98.0` under an `otelcol` Set at `2.0.0`) is never proposed
+a Set behind what it has; it is proposed the version it does not confirm running, and the `409` says
+which two versions were read.
 
 Versions are still kept side by side — a new version is a new Set, and the older artifact stays in
 the store — but **taking a bad version back is not a rollout**:
