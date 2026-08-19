@@ -35,10 +35,10 @@ use server::fleet::{AgentView, AppState};
 /// and never collides with an operator's `default`.
 const INSTANCE: &str = "ci-smoke";
 
-/// The operator's name for this Agent — written as `name` in the `client.toml` below and reported
+/// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and reported
 /// as `service.instance.name` (ADR-0033), which is what the fleet view is searched by. Deliberately
-/// not `service.name`: that carries the Agent *type*, which for this Client is always
-/// `opamp-fleet-client` and is the same for every instance.
+/// not `service.name`: that carries the Agent *type*, which for this Client is always `supervisor`
+/// (ADR-0077) and is the same for every instance.
 const AGENT_NAME: &str = "service-smoke-client";
 
 fn instance() -> InstanceName {
@@ -56,7 +56,7 @@ struct Registered;
 impl Drop for Registered {
     fn drop(&mut self) {
         let _ = service().stop();
-        let _ = client(&["service", "uninstall"], &PathBuf::from("client.toml"));
+        let _ = client(&["service", "uninstall"], &PathBuf::from("supervisor.toml"));
     }
 }
 
@@ -64,7 +64,7 @@ impl Drop for Registered {
 /// rather than the library is the point here: `service install` also stages the versioned layout,
 /// and an operator's mistake would be in that command line.
 fn client(args: &[&str], config: &Path) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+    let output = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config)
         .args(["--instance", INSTANCE])
@@ -212,14 +212,14 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("install");
     let (addr, state, _server) = spawn_server();
-    let config = dir.path().join("client.toml");
+    let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
         format!(
             "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n"
         ),
     )
-    .expect("write client.toml");
+    .expect("write supervisor.toml");
 
     client(
         &["service", "install", "--root", &root.to_string_lossy()],

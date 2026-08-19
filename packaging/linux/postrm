@@ -42,6 +42,11 @@ purge)
 *) exit 0 ;;
 esac
 
+if [ -L /usr/bin/supervisor ]; then
+	rm -f /usr/bin/supervisor
+fi
+# A host that came across the ADR-0080 rename may still carry the old link if the upgrade never
+# reached the post-install that retires it.
 if [ -L /usr/bin/opamp-fleet-client ]; then
 	rm -f /usr/bin/opamp-fleet-client
 fi

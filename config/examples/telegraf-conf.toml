@@ -1,4 +1,4 @@
-# Minimal test Configuration for the "telegraf" supervisor example in config/client.toml —
+# Minimal test Configuration for the "telegraf" supervisor example in config/supervisor.toml —
 # a Foreign Agent under the generic "command" Supervisor, observed from the outside.
 # Distributed by scripts/seed_test_configs.sh as Configuration "telegraf-conf" (ADR-0012),
 # typed `telegraf` (ADR-0054) so it reaches no other kind of Agent — the block states no

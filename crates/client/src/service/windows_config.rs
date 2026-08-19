@@ -23,7 +23,7 @@
 //!    restarted. The flag is false by default.
 //!
 //! The display name is the third gap. The backend's `sc create` sets `displayname=` to the service
-//! name, so the Windows services list would read `opamp-fleet-client` where ADR-0010 promised
+//! name, so the Windows services list would read `supervisor` where ADR-0010 promised
 //! *"OpAMP Fleet Client (<instance>)"* — a promise never actually kept. It is set afterwards with
 //! `sc.exe config`, deliberately **not** with the crate's `Service::change_config`: that call maps
 //! onto `ChangeServiceConfigW` with every field supplied from a `ServiceInfo`, so setting one field

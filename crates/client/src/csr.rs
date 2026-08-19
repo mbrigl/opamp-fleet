@@ -5,7 +5,7 @@
 //! ordinary connection-settings offer. What leaves the host is a signing request; what is written
 //! beside it is a key nothing ever sends.
 //!
-//! Enrolment is driven by capability, not by a switch in `client.toml`: a Client asks when the
+//! Enrolment is driven by capability, not by a switch in `supervisor.toml`: a Client asks when the
 //! Server says it signs (`AcceptsConnectionSettingsRequest`) and it has no certificate, or the one
 //! it holds is two thirds through its life. A Server that declares nothing is never asked, which is
 //! the protocol's own negotiation rule — and a certificate obtained before mutual TLS is switched

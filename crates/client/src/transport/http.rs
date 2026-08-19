@@ -140,7 +140,7 @@ pub async fn run(
             };
             crate::transport::process_package_downloads(engine, config, &mut sink).await;
             // The self-Agent's configuration is its Supervisor set (ADR-0056): apply it — stop
-            // what left, rewrite `client.toml`, start what arrived — and send the retired
+            // what left, rewrite `supervisor.toml`, start what arrived — and send the retired
             // Agents' goodbyes; the outcome rides the owed reports below.
             crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await;
             reports = engine.owed_reports();

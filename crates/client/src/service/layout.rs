@@ -1,8 +1,8 @@
 //! The versioned install layout (ADR-0010): what makes a future self-update a pointer switch.
 //!
 //! ```text
-//! <root>/versions/opamp-fleet-client-<MAJOR.MINOR.PATCH>-<hash>/opamp-fleet-client
-//! <root>/current -> versions/opamp-fleet-client-…/   # symlink (Unix) / junction (Windows)
+//! <root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/supervisor
+//! <root>/current -> versions/supervisor-…/   # symlink (Unix) / junction (Windows)
 //! ```
 //!
 //! The default per-instance state directory is [`STATE_DIR_NAME`] under the *data* root — the
@@ -13,7 +13,7 @@
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
 //! release or a dev build is answered by the manifest inside it, which records the full ADR-0009
 //! version string and the binary's SHA-256 (what a future self-update verifies against). The
-//! service's program is `<root>/current/opamp-fleet-client`, so switching versions never
+//! service's program is `<root>/current/supervisor`, so switching versions never
 //! re-registers the service.
 
 use std::path::{Path, PathBuf};
@@ -26,14 +26,14 @@ use sha2::{Digest, Sha256};
 /// member a self-update extracts from an offered package. Changing it after a release is therefore
 /// not a rename but a migration — see ADR-0028.
 pub const BINARY_FILENAME: &str = if cfg!(windows) {
-    "opamp-fleet-client.exe"
+    "supervisor.exe"
 } else {
-    "opamp-fleet-client"
+    "supervisor"
 };
 
 /// The product's name: the prefix of every version directory (ADR-0028) and, since ADR-0030, the
 /// name the service is registered under as well. One definition, so the two cannot drift.
-pub const COMPONENT: &str = "opamp-fleet-client";
+pub const COMPONENT: &str = "supervisor";
 
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
@@ -159,7 +159,7 @@ impl Layout {
 }
 
 /// The version-directory name for a full ADR-0009 version string:
-/// `opamp-fleet-client-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0010, ADR-0028).
+/// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0010, ADR-0028).
 #[must_use]
 pub fn version_dir_name(full_version: &str) -> String {
     let (base, metadata) = full_version.split_once('+').unwrap_or((full_version, ""));
@@ -275,7 +275,7 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
     }
 
     let manifest = format!(
-        "# Written by `opamp-fleet-client service install` (ADR-0010).\nversion = \"{version}\"\nsha256 = \"{sha256}\"\n"
+        "# Written by `supervisor service install` (ADR-0010).\nversion = \"{version}\"\nsha256 = \"{sha256}\"\n"
     );
     let manifest_path = dir.join(MANIFEST_FILENAME);
     std::fs::write(&manifest_path, manifest)
@@ -293,18 +293,18 @@ mod tests {
     fn the_directory_name_is_base_plus_hash_never_the_prerelease() {
         assert_eq!(
             version_dir_name("1.2.3+a1b2c3d"),
-            "opamp-fleet-client-1.2.3-a1b2c3d"
+            "supervisor-1.2.3-a1b2c3d"
         );
         assert_eq!(
             version_dir_name("1.2.3-dev+b4e5f6a"),
-            "opamp-fleet-client-1.2.3-b4e5f6a"
+            "supervisor-1.2.3-b4e5f6a"
         );
         assert_eq!(
             version_dir_name("0.0.0-dev+a1b2c3d"),
-            "opamp-fleet-client-0.0.0-a1b2c3d"
+            "supervisor-0.0.0-a1b2c3d"
         );
         // An override build outside a repository carries no metadata.
-        assert_eq!(version_dir_name("9.9.9"), "opamp-fleet-client-9.9.9");
+        assert_eq!(version_dir_name("9.9.9"), "supervisor-9.9.9");
     }
 
     #[test]
@@ -324,8 +324,8 @@ mod tests {
         // Canonicalize up front: macOS tempdirs live under /var → /private/var, so a resolved
         // pointer would otherwise never equal the raw path.
         let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
-        let a = layout.version_dir("opamp-fleet-client-1.0.0-aaaaaaa");
-        let b = layout.version_dir("opamp-fleet-client-2.0.0-bbbbbbb");
+        let a = layout.version_dir("supervisor-1.0.0-aaaaaaa");
+        let b = layout.version_dir("supervisor-2.0.0-bbbbbbb");
         std::fs::create_dir_all(&a).expect("create a");
         std::fs::create_dir_all(&b).expect("create b");
 
@@ -353,7 +353,7 @@ mod tests {
             .to_string_lossy()
             .replace('\\', "/");
         let layout = Layout::new(&root);
-        let version_dir = layout.version_dir("opamp-fleet-client-1.0.0-aaaaaaa");
+        let version_dir = layout.version_dir("supervisor-1.0.0-aaaaaaa");
         std::fs::create_dir_all(&version_dir).expect("create the version directory");
 
         layout.set_current(&version_dir).expect("point current");
@@ -459,8 +459,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Canonicalize up front — see set_current_points_and_repoints.
         let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
-        let a = layout.version_dir("opamp-fleet-client-1.0.0-aaaaaaa");
-        let b = layout.version_dir("opamp-fleet-client-2.0.0-bbbbbbb");
+        let a = layout.version_dir("supervisor-1.0.0-aaaaaaa");
+        let b = layout.version_dir("supervisor-2.0.0-bbbbbbb");
         std::fs::create_dir_all(&a).expect("create a");
         std::fs::create_dir_all(&b).expect("create b");
 
@@ -475,16 +475,16 @@ mod tests {
     #[test]
     fn enclosing_detects_a_layout_and_rejects_loose_binaries() {
         let (layout, version_dir) = Layout::enclosing(Path::new(
-            "/opt/fleet/versions/opamp-fleet-client-1.2.3-a1b2c3d/opamp-fleet-client",
+            "/opt/fleet/versions/supervisor-1.2.3-a1b2c3d/supervisor",
         ))
         .expect("a layout path");
         assert_eq!(layout.current(), PathBuf::from("/opt/fleet/current"));
         assert_eq!(
             version_dir,
-            PathBuf::from("/opt/fleet/versions/opamp-fleet-client-1.2.3-a1b2c3d")
+            PathBuf::from("/opt/fleet/versions/supervisor-1.2.3-a1b2c3d")
         );
-        assert!(Layout::enclosing(Path::new("/usr/bin/opamp-fleet-client")).is_none());
-        assert!(Layout::enclosing(Path::new("opamp-fleet-client")).is_none());
+        assert!(Layout::enclosing(Path::new("/usr/bin/supervisor")).is_none());
+        assert!(Layout::enclosing(Path::new("supervisor")).is_none());
     }
 
     /// What the service actually runs is `<root>/current/client`, and on macOS that is the path
@@ -496,7 +496,7 @@ mod tests {
     fn the_layout_is_found_from_the_pointer_the_service_was_registered_against() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
-        let version_dir = layout.version_dir("opamp-fleet-client-1.2.3-a1b2c3d");
+        let version_dir = layout.version_dir("supervisor-1.2.3-a1b2c3d");
         std::fs::create_dir_all(&version_dir).expect("create the version dir");
         std::fs::write(version_dir.join(BINARY_FILENAME), b"the-client").expect("write the binary");
         layout.set_current(&version_dir).expect("point current");

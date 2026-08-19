@@ -42,7 +42,7 @@ const MAX_ATTEMPTS: u32 = 3;
 
 /// What `client self-check` prints. A package can be offered under the configured name and still
 /// be some other program; this is what only this program answers.
-pub const SELF_CHECK_TOKEN: &str = "opamp-fleet-client self-check ok version=";
+pub const SELF_CHECK_TOKEN: &str = "supervisor self-check ok version=";
 
 /// The exit code that asks the service manager for a restart (ADR-0020). Non-zero on purpose:
 /// "restart on failure" is what all three managers offer, and there is no "restart on success".
@@ -174,7 +174,7 @@ pub fn install(
     let (layout, running_dir) = Layout::enclosing(&exe).ok_or_else(|| {
         format!(
             "this Client does not run from a versioned install layout ({}); \
-             self-update needs `opamp-fleet-client service install`",
+             self-update needs `supervisor service install`",
             exe.display()
         )
     })?;

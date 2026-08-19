@@ -1,7 +1,11 @@
 {
   "name": "OpAMP Fleet DevContainer",
 
-  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  // Pinned to a Debian *release*, not the floating `:debian` tag: this container is the build host
+  // for the Icinga 2 artifact, so its glibc is that artifact's reach (ADR-0070, ADR-0071) and a tag
+  // that moves would move the reach with it. bookworm ⇒ `libc6 >= 2.34` ⇒ Debian 12+, Ubuntu 22.04+,
+  // RHEL 9+. Changing this line is a decision about which hosts the fleet can serve — see ADR-0074.
+  "image": "mcr.microsoft.com/devcontainers/base:debian12",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
 
@@ -34,8 +38,9 @@
   },
 
   // System packages the base image does not carry, installed once when the container is created.
-  // All four are *developer tooling* — nothing shipped depends on them, which is why they need no
-  // ADR (AGENTS.md §3.6) — and each earns its place:
+  //
+  // The first five are *developer tooling* — nothing shipped depends on them, which is why they
+  // need no ADR (AGENTS.md §3.6) — and each earns its place:
   //
   //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
@@ -46,7 +51,18 @@
   //             Windows artifacts publish no digest to check against (ADR-0072).
   //   rpm2cpio  the RPM half of the same repack. That path is not built; the tools are here
   //   cpio      because inspecting the payload is how the decision whether to build it gets made.
-  "postCreateCommand": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio",
+  //
+  // The Boost and protobuf libraries after them are a different kind of entry: they are not used by
+  // anything in this repository, they are what `opamp-package-fetch` *copies into* the Icinga 2
+  // artifact. The repack bundles the closure `ldd` resolves on this host (ADR-0070), so a library
+  // missing here is a library missing from the tree — which the tool refuses to pack rather than
+  // ship, by design. They are the exact set `icinga2-bin` needs beyond what the base image already
+  // has. Two things about them:
+  //
+  //   * The `1.74.0` / `32` in the names are bookworm's versions and move with the image pin above.
+  //   * `libboost-regex1.74.0` pulls `libicu72` in, so ICU rides along in the artifact. Icinga 2
+  //     2.14.6 did not link `boost_regex` at all; 2.16.5 does.
+  "postCreateCommand": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
 
   "customizations": {
     // VS Code extensions installed inside the container

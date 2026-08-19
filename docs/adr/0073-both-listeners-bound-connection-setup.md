@@ -1,6 +1,6 @@
 # ADR-0073: Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 

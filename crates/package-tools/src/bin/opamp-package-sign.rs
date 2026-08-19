@@ -434,10 +434,11 @@ mod tests {
         assert!(archive::extract_7z(&artifact, "promtail", &mut out, None).is_err());
     }
 
-    /// What the release ships is a `.7z` (ADR-0025), and an operator who unpacks one by hand must
-    /// get a file that runs. Both containers therefore carry an executable mode of their own — the
-    /// tar in its header, the 7z in 7-Zip's Unix-attribute convention — rather than relying on the
-    /// Client, which sets the mode itself but only on the path where *it* installs the package.
+    /// An operator who unpacks a published artifact by hand must get a file that runs — the release
+    /// ships `.tar.gz` since ADR-0078, and `.7z` stays the container an artifact may be encrypted
+    /// in (ADR-0018). Both therefore carry an executable mode of their own — the tar in its header,
+    /// the 7z in 7-Zip's Unix-attribute convention — rather than relying on the Client, which sets
+    /// the mode itself but only on the path where *it* installs the package.
     #[test]
     #[cfg(unix)]
     fn a_packed_program_is_executable_when_it_is_unpacked_by_hand() {

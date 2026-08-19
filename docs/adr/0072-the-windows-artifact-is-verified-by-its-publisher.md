@@ -1,6 +1,6 @@
 # ADR-0072: The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-17
 - **Deciders:** Markus Brigl
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde::Deserialize;
 
-/// `client.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
+/// `supervisor.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
 /// startup instead of silently applying a default.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,8 +18,9 @@ pub struct ClientConfig {
     pub endpoint: String,
     /// The operator's name for the Client's own Agent, reported as `service.instance.name`
     /// (ADR-0033) — *which* Client this is. Its `service.name` is the type
-    /// [`CLIENT_SERVICE_NAME`](crate::supervisor::agent::CLIENT_SERVICE_NAME), a constant, so this
-    /// key cannot state it: every Client in a fleet is the same kind of thing.
+    /// [`CLIENT_SERVICE_NAME`](crate::supervisor::agent::CLIENT_SERVICE_NAME) — `supervisor`, a
+    /// constant (ADR-0077) — so this key cannot state it: every Client in a fleet is the same kind
+    /// of thing.
     #[serde(default = "default_name")]
     pub name: String,
     /// The deployment's `service.namespace`. The Baseline asks for it "if it is used in the
@@ -65,9 +66,11 @@ pub struct ClientConfig {
     /// Package verification (ADR-0015); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
-    /// Consent for the Server to replace this Client's own binary (ADR-0020); absent — the
-    /// default — means the Client's Agent accepts no packages at all.
-    pub self_update: Option<SelfUpdateConfig>,
+    /// Consent for the Server to replace this Client's own binary (ADR-0020). Absent means the
+    /// section's own defaults, which since ADR-0075 are **consent given** under the Client's own
+    /// name — write `enabled = false` to withdraw it.
+    #[serde(default)]
+    pub self_update: SelfUpdateConfig,
     /// Where this Client's own log goes when it runs as a service (ADR-0041). Absent takes the
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
@@ -528,17 +531,86 @@ pub struct PackagesConfig {
 
 /// The `[self_update]` block (ADR-0020): consent for the Server to replace *this Client's* binary.
 ///
-/// Absent — the default — the Client's own Agent declares no package capability at all, and no
-/// offer can reach it. Present, it takes exactly the package named here.
+/// **The section is absent on most hosts, and absent means consent** (ADR-0075, superseding
+/// ADR-0027 point 4): a Client the fleet cannot update is a Client that has to be updated by hand
+/// on every host, which is the state fleet management exists to end. What used to be the default —
+/// no consent at all — is now written down, as `enabled = false`.
+///
+/// The *name* is what the consent is narrowed to, and it does the work the absent section used to:
+/// a package with an empty Selector reaches every Agent that accepts packages (ADR-0017), so
+/// without a name to match, the first fleet-wide Collector artifact an operator uploads would be
+/// installed over the Client and take the host out of reach. An offer under any other name is
+/// refused and reported, never applied. The default name is the Client's own Agent type —
+/// `supervisor` since ADR-0077 — which is what a Set carrying this Client is keyed by anyway
+/// (ADR-0034), so the default is not a wildcard: it is the one package that could legitimately be
+/// this Client.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
-    /// The name of the package that carries this Client. **Required**, and the whole of the
-    /// protection: a package with an empty Selector reaches every Agent that accepts packages
-    /// (ADR-0017), so without a name to match, the first fleet-wide Collector artifact an operator
-    /// uploads would be installed over the Client and take the host out of reach. An offer under
-    /// any other name is refused and reported, never applied.
+    /// Whether the consent stands. `false` is the withdrawal — the Client's own Agent then declares
+    /// no package capability at all and no offer can reach it, which is exactly what an absent
+    /// section meant before ADR-0075.
+    #[serde(default = "default_self_update_enabled")]
+    pub enabled: bool,
+    /// The name of the package that carries this Client; defaults to the Client's own Agent type
+    /// (ADR-0077). An empty name with the consent standing is refused at load: the name is the
+    /// whole of the narrowing, and an empty one would widen it to every package the Server offers.
+    #[serde(default = "default_self_update_package")]
     pub package: String,
+}
+
+impl Default for SelfUpdateConfig {
+    fn default() -> Self {
+        SelfUpdateConfig {
+            enabled: default_self_update_enabled(),
+            package: default_self_update_package(),
+        }
+    }
+}
+
+/// What the configuration file was called until ADR-0080, and the one reason a missing file is an
+/// error rather than the defaults.
+pub const LEGACY_CONFIG_FILE_NAME: &str = "client.toml";
+
+/// Refuses to carry on when the configuration is only *missing* because it was renamed
+/// (ADR-0080): the file this Client looks for is absent and a `supervisor.toml` — what it was called
+/// until ADR-0080 — sits where it would be.
+///
+/// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
+/// and manages nothing until one exists (ADR-0027). That is exactly the wrong answer here, and the
+/// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
+/// none of the Agents it used to, and nothing about it would look like a failure. So this one case
+/// fails closed, naming both paths and the single command that fixes it.
+fn legacy_name_beside(path: &Path) -> Result<(), String> {
+    let legacy = path.with_file_name(LEGACY_CONFIG_FILE_NAME);
+    if path
+        .file_name()
+        .is_some_and(|name| name == LEGACY_CONFIG_FILE_NAME)
+        || !legacy.exists()
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "no configuration at {}, but {} is beside it: the file was renamed in this release \
+         (ADR-0080). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
+         changed.",
+        path.display(),
+        legacy.display(),
+        legacy.display(),
+        path.display()
+    ))
+}
+
+fn default_self_update_enabled() -> bool {
+    true
+}
+
+/// The Client's own Agent type (ADR-0077): the Set that carries this Client is keyed by the type it
+/// is built for (ADR-0034), so the type is also what names it. Deliberately *not* the product's name
+/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0077 is a different
+/// string and names the binary, the service, and the version directories rather than the package.
+fn default_self_update_package() -> String {
+    crate::supervisor::agent::CLIENT_SERVICE_NAME.to_string()
 }
 
 /// The `[logging]` section (ADR-0041): this Client's own log, on disk, while it runs as a service.
@@ -717,7 +789,13 @@ fn default_endpoint() -> String {
 }
 
 fn default_name() -> String {
-    "opamp-fleet-client".to_string()
+    // The program's own name (ADR-0080), which is what an operator who has not chosen one sees.
+    // It reads the same as the Agent *type* on such a host, and that is the honest answer rather
+    // than a defect: an unconfigured Client is not a particular one, and the questionnaire asks
+    // for this key first (ADR-0027) precisely so that a fleet's Clients are told apart by a name
+    // somebody chose. Naming the product it used to be would be worse — that word is on no file,
+    // no service and no artifact any more.
+    crate::service::layout::COMPONENT.to_string()
 }
 
 fn default_poll_interval_secs() -> u64 {
@@ -781,7 +859,7 @@ impl Default for ClientConfig {
             auth: None,
             authorization_override: None,
             packages: None,
-            self_update: None,
+            self_update: SelfUpdateConfig::default(),
             package_key: None,
             source: None,
             path: None,
@@ -795,8 +873,19 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored.
+    /// The package this Client consents to be replaced by, or `None` when the consent is withdrawn
+    /// (ADR-0020, ADR-0075). The one place the two fields of `[self_update]` are read together, so
+    /// no caller can honour the name while ignoring the switch.
+    #[must_use]
+    pub fn self_update_package(&self) -> Option<&str> {
+        self.self_update
+            .enabled
+            .then_some(self.self_update.package.as_str())
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         if !path.exists() {
+            legacy_name_beside(path)?;
             return Ok(ClientConfig {
                 path: Some(path.to_path_buf()),
                 ..ClientConfig::default()
@@ -819,6 +908,17 @@ impl ClientConfig {
         if let Some(tls) = &config.tls {
             tls.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        // An empty name with the consent standing must fail startup rather than widen the consent
+        // to whatever the Server offers next (ADR-0075). Withdrawn, the name is not read at all,
+        // so an empty one there is simply unused.
+        if config.self_update.enabled && config.self_update.package.trim().is_empty() {
+            return Err(format!(
+                "{}: [self_update].package is empty — it is the whole of what the consent is \
+                 narrowed to. Name the package that carries this Client, or write \
+                 `enabled = false` to withdraw the consent.",
+                path.display()
+            ));
         }
         if let Some(gateway) = &config.gateway {
             gateway
@@ -879,9 +979,9 @@ impl ClientConfig {
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
-    /// connection settings have over `client.toml` (ADR-0014): the file stays what the operator
+    /// connection settings have over `supervisor.toml` (ADR-0014): the file stays what the operator
     /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
-    /// certificate — it keeps standing in `client.toml`, unused, once a real one has been issued.
+    /// certificate — it keeps standing in `supervisor.toml`, unused, once a real one has been issued.
     pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
         let cert = self.state_dir.join(crate::tls::ISSUED_CERT_FILE);
         let key = self.state_dir.join(crate::tls::ISSUED_KEY_FILE);
@@ -1061,7 +1161,7 @@ mod tests {
         // `keep = 0` is the one setting that fills a disk on a host nobody watches, so it is not
         // reachable: it fails startup and the message points at the switch that does mean "off".
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "[logging]\nkeep = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero retention must fail startup");
         assert!(err.contains("keep"), "{err}");
@@ -1075,27 +1175,103 @@ mod tests {
         assert!(ClientConfig::load(&path).is_ok());
     }
 
-    /// ADR-0020: self-update is off unless the file says otherwise, and saying so means naming the
-    /// package. A section without a name does not parse — an operator who half-configured this
-    /// would otherwise have consented to receive whatever the fleet receives.
+    /// ADR-0080: the rename must not turn a managed host into a silent one. A missing
+    /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
+    /// beside it is an upgraded host that would otherwise come up on the development endpoint and
+    /// manage nothing, which is the failure nobody sees.
     #[test]
-    fn self_update_is_off_by_default_and_must_name_its_package() {
-        assert!(ClientConfig::default().self_update.is_none());
+    fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = dir.path().join(crate::config_init::FILE_NAME);
+
+        // Neither file: an ordinary fresh host, and the defaults are the answer (ADR-0027).
+        assert!(ClientConfig::load(&expected).is_ok());
+
+        std::fs::write(
+            dir.path().join(LEGACY_CONFIG_FILE_NAME),
+            "endpoint = \"ws://h/v1/opamp\"\n",
+        )
+        .expect("write the file this host was configured with");
+        let error = ClientConfig::load(&expected).expect_err("an upgraded host must not go quiet");
+        assert!(
+            error.contains(LEGACY_CONFIG_FILE_NAME)
+                && error.contains(crate::config_init::FILE_NAME),
+            "the refusal names both files: {error}"
+        );
+
+        // And once renamed, it is an ordinary configuration again.
+        std::fs::rename(dir.path().join(LEGACY_CONFIG_FILE_NAME), &expected).expect("rename");
+        assert_eq!(
+            ClientConfig::load(&expected).expect("loads").endpoint,
+            "ws://h/v1/opamp"
+        );
+    }
+
+    /// ADR-0075: the consent stands unless the file withdraws it, and it is narrowed to a name
+    /// either way — the Client's own Agent type when the file names none, which since ADR-0077 is
+    /// `supervisor`. A withdrawal is a written `enabled = false`, so a Client the fleet cannot
+    /// update says so in its own configuration instead of saying nothing at all.
+    #[test]
+    fn self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name() {
+        let default = ClientConfig::default();
+        assert_eq!(
+            default.self_update_package(),
+            Some(crate::supervisor::agent::CLIENT_SERVICE_NAME),
+            "a Client with nothing configured consents under its own Agent type"
+        );
+
+        // A file that never mentions the section is the common case, and it is consent.
         let untouched: ClientConfig =
             toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
-        assert!(untouched.self_update.is_none());
-
-        let armed: ClientConfig =
-            toml::from_str("[self_update]\npackage = \"opamp-client\"\n").expect("parse");
-        assert_eq!(armed.self_update.expect("armed").package, "opamp-client");
-
-        assert!(
-            toml::from_str::<ClientConfig>("[self_update]\n").is_err(),
-            "a section without a package name is not consent to anything"
+        assert_eq!(
+            untouched.self_update_package(),
+            Some(crate::supervisor::agent::CLIENT_SERVICE_NAME)
         );
+
+        // And that name is `supervisor` since ADR-0077 — pinned here because the default travels
+        // into every written configuration and has to line up with the Set the Server publishes.
+        assert_eq!(untouched.self_update_package(), Some("supervisor"));
+
+        // A name of its own is honoured, and it is the *only* name an offer may carry.
+        let named: ClientConfig =
+            toml::from_str("[self_update]\npackage = \"opamp-client\"\n").expect("parse");
+        assert_eq!(named.self_update_package(), Some("opamp-client"));
+
+        // The withdrawal, which is what an absent section used to mean.
+        let withdrawn: ClientConfig =
+            toml::from_str("[self_update]\nenabled = false\n").expect("parse");
+        assert_eq!(withdrawn.self_update_package(), None);
+
+        // Withdrawn *and* named parses, and stays withdrawn: the switch wins over the name, which
+        // is why no caller reads them apart (`self_update_package` is the only reader).
+        let both: ClientConfig =
+            toml::from_str("[self_update]\nenabled = false\npackage = \"x\"\n").expect("parse");
+        assert_eq!(both.self_update_package(), None);
+
+        // An empty section is now legal — it is the default spelled out — and a typo still is not.
+        assert!(toml::from_str::<ClientConfig>("[self_update]\n").is_ok());
         assert!(
             toml::from_str::<ClientConfig>("[self_update]\npackge = \"x\"\n").is_err(),
-            "a typo fails startup rather than silently disabling self-update"
+            "a typo fails startup rather than silently changing what the consent covers"
+        );
+    }
+
+    /// The name is the whole of the narrowing (ADR-0075), so an empty one with the consent standing
+    /// is refused at load rather than left to widen the consent to every package the Server offers.
+    /// Withdrawn, the name is not read at all and an empty one is simply unused.
+    #[test]
+    fn an_empty_self_update_package_is_refused_while_the_consent_stands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+
+        std::fs::write(&path, "[self_update]\npackage = \"\"\n").expect("write");
+        let err = ClientConfig::load(&path).expect_err("an empty name is not a narrowing");
+        assert!(err.contains("[self_update].package is empty"), "{err}");
+
+        std::fs::write(&path, "[self_update]\nenabled = false\npackage = \"\"\n").expect("write");
+        assert!(
+            ClientConfig::load(&path).is_ok(),
+            "withdrawn, the name is never read"
         );
     }
 
@@ -1112,7 +1288,7 @@ mod tests {
         assert_eq!(tightened.max_message_size_bytes, 65536);
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
@@ -1129,7 +1305,7 @@ mod tests {
         assert_eq!(tightened.max_artifact_size_bytes, 1_048_576);
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(&path, "max_artifact_size_bytes = 0\n").expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_artifact_size_bytes"), "{err}");
@@ -1141,7 +1317,7 @@ mod tests {
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
 
         std::fs::write(
             &path,
@@ -1755,7 +1931,7 @@ mod tests {
     #[test]
     fn load_stashes_the_source_already_redacted() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join(crate::config_init::FILE_NAME);
         std::fs::write(
             &path,
             "endpoint = \"ws://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",

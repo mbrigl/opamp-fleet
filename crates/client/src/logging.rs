@@ -6,7 +6,7 @@
 //! present. In the foreground nothing is written: somebody is reading stderr there.
 //!
 //! This is not the OTLP own-logs bridge (ADR-0036) under another name. That one needs a Server that
-//! is already reachable, which is exactly what a bad `client.toml`, an unusable certificate, or a
+//! is already reachable, which is exactly what a bad `supervisor.toml`, an unusable certificate, or a
 //! refused endpoint is not.
 //!
 //! **The destination is not known when logging starts.** `tracing` takes one subscriber per process
@@ -23,7 +23,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt::writer::{EitherWriter, MakeWriter};
 
 /// The base name of the log file; the rotation appends the date.
-const FILE_STEM: &str = "opamp-fleet-client";
+const FILE_STEM: &str = "supervisor";
 const FILE_SUFFIX: &str = "log";
 
 /// The open file, once there is one. Set at most once per process.

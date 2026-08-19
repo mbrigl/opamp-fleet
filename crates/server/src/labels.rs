@@ -1,7 +1,7 @@
 //! Server-set labels on an Agent (ADR-0042).
 //!
 //! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and
-//! until now it could only be invented in `client.toml` on the machine. Moving a host between rings
+//! until now it could only be invented in `supervisor.toml` on the machine. Moving a host between rings
 //! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0017 set out to
 //! remove, surviving in the one place it mattered most.
 //!

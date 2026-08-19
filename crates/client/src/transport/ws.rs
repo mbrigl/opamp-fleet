@@ -283,7 +283,7 @@ async fn serve(
                             return Served::RestartForUpdate;
                         }
                         // The self-Agent's configuration is its Supervisor set (ADR-0056):
-                        // apply it — stop what left, rewrite `client.toml`, start what arrived —
+                        // apply it — stop what left, rewrite `supervisor.toml`, start what arrived —
                         // send the retired Agents' goodbyes, and flush the outcome.
                         let mut sink = FrameSink { socket: &mut socket, limit };
                         if crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await

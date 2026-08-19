@@ -3,17 +3,18 @@ name = "client"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0003)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p client` means this one.
 # The operator tools are not here at all: they are `crates/package-tools` (ADR-0065).
-default-run = "opamp-fleet-client"
+default-run = "supervisor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# ADR-0028: the package keeps its build-time name, the shipped binary does not. A Cargo package
-# name never leaves the repository; this is the name on the host, in `ps`, and in the unit file.
+# ADR-0028, renamed by ADR-0080: the package keeps its build-time name, the shipped binary does
+# not. A Cargo package name never leaves the repository; this is the name on the host, in `ps`, and
+# in the unit file.
 [[bin]]
-name = "opamp-fleet-client"
+name = "supervisor"
 path = "src/main.rs"
 
 [dependencies]
@@ -30,7 +31,7 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# ADR-0056: the surgical `[[supervisor]]` rewrite of `client.toml` keeps the operator's half of
+# ADR-0056: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written.
 toml_edit.workspace = true
 futures-util.workspace = true
@@ -98,7 +99,7 @@ The process an operator installs to place a machine under OpAMP management: it c
 Server, supervises the Agents configured for this host, and can update itself and them from \
 packages the Server offers.
 
-The package delivers the binary only. `opamp-fleet-client service install`, which the post-install \
+The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
 # Derived from what the binary actually links, rather than a floor somebody typed.
 depends = "$auto"
@@ -108,7 +109,7 @@ depends = "$auto"
 # `usr/libexec`, not `usr/bin` (ADR-0048): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
-assets = [["target/release/opamp-fleet-client", "usr/libexec/", "755"]]
+assets = [["target/release/supervisor", "usr/libexec/", "755"]]
 maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
@@ -116,7 +117,7 @@ name = "opamp-fleet-client"
 # One `Release`, forever: ADR-0026 releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
-    { source = "target/release/opamp-fleet-client", dest = "/usr/libexec/opamp-fleet-client", mode = "755" },
+    { source = "target/release/supervisor", dest = "/usr/libexec/supervisor", mode = "755" },
 ]
 # These resolve against this manifest's directory. A path that does *not* resolve is silently
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what

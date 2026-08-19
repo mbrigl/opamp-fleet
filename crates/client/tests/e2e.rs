@@ -4,7 +4,7 @@
 //! on the written files, and comes back `APPLIED` and in sync. A Configuration typed for the
 //! Client itself then changes its Supervisor set at runtime (ADR-0056): an added block starts
 //! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops,
-//! says goodbye, and its directory is purged (ADR-0059) — and `client.toml` is rewritten around
+//! says goodbye, and its directory is purged (ADR-0059) — and `supervisor.toml` is rewritten around
 //! the operator's globals each time.
 
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempD
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+        Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())
@@ -160,8 +160,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         otelcol_block = otelcol_block,
         stub_block = stub_block,
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
     // once rather than waiting for a package (ADR-0057 makes the delivery path owned-only).
@@ -181,7 +181,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(view(&agents, "otelcol").is_some());
     assert!(view(&agents, "stub").is_some());
     assert!(
-        view(&agents, "opamp-fleet-client").is_some(),
+        view(&agents, "supervisor").is_some(),
         "the Client is its own Agent (ADR-0020)"
     );
     // The two Supervisors run the *same* stub program, so they report the same Agent type — which
@@ -235,8 +235,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         let supervised = ["otelcol", "stub"].iter().all(|name| {
             view(&snapshot, name).is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED")
         });
-        let refused = view(&snapshot, "opamp-fleet-client")
-            .is_some_and(|a| a.remote_config_status == "FAILED");
+        let refused =
+            view(&snapshot, "supervisor").is_some_and(|a| a.remote_config_status == "FAILED");
         (supervised && refused).then_some(())
     })
     .await;
@@ -283,7 +283,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The Client's own Agent reports the Client's version instead — never a Managed Process's,
     // because it has none (ADR-0020 makes it visible; ADR-0009 supplies the version).
     let snapshot = state.snapshot();
-    let client_agent = view(&snapshot, "opamp-fleet-client").expect("the client's own agent");
+    let client_agent = view(&snapshot, "supervisor").expect("the client's own agent");
     assert_ne!(client_agent.service_version, "9.9.9");
     assert!(
         !client_agent.service_version.is_empty(),
@@ -452,7 +452,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
                 selector: Default::default(),
                 body: format!("{otelcol_block}\n{stub_block}\n{added_block}"),
                 role: String::new(),
-                service_name: "opamp-fleet-client".to_string(),
+                service_name: "supervisor".to_string(),
             },
         )
         .expect("save the supervisor set");
@@ -463,13 +463,13 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     wait_until("the added supervisor to connect, the set applied", || {
         let snapshot = state.snapshot();
         let added = view(&snapshot, "added").is_some_and(|a| a.connected);
-        let applied = view(&snapshot, "opamp-fleet-client")
+        let applied = view(&snapshot, "supervisor")
             .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
         (added && applied).then_some(())
     })
     .await;
     let _ = wait_until("the added stub to run", || stub_pid(&added_marker)).await;
-    let rewritten = std::fs::read_to_string(&config_path).expect("read back client.toml");
+    let rewritten = std::fs::read_to_string(&config_path).expect("read back supervisor.toml");
     assert!(rewritten.contains("name = \"added\""), "{rewritten}");
     assert!(
         rewritten.contains("env = \"prod\"") && rewritten.contains("heartbeat_interval_secs = 1"),
@@ -490,7 +490,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
                 selector: Default::default(),
                 body: format!("{otelcol_block}\n{stub_block}"),
                 role: String::new(),
-                service_name: "opamp-fleet-client".to_string(),
+                service_name: "supervisor".to_string(),
             },
         )
         .expect("shrink the supervisor set");
@@ -501,12 +501,12 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     wait_until("the added supervisor to say goodbye", || {
         let snapshot = state.snapshot();
         let gone = view(&snapshot, "added").is_some_and(|a| !a.connected);
-        let applied = view(&snapshot, "opamp-fleet-client")
+        let applied = view(&snapshot, "supervisor")
             .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
         (gone && applied).then_some(())
     })
     .await;
-    let rewritten = std::fs::read_to_string(&config_path).expect("read back client.toml");
+    let rewritten = std::fs::read_to_string(&config_path).expect("read back supervisor.toml");
     assert!(!rewritten.contains("\"added\""), "{rewritten}");
     assert_eq!(
         stub_pid(&stub_marker),

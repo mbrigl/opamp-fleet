@@ -17,7 +17,7 @@
 //! it points to is re-owned as the `versions/` entry it is. On Windows the files under
 //! `%ProgramData%` stay owned by Administrators and the account is *granted* Modify with
 //! inheritance instead — the platform's idiom for "these directories are yours to use", and what
-//! lets the service create tomorrow's files (a staged version, a rewritten `client.toml`) in
+//! lets the service create tomorrow's files (a staged version, a rewritten `supervisor.toml`) in
 //! directories it did not create today.
 
 use std::path::Path;
@@ -211,10 +211,10 @@ mod tests {
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
     #[test]
     fn windows_forms_are_the_passwordless_ones() {
-        let svc = "opamp-fleet-client";
-        assert!(windows_account_form(r"NT SERVICE\opamp-fleet-client", svc).is_ok());
+        let svc = "supervisor";
+        assert!(windows_account_form(r"NT SERVICE\supervisor", svc).is_ok());
         assert!(
-            windows_account_form(r"nt service\OPAMP-FLEET-CLIENT", svc).is_ok(),
+            windows_account_form(r"nt service\SUPERVISOR", svc).is_ok(),
             "account names compare case-insensitively on Windows"
         );
         assert!(windows_account_form(r"NT AUTHORITY\LocalService", svc).is_ok());
@@ -225,11 +225,11 @@ mod tests {
         );
 
         let other = windows_account_form(r"NT SERVICE\mssqlserver", svc).expect_err("not ours");
-        assert!(other.contains(r"NT SERVICE\opamp-fleet-client"), "{other}");
+        assert!(other.contains(r"NT SERVICE\supervisor"), "{other}");
 
         let plain = windows_account_form("bob", svc).expect_err("needs a password");
         assert!(plain.contains("password"), "{plain}");
-        assert!(plain.contains(r"NT SERVICE\opamp-fleet-client"), "{plain}");
+        assert!(plain.contains(r"NT SERVICE\supervisor"), "{plain}");
         assert!(plain.contains("ADR-0046"), "{plain}");
     }
 
@@ -238,8 +238,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_missing_account_is_refused_with_the_way_out() {
-        let err = RunAs::resolve("no-such-account-0062", "opamp-fleet-client")
-            .expect_err("must not exist");
+        let err = RunAs::resolve("no-such-account-0062", "supervisor").expect_err("must not exist");
         assert!(err.contains("does not exist"), "{err}");
         assert!(err.contains("useradd"), "{err}");
         assert!(
@@ -262,19 +261,20 @@ mod tests {
                 .stdout,
         )
         .expect("utf8");
-        let me = RunAs::resolve(user.trim(), "opamp-fleet-client").expect("own account resolves");
+        let me = RunAs::resolve(user.trim(), "supervisor").expect("own account resolves");
 
         let root = std::env::temp_dir().join(format!("run-as-test-{}", std::process::id()));
-        let versions = root.join("versions/opamp-fleet-client-1.0.0-abc");
+        let versions = root.join("versions/supervisor-1.0.0-abc");
         std::fs::create_dir_all(&versions).expect("mkdir");
-        std::fs::write(versions.join("opamp-fleet-client"), b"binary").expect("write");
-        std::os::unix::fs::symlink(
-            "versions/opamp-fleet-client-1.0.0-abc",
-            root.join("current"),
+        std::fs::write(
+            versions.join(crate::service::layout::BINARY_FILENAME),
+            b"binary",
         )
-        .expect("symlink");
+        .expect("write");
+        std::os::unix::fs::symlink("versions/supervisor-1.0.0-abc", root.join("current"))
+            .expect("symlink");
 
-        let missing = root.join("client.toml");
+        let missing = root.join("supervisor.toml");
         me.hand_over(&[&root, &missing])
             .expect("a missing config file is skipped, the tree is walked");
 

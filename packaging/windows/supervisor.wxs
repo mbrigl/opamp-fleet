@@ -38,18 +38,19 @@
     <SummaryInformation Description="OpAMP Fleet Client — places a machine under OpAMP management" />
 
     <!--
-      Both answers the dialogs collect are public properties (all uppercase) and Secure, and neither
-      is cosmetic:
+      Every answer the dialogs collect is a public property (all uppercase) and Secure, and that is
+      not cosmetic:
 
         * public, because Windows Installer resets private properties when execution crosses from
           the UI sequence into the execute sequence — a value typed into a dialog would never reach
           the custom action below;
-        * Secure, because that is what lets an administrator set the same two on the command line,
-          which is how Intune, Group Policy and SCCM will deploy this:
+        * Secure, because that is what lets an administrator set them on the command line, which is
+          how Intune, Group Policy and SCCM will deploy this:
 
-              msiexec /i opamp-fleet-client_1.2.3_windows_amd64.msi /qn ^
+              msiexec /i supervisor_1.2.3_windows_amd64.msi /qn ^
                 INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
-                ENDPOINT="wss://fleet.example.com/v1/opamp"
+                ENDPOINT="wss://fleet.example.com/v1/opamp" ^
+                SELFUPDATE=0
 
       ENDPOINT is empty by default in the execute sequence: an empty one is a legal answer meaning
       "configure later", and it selects the second custom action below. Only the interactive dialog
@@ -64,6 +65,46 @@
       the value to the loader's endpoint rule and to this string.
     -->
     <Property Id="ENDPOINT" Secure="yes" />
+
+    <!--
+      The self-update consent (ADR-0075). Unlike ENDPOINT's prefill this default is set in *both*
+      sequences, because default-on is the decision rather than a convenience for the click-through
+      path: a silent `/qn` deploy that names nothing gets a fleet-updatable Client, which is the
+      point. An administrator withdraws it the same way the dialog's cleared checkbox does:
+
+          msiexec /i supervisor_1.2.3_windows_amd64.msi /qn SELFUPDATE=0
+
+      Both spellings of "off" have to work, and this is the MSI trap worth naming: a condition of
+      the bare property name is true for *any* non-empty value, so `SELFUPDATE=0` — which is what an
+      administrator will type — would read as ON. The dialog's checkbox clears the property to empty
+      instead. Hence the two-armed condition below, which is what SELFUPDATEFLAG is computed from
+      rather than repeated at each use.
+
+      SELFUPDATEFLAG is computed in the **execute** sequence alone, and deliberately not in "both":
+      the only readers are the deferred custom actions, whose formatted Target is resolved as the
+      installation script is written — and `InstallInitialize`, the point a SetProperty feeding a
+      deferred action belongs before, exists in the execute sequence only. A `Sequence="both"` here
+      would ask the UI sequence to schedule against an action it does not have. The checkbox's own
+      value reaches the execute sequence on its own, because SELFUPDATE is public and Secure.
+    -->
+    <Property Id="SELFUPDATE" Value="1" Secure="yes" />
+    <!--
+      `SELFUPDATE=0` given to a run that shows the UI is normalised to empty first, so the checkbox
+      renders unchecked instead of checked-but-not-honoured: a checkbox is checked whenever its
+      property is non-empty, and "0" is non-empty. `{}` is the formatted field that yields nothing,
+      which is how a property is cleared. UI sequence only — a silent install draws no checkbox, and
+      there the two-armed condition below already reads "0" correctly.
+    -->
+    <SetProperty Id="SELFUPDATE"
+                 Value="{}"
+                 Sequence="ui"
+                 After="LaunchConditions"
+                 Condition="SELFUPDATE=&quot;0&quot;" />
+    <SetProperty Id="SELFUPDATEFLAG"
+                 Value=" --no-self-update"
+                 Sequence="execute"
+                 Before="InstallInitialize"
+                 Condition="NOT SELFUPDATE OR SELFUPDATE=&quot;0&quot;" />
     <SetProperty Id="ENDPOINT"
                  Value="http://localhost:4320/v1/opamp"
                  Sequence="ui"
@@ -72,7 +113,7 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes" />
 
     <!--
-      One directory for everything (ADR-0046 clause 5): the .exe, the client.toml the install
+      One directory for everything (ADR-0046 clause 5): the .exe, the supervisor.toml the install
       writes, and ADR-0010's versions/, current and state/ all live under INSTALLFOLDER, because
       the root flag of `service install` already anchors all of them. The operator configures one
       path, not half of one.
@@ -83,8 +124,8 @@
 
     <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
       <Component Id="ClientExe">
-        <File Id="OpampFleetClientExe"
-              Name="opamp-fleet-client.exe"
+        <File Id="SupervisorExe"
+              Name="supervisor.exe"
               Source="$(BinaryPath)"
               KeyPath="yes" />
       </Component>
@@ -113,6 +154,11 @@
       loader's own endpoint rule, the second is the ordinary "configure it later" install that
       only warns.
 
+      The self-update answer needs no third and fourth action, because unlike the endpoint it *has*
+      a no-op spelling: `[SELFUPDATEFLAG]` is empty when the consent stands, and a formatted field
+      of an unset property resolves to nothing — so the consenting command line is character for
+      character the one this package sent before ADR-0075.
+
       The backslash before each [INSTALLFOLDER] closing quote is load-bearing. A directory
       property always resolves with a trailing backslash, so without it the command line ends in
       `...Client\" ...` — and the C runtime that builds the client's argv reads a backslash before
@@ -123,15 +169,15 @@
       parses these lines exactly as the CRT will and fails on a regression.
     -->
     <CustomAction Id="RegisterServiceWithEndpoint"
-                  FileRef="OpampFleetClientExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot; --endpoint &quot;[ENDPOINT]&quot;"
+                  FileRef="SupervisorExe"
+                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot; --endpoint &quot;[ENDPOINT]&quot;[SELFUPDATEFLAG]"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
 
     <CustomAction Id="RegisterService"
-                  FileRef="OpampFleetClientExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot;"
+                  FileRef="SupervisorExe"
+                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot;[SELFUPDATEFLAG]"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
@@ -142,18 +188,18 @@
       type 18 action needs its executable to still be on disk.
 
       `service uninstall` leaves the install root and the state directory behind, as it does
-      everywhere (ADR-0010) — deleting a client.toml holding a credential the operator typed would
+      everywhere (ADR-0010) — deleting a supervisor.toml holding a credential the operator typed would
       be the overwrite ADR-0027 refused, one step later.
     -->
     <CustomAction Id="StopService"
-                  FileRef="OpampFleetClientExe"
+                  FileRef="SupervisorExe"
                   ExeCommand="service stop"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
 
     <CustomAction Id="UnregisterService"
-                  FileRef="OpampFleetClientExe"
+                  FileRef="SupervisorExe"
                   ExeCommand="service uninstall"
                   Execute="deferred"
                   Impersonate="no"

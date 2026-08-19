@@ -6,7 +6,7 @@
 
 ## Context
 
-A Supervisor configured exactly as [`config/client.toml`](../../config/client.toml) documents it
+A Supervisor configured exactly as [`config/supervisor.toml`](../../config/supervisor.toml) documents it
 cannot take a package update:
 
 ```toml

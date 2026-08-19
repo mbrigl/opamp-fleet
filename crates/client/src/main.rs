@@ -1,5 +1,5 @@
 //! Entry point: parse the CLI (ADR-0010) and hand off — `run` to the daemon runtime, the
-//! `service` verbs to the cross-platform lifecycle. The daemon loads `client.toml`, restores the
+//! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
 //! Agent's identity, and runs the transport the endpoint selects (ADR-0007) until stopped.
 
 use std::path::{Path, PathBuf};
@@ -188,8 +188,18 @@ fn install(
         config_init::run(&config_path)?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0046): this is the branch
-        // the MSI's custom action and a `%post` script take.
-        config_init::run_with_endpoint(&config_path, endpoint)?;
+        // the MSI's custom action and a `%post` script take. The self-update consent travels with
+        // it — standing unless this install was told to withdraw it (ADR-0075).
+        let self_update = if args.no_self_update {
+            None
+        } else {
+            Some(
+                args.self_update_package
+                    .as_deref()
+                    .unwrap_or(client::supervisor::agent::CLIENT_SERVICE_NAME),
+            )
+        };
+        config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service starts, dials the development default, and manages nothing.
@@ -242,7 +252,7 @@ fn install(
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };
-    println!("start it with: opamp-fleet-client service start{user} --instance {instance}");
+    println!("start it with: supervisor service start{user} --instance {instance}");
     Ok(())
 }
 

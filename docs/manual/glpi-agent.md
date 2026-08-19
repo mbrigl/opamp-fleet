@@ -39,7 +39,7 @@ Three consequences follow:
 - **No package updates from the fleet.** The Agent does not declare `AcceptsPackages`; a new GLPI
   Agent version arrives by `apt`/`dnf` upgrade or a new MSI, as before.
 - **The block is the operator's to write.** A Server-delivered Supervisor set may name only
-  Client-owned programs, so this block lives in each host's `client.toml` — written by hand or by
+  Client-owned programs, so this block lives in each host's `supervisor.toml` — written by hand or by
   the configuration management that installs the GLPI Agent anyway.
 - **The configuration is still central.** The agent's configuration file is a Configuration on
   the Server, typed `glpi-agent`, rolled out and applied by restart like any other — that, plus
@@ -281,7 +281,7 @@ Three things this route needs that the machine-installed one does not:
   before the first start.
 - **The block may be rolled out from the Server.** Bare-named programs are the one shape a
   Server-delivered Supervisor set may carry, so unlike the machine-installed route this block
-  can travel in a Configuration typed `opamp-fleet-client` — see
+  can travel in a Configuration typed `supervisor` — see
   [The Server can manage the set](client.md#the-server-can-manage-the-set).
 - **Nothing native is installed, so [step 1](#1-hand-over-the-autostart) does not apply** —
   there is no service to disable, unless a native GLPI Agent is also present, in which case
@@ -289,7 +289,7 @@ Three things this route needs that the machine-installed one does not:
 
 Updating is the ordinary act: a new version is a new Set, uploaded and rolled out, health-gated
 on the host and rolled back if the new tree will not stay up
-([walkthrough step 8](rollout.md#8-ship-an-update-and-take-it-back)). One platform limit:
+([walkthrough step 8](rollout.md#8-ship-an-update)). One platform limit:
 upstream publishes the AppImage for **x86_64 only**, so Linux arm64 hosts stay on the
 machine-installed route above.
 

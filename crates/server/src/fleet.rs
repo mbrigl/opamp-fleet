@@ -143,6 +143,19 @@ impl AgentRecord {
             .unwrap_or(&NO_PACKAGE_ASSIGNMENTS)
     }
 
+    /// What this Agent last reported as installed, per package name (ADR-0076): the versions
+    /// every matching test now measures a Set against. A package reported with an empty
+    /// `agent_has_version` — offered, not yet installed — carries no version and is left out, so
+    /// it reads as "nothing installed under that name" rather than as an unorderable value.
+    fn installed_package_versions(&self) -> crate::packages::InstalledVersions {
+        self.package_statuses
+            .iter()
+            .flat_map(|statuses| statuses.packages.iter())
+            .filter(|(_, status)| !status.agent_has_version.is_empty())
+            .map(|(name, status)| (name.clone(), status.agent_has_version.clone()))
+            .collect()
+    }
+
     /// The package assignments for writing — a rollout act settles the record under ADR-0061,
     /// seed or no seed, because the operator's explicit act is now the authority.
     fn package_assignments_mut(&mut self) -> &mut BTreeMap<String, SetId> {
@@ -697,7 +710,11 @@ impl AppState {
                     )
                 })?;
                 store
-                    .fits_agent(id, record.effective_description().as_deref())
+                    .fits_agent(
+                        id,
+                        record.effective_description().as_deref(),
+                        &record.installed_package_versions(),
+                    )
                     .map_err(|e| {
                         if e.starts_with("no package set") {
                             RolloutError::UnknownResource(e)
@@ -722,7 +739,11 @@ impl AppState {
                 if let Some(store) = self.packages.as_ref().map(PackageOffering::store) {
                     // An ambiguous candidate set proposes nothing (the view says why), so a
                     // conflict never blocks the Configurations riding the same press.
-                    for id in store.candidate_ids(description).unwrap_or_default() {
+                    let installed = record.installed_package_versions();
+                    for id in store
+                        .candidate_ids(description, &installed)
+                        .unwrap_or_default()
+                    {
                         assign_package(record, store, &id);
                     }
                 }
@@ -799,7 +820,11 @@ impl AppState {
         let mut assigned = 0usize;
         for (uid, record) in fleet.iter_mut() {
             if store
-                .fits_agent(id, record.effective_description().as_deref())
+                .fits_agent(
+                    id,
+                    record.effective_description().as_deref(),
+                    &record.installed_package_versions(),
+                )
                 .is_err()
             {
                 continue;
@@ -867,8 +892,8 @@ impl AppState {
         self.labels.get(uid)
     }
 
-    /// How many Agents in the fleet each stored Set would actually reach today, keyed by the
-    /// Set's identity (`name@version@type`).
+    /// How many Agents in the fleet each stored Set aims at, and how many it would actually
+    /// reach today, keyed by the Set's identity (`name@version@type`).
     ///
     /// A Set only fits Agents of its type (ADR-0034), only hosts it has an entry for (ADR-0031),
     /// and its Selector narrows it further (ADR-0017) — three ways to target nobody, none of which
@@ -876,22 +901,30 @@ impl AppState {
     /// silently arrives nowhere, and there is no canonicalisation that would catch it. Counting is
     /// what turns that into something an operator can see.
     ///
+    /// Since ADR-0076 that is two counts, because zero has two meanings: `aiming` is the
+    /// version-blind fit-and-aim — zero there is the mistake worth hunting — and `targeted` holds
+    /// it to an upgrade, which is what a rollout act would actually change. Aiming at a fleet
+    /// that already runs this version reaches nobody and is nothing to fix.
+    ///
     /// It answers for the fleet *as reported so far*: a Set aimed at hosts that have not connected
     /// yet legitimately reaches nobody, which is why this is a count to be read rather than an
     /// error to be raised.
-    pub fn package_reach(&self) -> BTreeMap<String, usize> {
-        let mut reach = BTreeMap::new();
+    pub fn package_reach(&self) -> BTreeMap<String, SetReach> {
+        let mut reach: BTreeMap<String, SetReach> = BTreeMap::new();
         let Some(store) = self.packages() else {
             return reach;
         };
         let fleet = self.fleet.lock().expect("fleet lock");
         for record in fleet.values() {
             let effective = record.effective_description();
+            for id in store.aiming_at(effective.as_deref()) {
+                reach.entry(id.to_string()).or_default().aiming += 1;
+            }
             for id in store
-                .candidate_ids(effective.as_deref())
+                .candidate_ids(effective.as_deref(), &record.installed_package_versions())
                 .unwrap_or_default()
             {
-                *reach.entry(id.to_string()).or_insert(0) += 1;
+                reach.entry(id.to_string()).or_default().targeted += 1;
             }
         }
         reach
@@ -1374,7 +1407,10 @@ impl AppState {
         }
         offering
             .store
-            .candidate_ids(record.effective_description().as_deref())
+            .candidate_ids(
+                record.effective_description().as_deref(),
+                &record.installed_package_versions(),
+            )
             .err()
     }
 
@@ -1679,7 +1715,10 @@ impl AppState {
                     .packages()
                     .map(|store| {
                         store
-                            .candidate_ids(effective.as_deref())
+                            .candidate_ids(
+                                effective.as_deref(),
+                                &record.installed_package_versions(),
+                            )
                             .unwrap_or_default()
                             .into_iter()
                             .filter_map(|id| {
@@ -1878,7 +1917,7 @@ pub struct AgentView {
     /// makes silence mean something. Derived on read, never stored.
     pub stale: bool,
     /// The operator's labels on this Agent (ADR-0042) — matched by Selectors exactly like a
-    /// reported attribute, but set here rather than in `client.toml` on the host, so moving a host
+    /// reported attribute, but set here rather than in `supervisor.toml` on the host, so moving a host
     /// between rollout rings is an API call instead of an edit and a restart.
     pub labels: BTreeMap<String, String>,
     /// Labels this Agent's own reports shadow: set, matching nothing, and therefore doing nothing.
@@ -1897,6 +1936,17 @@ pub struct PendingConfigurationView {
     /// `new` — a candidate not yet assigned; `update` — the saved revision is newer than the
     /// assigned one.
     pub change: String,
+}
+
+/// Whom one Set reaches in the fleet as reported so far (ADR-0076): the Agents it aims at, and
+/// the subset a rollout act would actually change.
+#[derive(Clone, Copy, Default)]
+pub struct SetReach {
+    /// Agents this Set fits and its Selector aims at, whatever they run — zero is the aim
+    /// mistake (type, platform, Selector) ADR-0061 put the count there to expose.
+    pub aiming: usize,
+    /// Of those, the Agents for which this Set is an upgrade — what a rollout act would change.
+    pub targeted: usize,
 }
 
 /// One package Set waiting for a rollout act toward one Agent (ADR-0061).

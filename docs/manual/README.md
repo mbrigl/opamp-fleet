@@ -36,7 +36,7 @@ you can run:
 
 ```console
 $ cargo run -p server -- --config config/server.toml
-$ cargo run -p client -- --config config/client.toml
+$ cargo run -p client -- --config config/supervisor.toml
 ```
 
 An installed deployment runs the same two programs under the names `server` and `client`; the
@@ -59,7 +59,7 @@ no configuration file at all, because every setting has a default.
 2. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself.
 
    ```console
-   $ cargo run -p client -- --config config/client.toml
+   $ cargo run -p client -- --config config/supervisor.toml
    ```
 
 3. **Open the UI** at <http://127.0.0.1:4321/>. The Agent is listed as *Connected*, with the
@@ -96,12 +96,13 @@ connection, so the Server's fleet view has more rows than there are hosts.
 
 **Attributes.** Every Agent reports attributes — `service.name`, `service.instance.name`,
 `service.version`, `service.instance.id`, `os.type`, `os.name`, `os.version`, `os.description`,
-`host.name`, `host.arch`, `host.id` — and an operator can add more in `client.toml`, plus
+`host.name`, `host.arch`, `host.id` — and an operator can add more in `supervisor.toml`, plus
 `service.namespace` where a deployment uses one. These are what Selectors match on. An attribute the
 host cannot answer is absent rather than empty.
 
 Two of them are easy to confuse, and telling them apart is what aims everything else:
-`service.name` is the Agent **type** — `otelcol-contrib`, `promtail`, `opamp-fleet-client` — the
+`service.name` is the Agent **type** — `otelcol-contrib`, `promtail`, `supervisor` for the Client's
+own Agent — the
 same value on every host running that kind of agent, while `service.instance.name` is **your** name
 for one Agent, the `[[supervisor]]` block's `name`. Aim at the type to reach every Agent of a kind,
 at the instance name to reach exactly one.
@@ -133,7 +134,7 @@ time.
 Every key is optional, an unknown key is refused at startup rather than ignored, and there are no
 environment-variable fallbacks. The annotated examples in [`config/`](../../config/) are the
 reference copies: [`config/server.toml`](../../config/server.toml) and
-[`config/client.toml`](../../config/client.toml).
+[`config/supervisor.toml`](../../config/supervisor.toml).
 
 ## Not built yet
 

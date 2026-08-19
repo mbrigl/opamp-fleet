@@ -26,7 +26,7 @@ Server sends them, reports back what they are doing, and can replace their binar
 - **Presents one or more Agents to the Server.** The Client is always its own Agent, whether or not
   it supervises anything, so the Server can see which version each host runs. Each configured
   Supervisor is an additional Agent. All of them share one connection. The Client's own Agent
-  reports `client.toml` itself as its effective configuration — with credential values (`[auth]`'s
+  reports `supervisor.toml` itself as its effective configuration — with credential values (`[auth]`'s
   `bearer_token` and `password`, `[packages]`'s `archive_key`) masked as `***`, since the Server
   persists what it receives.
 - **Supervises processes**: starts them, watches them, restarts them on a configuration
@@ -46,15 +46,15 @@ Server sends them, reports back what they are doing, and can replace their binar
 ## Running it
 
 ```console
-$ opamp-fleet-client --config /etc/opamp/client.toml     # foreground; `run` is implied
-$ opamp-fleet-client run --config /etc/opamp/client.toml # the same thing, said explicitly
-$ opamp-fleet-client --version
+$ supervisor --config /etc/opamp/supervisor.toml     # foreground; `run` is implied
+$ supervisor run --config /etc/opamp/supervisor.toml # the same thing, said explicitly
+$ supervisor --version
 ```
 
 | Global flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `client.toml`; defaults apply if it does not exist. `service install` is the one place where "not given" means something else: there the file is `<root>/client.toml` inside the install root, because a path resolved against this shell's working directory is not one the service manager shares. |
-| `--instance <name>` | Selects the service identity (`opamp-fleet-client-<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`, whose service is plain `opamp-fleet-client`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
+| `--config <path>` | The TOML configuration file. Defaults to `supervisor.toml`; defaults apply if it does not exist. `service install` is the one place where "not given" means something else: there the file is `<root>/supervisor.toml` inside the install root, because a path resolved against this shell's working directory is not one the service manager shares. |
+| `--instance <name>` | Selects the service identity (`supervisor-<instance>`) and the default install root, so several differently-configured Clients coexist on one host. Defaults to `default`, whose service is plain `supervisor`. Same name grammar as everything else: 1–32 lowercase letters, digits, and `-`. |
 | `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
 
 There are no environment-variable fallbacks for configuration — the flags say only where
@@ -71,17 +71,17 @@ The Client registers *itself* with systemd, launchd, or the Windows SCM — ther
 packaging step and no unit file to write:
 
 ```console
-$ opamp-fleet-client service install --config /etc/opamp/client.toml   # root / Administrator
-$ opamp-fleet-client service start
-$ opamp-fleet-client service status
-$ opamp-fleet-client service stop
-$ opamp-fleet-client service uninstall      # deregisters; never deletes the install layout or state
+$ supervisor service install --config /etc/opamp/supervisor.toml   # root / Administrator
+$ supervisor service start
+$ supervisor service status
+$ supervisor service stop
+$ supervisor service uninstall      # deregisters; never deletes the install layout or state
 ```
 
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
-| `--root <dir>` | `service install` | The install root: everything — the executable layout, `client.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
+| `--root <dir>` | `service install` | The install root: everything — the executable layout, `supervisor.toml`, and `state/` — goes under this one directory, whose SELinux labeling is then the operator's business. Without it the defaults apply, per scope and instance: on Linux system installs the executable layout lives at `/opt/opamp-fleet/client/<instance>` while configuration and state stay at `/var/lib/opamp-fleet/client/<instance>` (a binary under `/var/lib` is one SELinux never lets systemd start); macOS uses `/Library/Application Support/opamp-fleet/client/<instance>`, Windows `%ProgramData%\opamp-fleet\client\<instance>`, and user scope the user's data directory — one directory for everything. No path is ever fixed. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. Takes no credential on purpose: a flag stands in the shell history and the process list. |
 | `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand the instance's files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
@@ -99,7 +99,7 @@ On Linux and macOS the account must already exist; the install refuses early if 
 
 ```console
 # useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin opamp-fleet
-# opamp-fleet-client service install --run-as opamp-fleet
+# supervisor service install --run-as opamp-fleet
 ```
 
 On Windows only **passwordless** account forms are accepted — there is deliberately no password
@@ -107,7 +107,7 @@ flag, for the same reason `--endpoint` takes no credential. The recommended form
 own virtual account, which Windows provisions and password-manages by itself:
 
 ```console
-> opamp-fleet-client service install --run-as "NT SERVICE\opamp-fleet-client"
+> supervisor service install --run-as "NT SERVICE\supervisor"
 ```
 
 A group-managed service account (`DOMAIN\name$`) and the built-ins `NT AUTHORITY\LocalService` /
@@ -120,7 +120,7 @@ that default grant, restore the right for the account or the service will not st
 Two consequences to weigh before using it:
 
 - **The account is a trust boundary.** Whoever holds it can replace the binary in the layout, and
-  the packaged `/usr/bin/opamp-fleet-client` symlink resolves through that layout's `current`
+  the packaged `/usr/bin/supervisor` symlink resolves through that layout's `current`
   pointer — an administrator invoking the CLI executes account-owned code.
 - **The account's limits are the fleet's.** Anything under this Client that needs a port below
   1024 or root-only telemetry sources will fail — that trade-off is the point of the flag.
@@ -130,27 +130,27 @@ without the flag it registers exactly as before — root/`LocalSystem`, no hando
 
 ### The first configuration, on a host that has none
 
-A release artifact is the bare binary, so a freshly downloaded Client has no `client.toml` to edit.
+A release artifact is the bare binary, so a freshly downloaded Client has no `supervisor.toml` to edit.
 Without one it still installs and starts — on the development defaults, dialling `127.0.0.1` and
 managing nothing. `--interactive` is the way past that:
 
 ```console
-$ opamp-fleet-client service install --interactive        # root / Administrator
-No configuration at /var/lib/opamp-fleet/client/default/client.toml — answering these writes it …
+$ supervisor service install --interactive        # root / Administrator
+No configuration at /var/lib/opamp-fleet/client/default/supervisor.toml — answering these writes it …
 Server OpAMP endpoint [ws://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
-This Agent's name (service.instance.name) [opamp-fleet-client]: host-01
+This Agent's name (service.instance.name) [supervisor]: host-01
 Authentication toward the Server: bearer token
 Bearer token: ********
 Does the Server present a certificate from a private CA? [y/N]: n
 Allow the Server to update this Client's own binary? [y/N]: n
-wrote /var/lib/opamp-fleet/client/default/client.toml
-installed opamp-fleet-client
+wrote /var/lib/opamp-fleet/client/default/supervisor.toml
+installed supervisor
 ```
 
 What it asks about is only what has no useful default here: the endpoint, the Agent's name, the
 credential ([`[auth]`](#auth)), a private CA when the endpoint is `wss://` or `https://`
-([`[tls]`](#tls)), and last — defaulting to **no** — consent for the Server to replace this Client's
-own binary ([`[self_update]`](#self_update)). Everything else is written into the file as commented
+([`[tls]`](#tls)), and last — defaulting to **yes** since ADR-0075 — consent for the Server to
+replace this Client's own binary ([`[self_update]`](#self_update)). Everything else is written into the file as commented
 defaults. The credential is typed into a hidden prompt rather than passed as a flag, so it stays out
 of the shell history and out of the process list; on Unix the file is created mode `0600`.
 
@@ -163,7 +163,7 @@ Four rules worth knowing before you script around it:
 - **No terminal, no questionnaire.** `--interactive` in a provisioning run, a container build, or a
   pipeline fails with a message instead of blocking forever on an answer nobody can give.
 - **Where it writes:** the path from `--config` when you name one, and otherwise
-  `<root>/client.toml` inside the install root — the same per-platform, per-instance location the
+  `<root>/supervisor.toml` inside the install root — the same per-platform, per-instance location the
   versions and the state directory already use. The file is validated by the ordinary loader before
   the service is registered; a file that does not parse fails the install and stays on disk for you
   to correct.
@@ -172,9 +172,9 @@ Where there is an answer but no terminal — a provisioning run, an MSI dialog, 
 `--endpoint` writes the same file without asking:
 
 ```console
-$ opamp-fleet-client service install --endpoint wss://fleet.example.com/v1/opamp
-wrote /var/lib/opamp-fleet/client/default/client.toml for wss://fleet.example.com/v1/opamp
-installed opamp-fleet-client
+$ supervisor service install --endpoint wss://fleet.example.com/v1/opamp
+wrote /var/lib/opamp-fleet/client/default/supervisor.toml for wss://fleet.example.com/v1/opamp
+installed supervisor
 ```
 
 It writes only the endpoint; everything else keeps its default, and the credential goes into the
@@ -183,15 +183,15 @@ file afterwards. All four rules above hold unchanged — in particular, an exist
 ### Installing from a native package
 
 A release also ships a `.deb`, an `.rpm` and an `.msi`. They deliver the binary to
-`/usr/libexec/opamp-fleet-client` (Windows: the folder you choose) and then run `service install`
+`/usr/libexec/supervisor` (Windows: the folder you choose) and then run `service install`
 themselves — the layout, the unit and the SCM entry are the same ones this page describes, because
 they are made by the same command. No package ships a unit file of its own. What lands on `PATH` —
-`/usr/bin/opamp-fleet-client` — is a symlink through the layout's `current` pointer, so
+`/usr/bin/supervisor` — is a symlink through the layout's `current` pointer, so
 the command you type is always the binary the service runs.
 
 ```console
-$ sudo apt install ./opamp-fleet-client_1.2.3_linux_amd64.deb
-$ sudo dnf install ./opamp-fleet-client_1.2.3_linux_amd64.rpm
+$ sudo apt install ./supervisor_1.2.3_linux_amd64.deb
+$ sudo dnf install ./supervisor_1.2.3_linux_amd64.rpm
 ```
 
 **The service is registered and left stopped.** That is deliberate: a Client with no configuration
@@ -199,17 +199,17 @@ would dial the development default and manage nothing, and a package must not ma
 on every host it touches. Two steps remain, and the post-install prints them:
 
 ```console
-$ sudo opamp-fleet-client service install --endpoint wss://fleet.example.com/v1/opamp
-$ sudo systemctl start opamp-fleet-client
+$ sudo supervisor service install --endpoint wss://fleet.example.com/v1/opamp
+$ sudo systemctl start supervisor
 ```
 
 On Windows the `.msi` asks for the installation folder and the endpoint. The folder is the install
-root — the `.exe`, `client.toml`, `versions/`, `current` and `state/` all live under it. The same
+root — the `.exe`, `supervisor.toml`, `versions/`, `current` and `state/` all live under it. The same
 file installs unattended with the same two answers, which is how Intune, Group Policy and SCCM
 deploy it:
 
 ```console
-C:\> msiexec /i opamp-fleet-client_1.2.3_windows_amd64.msi /qn ^
+C:\> msiexec /i supervisor_1.2.3_windows_amd64.msi /qn ^
        INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
        ENDPOINT="wss://fleet.example.com/v1/opamp"
 ```
@@ -219,16 +219,16 @@ Two things to know about living with a packaged install:
 - **`dpkg -l` reports the version it *delivered*, not the one that is running.** After a fleet
   self-update ([Updating the Client itself](#updating-the-client-itself)) the service runs the binary
   under `<root>/current/`, which no package manager owns — that separation is what keeps the next
-  `apt upgrade` from silently reverting the Server's decision. `opamp-fleet-client --version` goes
+  `apt upgrade` from silently reverting the Server's decision. `supervisor --version` goes
   through `current` and answers for the running binary, as does the fleet view; those two
   are the truth.
 - **Removing the package stops and unregisters the service and uninstalls every staged version.**
   `versions/` and the `current` pointer go with the package; the state directory and
-  `client.toml` stay, for the same reason an install never overwrites a configuration: it may hold
+  `supervisor.toml` stay, for the same reason an install never overwrites a configuration: it may hold
   a credential you typed. `apt purge` deletes those too — the instance directory whole. A reinstall
   after a plain remove keeps the host's identity and configuration and stages its own binary fresh.
 
-macOS has no native installer; there, unpack the `.7z` and run `service install` yourself.
+macOS has no native installer; there, unpack the `.tar.gz` and run `service install` yourself.
 
 ### What the service is called
 
@@ -237,12 +237,12 @@ instance appends its own:
 
 | | `--instance default` | `--instance prod` |
 |---|---|---|
-| **Linux** (systemd) | `opamp-fleet-client.service` | `opamp-fleet-client-prod.service` |
-| **macOS** (launchd) | `opamp-fleet-client` (job and plist) | `opamp-fleet-client-prod` |
-| **Windows** (SCM) | `opamp-fleet-client` | `opamp-fleet-client-prod` |
+| **Linux** (systemd) | `supervisor.service` | `supervisor-prod.service` |
+| **macOS** (launchd) | `supervisor` (job and plist) | `supervisor-prod` |
+| **Windows** (SCM) | `supervisor` | `supervisor-prod` |
 
-So the same command works everywhere it exists: `systemctl status opamp-fleet-client`,
-`launchctl list opamp-fleet-client`, `sc query opamp-fleet-client`.
+So the same command works everywhere it exists: `systemctl status supervisor`,
+`launchctl list supervisor`, `sc query supervisor`.
 
 Where a platform has a second, human-readable name, it is **OpAMP Fleet Client** (`OpAMP Fleet
 Client (prod)` for a named instance). That is the Windows services list; systemd shows the unit name
@@ -254,12 +254,12 @@ A Client started by the service manager writes its own log to **`<state_dir>/log
 platform, one file per day, seven days kept:
 
 ```
-<state_dir>/logs/opamp-fleet-client.2026-08-09.log
+<state_dir>/logs/supervisor.2026-08-09.log
 ```
 
 **On Windows this is the only copy there is** — the SCM discards a service's stderr, so `sc query`
 telling you the service will not start is all the platform itself offers. On Linux and macOS the
-same lines are also in `journalctl -u opamp-fleet-client` and Console/`log show`; the file is
+same lines are also in `journalctl -u supervisor` and Console/`log show`; the file is
 written anyway so the answer to "where are the logs" is the same everywhere, including in a
 container where neither exists.
 
@@ -282,7 +282,7 @@ file has turned a diagnostic into an outage.
 
 This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
-is exactly what a bad `client.toml`, an unusable certificate, or a refused endpoint does not give
+is exactly what a bad `supervisor.toml`, an unusable certificate, or a refused endpoint does not give
 it. The file on disk is what explains those.
 
 The Windows services list has a **Description** column beside that name, and it is a separate field
@@ -296,17 +296,17 @@ The root holds versioned installs side by side, a `current` pointer the service 
 against, and the default state directory:
 
 ```
-<root>/versions/opamp-fleet-client-<version>-<commit>/opamp-fleet-client   # every version
-<root>/current -> versions/opamp-fleet-client-…/    # symlink (Unix), junction (Windows)
+<root>/versions/supervisor-<version>-<commit>/supervisor   # every version
+<root>/current -> versions/supervisor-…/    # symlink (Unix), junction (Windows)
 <root>/state/                                            # the default state_dir
 ```
 
-Because the service runs `<root>/current/opamp-fleet-client`, switching versions never re-registers
+Because the service runs `<root>/current/supervisor`, switching versions never re-registers
 the service.
 
 On a **Linux system install without `--root`**, the picture above spans two
 directories: `versions/` and `current` live under `/opt/opamp-fleet/client/<instance>` — SELinux
-never lets systemd execute a binary labeled for `/var/lib` — while `client.toml` and `state/`
+never lets systemd execute a binary labeled for `/var/lib` — while `supervisor.toml` and `state/`
 stay under `/var/lib/opamp-fleet/client/<instance>`. An explicit `--root` keeps everything under
 the one directory it names.
 
@@ -323,7 +323,7 @@ rights — there is no UAC prompt to be had from inside a command that has alrea
 service at all, and stops with a message naming the fix if it may not:
 
 ```console
-C:\> opamp-fleet-client service install
+C:\> supervisor service install
 the Windows service control manager denied access: registering a machine-wide service needs
 Administrator, and a running process cannot raise its own rights. Open a shell with "Run as
 administrator" — from PowerShell, `Start-Process powershell -Verb RunAs` — and run this command
@@ -337,7 +337,7 @@ nothing beforehand and simply report the manager's own refusal.
 
 ## Configuration reference
 
-The full annotated example is [`config/client.toml`](../../config/client.toml). Every key is
+The full annotated example is [`config/supervisor.toml`](../../config/supervisor.toml). Every key is
 optional and shown below with its default; an unknown key fails startup rather than being ignored.
 
 ### Top level
@@ -345,7 +345,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 | Key | Default | Meaning |
 |---|---|---|
 | `endpoint` | `"ws://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport: `ws://`/`wss://` for WebSocket, `http://`/`https://` for polling. |
-| `name` | `"opamp-fleet-client"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `opamp-fleet-client`, the same on every host. |
+| `name` | `"supervisor"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `supervisor`, the same on every host. |
 | `poll_interval_secs` | `30` | How often the plain-HTTP transport polls. Ignored on WebSocket. |
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
@@ -414,7 +414,7 @@ private CA. Without it the platform's trust store applies.
 — they go together or not at all. This is the identity an operator provisions, including
 the **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
 the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
-prefers it, the same precedence persisted connection settings have over `client.toml`. Deleting the
+prefers it, the same precedence persisted connection settings have over `supervisor.toml`. Deleting the
 stored pair reverts to what is written here.
 
 **Enrolment needs nothing in this file.** When the Server declares that it signs certificates, a
@@ -461,11 +461,28 @@ the package's Agent type and its Selector, never a key in this file.
 
 ```toml
 [self_update]
-package = "opamp-fleet-client"
+enabled = true                     # the default; false withdraws the consent
+package = "supervisor"             # the default: this Client's own Agent type
 ```
 
-See [Updating the Client itself](#updating-the-client-itself). Absent — the default — the Client's
-own Agent declares no package capability at all and no offer can reach it.
+See [Updating the Client itself](#updating-the-client-itself). **An absent section is the consent**
+(ADR-0075): a Client the fleet cannot update is the one program on the host left to patch by hand.
+What bounds it is the name — an offer under any other is refused and reported, never applied — and
+the default name is the product's own, which is what the release artifact and therefore the Set
+carrying this Client is named. Not the Agent type: since ADR-0077 the two are different strings, and
+a default taken from the type would narrow the consent to a package nobody publishes.
+
+To withdraw the consent, say so; there is no third state:
+
+```toml
+[self_update]
+enabled = false
+```
+
+An empty `package` with `enabled = true` fails at startup rather than widening the consent to
+whatever the Server offers next. Every install path can answer this: `service install
+--no-self-update`, `--self-update-package <NAME>`, the `--interactive` questionnaire (which asks and
+defaults to yes), and the MSI's checkbox or `SELFUPDATE=0` on a silent deploy.
 
 ## Gateway Mode: carrying other Clients
 
@@ -527,13 +544,13 @@ plugin, not a change to the core.
 
 ### The Server can manage the set
 
-The `[[supervisor]]` blocks are the fleet-manageable half of `client.toml`. A
-Configuration typed for the Client itself — `service_name = "opamp-fleet-client"` —
+The `[[supervisor]]` blocks are the fleet-manageable half of `supervisor.toml`. A
+Configuration typed for the Client itself — `service_name = "supervisor"` —
 carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
   the endpoint, the credential, the state directory stay the host's, and can never arrive over
-  the wire. You may roll out a full `client.toml`-shaped document; exactly its supervisor half
+  the wire. You may roll out a full `supervisor.toml`-shaped document; exactly its supervisor half
   takes effect. A duplicate `name` fails the offer, as it would fail the file.
 - **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
   merged file is written, changed and added ones are started from it. An unchanged Supervisor's
@@ -544,7 +561,7 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   and keeps its directory; a program named by an absolute path is the machine's file and is
   never touched. Removal is destructive on the host: re-adding the same name later starts a
   genuinely fresh Agent, restoring service, not history.
-- **`client.toml` stays the single truth.** The blocks are written into the file itself,
+- **`supervisor.toml` stays the single truth.** The blocks are written into the file itself,
   surgically: your comments, ordering, and formatting outside them survive. A Client restarting
   offline starts the Server-delivered set, because it is in its file.
 - **The outcome is a status, not a silence.** The Client acknowledges `APPLYING`, then `APPLIED`
@@ -644,7 +661,7 @@ lifecycle into the protocol.
 | `args` | Its arguments, verbatim — apart from [placeholder expansion](#path-placeholders). |
 | `working_dir` | The directory to start in. Optional. |
 | `[supervisor.env]` | Additional environment for the process. |
-| `version_args` | Arguments that make the program print its version, e.g. `["--version"]`. The program is invoked once with exactly these, and the first SemVer 2.0.0 version in its output becomes the Agent's `service.version`. Opt-in, because a Foreign Agent's version flag is its own convention. |
+| `version_args` | Arguments that make the program print its version, e.g. `["--version"]`. The program is invoked once with exactly these, and the first SemVer 2.0.0 version in its output becomes the Agent's `service.version`. Opt-in, because a Foreign Agent's version flag is its own convention. **They are also the preflight**: a package's staged program is run with them before what runs is stopped, and a non-zero exit refuses the package with the program's own message — so a build this host cannot run costs a refusal instead of a stop, a swap, a failed start and a rollback. |
 | `reload_signal` | The signal that makes the program re-read its configuration in place: `"HUP"`, `"USR1"`, or `"USR2"` (a `SIG` prefix is accepted). When set, a configuration change is applied by sending this signal instead of restarting, and the process keeps its in-flight state; if the signal cannot be delivered or the process dies on it, the Supervisor falls back to the restart. Opt-in, because whether a daemon reloads on a signal is its own convention — and Linux/macOS only: on Windows the key is refused at startup. |
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
@@ -706,7 +723,7 @@ because replacing a program means writing in the directory it sits in. The same 
 | What you write | What it means |
 |---|---|
 | a **bare file name** — `otelcol-contrib` | The program lives in `<supervisor_dir>/<name>/program/`, a directory this Client creates and owns. **It takes package updates**, and it is the **only** shape a Server may deliver. |
-| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. Only an operator may write it in `client.toml`; a Server-delivered block that names one is refused. |
+| an **absolute path** — `/usr/local/bin/otelcol` | The machine's program, put there by a distribution package or configuration management. It is started and supervised, never written to. Only an operator may write it in `supervisor.toml`; a Server-delivered block that names one is refused. |
 | anything else — `./x`, `bin/x` | A startup error, rather than a guess. |
 
 A block a Server pushes as part of a Supervisor set is held to the first row alone: it
@@ -772,12 +789,12 @@ Each Supervisor owns everything under its own directory:
 
 The directory lives exactly as long as its `[[supervisor]]` block: a Supervisor removed by an
 applied set takes it along, whole. A directory no block names — left by a purge that
-could not finish, or by a block removed from `client.toml` by hand while the Client was down —
+could not finish, or by a block removed from `supervisor.toml` by hand while the Client was down —
 is warned about at startup and never deleted automatically: remove it by hand once you are sure
 its Supervisor is gone for good.
 
 **Persisted connection settings override the file.** `<state_dir>/connection-settings.pb` takes
-precedence over `endpoint`, `[auth]`, and the intervals in `client.toml`. Delete it to revert to
+precedence over `endpoint`, `[auth]`, and the intervals in `supervisor.toml`. Delete it to revert to
 what the file says.
 
 ## Package updates
@@ -886,17 +903,18 @@ the Server *replace* that version is opt-in, and the opt-in **names the package*
 
 ```toml
 [self_update]
-package = "opamp-fleet-client"
+package = "supervisor"
 ```
 
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
-another Agent type either, and this Client's type is the constant `opamp-fleet-client`.
-Neither replaces the other — an operator who types a Collector artifact as `opamp-fleet-client` gets
+another Agent type either, and this Client's type is the constant `supervisor` — the same string,
+which is why the Set that carries the Client is named and typed alike.
+Neither guard replaces the other — an operator who types a Collector artifact as `supervisor` gets
 past the Server, and this name is what is left.
 
 On an accepted offer the artifact is verified like any other, staged as a new version *beside* the
-running one in the install layout, and proved by running `opamp-fleet-client self-check` on it before the
+running one in the install layout, and proved by running `supervisor self-check` on it before the
 `current` pointer moves — which asks two things at once: does this binary run at all on this host,
 and is it actually an OpAMP Fleet Client at the version offered. The process then shuts down exactly
 as an ordinary stop does — Managed Processes stopped gracefully, the goodbyes sent — and
@@ -908,37 +926,51 @@ to the Server by whichever version came up.
 Self-update therefore requires an installed service — it is the service manager that performs the
 restart.
 
+**What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
+an `.rpm`, an MSI or a hand did. It reports that under the name `[self_update]` consents to from its
+very first report, which is what lets the Server hold a Set against it: since
+[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) a Set reaches an Agent only as
+an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
+The practical consequence: a Client installed by hand is not taken over by the fleet's package the
+moment one is published at the version it already is — it comes under package management with the
+next release that is actually newer.
+
 **Replacing the binary by hand does not fool it.** What the Client installed is recorded in
 `<state_dir>/installed-package.json`, and `service uninstall` deletes neither the install layout nor
 the state — so installing an older Client afterwards comes up on top of that record. A record that
 does not name the version the running binary *is* is discarded at startup, with a warning naming
-both versions. The Client then reports no package, the Server offers the published one again, and
-the host is updated back to it. To hold a host on an older Client, retract the package on the Server
-first ([`publication`](server.md#packages-distributing-software)) — retracting withdraws the offer
-and uninstalls nothing.
+both versions. The Client then reports the version it actually runs, the Server sees its published
+package as the upgrade it now is, and the host is updated back to it. To hold a host on an older
+Client, retract the package on the Server first
+([`publication`](server.md#packages-distributing-software)) — retracting withdraws the offer and
+uninstalls nothing.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`opamp-fleet-client_<version>_<os>_<arch>.7z` — and that file
-*is* a package artifact: it holds the Client under the name the install layout gives it, so it is
-uploaded exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies.
-Nothing repacks it. The fields are separated by `_` because two of them carry `-` — the name
-(`opamp-fleet-client`) and a prerelease version (`1.2.3-dev`) — so the last two fields are the
-platform and can be read off the name.
+`supervisor_<version>_<os>_<arch>.tar.gz`
+([ADR-0078](../adr/0078-a-release-is-named-after-the-set-it-becomes.md)) — and that file *is* a
+package artifact: it holds the Client under the name the install layout gives it, so it is uploaded
+exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing
+repacks it. The files are named after the **Set** they become, not after the product inside them:
+the member is `supervisor`, which is what a Client looks for, while the file says which
+package it is. The fields are separated by `_` because two of them carry `-` — a package name and a
+prerelease version (`1.2.3-dev`) — so the last two fields are the platform and can be read off the
+name.
 
 **The version in the query is the release number** — the one in the file name — and the
 platform is required with it, spelled as the Agent reports it:
 
 ```console
-$ curl -X PUT --data-binary @opamp-fleet-client_1.2.3_linux_amd64.7z \
-       "http://<server>:4321/api/v1/packages/opamp-fleet-client?version=1.2.3&os=linux&arch=amd64"
+$ curl -X PUT --data-binary @supervisor_1.2.3_linux_amd64.tar.gz \
+       "http://<server>:4321/api/v1/packages/supervisor?version=1.2.3&os=linux&arch=amd64"
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "opamp-fleet-client"}' \
-       http://<server>:4321/api/v1/packages/opamp-fleet-client/type
+       -d '{"service_name": "supervisor"}' \
+       http://<server>:4321/api/v1/packages/supervisor/type
 ```
 
 The second call is what arms the package: until a type is set it is offered to nobody, so
 an artifact uploaded and left untyped reaches no Client at all. For this one the type is the
-Client's own, `opamp-fleet-client`.
+Client's own, `supervisor` — and so is the Set's name, which is what `[self_update] package` above
+consents to. The *file* keeps its published name; the Set is a label the Server holds.
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the
 build came from — `1.2.3` and `1.2.3+a1b2c3d` are the same release, and the content hash is what
@@ -947,7 +979,7 @@ as `1.2.3` is refused, because a build heading for a release is not that release
 
 Two things follow. Passing the full string still works, but if you do, remember that a `+` in a URL
 query is decoded as a *space* — it has to be written `%2B`, which is the reason the release number
-is the better thing to type. And `opamp-fleet-client --version` prints the full string on any host,
+is the better thing to type. And `supervisor --version` prints the full string on any host,
 which is what to quote when asking which build a host runs.
 
 ## Connecting to the Server

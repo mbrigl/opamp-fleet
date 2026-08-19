@@ -29,7 +29,8 @@ a service.
   and in sync, which Configurations match them, and which packages they have installed.
 - **Distributes packages**: versioned Sets of uploaded artifacts, or references to ones hosted
   elsewhere, aimed at part of the fleet by Selector — released only by an explicit rollout act,
-  and rolled back by rolling the older version out again.
+  and only ever forwards: a Set reaches an Agent when it is an upgrade over the version that
+  Agent reports installed, never when it would move it back or leave it where it is.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
   command.
 - **Offers new connection settings**: a credential, a heartbeat interval, or an entirely
@@ -430,16 +431,33 @@ no artifact that can be known to be meant for it or to run on it, and guessing i
 outage starts. Every Client this project ships reports all three; a foreign OpAMP client that
 reports no type says so on its fleet row rather than leaving you with a rollout that never starts.
 
-**The rollback is the same act, pointed at the older version**. Versions are kept side by side —
-a new version is a new Set — so taking a bad one back is rolling the previous version out again:
+**A rollout act never moves an Agent backwards.** Since
+[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) the version an Agent reports
+installed is part of matching: a Set reaches it only if the Set's version is **greater**, compared
+as SemVer (major, minor, patch, then the pre-release rules). Equal is not greater — a Set an Agent
+already runs reaches it with nothing — and a reported version nothing can order is refused rather
+than guessed at. The bulk act skips such Agents; the per-Agent act answers `409` and says which
+version the Agent reports.
 
-```console
-$ curl -X POST "http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/1.2.2/rollout"
-```
+**An Agent that reports no version for the package is held against the version it reports
+*running*** — its `service.version`
+([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)).
+That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
+installed no package and has none to report: no Client is offered the version it already runs, and
+none is moved backwards. A reported version for the package itself always wins over it — that one is
+a statement about the package — and a `service.version` nothing can order (`1.19`, `24.04.1`) simply
+says nothing, so an Agent whose program numbers itself its own way stays reachable.
 
-It reaches exactly the Agents the Set fits and aims at, which is also how a rollback can be
-tried on one Agent first — the per-Agent rollout accepts any version that fits, not only the
-newest.
+Versions are still kept side by side — a new version is a new Set, and the older artifact stays in
+the store — but **taking a bad version back is not a rollout**:
+
+- on the host, the version a package superseded is retained for `retain_previous_secs` and put
+  back when the new one fails its health gate (see the Client manual, *Package updates: rollback
+  and retention*);
+- a Client that will not stay up after its own self-update goes back by itself;
+- fleet-wide, what is left is publishing the older content **as a new, greater version** — which
+  is honest about the fact that the fleet moves forward, and is the only thing the matching rule
+  will carry.
 
 **Deleting.** `DELETE /api/v1/packages/otelcol/otelcol-contrib/0.109.0` removes the Set — its
 entries, artifacts, metadata, and every per-Agent assignment that referenced it; the entry route
@@ -481,20 +499,20 @@ show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) an
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout rings without touching the host](#labels-rollout-rings-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
-| `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act. Empty body: everything the fleet view shows as waiting for this Agent. `{"configuration": "…"}` or `{"package": {"name": "…", "agent_type": "…", "version": "…"}}`: that one resource — any version that fits, which is how a rollback is tried on one Agent first. |
+| `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act. Empty body: everything the fleet view shows as waiting for this Agent. `{"configuration": "…"}` or `{"package": {"name": "…", "agent_type": "…", "version": "…"}}`: that one resource — any version that fits, aims at, and would upgrade this Agent; `409` with the reason when it would not. |
 | `GET /api/v1/configurations` | Every Configuration — the saved revision each. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
 | `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
 | `POST /api/v1/configurations/{name}/rollout` | Roll the saved revision out to every Agent it currently fits and aims at — the moment a change starts travelling. Answers how many Agents were assigned. |
 | `DELETE /api/v1/configurations/{name}` | Remove it — from every Agent it was rolled out to as well, which those Agents apply. |
-| `GET /api/v1/packages` | Every stored Set (never the artifact bytes), with `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
+| `GET /api/v1/packages` | Every stored Set (never the artifact bytes), with `matching_agents` and `targeted_agents` — see [Whom a package actually reaches](#whom-a-package-actually-reaches). |
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}` | Create a Set, or update its Selector and kind. Body: `{"selector": {…}, "addon": false}`. **Distributes nothing**. |
 | `GET /api/v1/packages/{name}/{agent_type}/{version}` | One Set. |
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body; optional `?signature=<hex>`). `409` while the Set is rolled out to an Agent. |
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "signature": "…", "headers": {…}}`. |
 | `DELETE /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Set is rolled out to an Agent. |
 | `PUT /api/v1/packages/{name}/{agent_type}/{version}/selector` | Set whom a rollout act would release it to. Never distributes. |
-| `POST /api/v1/packages/{name}/{agent_type}/{version}/rollout` | Roll the Set out to every Agent it fits and its Selector aims at — the moment a rollout starts. An older version here is the rollback. `409` while the Set holds no entries. |
+| `POST /api/v1/packages/{name}/{agent_type}/{version}/rollout` | Roll the Set out to every Agent it fits, its Selector aims at, and it would upgrade — the moment a rollout starts. Agents it would not move forward are skipped, and `assigned_agents` counts what it actually changed. `409` while the Set holds no entries. |
 | `DELETE /api/v1/packages/{name}/{agent_type}/{version}` | Remove the Set — and every per-Agent assignment that referenced it. Uninstalls nothing. |
 | `GET /api/v1/packages/{name}/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. |
 
@@ -502,12 +520,17 @@ The package routes answer `404` while package delivery is not configured on this
 
 ### Whom a package actually reaches
 
-Every stored package carries **`targeted_agents`**: how many Agents in the fleet it would be offered
-to right now. It is not a separate calculation — the Server resolves it exactly as it resolves the
-offer itself, fitting by Agent type and platform and then aiming by Selector, so the number cannot
-promise a reach the fleet does not get.
+Every stored package carries **two** counts, and reading them together is the point:
 
-**Zero is the number to look for.** A package targets nobody when
+- **`matching_agents`** — how many Agents this Set fits and its Selector aims at, whatever they
+  currently run.
+- **`targeted_agents`** — how many of those a rollout act would actually change: the ones this Set
+  would **upgrade**. This is the number the UI puts on the *Roll out* button.
+
+Neither is a separate calculation — the Server answers them exactly as it matches a Set to an
+Agent, so a number cannot promise a reach the fleet does not get.
+
+**Zero in `matching_agents` is the number to look for.** A package aims at nobody when
 
 - its **Agent type** is unset or misspelled — compared raw, with nothing to catch a typo;
 - no **artifact** matches a platform any Agent reports;
@@ -517,7 +540,11 @@ promise a reach the fleet does not get.
 
 None of those is an upload error — the package stores fine, validates fine, and reaches no one — so
 without this number a mistyped rollout looks exactly like a successful one until somebody notices
-the version never moved.
+the version never moved. The UI shows this case as `⚠ 0`.
+
+**Zero in `targeted_agents` with a non-zero `matching_agents` is not a fault.** It means every
+Agent this Set aims at already runs this version or a newer one, so there is nothing for an act to
+do; the UI states it plainly rather than warning about it.
 
 It counts the fleet **as reported so far**, which means a package staged ahead of the hosts it is
 for legitimately reads `0`. That is why it is a number to read rather than something the Server
@@ -540,7 +567,7 @@ knowing by name:
 | `matched_configurations`, `desired_hash` | What it should be running. |
 | `remote_config_status`, `remote_config_error`, `in_sync` | What it reports about the last configuration it was sent. |
 | `effective_config` | What it says it is actually running. |
-| `healthy`, `health_status`, `health_error`, `connected`, `transport`, `last_seen_ms` | Liveness — and `connected` alone is not it. A Supervisor whose Managed Process will not start is still `connected` (the Supervisor lives); `healthy: false` with `health_status` (`no process installed`, `awaiting configuration`, …) and the reason in `health_error` is where that shows. The UI's *Health* column renders exactly these three. |
+| `healthy`, `health_status`, `health_error`, `connected`, `transport`, `last_seen_ms` | Liveness — and `connected` alone is not it. A Supervisor whose Managed Process will not start is still `connected` (the Supervisor lives); `healthy: false` with `health_status` (`no process installed`, `awaiting configuration`, …) and the reason in `health_error` is where that shows. The UI's *Health* column renders exactly these three: the badge carries `health_status`, and `health_error` — often a whole command line — opens in a dialog when you click it, so one broken Agent does not take twenty rows of screen. |
 | `packages`, `package_conflict` | Package installations, and why an Agent that accepts packages is being offered none. |
 | `package_error` | Why the Agent refused the *offer itself* — no package status carries this, and the Client's own Agent refusing a package `[self_update]` did not name is the case it exists for. |
 | `available_components` | Reported by a Collector carrying the `opampextension`. |
@@ -549,7 +576,7 @@ knowing by name:
 
 A Selector aims a Configuration or a package at the Agents whose attributes match it — and the
 attribute a staged rollout actually wants, `rollout = "canary"`, is one you invent. Until now it
-could only be invented in `[attributes]` in `client.toml`, so moving a host between rings meant
+could only be invented in `[attributes]` in `supervisor.toml`, so moving a host between rings meant
 editing a file **on that host** and restarting it.
 
 **Labels are that attribute, set from here**:
@@ -573,7 +600,7 @@ for its next poll.
 key. Reported attributes are not annotations: `os.type` and `host.arch` decide which artifact fits
 the machine and `service.name` decides which packages fit it at all. If a
 label could outrank them, a slip here would offer a host a binary built for another one. Where an
-Agent reports something wrong, the fix belongs in that host's `client.toml`, where the wrong value
+Agent reports something wrong, the fix belongs in that host's `supervisor.toml`, where the wrong value
 comes from.
 
 If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
@@ -598,7 +625,7 @@ about that Agent.
 is revoked: a credential here proves *fleet membership*, never which Agent is speaking, so there is
 none belonging to one Agent to take away. A Client that is still running and still pointed at this
 Server reports again within its polling or heartbeat interval and the row comes back. Forgetting
-tidies the view; **to remove an agent for good, stop it on the host** (`opamp-fleet-client service
+tidies the view; **to remove an agent for good, stop it on the host** (`supervisor service
 uninstall`) and then forget it here.
 
 It is refused with `409` while the Agent is still reporting — connected, and heard from within the

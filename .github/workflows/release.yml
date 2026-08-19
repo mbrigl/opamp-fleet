@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the Client for every target it ships on and publishes one `.7z` per target (ADR-0025).
+# Builds the Client for every target it ships on and publishes one `.tar.gz` per target
+# (ADR-0025, amended by ADR-0078 for the container and the artifact name).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
 # `version/*` tag from it (ADR-0026) — *before* it builds, so ADR-0009's `build.rs` finds a tag on
@@ -28,7 +29,15 @@ permissions:
   contents: read
 
 env:
-  PRODUCT: opamp-fleet-client
+  # What every published artifact is named after, and the name of the Set an operator uploads them
+  # to (ADR-0078). The same string the Client's own Agent reports as its type since ADR-0077 and —
+  # since ADR-0080 — the name of the program inside the archive, of its service, and of its
+  # configuration file. A Set built from these files is `supervisor@<version>@supervisor`.
+  #
+  # The one name that is *not* this is the dpkg/rpm/MSI package identity, which stays
+  # `opamp-fleet-client` (ADR-0080) so that an `apt`, `dnf` or MSI upgrade stays an upgrade; it
+  # lives in crates/client/Cargo.toml and packaging/windows/supervisor.wxs, not here.
+  ARTIFACT: supervisor
 
 jobs:
   # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
@@ -129,8 +138,8 @@ jobs:
           set -euo pipefail
           # `-p client` is the package (its name is a build-time identifier); the binary it
           # produces is the shipped name (ADR-0028).
-          cargo build -p client --bin opamp-fleet-client --locked
-          full=$(./target/debug/opamp-fleet-client --version | awk '{print $NF}')
+          cargo build -p client --bin supervisor --locked
+          full=$(./target/debug/supervisor --version | awk '{print $NF}')
           echo "the binary reports $full"
           version='${{ steps.read.outputs.version }}'
           if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
@@ -171,14 +180,14 @@ jobs:
       - name: Add the target
         run: rustup target add ${{ matrix.target }}
       - name: Build the Client
-        run: cargo build --release -p client --bin opamp-fleet-client --target ${{ matrix.target }} --locked
+        run: cargo build --release -p client --bin supervisor --target ${{ matrix.target }} --locked
       # A host build: it runs here, on this runner, to pack the artifact.
       - name: Build the packer
         run: cargo build --release -p package-tools --bin opamp-package-sign --locked
       - name: The binary agrees with the name it will be given
         if: matrix.native
         run: |
-          reported=$(./target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }} --version | awk '{print $NF}')
+          reported=$(./target/${{ matrix.target }}/release/supervisor${{ matrix.suffix }} --version | awk '{print $NF}')
           expected='${{ needs.version.outputs.full }}'
           if [ "$reported" != "$expected" ]; then
             echo "::error::this target reports $reported, the release is $expected"
@@ -190,23 +199,24 @@ jobs:
           # `_` between the four fields, because two of them contain `-`: the name grammar is
           # `[a-z0-9-]` (ADR-0010) and a prerelease version spells itself with a hyphen, so a
           # hyphen-separated name does not parse back (ADR-0032).
-          name="${PRODUCT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.7z"
-          # The packer names the single member after the program — `opamp-fleet-client`, which is
+          name="${ARTIFACT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
+          # The packer names the single member after the program — `supervisor`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
+          # The *file* is named after the Set (ADR-0078); the member inside it is the product.
           sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
-            --format 7z \
+            --format tar.gz \
             --out "$name" \
-            "target/${{ matrix.target }}/release/opamp-fleet-client${{ matrix.suffix }}")
+            "target/${{ matrix.target }}/release/supervisor${{ matrix.suffix }}")
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           # Every artifact of this row shares these four fields; only the extension differs
           # (ADR-0046 clause 4).
-          echo "STEM=${name%.7z}" >> "$GITHUB_ENV"
+          echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
       # ---- ADR-0046: the native installers, beside the archive and never instead of it. ----
       #
       # All of them package the binary built above rather than building their own, so the bytes an
-      # operator installs from a `.deb` are the bytes the `.7z` carries and the checksum published
+      # operator installs from a `.deb` are the bytes the `.tar.gz` carries and the checksum published
       # for one is provable against the other.
 
       - name: Install the Linux packaging tools
@@ -273,10 +283,10 @@ jobs:
           wix build \
             -arch x64 \
             -d Version=${{ needs.version.outputs.version }} \
-            -d BinaryPath="target/${{ matrix.target }}/release/opamp-fleet-client.exe" \
+            -d BinaryPath="target/${{ matrix.target }}/release/supervisor.exe" \
             -ext WixToolset.UI.wixext \
             -o "$STEM.msi" \
-            packaging/windows/opamp-fleet-client.wxs \
+            packaging/windows/supervisor.wxs \
             packaging/windows/WixUI_OpampInstallDir.wxs \
             packaging/windows/EndpointDlg.wxs
 
@@ -295,8 +305,8 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.name }}
           path: |
-            ${{ env.STEM }}.7z
-            ${{ env.STEM }}.7z.sha256
+            ${{ env.STEM }}.tar.gz
+            ${{ env.STEM }}.tar.gz.sha256
             ${{ env.STEM }}.deb
             ${{ env.STEM }}.deb.sha256
             ${{ env.STEM }}.rpm
@@ -339,23 +349,23 @@ jobs:
           | you want to | take |
           |---|---|
           | install this on a host | the \`.deb\`, \`.rpm\` or \`.msi\` |
-          | update a fleet from its Server | the \`.7z\` |
+          | update a fleet from its Server | the \`.tar.gz\` |
 
           ## Installing on a host
 
-          The installers deliver the binary and then run \`opamp-fleet-client service install\`
+          The installers deliver the binary and then run \`supervisor service install\`
           themselves — the same install every platform gets, not a second one. **They register the
           service and leave it stopped**: a Client with no configuration would dial the development
           default and manage nothing (ADR-0027), so starting it is the last step and it is yours.
 
           \`\`\`console
           # Debian, Ubuntu
-          sudo apt install ./${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.deb
+          sudo apt install ./${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_linux_amd64.deb
           # RHEL, Fedora, openSUSE
-          sudo dnf install ./${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.rpm
+          sudo dnf install ./${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_linux_amd64.rpm
 
-          sudo opamp-fleet-client service install --endpoint wss://<server>/v1/opamp
-          sudo systemctl start opamp-fleet-client
+          sudo supervisor service install --endpoint wss://<server>/v1/opamp
+          sudo systemctl start supervisor
           \`\`\`
 
           Use \`service install --interactive\` in place of \`--endpoint\` to be asked for the
@@ -366,7 +376,7 @@ jobs:
           installs unattended, which is how Intune, Group Policy and SCCM deploy it:
 
           \`\`\`console
-          msiexec /i ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_windows_amd64.msi /qn ^
+          msiexec /i ${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_windows_amd64.msi /qn ^
             INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
             ENDPOINT="wss://<server>/v1/opamp"
           \`\`\`
@@ -376,25 +386,25 @@ jobs:
 
           ## Updating a fleet
 
-          Hand the \`.7z\` artifacts to a Server under its release number for a Client self-update
+          Hand the \`.tar.gz\` artifacts to a Server under its release number for a Client self-update
           (ADR-0020, ADR-0029) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
           Upload **all** of them into **one** Set (ADR-0052) — identified by the package name, the
-          Agent type \`opamp-fleet-client\`, and this release's version — with one entry per
+          Agent type \`supervisor\`, and this release's version — with one entry per
           platform: the Server offers each Agent the entry built for the machine it reported
           (ADR-0031), so a mixed fleet updates from a single
-          \`[self_update] package = "opamp-fleet-client"\`. Each file is named
-          \`<name>_<version>_<os>_<arch>.7z\` (ADR-0032), and the last two fields are exactly the
+          \`[self_update] package = "supervisor"\`. Each file is named
+          \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0032), and the last two fields are exactly the
           pair an Agent reports as \`os.type\` and \`host.arch\` — so the upload reads them out of
           the name and needs no table. The Set is a draft until the final publication call, so all
           five platforms release together (ADR-0043):
 
           \`\`\`console
-          set="http://<server>:4321/api/v1/packages/opamp-fleet-client/opamp-fleet-client/${{ needs.version.outputs.version }}"
+          set="http://<server>:4321/api/v1/packages/supervisor/supervisor/${{ needs.version.outputs.version }}"
           curl -X PUT -H 'Content-Type: application/json' -d '{}' "\$set"
-          for f in *_${{ needs.version.outputs.version }}_*.7z; do
-            p=\${f%.7z}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
+          for f in *_${{ needs.version.outputs.version }}_*.tar.gz; do
+            p=\${f%.tar.gz}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
             curl -X PUT --data-binary @"\$f" "\$set/entries/\$os/\$arch"
           done
           curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' "\$set/publication"
@@ -408,9 +418,9 @@ jobs:
           which has no native installer here:
 
           \`\`\`console
-          7z x ${{ env.PRODUCT }}_${{ needs.version.outputs.version }}_linux_amd64.7z
-          ./opamp-fleet-client service install --interactive   # root; answers write the configuration
-          ./opamp-fleet-client service start
+          tar xzf ${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_linux_amd64.tar.gz
+          ./supervisor service install --interactive   # root; answers write the configuration
+          ./supervisor service start
           \`\`\`
 
           Nothing is signed yet: Windows will show an unknown publisher, and \`rpm\` reports no
@@ -420,4 +430,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ needs.version.outputs.version }}" \
             --notes-file notes.md \
-            *.7z *.deb *.rpm *.msi SHA256SUMS
+            *.tar.gz *.deb *.rpm *.msi SHA256SUMS

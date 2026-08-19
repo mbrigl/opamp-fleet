@@ -67,12 +67,13 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             .with_attributes(config.agent_attributes(None))
             .with_namespace(config.service_namespace.clone()),
     );
-    // Consenting to be updated is its own decision, made per Client, and it names the package it
-    // will take — anything else is refused rather than written over this binary (ADR-0020).
-    if let Some(self_update) = &config.self_update {
-        self_state.accept_packages_named(self_update.package.clone());
+    // Consenting to be updated names the package it will take — anything else is refused rather
+    // than written over this binary (ADR-0020). Since ADR-0075 the consent stands unless the file
+    // withdraws it, so this is the ordinary path rather than the opted-into one.
+    if let Some(package) = config.self_update_package() {
+        self_state.accept_packages_named(package.to_string());
     }
-    // The self-Agent's effective configuration is its own file — `client.toml` is what this
+    // The self-Agent's effective configuration is its own file — `supervisor.toml` is what this
     // Client runs (a file that fails to load fails startup), so the fleet view can finally answer
     // it. The text was redacted at load; without it, echoing a stored offer would say nothing
     // about this Client. No file means the defaults run, and there is nothing truthful to show.
@@ -80,7 +81,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         self_state.set_process_effective_config(opamp::proto::EffectiveConfig {
             config_map: Some(opamp::proto::AgentConfigMap {
                 config_map: std::collections::HashMap::from([(
-                    "client.toml".to_string(),
+                    "supervisor.toml".to_string(),
                     opamp::proto::AgentConfigObject {
                         role: String::new(),
                         body: source.clone().into_bytes(),
@@ -430,6 +431,11 @@ mod tests {
             "an owned program is package-updatable, so the Client installs packages"
         );
 
+        // An absolute program is the machine's, so *that Supervisor* takes no package — but the
+        // Client's own Agent does, since ADR-0075 made its consent the default. What
+        // `installs_packages` answers is a question about the whole Engine, and the honest answer
+        // here is yes: the startup check it feeds warns about an unconfigured verification key, and
+        // a self-update is exactly a package that key would protect.
         let foreign = dir.path().join("elsewhere/managed-agent");
         let machines: ClientConfig = toml::from_str(&config(
             dir.path(),
@@ -439,8 +445,25 @@ mod tests {
         .expect("parse");
         let engine = build_engine(&machines, &shutdown).expect("build");
         assert!(
+            engine.installs_packages(),
+            "the Client's own Agent consents by default, whatever its Supervisors name"
+        );
+
+        // Withdraw that consent and nothing in this Engine takes a package any more, which is what
+        // the absolute program alone used to be enough for.
+        let withdrawn: ClientConfig = toml::from_str(&format!(
+            "{}\n[self_update]\nenabled = false\n",
+            config(
+                dir.path(),
+                &foreign.to_string_lossy(),
+                Some(dir.path().join("other")),
+            )
+        ))
+        .expect("parse");
+        let engine = build_engine(&withdrawn, &shutdown).expect("build");
+        assert!(
             !engine.installs_packages(),
-            "an absolute program is the machine's; the Client installs no packages"
+            "an absolute program is the machine's, and a withdrawn consent is the Client's own"
         );
     }
 
@@ -530,13 +553,13 @@ mod tests {
     }
 
     /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:
-    /// the first report carries `client.toml`'s (redacted) text, which is what fills the fleet
+    /// the first report carries `supervisor.toml`'s (redacted) text, which is what fills the fleet
     /// view's empty column for every Client.
     #[tokio::test]
     async fn the_self_agent_reports_its_file_as_the_effective_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(
             &path,
             format!(
@@ -555,7 +578,7 @@ mod tests {
             .as_ref()
             .expect("the first report is a full one and carries the effective configuration");
         let map = &effective.config_map.as_ref().expect("map").config_map;
-        let body = String::from_utf8(map["client.toml"].body.clone()).expect("utf-8");
+        let body = String::from_utf8(map["supervisor.toml"].body.clone()).expect("utf-8");
         assert!(body.contains("# written by the operator"), "{body}");
         assert!(body.contains("endpoint = \"ws://127.0.0.1:1/v1/opamp\""));
         assert!(

@@ -320,7 +320,7 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
 
     for (name, service_name) in [
         ("for-collectors", support::AGENT_TYPE),
-        ("for-clients", "opamp-fleet-client"),
+        ("for-clients", "supervisor"),
     ] {
         let put = client
             .put(url(

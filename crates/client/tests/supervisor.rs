@@ -18,7 +18,7 @@ fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
 }
 
 fn spawn_client(config_path: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+    Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config_path)
         .stdout(Stdio::null())
@@ -36,8 +36,8 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
         command = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let path = dir.join("client.toml");
-    std::fs::write(&path, config).expect("write client.toml");
+    let path = dir.join("supervisor.toml");
+    std::fs::write(&path, config).expect("write supervisor.toml");
     path
 }
 
@@ -61,8 +61,8 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
         command = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, config).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, config).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for("the stub's marker file", Duration::from_secs(20), || {
@@ -120,8 +120,8 @@ fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
         supervisors = supervisor_dir.to_string_lossy(),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, config).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, config).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for("the stub's marker file", Duration::from_secs(20), || {
@@ -168,8 +168,8 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
         binary = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for(
@@ -210,8 +210,8 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
         binary = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
     wait_for(

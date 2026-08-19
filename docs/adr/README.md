@@ -99,7 +99,13 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0068](0068-icinga-2-is-supervised-by-a-kind-of-its-own.md) | Icinga 2 is supervised by a kind of its own — the relocation arguments, the directories, and the validation are the Supervisor's | 🟢 accepted |
 | [0069](0069-the-icinga-master-signs-the-ticket-travels-as-a-configuration.md) | The Icinga master stays the CA — the ticket travels as a Configuration, and the Supervisor enrols once | 🟢 accepted |
 | [0070](0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md) | Repacked vendor packages as relocatable Icinga 2 trees — everything but glibc rides along | 🟢 accepted |
-| [0071](0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md) | One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion | 🟡 proposed |
-| [0072](0072-the-windows-artifact-is-verified-by-its-publisher.md) | The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH | 🟡 proposed |
-| [0073](0073-both-listeners-bound-connection-setup.md) | Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it | 🟡 proposed |
-
+| [0071](0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md) | One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion | 🟢 accepted |
+| [0072](0072-the-windows-artifact-is-verified-by-its-publisher.md) | The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH | 🟢 accepted |
+| [0073](0073-both-listeners-bound-connection-setup.md) | Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it | 🟢 accepted |
+| [0074](0074-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
+| [0075](0075-the-self-update-consent-stands-unless-it-is-withdrawn.md) | The self-update consent stands unless it is withdrawn — and the installers can ask | 🟢 accepted |
+| [0076](0076-a-set-reaches-an-agent-only-as-an-upgrade.md) | A Set reaches an Agent only as an upgrade — the reported installed version is the fourth matching test | 🟢 accepted |
+| [0077](0077-the-clients-own-agent-type-is-supervisor.md) | The Client's own Agent type is `supervisor` — and so is the package that carries it | 🟢 accepted |
+| [0078](0078-a-release-is-named-after-the-set-it-becomes.md) | A release is named after the Set it becomes, and packed as `.tar.gz` like every other package | 🟢 accepted |
+| [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | 🟢 accepted |
+| [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | 🟡 proposed |

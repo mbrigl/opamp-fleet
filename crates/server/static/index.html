@@ -96,7 +96,14 @@
       .btn-primary:hover { background: var(--primary-hover); }
       .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
       .btn-ghost:hover { background: var(--row-hover); }
-      /* A row-sized button: the rollout act lives on the Set's table row. */
+      /* The rollout act, wearing the Healthy badge's green and its shape: the same soft green the
+         table already uses for "this is well", pressable. Hover inverts it, as the ✕ disc does. */
+      .btn-ok {
+        background: var(--soft-green-bg); color: var(--soft-green-fg);
+        border-radius: 999px; padding: 3px 10px; font-size: 12px;
+      }
+      .btn-ok:hover { background: var(--soft-green-fg); color: var(--soft-green-bg); }
+      /* A button sized to sit inside a form line rather than to head one. */
       .btn-sm { padding: 4px 12px; font-size: 12px; }
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
@@ -138,6 +145,7 @@
          what you are looking at. */
       .chip.selected { background: var(--accent); color: var(--accent-fg); }
       .chip.clickable { cursor: pointer; }
+      .pill.clickable { cursor: pointer; }
       textarea {
         width: 100%; min-height: 120px; padding: 11px; border-radius: 8px;
         border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
@@ -235,12 +243,14 @@
       .cfg { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .cfg.cfg-open { cursor: pointer; }
       .cfg.cfg-open:hover { color: var(--text); }
-      /* The full effective configuration is a document, not a cell: the truncated column opens it
-         whole in a dialog, where it scrolls inside its own box. */
-      .cfg-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; padding: 16px 18px; width: min(760px, 92vw); }
-      .cfg-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
-      .cfg-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
-      .cfg-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+      /* Text that is a document rather than a cell — an effective configuration, the reason a
+         Supervisor will not start — opens whole in this dialog, where it scrolls inside its own
+         box. A row stays one line high whatever the text is: a column that grows to fit the
+         longest error pushes every other row off the screen, and the error is read once. */
+      .text-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 12px; padding: 16px 18px; width: min(760px, 92vw); }
+      .text-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+      .text-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+      .text-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -327,8 +337,7 @@
               <th style="width: 90px">Kind</th>
               <th>Platforms</th>
               <th>Selector</th>
-              <th style="width: 110px">Reach</th>
-              <th style="width: 170px"></th>
+              <th style="width: 140px">Reach</th>
             </tr>
           </thead>
           <tbody id="sets"></tbody>
@@ -438,14 +447,16 @@
       </div>
     </div>
 
-    <!-- The whole effective configuration, opened from its truncated column. A native <dialog>:
+    <!-- Text too long for a cell, opened from the cell that summarises it: an effective
+         configuration from its truncated column, an error from the red badge that reports it. A
+         native <dialog>:
          the browser supplies the backdrop and the Esc-to-close, nothing here reinvents them. -->
-    <dialog id="config-dialog" class="cfg-dialog">
-      <div class="cfg-dialog-head">
-        <strong id="config-dialog-title"></strong>
-        <button id="config-dialog-close" class="btn btn-ghost">Close</button>
+    <dialog id="text-dialog" class="text-dialog">
+      <div class="text-dialog-head">
+        <strong id="text-dialog-title"></strong>
+        <button id="text-dialog-close" class="btn btn-ghost">Close</button>
       </div>
-      <pre id="config-dialog-body" class="cfg-full"></pre>
+      <pre id="text-dialog-body" class="text-full"></pre>
     </dialog>
 
     <script>
@@ -582,15 +593,26 @@
       // Baseline defines no status values, so the Agent's words are the most an operator can
       // be told. Gray when no health was ever reported — absence of a report is not a finding,
       // and a Foreign Agent that never promised ReportsHealth must not read as broken.
+      // A red badge and nothing else. The reason a process will not start is a paragraph — a
+      // linker error, a validation run's whole command line — and printed into the cell it makes
+      // that row twenty lines tall, which pushes every other Agent off the screen for a text that
+      // is read once and then acted on. So the row keeps the finding and the click carries the
+      // reason, the way the effective configuration column already works. Without an error there
+      // is nothing to open, and the badge stays a plain one rather than lying about being
+      // clickable.
+      function errorPill(a, kind, label, error) {
+        if (!error) return `<span class="pill red">${label}</span>`;
+        return `<span class="pill red clickable err-open" data-uid="${esc(a.instance_uid)}" data-kind="${kind}" title="Click to see the error">${label}</span>`;
+      }
       function healthPill(a) {
         if (a.healthy) return `<span class="pill green">Healthy</span>`;
         if (a.health_status || a.health_error)
-          return `<span class="pill red">${esc(a.health_status) || "Unhealthy"}</span>${a.health_error ? `<div class="err">${esc(a.health_error)}</div>` : ""}`;
+          return errorPill(a, "health", esc(a.health_status) || "Unhealthy", a.health_error);
         return `<span class="pill gray">—</span>`;
       }
       function configPill(a) {
         if (a.remote_config_status === "FAILED")
-          return `<span class="pill red">Failed</span>${a.remote_config_error ? `<div class="err">${esc(a.remote_config_error)}</div>` : ""}`;
+          return errorPill(a, "config", "Failed", a.remote_config_error);
         if (!a.in_sync) return `<span class="pill amber">Syncing…</span>`;
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
@@ -856,9 +878,19 @@
         if (cfg) {
           const agent = agents.find((x) => x.instance_uid === cfg.dataset.uid);
           if (agent && agent.effective_config) {
-            $("config-dialog-title").textContent = `${displayName(agent) || "agent"} — effective configuration`;
-            $("config-dialog-body").textContent = agent.effective_config;
-            $("config-dialog").showModal();
+            openTextDialog(`${displayName(agent) || "agent"} — effective configuration`, agent.effective_config);
+          }
+          return;
+        }
+        const errPill = e.target.closest(".err-open");
+        if (errPill) {
+          const agent = agents.find((x) => x.instance_uid === errPill.dataset.uid);
+          if (agent) {
+            const health = errPill.dataset.kind === "health";
+            openTextDialog(
+              `${displayName(agent) || "agent"} — ${health ? "health error" : "configuration error"}`,
+              health ? agent.health_error : agent.remote_config_error,
+            );
           }
           return;
         }
@@ -880,11 +912,17 @@
         currentAgent = currentAgent === tr.dataset.uid ? null : tr.dataset.uid;
         render();
       });
-      $("config-dialog-close").addEventListener("click", () => $("config-dialog").close());
+      // The one way this view shows a text that does not fit its cell.
+      function openTextDialog(title, body) {
+        $("text-dialog-title").textContent = title;
+        $("text-dialog-body").textContent = body;
+        $("text-dialog").showModal();
+      }
+      $("text-dialog-close").addEventListener("click", () => $("text-dialog").close());
       // A click on the backdrop closes too: the dialog's own box catches clicks inside it, so a
       // click that reaches the <dialog> element itself can only have hit the backdrop.
-      $("config-dialog").addEventListener("click", (e) => {
-        if (e.target === $("config-dialog")) $("config-dialog").close();
+      $("text-dialog").addEventListener("click", (e) => {
+        if (e.target === $("text-dialog")) $("text-dialog").close();
       });
       // Reflects the current selection in the bar above the table.
       function renderSelection() {
@@ -1085,13 +1123,19 @@
       // How many Agents a rollout act would reach, as the Server resolves it. Zero is the case
       // worth seeing — a mistyped agent type, a platform the fleet does not run, or a Selector
       // matching nobody — none of which is a rejected upload, so nothing else would say it.
-      // Checking the aim before the act is what the count exists for (ADR-0061).
+      // Checking the aim before the act is what the count exists for (ADR-0061) — so the count
+      // rides on the act it aims, and is a button only where it is a count the act can reach.
+      // Zero has two meanings since ADR-0076, and only one of them is a mistake: a set that aims
+      // at nobody is the amber warning, a set everyone already runs is a plain statement.
       function reachCell(p) {
         if (typeof p.targeted_agents !== "number") return "";
         if (p.targeted_agents === 0) {
-          return `<span class="pill amber" title="a rollout act would reach no agent — check the type, the platforms, and the selector">⚠ 0</span>`;
+          if (!p.matching_agents) {
+            return `<span class="pill amber" title="this set aims at no agent at all — check the type, the platforms, and the selector">⚠ 0</span>`;
+          }
+          return `<span class="pill gray" title="the ${p.matching_agents} agent(s) this set aims at already run this version or a newer one, so a rollout act would change nothing (ADR-0076)">${p.matching_agents} up to date</span>`;
         }
-        return `<span class="num" title="a rollout act would reach ${p.targeted_agents} agent(s)">${p.targeted_agents}</span>`;
+        return `<button class="btn btn-ok rollout-set-btn" data-key="${esc(setKey(p))}" title="Roll this set out to the ${p.targeted_agents} agent(s) it would upgrade (ADR-0061) — the press that changes the fleet. A set only reaches an agent it moves forward (ADR-0076); agents that appear later wait on the Agents tab. Refused while the set holds no entries.">Roll out (${p.targeted_agents})</button>`;
       }
 
       function renderSets() {
@@ -1111,7 +1155,6 @@
             <td><div class="chips">${entries || `<span class="chip">no entries yet</span>`}</div></td>
             <td>${esc(selectorText(p.selector)) || `<span class="sub">every agent of the type</span>`}</td>
             <td>${reachCell(p)}</td>
-            <td><button class="btn btn-ghost btn-sm rollout-set-btn" data-key="${esc(key)}" title="Roll this set out to every agent it fits and its selector aims at (ADR-0061) — the press that changes the fleet. Rolling out an older version is the rollback; agents that appear later wait on the Agents tab. Refused while the set holds no entries.">Roll out to all matching</button></td>
           </tr>`;
         }).join("");
       }

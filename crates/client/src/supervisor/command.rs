@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{ProcessSpec, Runner, VersionProbe};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
@@ -32,6 +32,11 @@ struct CommandSettings {
     /// command is invoked once with exactly these arguments and the first Semantic Versioning
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
+    ///
+    /// They are also this kind's **preflight** (ADR-0068): a package's staged program is run with
+    /// them before the running one is stopped, and a non-zero exit refuses the package with the
+    /// program's own message. Same arguments, same contract — a check that is cheap and touches
+    /// no state — asked where a refusal costs nothing rather than after the swap.
     #[serde(default)]
     version_args: Option<Vec<String>>,
     /// The signal that makes this process re-read its configuration in place (e.g. `"HUP"`),
@@ -115,6 +120,20 @@ impl Plugin for CommandPlugin {
             // strict SemVer read stays the default here (ADR-0068).
             parse: None,
         });
+        // The same arguments, asked of the *staged* program before the running one is stopped
+        // (ADR-0068). This kind knows no argument of its own to be safe to run — but an operator
+        // who set `version_args` has named one: the contract on that key is that the command may
+        // be invoked with exactly these and will print its version, which is precisely a check
+        // that is cheap and touches no state. Nothing new is asked of anyone; the arguments that
+        // already run after every swap now also run before one, where a refusal is free.
+        //
+        // Unset, this stays `None` and the kind behaves exactly as it did. No environment either,
+        // for the reason the probe has none: these arguments have always been invoked bare, so any
+        // that need one to succeed report no version today.
+        let preflight = settings.version_args.clone().map(|args| Preflight {
+            args,
+            env: Vec::new(),
+        });
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -124,9 +143,7 @@ impl Plugin for CommandPlugin {
             install: Some(install),
             archive_key: ctx.archive_key.clone(),
             version_probe,
-            // A Foreign Agent's invocation is the operator's; there is no argument this kind
-            // knows to be safe to run (ADR-0068).
-            preflight: None,
+            preflight,
             reload_signal: reload,
             events: ctx.events,
             commands: command_rx,

@@ -14,7 +14,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 /// The OpAMP Fleet Client command-line interface.
 #[derive(Debug, Parser)]
 #[command(
-    name = "opamp-fleet-client",
+    name = "supervisor",
     // The git-derived version baked in at build time (ADR-0009) — never clap's default, which
     // would silently report the static crate version.
     version = opamp::version::current(),
@@ -23,9 +23,9 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 pub struct Cli {
     // ADR-0008: the file is the whole configuration; the flag only says where it is.
     /// Path to the TOML configuration file; defaults apply if it does not exist.
-    #[arg(long, global = true, default_value = "client.toml")]
+    #[arg(long, global = true, default_value = "supervisor.toml")]
     pub config: PathBuf,
-    /// Instance name: selects the service identity (`opamp-fleet-client-<instance>`) and the
+    /// Instance name: selects the service identity (`supervisor-<instance>`) and the
     /// default install root, so several differently-configured Clients coexist on one host.
     #[arg(long, global = true, default_value = "default", value_parser = parse_instance_name)]
     pub instance: InstanceName,
@@ -173,6 +173,33 @@ pub struct InstallArgs {
     /// and in the installer log; write it into the file afterwards, or use `--interactive`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
+    // ADR-0075.
+    /// Withdraw the Client's consent to be updated by the Server, in the configuration this
+    /// install writes.
+    ///
+    /// The consent stands by default (ADR-0075): without this flag the written file names the
+    /// package that carries this Client and the fleet can replace it like any other program. With
+    /// it, the file says `enabled = false` and this Client becomes the one program on the host that
+    /// has to be updated by hand. The other non-interactive half of `--interactive`, for the same
+    /// installers `--endpoint` serves — the MSI's checkbox, and a `.deb`/`.rpm` post-install.
+    ///
+    /// Only ever affects a file this install *creates*; an existing configuration is kept
+    /// untouched, as it is for every other answer here.
+    #[arg(long, conflicts_with = "interactive")]
+    pub no_self_update: bool,
+    /// Name the package that carries this Client instead of taking its Agent type.
+    ///
+    /// The name is what the consent is narrowed to — an offer under any other name is refused and
+    /// reported, never applied — and the default is the Client's own Agent type, `supervisor` since
+    /// ADR-0077, which is what a Set carrying it is keyed by anyway. Name something else only if
+    /// your Set does.
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "interactive",
+        conflicts_with = "no_self_update"
+    )]
+    pub self_update_package: Option<String>,
     // ADR-0062.
     /// Run the service as this account instead of root/`LocalSystem`, and hand the instance's
     /// files — configuration, state, and the executable layout — over to it.
@@ -253,21 +280,31 @@ mod tests {
         Cli::try_parse_from(args).expect("valid CLI arguments")
     }
 
+    /// The `service install` arguments of a command line that must have them.
+    fn install(args: &[&str]) -> InstallArgs {
+        match parse(args).command {
+            Some(Command::Service {
+                action: ServiceAction::Install(install),
+            }) => install,
+            other => panic!("expected `service install`, parsed {other:?}"),
+        }
+    }
+
     #[test]
     fn bare_invocation_has_no_subcommand() {
         // No subcommand → the caller (main) defaults to `run`.
         let cli = parse(&["client"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.config, PathBuf::from("client.toml"));
+        assert_eq!(cli.config, PathBuf::from("supervisor.toml"));
         assert_eq!(cli.instance.as_str(), "default");
     }
 
     #[test]
     fn todays_invocation_still_parses() {
         // The pre-ADR-0010 command line: `client --config <path>`.
-        let cli = parse(&["client", "--config", "config/client.toml"]);
+        let cli = parse(&["client", "--config", "config/supervisor.toml"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.config, PathBuf::from("config/client.toml"));
+        assert_eq!(cli.config, PathBuf::from("config/supervisor.toml"));
     }
 
     #[test]
@@ -286,7 +323,7 @@ mod tests {
             "run",
             "--service",
             "--config",
-            "/etc/opamp/client.toml",
+            "/etc/opamp/supervisor.toml",
             "--instance",
             "prod",
             "--state-dir",
@@ -344,6 +381,75 @@ mod tests {
         };
         assert!(args.interactive);
         assert_eq!(args.endpoint, None);
+    }
+
+    /// ADR-0075: the consent travels on the same non-interactive path the endpoint does, and it
+    /// stands unless the install withdraws it. The two flags are mutually exclusive — naming a
+    /// package while withdrawing the consent is a contradiction, not a precedence to resolve — and
+    /// neither may ride `--interactive`, which asks instead.
+    #[test]
+    fn install_carries_the_self_update_answer_without_a_terminal() {
+        let standing = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+        ]);
+        assert!(!standing.no_self_update, "the consent stands by default");
+        assert_eq!(standing.self_update_package, None, "and takes its own name");
+
+        let withdrawn = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+            "--no-self-update",
+        ]);
+        assert!(withdrawn.no_self_update);
+
+        let named = install(&[
+            "client",
+            "service",
+            "install",
+            "--endpoint",
+            "ws://h/v1/opamp",
+            "--self-update-package",
+            "our-client",
+        ]);
+        assert_eq!(named.self_update_package.as_deref(), Some("our-client"));
+
+        for contradiction in [
+            vec![
+                "client",
+                "service",
+                "install",
+                "--no-self-update",
+                "--self-update-package",
+                "x",
+            ],
+            vec![
+                "client",
+                "service",
+                "install",
+                "--interactive",
+                "--no-self-update",
+            ],
+            vec![
+                "client",
+                "service",
+                "install",
+                "--interactive",
+                "--self-update-package",
+                "x",
+            ],
+        ] {
+            assert!(
+                super::Cli::try_parse_from(&contradiction).is_err(),
+                "{contradiction:?} must be refused rather than resolved"
+            );
+        }
     }
 
     /// ADR-0046 clause 7: a packaged install passes the answer it collected. The endpoint is not
@@ -431,14 +537,14 @@ mod tests {
     fn a_named_config_is_told_apart_from_the_default() {
         let default = parse_from(["client", "service", "install"]).expect("parse");
         assert!(!default.config_named);
-        assert_eq!(default.cli.config, PathBuf::from("client.toml"));
+        assert_eq!(default.cli.config, PathBuf::from("supervisor.toml"));
 
         // A global argument counts from either side of the subcommand.
         for args in [
             [
                 "client",
                 "--config",
-                "/etc/opamp/client.toml",
+                "/etc/opamp/supervisor.toml",
                 "service",
                 "install",
             ],
@@ -447,17 +553,26 @@ mod tests {
                 "service",
                 "install",
                 "--config",
-                "/etc/opamp/client.toml",
+                "/etc/opamp/supervisor.toml",
             ],
         ] {
             let named = parse_from(args).expect("parse");
             assert!(named.config_named, "{args:?}");
-            assert_eq!(named.cli.config, PathBuf::from("/etc/opamp/client.toml"));
+            assert_eq!(
+                named.cli.config,
+                PathBuf::from("/etc/opamp/supervisor.toml")
+            );
         }
 
         // Even spelled with the same value as the default: what counts is that it was written.
-        let same =
-            parse_from(["client", "service", "install", "--config", "client.toml"]).expect("parse");
+        let same = parse_from([
+            "client",
+            "service",
+            "install",
+            "--config",
+            "supervisor.toml",
+        ])
+        .expect("parse");
         assert!(same.config_named);
     }
 

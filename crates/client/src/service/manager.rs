@@ -35,7 +35,7 @@ pub const RESTART_DELAY_SECS: u32 = 5;
 
 /// The name this instance's service is registered under — the same on every platform (ADR-0030).
 ///
-/// `opamp-fleet-client` for the default instance, `opamp-fleet-client-<instance>` for any other:
+/// `supervisor` for the default instance, `supervisor-<instance>` for any other:
 /// most hosts run exactly one Client and should show the product's name and nothing else, and the
 /// suffix appears only where an operator asked for a second one. A hyphen and not a dot, for the
 /// reason [`label`] gives.
@@ -242,7 +242,7 @@ impl ServiceControl for NativeService {
 }
 
 /// The default *data* root for a scope and instance — the platform's data directory, per
-/// instance so any number of instances coexist (ADR-0010): where `client.toml` and the state
+/// instance so any number of instances coexist (ADR-0010): where `supervisor.toml` and the state
 /// directory live. `--root` overrides it; no path is ever fixed.
 ///
 /// # Errors
@@ -327,10 +327,7 @@ mod tests {
     /// name. A dot anywhere in it would split the label again and undo that.
     #[test]
     fn every_backend_renders_the_same_name() {
-        for (given, expected) in [
-            ("default", "opamp-fleet-client"),
-            ("prod", "opamp-fleet-client-prod"),
-        ] {
+        for (given, expected) in [("default", "supervisor"), ("prod", "supervisor-prod")] {
             let label = label(&instance(given)).expect("build the label");
             assert_eq!(label.to_qualified_name(), expected, "launchd and the SCM");
             assert_eq!(label.to_script_name(), expected, "systemd");
@@ -341,8 +338,8 @@ mod tests {
     /// The default instance shows the product's name; a second Client says which one it is.
     #[test]
     fn the_names_a_human_reads() {
-        assert_eq!(service_name(&instance("default")), "opamp-fleet-client");
-        assert_eq!(service_name(&instance("prod")), "opamp-fleet-client-prod");
+        assert_eq!(service_name(&instance("default")), "supervisor");
+        assert_eq!(service_name(&instance("prod")), "supervisor-prod");
         assert_eq!(display_name(&instance("default")), "OpAMP Fleet Client");
         assert_eq!(display_name(&instance("prod")), "OpAMP Fleet Client (prod)");
     }
@@ -372,7 +369,7 @@ mod tests {
             level: ServiceLevel::System,
             instance: instance("prod"),
             program: PathBuf::from("/opt/fleet/current/client"),
-            config_path: PathBuf::from("/etc/opamp/client.toml"),
+            config_path: PathBuf::from("/etc/opamp/supervisor.toml"),
             state_dir: PathBuf::from("/opt/fleet/state"),
             run_as: Some("opamp-fleet".to_string()),
         };
@@ -383,7 +380,7 @@ mod tests {
         );
         assert_eq!(args[0], OsString::from("run"));
         assert_eq!(args[1], OsString::from("--service"));
-        assert!(args.contains(&OsString::from("/etc/opamp/client.toml")));
+        assert!(args.contains(&OsString::from("/etc/opamp/supervisor.toml")));
         assert!(args.contains(&OsString::from("prod")));
         assert!(args.contains(&OsString::from("/opt/fleet/state")));
     }
