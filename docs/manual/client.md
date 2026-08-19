@@ -138,7 +138,7 @@ managing nothing. `--interactive` is the way past that:
 $ supervisor service install --interactive        # root / Administrator
 No configuration at /var/lib/opamp-fleet/client/default/supervisor.toml — answering these writes it …
 Server OpAMP endpoint [ws://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
-This Agent's name (service.instance.name) [supervisor]: host-01
+This Agent's name (service.instance.name) [Supervisor Agent]: host-01
 Authentication toward the Server: bearer token
 Bearer token: ********
 Does the Server present a certificate from a private CA? [y/N]: n
@@ -345,7 +345,7 @@ optional and shown below with its default; an unknown key fails startup rather t
 | Key | Default | Meaning |
 |---|---|---|
 | `endpoint` | `"ws://127.0.0.1:4320/v1/opamp"` | The Server's OpAMP endpoint. The scheme selects the transport: `ws://`/`wss://` for WebSocket, `http://`/`https://` for polling. |
-| `name` | `"supervisor"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `supervisor`, the same on every host. |
+| `name` | `"Supervisor Agent"` | The Agent's `service.instance.name` — your name for *this* Client, shown in the fleet view and matchable by a Selector. Its `service.name` is the constant type `supervisor`, the same on every host. |
 | `poll_interval_secs` | `30` | How often the plain-HTTP transport polls. Ignored on WebSocket. |
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |

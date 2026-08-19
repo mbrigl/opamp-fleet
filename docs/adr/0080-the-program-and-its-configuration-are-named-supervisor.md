@@ -69,11 +69,13 @@ as a **clean break** with no compatibility name, and make the one silent failure
    deliberately falls through on an upgrade and the old unit would otherwise survive, pointing at a
    file the new layout does not have. It also removes the old `PATH` symlink and the orphaned
    `opamp-fleet-client-*` version directories, the way it already does the ADR-0053 migration.
-6. **The default `name` follows too.** The top-level key an operator sets to say *which* Client this
-   is (ADR-0033) defaulted to `opamp-fleet-client`, a word that after this decision is on no file, no
-   service and no artifact. It becomes the program's name, which reads the same as the Agent type on
-   a host where nobody has chosen one — the honest answer for a Client that is not a particular one,
-   and the questionnaire asks for this key first precisely so that it does not stay that way.
+6. **The default `name` moves too, but not to this word.** The top-level key an operator sets to
+   say *which* Client this is (ADR-0033) defaulted to `opamp-fleet-client`, which after this decision
+   is on no file, no service and no artifact. It becomes **`Supervisor Agent`** — a display name,
+   spaces and capitals included. Not `supervisor`: that is the Agent *type*, and a default equal to
+   it would print the same word in both columns of the fleet view, which is the collapse ADR-0033
+   ended. Nothing resolves a path or a service from this key — the ADR-0010 grammar governs
+   `--instance` and the `[[supervisor]]` block names — so a name that reads like one is free.
 7. **What keeps its name, and why:**
 
    | Stays | Because |

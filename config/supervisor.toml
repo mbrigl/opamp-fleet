@@ -8,9 +8,9 @@ endpoint = "ws://127.0.0.1:4320/v1/opamp"
 
 # The Agent's service.instance.name — the operator's name for *this* Client, shown in the fleet UI
 # and matchable by a Selector. Its service.name is the constant type `supervisor`, the same on every
-# host, which is what a package or Configuration aimed at every Client matches. The default below
-# is the program's own name, so give this one a name of yours: it is what tells your Clients apart.
-name = "supervisor"
+# host, which is what a package or Configuration aimed at every Client matches. The default below is
+# a display name, not an identifier — give this one a name of yours: it is what tells Clients apart.
+name = "Supervisor Agent"
 
 # Poll interval of the plain-HTTP transport, in seconds (the protocol's default: 30).
 poll_interval_secs = 30

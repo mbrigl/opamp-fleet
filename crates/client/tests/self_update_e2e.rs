@@ -94,23 +94,87 @@ fn version_of(binary: &Path) -> String {
 const NEWER_VERSION: &str = "9.9.9";
 
 /// A Client binary that is a *newer version* than the one this test runs, built once per test
-/// binary from these very sources with the override the build script documents
-/// (`OPAMP_FLEET_VERSION`, ADR-0026), and its version as an operator would type it.
+/// binary with the override the build script documents (`OPAMP_FLEET_VERSION`, ADR-0026), and its
+/// version as an operator would type it.
 ///
 /// A second build, rather than offering the running binary back to itself, because that offer is
 /// one the fleet no longer makes: a Set reaches an Agent only as an **upgrade** (ADR-0076), and a
 /// Client reports the version it runs whether or not a package put it there — so a Set at the
 /// running version reaches nobody, which is what `a_set_at_the_running_version_reaches_nobody`
 /// asserts. What is left to test here is the update itself, and an update needs something newer to
-/// install. It is cheap after the first run: a target directory of its own under
-/// `CARGO_TARGET_TMPDIR`, kept between runs, and no debug info in it.
+/// install.
+///
+/// It is built from a **tagless clone** of this repository rather than from the checkout itself,
+/// and that is the whole reason a clone appears in a test: `build.rs` refuses a build whose
+/// `OPAMP_FLEET_VERSION` disagrees with a `version/*` tag on HEAD (ADR-0026's drift rule), so this
+/// helper broke on precisely the commits a release is cut from. The clone carries no tags, so the
+/// override is the only version statement there is and the build is an ordinary `-dev` one.
+///
+/// What that costs: the artifact is built from the **committed** state. Uncommitted changes to the
+/// Client are in the binary under test but not in the one it installs, which for what these tests
+/// assert — a program that self-checks at the offered version, comes up, and reports `Installed` —
+/// is a difference that does not show. Cheap after the first run: the clone is refreshed to HEAD
+/// and both it and its target directory are kept under `CARGO_TARGET_TMPDIR`, without debug info.
 fn newer_client() -> &'static (PathBuf, String) {
     static NEWER: std::sync::OnceLock<(PathBuf, String)> = std::sync::OnceLock::new();
     NEWER.get_or_init(|| {
-        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("newer-client");
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("newer-client");
+        let checkout = root.join("checkout");
+        let target = root.join("target");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the workspace root resolves");
+        // `file://`, because git ignores `--depth` on a plain local path — and without the depth
+        // this copies the whole history to build one binary.
+        let url = format!("file://{}", workspace.display());
+
+        let git = |args: &[&str], what: &str| {
+            let status = Command::new("git")
+                .args(args)
+                .status()
+                .unwrap_or_else(|e| panic!("cannot run git to {what}: {e}"));
+            assert!(status.success(), "cannot {what}: {status}");
+        };
+        if checkout.join("Cargo.toml").exists() {
+            // Kept between runs, so it has to follow HEAD rather than stay where it was cloned.
+            let dir = checkout.to_string_lossy().to_string();
+            git(
+                &[
+                    "-C",
+                    &dir,
+                    "fetch",
+                    "--no-tags",
+                    "--depth",
+                    "1",
+                    &url,
+                    "HEAD",
+                ],
+                "fetch the sources to build the newer Client from",
+            );
+            git(
+                &["-C", &dir, "reset", "--hard", "FETCH_HEAD"],
+                "move the newer Client's sources to HEAD",
+            );
+        } else {
+            std::fs::create_dir_all(&root).expect("create the build directory");
+            git(
+                &[
+                    "clone",
+                    "--no-tags",
+                    "--depth",
+                    "1",
+                    &url,
+                    &checkout.to_string_lossy(),
+                ],
+                "clone the sources to build the newer Client from",
+            );
+        }
+
         let release = !cfg!(debug_assertions);
         let mut build = Command::new(env!("CARGO"));
         build
+            .current_dir(&checkout)
             .args(["build", "-p", "client", "--bin", "supervisor"])
             .env("OPAMP_FLEET_VERSION", NEWER_VERSION)
             .env("CARGO_TARGET_DIR", &target)

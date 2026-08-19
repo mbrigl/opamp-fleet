@@ -789,13 +789,14 @@ fn default_endpoint() -> String {
 }
 
 fn default_name() -> String {
-    // The program's own name (ADR-0080), which is what an operator who has not chosen one sees.
-    // It reads the same as the Agent *type* on such a host, and that is the honest answer rather
-    // than a defect: an unconfigured Client is not a particular one, and the questionnaire asks
-    // for this key first (ADR-0027) precisely so that a fleet's Clients are told apart by a name
-    // somebody chose. Naming the product it used to be would be worse — that word is on no file,
-    // no service and no artifact any more.
-    crate::service::layout::COMPONENT.to_string()
+    // A *display* name, and deliberately not the program's own (ADR-0080): this key is the one
+    // place an operator says which Client this is, and a default that reads exactly like the Agent
+    // type would put the same word in both columns of the fleet view — the collapse ADR-0033 ended.
+    // Spelled as a person would write it, spaces and capitals included: nothing resolves a path or
+    // a service from it, the grammar of ADR-0010 governs the `--instance` and the `[[supervisor]]`
+    // block names instead, and the questionnaire asks for this one first (ADR-0027) so that a fleet
+    // is told apart by names somebody chose.
+    "Supervisor Agent".to_string()
 }
 
 fn default_poll_interval_secs() -> u64 {

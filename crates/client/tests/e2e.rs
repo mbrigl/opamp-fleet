@@ -181,7 +181,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(view(&agents, "otelcol").is_some());
     assert!(view(&agents, "stub").is_some());
     assert!(
-        view(&agents, "supervisor").is_some(),
+        view(&agents, "Supervisor Agent").is_some(),
         "the Client is its own Agent (ADR-0020)"
     );
     // The two Supervisors run the *same* stub program, so they report the same Agent type — which
@@ -236,7 +236,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             view(&snapshot, name).is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED")
         });
         let refused =
-            view(&snapshot, "supervisor").is_some_and(|a| a.remote_config_status == "FAILED");
+            view(&snapshot, "Supervisor Agent").is_some_and(|a| a.remote_config_status == "FAILED");
         (supervised && refused).then_some(())
     })
     .await;
@@ -283,7 +283,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The Client's own Agent reports the Client's version instead — never a Managed Process's,
     // because it has none (ADR-0020 makes it visible; ADR-0009 supplies the version).
     let snapshot = state.snapshot();
-    let client_agent = view(&snapshot, "supervisor").expect("the client's own agent");
+    let client_agent = view(&snapshot, "Supervisor Agent").expect("the client's own agent");
     assert_ne!(client_agent.service_version, "9.9.9");
     assert!(
         !client_agent.service_version.is_empty(),
@@ -463,7 +463,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     wait_until("the added supervisor to connect, the set applied", || {
         let snapshot = state.snapshot();
         let added = view(&snapshot, "added").is_some_and(|a| a.connected);
-        let applied = view(&snapshot, "supervisor")
+        let applied = view(&snapshot, "Supervisor Agent")
             .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
         (added && applied).then_some(())
     })
@@ -501,7 +501,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     wait_until("the added supervisor to say goodbye", || {
         let snapshot = state.snapshot();
         let gone = view(&snapshot, "added").is_some_and(|a| !a.connected);
-        let applied = view(&snapshot, "supervisor")
+        let applied = view(&snapshot, "Supervisor Agent")
             .is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED");
         (gone && applied).then_some(())
     })

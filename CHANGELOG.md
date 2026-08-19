@@ -50,6 +50,15 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **A fresh Client calls itself `Supervisor Agent`.** The top-level `name` — your name for *this*
+  Client, reported as `service.instance.name` — defaulted to the program's own name, which since
+  [ADR-0080](docs/adr/0080-the-program-and-its-configuration-are-named-supervisor.md) reads exactly
+  like the Agent *type* it sits beside in the fleet view. It is now a display name instead: spaces
+  and capitals, because nothing resolves a path or a service from this key.
+  **What to do:** nothing. A host whose configuration names this Client keeps that name; only a
+  Client that never had one changes what it calls itself, and the questionnaire still asks for a
+  name of yours first.
+
 - **Release artifacts are `.tar.gz` and are named `supervisor_…`**
   ([ADR-0078](docs/adr/0078-a-release-is-named-after-the-set-it-becomes.md), superseding
   [ADR-0025](docs/adr/0025-release-pipeline-and-artifacts.md) clauses 3 and 4 and
