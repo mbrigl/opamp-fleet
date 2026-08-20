@@ -89,6 +89,44 @@ fn version_of(binary: &Path) -> String {
         .to_string()
 }
 
+/// A `file://` URL for a local path, spelled the way git wants it on every platform.
+///
+/// `file://` rather than a plain path, for two reasons that only bite in CI: git ignores `--depth`
+/// on a local path, and it refuses the local-clone optimisation against a *shallow* source — which
+/// is what `actions/checkout` leaves behind at its default depth of one. Windows then needs the
+/// spelling fixed twice over: canonicalisation there yields an extended-length path (`\\?\C:\…`)
+/// and native separators, and neither belongs in a URL. Getting this wrong is what `exit code: 128`
+/// on the Windows runner looked like, so the shape is pinned by a test that runs everywhere.
+fn file_url(path: &Path) -> String {
+    let text = path.display().to_string();
+    let text = text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .replace('\\', "/");
+    // `file://` plus a path that already starts with `/` gives the three slashes a URL needs; a
+    // Windows path starts with its drive letter and has to be given the third.
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}
+
+/// The three spellings this has to survive: a Unix path, and a Windows one with and without the
+/// extended-length prefix `std::fs::canonicalize` puts in front of it.
+#[test]
+fn a_local_path_becomes_a_file_url_git_accepts() {
+    assert_eq!(file_url(Path::new("/workspace")), "file:///workspace");
+    assert_eq!(
+        file_url(Path::new(r"\\?\C:\a\opamp-fleet")),
+        "file:///C:/a/opamp-fleet"
+    );
+    assert_eq!(
+        file_url(Path::new(r"C:\a\opamp-fleet")),
+        "file:///C:/a/opamp-fleet"
+    );
+}
+
 /// The version the artifact under offer is built as — greater than anything this repository has
 /// released, so it is an upgrade for whatever the test runs.
 const NEWER_VERSION: &str = "9.9.9";
@@ -125,16 +163,21 @@ fn newer_client() -> &'static (PathBuf, String) {
             .join("../..")
             .canonicalize()
             .expect("the workspace root resolves");
-        // `file://`, because git ignores `--depth` on a plain local path — and without the depth
-        // this copies the whole history to build one binary.
-        let url = format!("file://{}", workspace.display());
+        let url = file_url(&workspace);
 
         let git = |args: &[&str], what: &str| {
-            let status = Command::new("git")
+            let out = Command::new("git")
                 .args(args)
-                .status()
+                .output()
                 .unwrap_or_else(|e| panic!("cannot run git to {what}: {e}"));
-            assert!(status.success(), "cannot {what}: {status}");
+            // stderr, not just the code: this runs on three platforms in CI, where `exit code:
+            // 128` on its own says nothing about which of them git objected to.
+            assert!(
+                out.status.success(),
+                "cannot {what}: {}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         };
         if checkout.join("Cargo.toml").exists() {
             // Kept between runs, so it has to follow HEAD rather than stay where it was cloned.
@@ -169,6 +212,22 @@ fn newer_client() -> &'static (PathBuf, String) {
                 ],
                 "clone the sources to build the newer Client from",
             );
+        }
+
+        // `--no-tags` is the intent; this is the guarantee. The whole point of the clone is a HEAD
+        // no `version/*` tag points at, and a tag that arrived anyway — by a git that copies refs
+        // on a local optimisation, or by a source whose refs moved — would put the drift rule back
+        // in the way with a message nobody would connect to this helper.
+        let dir = checkout.to_string_lossy().to_string();
+        let listed = Command::new("git")
+            .args(["-C", &dir, "tag", "-l"])
+            .output()
+            .expect("list the clone's tags");
+        for tag in String::from_utf8_lossy(&listed.stdout).lines() {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                git(&["-C", &dir, "tag", "-d", tag], "drop a tag from the clone");
+            }
         }
 
         let release = !cfg!(debug_assertions);
