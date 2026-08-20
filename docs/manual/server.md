@@ -750,9 +750,14 @@ several Agents stay apart at the receiving end.
 
 Two limits worth knowing before you point this somewhere:
 
-- **A cleartext destination is refused.** `http://` beyond the loopback interface is rejected by the
-  Agent and reported back, because the stream carries identifying attributes and whatever the Client
-  logs. The protocol permits exactly this refusal.
+- **A cleartext destination is refused outside the private address space.** `http://` is accepted to
+  loopback and to the private ranges — `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — and rejected
+  anywhere else by the Agent and reported back, because the stream carries identifying attributes and
+  whatever the Client logs. The protocol permits exactly this refusal. The judgement is made on the
+  **address**: a host name over `http://` is refused whatever it resolves to, since a name can be
+  re-pointed after the offer was admitted. So a Collector one hop away on the LAN needs no
+  certificate — `http://192.168.10.5:4318/v1/metrics` is accepted — and one reached by name, or
+  across anything public, needs TLS in front of it.
 - **A Collector's internal telemetry does not come this way.** The Client must not touch a Managed
   Process's configuration, so what it reports about a Collector is what it can see from
   outside. Configure the Collector for its own internals as you would without OpAMP.

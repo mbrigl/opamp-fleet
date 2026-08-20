@@ -1,6 +1,6 @@
 # ADR-0086: A telemetry destination is an offer of its own class — applied without a connection to prove it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
 

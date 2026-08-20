@@ -17,6 +17,7 @@
 //! `opentelemetry-semantic-conventions` rather than string literals of this project's own.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
 use opamp::proto::{AgentDescription, ConnectionSettingsOffers, TelemetryConnectionSettings};
@@ -281,14 +282,19 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// The Baseline's "MAY refuse to send the telemetry if the URL begins with `http://`", taken.
 ///
 /// The Resource carries the Agent's identifying attributes and the log records carry whatever this
-/// Client logs, so plaintext beyond the loopback interface is refused rather than warned about —
-/// one step firmer than the credential warning of ADR-0013, because this is a continuous stream.
-/// `tls` and `proxy` are refused for the same reasons they are on the OpAMP settings (ADR-0035).
+/// Client logs, so plaintext across a network the operator does not control is refused rather than
+/// warned about — one step firmer than the credential warning of ADR-0013, because this is a
+/// continuous stream. What that leaves is the private address space (ADR-0088): loopback, and the
+/// RFC 1918 and unique-local ranges, where the stream stays inside the boundary the operator
+/// already owns. `tls` and `proxy` are refused for the same reasons they are on the OpAMP settings
+/// (ADR-0035).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
-    if endpoint.starts_with("http://") && !is_loopback(endpoint) {
+    if endpoint.starts_with("http://") && !is_private(endpoint) {
         return Err(format!(
-            "{field}: refusing to send own telemetry to {endpoint} in cleartext — use https://"
+            "{field}: refusing to send own telemetry to {endpoint} in cleartext — a cleartext \
+             destination must be loopback or a private address (10/8, 172.16/12, 192.168/16, \
+             fc00::/7), otherwise use https://"
         ));
     }
     if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
@@ -421,14 +427,45 @@ fn exporter_client(
     Ok(RuntimeBoundClient { client, handle })
 }
 
-fn is_loopback(endpoint: &str) -> bool {
-    let host = endpoint
+/// Whether a cleartext destination stays inside the private address space (ADR-0088).
+///
+/// Literal addresses only, plus `localhost` by name. A host name is **not** resolved to decide
+/// this: the answer would depend on what DNS says at the moment the offer is admitted, and an
+/// admission test that a re-resolve can flip is not one an operator can reason about. A collector
+/// reached by name over cleartext is therefore refused — name it by address, or put TLS in front
+/// of it.
+fn is_private(endpoint: &str) -> bool {
+    let host = host_of(endpoint);
+    if host == "localhost" {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        // `is_private` is the RFC 1918 trio — 10/8, 172.16/12, 192.168/16 — and nothing else.
+        Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private(),
+        // `Ipv6Addr::is_unique_local` is still unstable, so fc00::/7 is spelled out here.
+        Ok(IpAddr::V6(v6)) => v6.is_loopback() || is_unique_local(v6),
+        Err(_) => false,
+    }
+}
+
+/// The host of an endpoint, without scheme, port, or path: `192.168.10.5:4318/v1/logs` →
+/// `192.168.10.5`, `[fd00::5]:4318/v1/logs` → `fd00::5`. An IPv6 literal is bracketed in a URL, so
+/// its own colons are only separable once the brackets are found.
+fn host_of(endpoint: &str) -> &str {
+    let authority = endpoint
         .trim_start_matches("http://")
         .split('/')
         .next()
         .unwrap_or("");
-    let host = host.split(':').next().unwrap_or("");
-    host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+    match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    }
+}
+
+/// `fc00::/7`, IPv6's answer to RFC 1918.
+fn is_unique_local(addr: Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xfe00) == 0xfc00
 }
 
 /// The OTLP Resource: the Agent's identifying attributes, as the Baseline asks — "the combination
@@ -564,7 +601,7 @@ mod tests {
     /// The Baseline's "MAY refuse" for cleartext, taken — and refused *loudly*, so the Server is
     /// told rather than left believing the telemetry flows.
     #[test]
-    fn a_cleartext_destination_beyond_loopback_is_refused() {
+    fn a_cleartext_destination_beyond_the_private_network_is_refused() {
         let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://collector.example:4318/v1/metrics")),
@@ -576,8 +613,58 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// Loopback is the exception: a Collector on the same host over plain HTTP is the ordinary
-    /// development and sidecar shape, and nothing leaves the machine.
+    /// The private address space is where cleartext is admitted and where it stops (ADR-0088).
+    /// The last two cases are the ones a prefix test would wave through: a public address that
+    /// merely reads like a private one, and a host *name* whose first labels are a private
+    /// address.
+    #[test]
+    fn cleartext_is_admitted_by_address_and_nowhere_else() {
+        for allowed in [
+            "http://localhost:4318/v1/metrics",
+            "http://127.0.0.1:4318/v1/metrics",
+            "http://[::1]:4318/v1/metrics",
+            "http://192.168.10.5:4318/v1/metrics",
+            "http://10.0.0.5:4318/v1/metrics",
+            "http://172.16.0.5:4318/v1/metrics",
+            "http://[fd00::5]:4318/v1/metrics",
+        ] {
+            assert!(
+                check(&destination(allowed), "own_metrics").is_ok(),
+                "{allowed} is inside the private address space"
+            );
+        }
+        for refused in [
+            "http://collector.example:4318/v1/metrics",
+            "http://203.0.113.5:4318/v1/metrics",
+            "http://172.32.0.5:4318/v1/metrics",
+            "http://[2001:db8::5]:4318/v1/metrics",
+            "http://192.168.0.1.example.com:4318/v1/metrics",
+        ] {
+            let Err(error) = check(&destination(refused), "own_metrics") else {
+                panic!("{refused} is not a private address");
+            };
+            assert!(error.contains("cleartext"), "{error}");
+        }
+    }
+
+    /// A Collector on the LAN rather than on the host: the same shape as loopback, one hop out,
+    /// and still inside the boundary the operator owns (ADR-0088).
+    #[tokio::test]
+    async fn a_private_network_destination_is_allowed_in_cleartext() {
+        crate::tls::install_ring_provider();
+        let telemetry = Telemetry::new();
+        let offer = ConnectionSettingsOffers {
+            own_metrics: Some(destination("http://192.168.10.5:4318/v1/metrics")),
+            ..Default::default()
+        };
+        let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(telemetry.reporting());
+        telemetry.shutdown();
+    }
+
+    /// Loopback is the innermost case: a Collector on the same host over plain HTTP is the ordinary
+    /// development and sidecar shape, and nothing leaves the machine at all.
     #[tokio::test]
     async fn a_loopback_destination_is_allowed_in_cleartext() {
         crate::tls::install_ring_provider();

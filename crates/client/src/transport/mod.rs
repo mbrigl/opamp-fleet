@@ -417,7 +417,7 @@ mod tests {
         crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
-        // Cleartext beyond loopback: the Baseline's "MAY refuse", taken.
+        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0088).
         engine.handle(&telemetry_only_offer(
             uid,
             "http://collector.example:4318/v1/metrics",

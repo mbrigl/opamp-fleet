@@ -302,7 +302,8 @@ credential, the Client presents one on both transports, and the Server issues th
 the Baseline's CSR flow — the Agent keeps its private key, sends a signing request, and receives the
 certificate as an ordinary connection-settings offer it proves by connecting with. Own telemetry closes three more bits (ADR-0036): the Client
 reports its own process metrics, its logs, and spans over the control loop's own lifecycles, OTLP
-over HTTP to whatever destination the Server names — and refuses a cleartext one. Every remaining
+over HTTP to whatever destination the Server names — and refuses a cleartext one outside the
+private address space (ADR-0088). Every remaining
 *planned* row — other connection settings and custom messages — is future work; the rows above
 double as that work list. Two rows still read *partial* rather than
 *implemented*: both connection-settings capabilities honour the endpoint, credential, heartbeat, and

@@ -149,7 +149,8 @@ max_package_size_bytes = 1073741824
 #
 # An Agent sends process metrics for itself and for each process it supervises, its own log output,
 # and spans over the operations that already have a lifecycle here (a configuration applied, a
-# package installed, a self-update). It refuses a cleartext http:// destination beyond loopback.
+# package installed, a self-update). It refuses a cleartext http:// destination outside the private
+# address space — loopback, 10/8, 172.16/12, 192.168/16, fc00::/7 — and by address, not by name.
 #
 # Nothing about this is configured on the Client: the capability means "report to the destination
 # the Server specifies", so this section is the only place it comes from.
@@ -175,18 +176,23 @@ max_package_size_bytes = 1073741824
 # them leaves the file with a duplicated table header, which is an error rather than a merge.
 #
 # (1) Development — the stack in deploy/observability/ is a `docker compose up` away and publishes
-#     the Collector's OTLP/HTTP port on the host. Loopback is the one place cleartext is accepted,
-#     which is why this reads http:// and why the ports are published rather than left on a compose
-#     network.
+#     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because loopback is
+#     inside the private address space, which is why this reads http:// and why the ports are
+#     published rather than left on a compose network.
 # [telemetry_offer]
 # metrics_endpoint = "http://localhost:4318/v1/metrics"
 # traces_endpoint = "http://localhost:4318/v1/traces"
 # logs_endpoint = "http://localhost:4318/v1/logs"
 
-# (2) Production — TLS in front of the collector, and a token if it wants one. An Agent on any host
-#     but the collector's own REFUSES a cleartext destination: it is not warned about and not
-#     downgraded, the offer comes back FAILED naming the reason. Terminate TLS in front of the
-#     receiver and offer the https:// URL.
+# (2) Production — TLS in front of the collector, and a token if it wants one. An Agent REFUSES a
+#     cleartext destination outside the private address space, and refuses a cleartext HOST NAME
+#     whatever it resolves to: it is not warned about and not downgraded, the offer comes back
+#     FAILED naming the reason. Terminate TLS in front of the receiver and offer the https:// URL.
+#
+#     A Collector one hop away on the LAN needs no certificate for this: an address in 10/8,
+#     172.16/12, 192.168/16 or fc00::/7 is accepted in cleartext (ADR-0088), e.g.
+#     http://192.168.10.5:4318/v1/metrics. The judgement is on the ADDRESS — a name that resolves
+#     there is still refused, because a name can be re-pointed after the offer was admitted.
 # [telemetry_offer]
 # metrics_endpoint = "https://collector.example:4318/v1/metrics"
 # traces_endpoint = "https://collector.example:4318/v1/traces"

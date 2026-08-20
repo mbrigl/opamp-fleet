@@ -50,6 +50,24 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **An Agent now accepts a cleartext OTLP destination anywhere in the private address space, not
+  only on loopback.** `http://` was refused beyond the loopback interface, which meant a Collector
+  one hop away on the LAN needed TLS and a certificate in front of it before any Agent would report
+  to it. `http://` is now accepted to loopback and to `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16` and `fc00::/7`, and refused everywhere else — reported back with the reason, as
+  before, never warned about and never downgraded
+  ([ADR-0088](docs/adr/0088-cleartext-own-telemetry-reaches-the-private-address-space.md)). The
+  judgement is made on the **address**, so a cleartext *host name* is still refused whatever it
+  resolves to: an admission test a later DNS change can flip is not one an offer can be trusted
+  against. Link-local and carrier-grade NAT are private but not the operator's, and stay refused.
+  Bracketed IPv6 loopback (`http://[::1]:4318/…`) was refused by a string comparison that could
+  never match it, and now works as it was always documented to.
+  **What to do:** a `[telemetry_offer]` may now name the Collector's LAN address directly — for
+  example `metrics_endpoint = "http://192.168.10.5:4318/v1/metrics"` — and the TLS terminator put in
+  front of it only to satisfy the old rule can go. Name it by address, not by name; a
+  `http://collector.lan:4318/…` that worked nowhere before still works nowhere. Nothing already
+  configured changes meaning: every destination accepted before is accepted now.
+
 - **A fresh Client calls itself `Supervisor Agent`.** The top-level `name` — your name for *this*
   Client, reported as `service.instance.name` — defaulted to the program's own name, which since
   [ADR-0080](docs/adr/0080-the-program-and-its-configuration-are-named-supervisor.md) reads exactly

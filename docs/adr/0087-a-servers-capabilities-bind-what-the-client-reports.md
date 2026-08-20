@@ -1,6 +1,6 @@
 # ADR-0087: A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
 
