@@ -47,18 +47,19 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0016](0016-what-a-package-is-and-how-it-is-aimed.md) | What a package is, and how the Server — not the host — aims it at Agents | 🟢 accepted |
 | [0017](0017-package-artifacts.md) | A package's artifacts — an uploaded archive or a URL the Agents fetch, unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
 | [0018](0018-client-self-update.md) | The Client updates itself — its own Agent, a staged version, a restart it does not issue, and a consent that names its package | 🟢 accepted |
-| [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟢 accepted |
+| [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟡 proposed |
 | [0020](0020-what-lives-in-which-crate.md) | What lives in which crate — the Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
 | [0021](0021-release-pipeline-and-artifacts.md) | A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install | 🟢 accepted |
-| [0022](0022-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, the version directory, and one service name on every platform | 🟢 accepted |
+| [0022](0022-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟡 proposed |
 | [0023](0023-what-describes-an-agent.md) | What describes an Agent — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
 | [0024](0024-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK, to the destinations the Server offers | 🟢 accepted |
 | [0025](0025-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
 | [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
 | [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
 | [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
-| [0029](0029-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt`, and the system service may run under an operator-named account that owns the instance's files | 🟢 accepted |
+| [0029](0029-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟡 proposed |
 | [0030](0030-glpi-agent-supervision-and-packages.md) | The GLPI Agent through the fleet — supervised as the Supervisor's own child, machine-installed or from self-contained packages on both platforms | 🟢 accepted |
-| [0031](0031-agent-plane-and-operator-plane.md) | The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane | 🟡 proposed |
-| [0032](0032-icinga-2-through-the-fleet.md) | Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source | 🟡 proposed |
-
+| [0031](0031-agent-plane-and-operator-plane.md) | The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane | 🟢 accepted |
+| [0032](0032-icinga-2-through-the-fleet.md) | Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source | 🟢 accepted |
+| [0033](0033-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
+| [0034](0034-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟡 proposed |

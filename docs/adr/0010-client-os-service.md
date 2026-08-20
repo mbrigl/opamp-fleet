@@ -99,7 +99,7 @@ says goes to stderr through one `tracing_subscriber::fmt` layer installed in
 [`main.rs`](../../crates/client/src/main.rs), and the Windows SCM discards a service's stderr. The
 [`README.md`](../../README.md) says so in the manual smoke checklist.
 
-Windows is not a lesser target here. [ADR-0022](0022-the-client-is-named-opamp-fleet-client.md) gives it
+Windows is not a lesser target here. [ADR-0022](0022-the-fleets-own-agent-is-called-supervisor.md) gives it
 the same service name as every other platform, the interactive install above treats it like every
 other platform, and it has an elevation model of its own that the service integration above goes to
 some trouble to satisfy. It is a supported platform on which a failed start produces nothing anyone
@@ -513,7 +513,7 @@ service**, on every platform, bounded by a retention it cannot exceed, and switc
   12.
 - This repository: [ADR-0024](0024-agents-report-their-own-telemetry.md), whose `reload::Layer` slot
   point 14 copies and whose OTLP bridge the service log complements rather than replaces;
-  [ADR-0022](0022-the-client-is-named-opamp-fleet-client.md), whose one-behaviour-per-platform argument
+  [ADR-0022](0022-the-fleets-own-agent-is-called-supervisor.md), whose one-behaviour-per-platform argument
   point 10 reuses; [ADR-0014](0014-server-driven-connection-settings.md), for the rule that
   the Client's own configuration stays on the machine.
 

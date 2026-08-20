@@ -1,6 +1,6 @@
 # ADR-0031: The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-16
 - **Deciders:** Markus Brigl
 

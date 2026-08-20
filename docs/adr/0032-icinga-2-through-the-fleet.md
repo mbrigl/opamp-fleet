@@ -1,6 +1,6 @@
 # ADR-0032: Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-17
 - **Deciders:** Markus Brigl
 
@@ -23,7 +23,7 @@ all, verified with `strace` — but only under conditions the block cannot carry
 - **Every invocation must name the account it runs under.** Without `-D RunAsUser=`/`-D RunAsGroup=`
   *every* subcommand — `daemon`, `pki`, even a validation — refuses with *"Please re-run this command
   as a privileged user or using the `nagios` account"*, because the compiled-in user does not exist
-  on a fleet-managed host and the Client's service account ([ADR-0029](0029-the-linux-service-executes-from-opt.md))
+  on a fleet-managed host and the Client's service account ([ADR-0029](0029-the-product-names-the-installation.md))
   is not it.
 - **The ITL is found through `-D IncludeConfDir=`, not `-I`.** Measured: with `-I` alone, `include
   <itl>` still resolved to the *host's* `/usr/share/icinga2`, silently using a copy the fleet does

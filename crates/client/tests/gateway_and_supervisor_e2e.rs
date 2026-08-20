@@ -54,7 +54,7 @@ async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempD
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+        Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())
@@ -105,8 +105,8 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
         stub = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // Supervisor Mode first: the Client's own Agent and the one it supervises.
@@ -217,8 +217,8 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         stub = env!("CARGO_BIN_EXE_stub_agent"),
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // The offer is applied and acknowledged — which is what ends the transport run and restarts the
@@ -304,8 +304,8 @@ async fn a_gateway_that_cannot_bind_is_loud() {
         state = dir.path().join("client-state").to_string_lossy(),
         port = port,
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // The Client itself still reaches the Server: Gateway Mode failing to bind is loud in the log

@@ -110,7 +110,7 @@ Four forces shape the installers, and three of them are already decided elsewher
 **`service install` already owns the install, and it must keep owning it.**
 [ADR-0010](0010-client-os-service.md) lays out `<root>/versions/<version>/`, a `current`
 pointer, and `<root>/state/`, registers the unit or the SCM entry, and absolutizes every path into
-the installed command line; [ADR-0022](0022-the-client-is-named-opamp-fleet-client.md) gives the
+the installed command line; [ADR-0022](0022-the-fleets-own-agent-is-called-supervisor.md) gives the
 registration its single-token name and its Windows display name through a post-install call the
 `service-manager` backend cannot make; ADR-0018 sets the SCM recovery actions that same backend
 discards. A native package that registered a service of its own would produce a registration missing

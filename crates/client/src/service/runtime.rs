@@ -19,7 +19,7 @@ use crate::transport::{self, RunOutcome};
 /// override (`--state-dir`, baked into installed units so they never depend on a relative path).
 #[derive(Debug, Clone)]
 pub struct RunSpec {
-    /// Path to `client.toml` (ADR-0008); defaults apply if the file does not exist.
+    /// Path to `supervisor.toml` (ADR-0008); defaults apply if the file does not exist.
     pub config_path: PathBuf,
     /// Overrides the configuration file's `state_dir` when present.
     pub state_dir: Option<PathBuf>,
@@ -163,7 +163,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     };
 
     let mut engine = supervisor::build_engine(&config, &shutdown)?;
-    if config.self_update.is_some() {
+    if config.self_update_package().is_some() {
         engine.arm_self_update(
             config.state_dir.clone(),
             config.packages.as_ref().and_then(|p| p.archive_key.clone()),
@@ -273,7 +273,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     }
 }
 
-/// The configuration in force: `client.toml` (ADR-0008), the `--state-dir` override, and the
+/// The configuration in force: `supervisor.toml` (ADR-0008), the `--state-dir` override, and the
 /// persisted Server-offered connection settings on top (ADR-0014).
 fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
     let mut config = ClientConfig::load(&spec.config_path)?;
