@@ -1,6 +1,6 @@
 # ADR-0071: One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-17
 - **Deciders:** Markus Brigl
 

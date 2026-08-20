@@ -1,6 +1,6 @@
 # ADR-0028: The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0082](0082-the-fleets-own-agent-is-called-supervisor.md)
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 

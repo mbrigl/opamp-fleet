@@ -1,10 +1,10 @@
 //! Server-offered connection settings (ADR-0014): persistence, their precedence over
-//! `client.toml`, and the verify-by-actually-connecting the Baseline requires.
+//! `supervisor.toml`, and the verify-by-actually-connecting the Baseline requires.
 //!
 //! The persisted file is the Baseline's own `ConnectionSettingsOffers` protobuf — the merged
 //! settings currently in force plus the hash that reports them `APPLIED`. It lives at the
 //! `state_dir` root because the settings belong to the Client's one upstream connection, not to
-//! any single Agent. Deleting the file reverts to `client.toml`.
+//! any single Agent. Deleting the file reverts to `supervisor.toml`.
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ use crate::config::ClientConfig;
 const SETTINGS_FILE: &str = "connection-settings.pb";
 
 /// The persisted settings in force, or `None` on a fresh state dir (an unreadable file is
-/// dropped with a warning — `client.toml` then applies, never a half-read override).
+/// dropped with a warning — `supervisor.toml` then applies, never a half-read override).
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     let path = state_dir.join(SETTINGS_FILE);
     let bytes = std::fs::read(&path).ok()?;
@@ -37,7 +37,7 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// Persists the settings now in force, losslessly as the received protobuf.
 ///
 /// The file holds the Server-rotated `Authorization` value (ADR-0014), which outranks the one in
-/// `client.toml` — so it is written no wider than its owner, and the state directory holding it no
+/// `supervisor.toml` — so it is written no wider than its owner, and the state directory holding it no
 /// wider than `0700`. On a multi-user host the default umask would otherwise leave the live fleet
 /// credential world-readable. On Windows the directory ACL under `%ProgramData%` protects it
 /// (ADR-0010); there is no mode to set.
@@ -159,7 +159,7 @@ pub fn offered_authorization(settings: &OpAmpConnectionSettings) -> Option<&str>
     })
 }
 
-/// Applies persisted settings over the loaded `client.toml` (ADR-0014): the Server's word wins
+/// Applies persisted settings over the loaded `supervisor.toml` (ADR-0014): the Server's word wins
 /// where it spoke — endpoint, credential, heartbeat (on plain HTTP the same value is the polling
 /// interval, the Baseline's MUST) — and the file's word stays everywhere else.
 pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {

@@ -278,7 +278,7 @@ struct LabelsBody {
     request_body = LabelsBody,
     description = "Replace this Agent's labels (ADR-0042). A label is an operator's key/value pair \
                    that joins what a Selector matches — for Configurations and for packages alike — \
-                   so a rollout ring is a Server-side decision instead of an edit to client.toml on \
+                   so a rollout ring is a Server-side decision instead of an edit to supervisor.toml on \
                    the host. An empty map clears them. Labels never travel to the Agent, and they \
                    outlive it: forgetting an Agent does not clear them. A key the Agent already \
                    reports is refused, because reported attributes decide which artifact fits the \
@@ -314,7 +314,7 @@ async fn set_agent_labels(
             format!(
                 "agent {uid} reports {key:?} itself, and a label may not restate it — a reported \
                  attribute decides which artifact fits this machine, so it wins. Change it where it \
-                 comes from, in that host's client.toml, or label it under another key"
+                 comes from, in that host's supervisor.toml, or label it under another key"
             ),
         ),
         Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -669,14 +669,21 @@ struct PackageSetView {
     /// One entry per platform. An Agent is offered the one built for the machine it reported,
     /// and never another (ADR-0031).
     entries: Vec<PackageEntryView>,
-    /// How many Agents in the fleet this Set **would** reach — fitted by type and platform, then
-    /// aimed by Selector and resolved against its sibling versions, exactly as the offer resolves.
+    /// How many Agents in the fleet this Set **would** reach — fitted by type and platform, aimed
+    /// by Selector, held to an upgrade over what each Agent reports installed (ADR-0076), and
+    /// resolved against its sibling versions.
     ///
-    /// **`0` is the value worth looking at.** A Set targets nobody when its type is misspelled,
-    /// when no entry matches any reported platform, or when its Selector matches no Agent — and
-    /// none of those is a rejected upload, so nothing else would say so. A **draft** is counted as
-    /// if it were published, because staging a rollout is how its aim is checked before it starts.
+    /// This is what a rollout act would change. Read it together with `matching_agents`: `0` here
+    /// with a non-zero `matching_agents` means every Agent this Set aims at already runs this
+    /// version or a newer one — nothing to do, and nothing wrong.
     targeted_agents: usize,
+    /// How many Agents this Set fits and aims at, whatever they run — type, platform and Selector
+    /// only.
+    ///
+    /// **`0` is the value worth looking at.** A Set aims at nobody when its type is misspelled,
+    /// when no entry matches any reported platform, or when its Selector matches no Agent — and
+    /// none of those is a rejected upload, so nothing else would say so.
+    matching_agents: usize,
 }
 
 /// One platform's entry of a Set: an uploaded artifact or a source reference (ADR-0018).
@@ -697,9 +704,10 @@ struct PackageEntryView {
 }
 
 impl PackageSetView {
-    fn of(summary: crate::packages::SetSummary, targeted_agents: usize) -> Self {
+    fn of(summary: crate::packages::SetSummary, reach: crate::fleet::SetReach) -> Self {
         PackageSetView {
-            targeted_agents,
+            targeted_agents: reach.targeted,
+            matching_agents: reach.aiming,
             name: summary.name,
             service_name: summary.service_name,
             version: summary.version,
@@ -787,7 +795,7 @@ fn set_response(state: &AppState, id: &crate::packages::SetId) -> Response {
                 .package_reach()
                 .get(&id.to_string())
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or_default();
             Json(PackageSetView::of(summary, reach)).into_response()
         }
         None => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
@@ -833,8 +841,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
                             "{}@{}@{}",
                             summary.name, summary.version, summary.service_name
                         );
-                        let targeted = reach.get(&key).copied().unwrap_or(0);
-                        PackageSetView::of(summary, targeted)
+                        PackageSetView::of(summary, reach.get(&key).copied().unwrap_or_default())
                     })
                     .collect::<Vec<_>>(),
             )

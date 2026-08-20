@@ -2,10 +2,10 @@
 //! to its **own** Agent.
 //!
 //! Only the `[[supervisor]]` blocks of the offered document are read — every other top-level key
-//! is ignored, because the rest of `client.toml` is host-local trust and wiring the Server must
+//! is ignored, because the rest of `supervisor.toml` is host-local trust and wiring the Server must
 //! never write. The offered set is validated against the running configuration's globals first;
 //! then the Supervisors that left or changed are stopped, the merged document is written to
-//! `client.toml` — surgically, so the operator's comments and layout survive — the removed
+//! `supervisor.toml` — surgically, so the operator's comments and layout survive — the removed
 //! Supervisors' directories are purged (ADR-0059), and the changed and added Supervisors are
 //! started from the file just written. Unchanged Supervisors ride through untouched.
 
@@ -161,7 +161,7 @@ fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Ve
 
 /// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
 /// `instance-uid` whose Agent has already said its goodbye (ADR-0059). Runs only after the
-/// rewritten `client.toml` no longer names the Supervisor: a failed write restarts the stopped
+/// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
 /// orphan the next startup reports.
@@ -247,7 +247,7 @@ fn restart_stopped(
 /// Reads the offered Supervisor set out of the composed config map (ADR-0056): every entry is
 /// parsed as TOML, the union of their `[[supervisor]]` blocks is the set, and every other
 /// top-level key is ignored — the boundary is enforced by what the Client takes. Returns the
-/// parsed blocks beside their verbatim tables, which is what the write puts into `client.toml`
+/// parsed blocks beside their verbatim tables, which is what the write puts into `supervisor.toml`
 /// so the offered text survives as written.
 ///
 /// # Errors
@@ -326,22 +326,17 @@ fn offered_blocks(
 ///
 /// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
 /// program lives in a directory this Client created and updates from signature-verified packages
-/// (ADR-0021). An absolute path is the machine's own process; letting the Server spawn one would be
-/// arbitrary code execution that never passes through package signing. This binds the delivery path
-/// alone: an operator may still write an absolute-path Supervisor in `client.toml` by hand, a
-/// different principal that `resolve_program` must keep serving — which is why the rule lives here
-/// and not in path resolution.
+/// (ADR-0057). Letting the Server spawn a program on the machine would be arbitrary code execution
+/// that never passes through package signing.
+///
+/// Since ADR-0085 that rule **cannot fire**: no block naming a program on the machine parses at
+/// all, from any principal, so every block reaching here already satisfies it. The check stays as
+/// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
+/// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
+/// enforces it in fact.
 fn validate_offered_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<(), String> {
     crate::supervisor::validate_block(config, block)?;
-    let program = crate::supervisor::resolve_block_program(config, block)?;
-    if !program.owned {
-        return Err(format!(
-            "supervisor {:?}: a Server-delivered supervisor may run only a program this Client \
-             owns — name it with a bare file name, not the absolute path {}",
-            block.name,
-            program.path.display()
-        ));
-    }
+    crate::supervisor::resolve_block_program(config, block)?;
     Ok(())
 }
 
@@ -361,7 +356,7 @@ fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
     }
 }
 
-/// Replaces the `[[supervisor]]` blocks of `client.toml` with the offered ones and leaves every
+/// Replaces the `[[supervisor]]` blocks of `supervisor.toml` with the offered ones and leaves every
 /// other line of the file exactly as the operator wrote it — comments, ordering, formatting
 /// (ADR-0056). A file that does not exist yet is created; the write goes through a sibling
 /// temporary file so a crash never leaves a half-written configuration. Returns the new text.
@@ -395,10 +390,10 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
     Ok(new_text)
 }
 
-/// Writes the new configuration to the temporary file the caller then renames over `client.toml`.
+/// Writes the new configuration to the temporary file the caller then renames over `supervisor.toml`.
 ///
 /// On Unix the temp file inherits the mode of the file it will replace — created with it, never
-/// widened after — so the rename cannot loosen permissions. `client.toml` holds the OpAMP
+/// widened after — so the rename cannot loosen permissions. `supervisor.toml` holds the OpAMP
 /// credential in cleartext and is created `0600` (`config_init::write_new`); writing the temp file
 /// at the default umask (`0644`) and renaming it over the original, as this did before, left that
 /// credential world-readable after every Server-driven reconfigure (ADR-0056). A file that does not
@@ -453,7 +448,7 @@ mod tests {
         }
     }
 
-    /// ADR-0056 point 1: only the `[[supervisor]]` blocks are read; a full `client.toml`-shaped
+    /// ADR-0056 point 1: only the `[[supervisor]]` blocks are read; a full `supervisor.toml`-shaped
     /// document may be offered and exactly its fleet-manageable half takes effect.
     #[test]
     fn foreign_top_level_keys_are_ignored() {
@@ -516,6 +511,10 @@ mod tests {
         }
     }
 
+    /// The attack this guard was written against: a Server that delivers a block spawning a
+    /// program on the machine with arguments of its choosing. Since ADR-0085 it is refused a step
+    /// earlier and for a broader reason — no block naming a program on the machine parses, from
+    /// any principal — but the delivery path must still refuse it, which is what this asserts.
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
         let program = machine_program();
@@ -532,12 +531,12 @@ mod tests {
 
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute path refused");
         assert!(err.contains("\"shell\""), "names the block: {err}");
-        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("only programs it installs"), "{err}");
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (ADR-0021), so a delivered
-    /// block that names one is accepted — the ordinary, intended delivery shape.
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0021, ADR-0085), so a
+    /// delivered block that names one is accepted — since ADR-0085 the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
         let offer = offer_of(&[(
@@ -567,7 +566,7 @@ mod tests {
         config.supervisors = blocks.clone();
 
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute binary refused");
-        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("only programs it installs"), "{err}");
         assert!(err.contains(program), "{err}");
     }
 
@@ -595,7 +594,7 @@ mod tests {
     #[test]
     fn the_write_replaces_blocks_and_keeps_the_operators_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(
             &path,
             "# where the fleet lives\nendpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
@@ -623,7 +622,7 @@ mod tests {
         assert_eq!(parsed.supervisors[0].name, "new");
     }
 
-    /// `client.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
+    /// `supervisor.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
     /// not widen it. Before the fix, writing the temp file at the default umask and renaming it over
     /// the original left the file (and the credential) world-readable after a Server reconfigure.
     #[cfg(unix)]
@@ -632,7 +631,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(
             &path,
             "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
@@ -663,14 +662,14 @@ mod tests {
     }
 
     /// A file that does not exist yet is created no wider than the `0600` floor `write_new` uses —
-    /// a delivered set that first materializes `client.toml` must not do so world-readable.
+    /// a delivered set that first materializes `supervisor.toml` must not do so world-readable.
     #[cfg(unix)]
     #[test]
     fn a_freshly_created_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         let offer = offer_of(&[(
             "fleet",
             "[[supervisor]]\ntype = \"command\"\nname = \"new\"\ncommand = \"new\"\n",
@@ -767,7 +766,7 @@ mod tests {
     #[test]
     fn an_empty_offer_removes_every_block() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(
             &path,
             "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\

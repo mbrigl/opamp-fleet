@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The one dialog this installer adds to the stock set (ADR-0046 clause 5): where the Server is.
+  The one dialog this installer adds to the stock set (ADR-0046 clause 5): where the Server is, and
+  whether the fleet may update this Client itself (ADR-0075).
 
   Geometry, control ids and button positions are InstallDirDlg's, so the page it follows and this
   one are the same page with a different field. The `!(loc.…)` strings resolve out of the WiX UI
@@ -25,14 +26,26 @@
         <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
                  Text="Which Server this Client reports to." />
 
-        <Control Id="EndpointLabel" Type="Text" X="20" Y="60" Width="320" Height="30" NoPrefix="yes"
+        <Control Id="EndpointLabel" Type="Text" X="20" Y="52" Width="320" Height="32" NoPrefix="yes"
                  Text="OpAMP endpoint — the scheme selects the transport. The prefilled value is the local development Server; replace it with your Server's endpoint, for example wss://fleet.example.com/v1/opamp, or clear it to configure the Client after the install." />
-        <Control Id="EndpointEdit" Type="Edit" X="20" Y="95" Width="320" Height="18" Property="ENDPOINT" />
+        <Control Id="EndpointEdit" Type="Edit" X="20" Y="86" Width="320" Height="18" Property="ENDPOINT" />
 
-        <Control Id="CredentialNote" Type="Text" X="20" Y="130" Width="320" Height="60" NoPrefix="yes"
-                 Text="A credential is deliberately not asked for here: what is typed into an installer is written to the Windows Installer log. If the Server needs one, add it to client.toml in the installation folder afterwards, or run &quot;opamp-fleet-client service install --interactive&quot; from an elevated prompt." />
+        <!--
+          Checked by default (ADR-0075). The box is checked whenever SELFUPDATE is non-empty, and
+          clearing it empties the property — which is what the package's SELFUPDATEFLAG condition
+          reads. The answer goes into supervisor.toml either way, so it is visible and editable on the
+          host afterwards rather than sunk into the installer.
+        -->
+        <Control Id="SelfUpdateCheck" Type="CheckBox" X="20" Y="112" Width="320" Height="12"
+                 Property="SELFUPDATE" CheckBoxValue="1"
+                 Text="Let the Server update this Client's own binary" />
+        <Control Id="SelfUpdateNote" Type="Text" X="33" Y="126" Width="307" Height="30" NoPrefix="yes"
+                 Text="This is how the fleet patches the Client itself; without it this host is the one machine you update by hand. The Client only ever takes a package named after itself — anything else is refused and reported." />
 
-        <Control Id="StartNote" Type="Text" X="20" Y="195" Width="320" Height="30" NoPrefix="yes"
+        <Control Id="CredentialNote" Type="Text" X="20" Y="160" Width="320" Height="44" NoPrefix="yes"
+                 Text="A credential is deliberately not asked for here: what is typed into an installer is written to the Windows Installer log. If the Server needs one, add it to supervisor.toml in the installation folder afterwards, or run &quot;supervisor service install --interactive&quot; from an elevated prompt." />
+
+        <Control Id="StartNote" Type="Text" X="20" Y="207" Width="320" Height="25" NoPrefix="yes"
                  Text="The service is registered but not started, so that a Client which is not yet fully configured never runs against the wrong Server." />
       </Dialog>
     </UI>

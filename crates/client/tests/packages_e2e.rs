@@ -62,7 +62,7 @@ async fn spawn_server(
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+        Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())
@@ -138,8 +138,8 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         key = public_key_hex,
         marker = marker.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
 
@@ -180,4 +180,98 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     assert!(state_dir
         .join("supervisors/myagent/installed-package.json")
         .exists());
+}
+
+/// ADR-0068's preflight, reached through the `command` kind's own configuration: `version_args`
+/// is the arguments an operator has declared safe to invoke the program with, so they are also
+/// what proves a *staged* program runs before the running one is stopped.
+///
+/// The stub is asked to exit non-zero on them — what a binary this host's libc cannot satisfy
+/// does, with the dynamic linker's message in place of the stub's silence. The package must be
+/// refused with that message and nothing may be recorded as installed. Without the wiring the
+/// swap itself would be the first thing to try the new binary, and this would report `Installed`.
+#[tokio::test]
+async fn a_package_that_fails_the_configured_version_check_is_refused() {
+    let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
+
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    let set = server::packages::SetId::new("myagent", "managed-agent", "2.0.0").expect("set id");
+    store
+        .create_or_update(&set, Default::default(), false)
+        .expect("create set");
+    store
+        .put_entry(&set, &this_host(), None, artifact)
+        .expect("put entry");
+
+    let (addr, state, dir) = spawn_server(store).await;
+
+    let state_dir = dir.path().join("client-state");
+    let program_dir = state_dir.join("supervisors/myagent/program");
+    std::fs::create_dir_all(&program_dir).expect("create the program dir");
+    let managed = program_dir.join("managed-agent");
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &managed).expect("copy stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let marker = dir.path().join("marker");
+    // `--exit-code 1` is both the version check and the refusal: the same arguments the probe
+    // already runs after every swap, failing the way an unrunnable build fails. The supervised
+    // process itself is started with `--touch` and is untouched by any of it.
+    let toml = format!(
+        concat!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\n",
+            "state_dir = {state:?}\n",
+            "heartbeat_interval_secs = 1\n\n",
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"myagent\"\n",
+            "apply_grace_secs = 1\n",
+            "command = \"managed-agent\"\n",
+            "args = [\"--touch\", {marker:?}]\n",
+            "version_args = [\"--exit-code\", \"1\"]\n",
+        ),
+        addr = addr,
+        state = state_dir.to_string_lossy(),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+
+    let _client = spawn_client(&config_path);
+
+    wait_until("the rollout act to reach the agent", || {
+        state
+            .rollout_package(&set)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
+
+    let error = wait_until("the package to be reported InstallFailed", || {
+        let snapshot = state.snapshot();
+        let agent = view(&snapshot, "myagent")?;
+        let package = agent.packages.iter().find(|p| p.name == "myagent")?;
+        (package.status == "InstallFailed").then(|| package.error.clone())
+    })
+    .await;
+
+    // The refusal carries what the program said rather than an exit status: a real one names the
+    // library or the symbol version, which is the whole reason the check runs the program at all.
+    assert!(
+        error.contains("does not run on this host"),
+        "the refusal names the preflight: {error:?}"
+    );
+
+    // Nothing was installed, and the process the operator configured ran throughout.
+    assert!(
+        !state_dir
+            .join("supervisors/myagent/installed-package.json")
+            .exists(),
+        "a refused package records no installation"
+    );
+    assert!(marker.exists(), "the configured process kept running");
 }

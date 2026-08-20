@@ -13,23 +13,23 @@
       "cwd": "${workspaceFolder}"
     },
     {
-      // The package is `client`, the binary it produces is `opamp-fleet-client` (ADR-0028):
+      // The package is `supervisor`, the binary it produces is `supervisor` (ADR-0028):
       // `--package` takes the first, `--bin` and the filter take the second.
       "type": "lldb",
       "request": "launch",
-      "name": "Client",
+      "name": "Supervisor",
       "cargo": {
-        "args": ["build", "--bin", "opamp-fleet-client", "--package", "client"],
-        "filter": { "name": "opamp-fleet-client", "kind": "bin" }
+        "args": ["build", "--bin", "supervisor", "--package", "client"],
+        "filter": { "name": "supervisor", "kind": "bin" }
       },
-      "args": ["--config", "config/client.toml"],
+      "args": ["--config", "config/supervisor.toml"],
       "cwd": "${workspaceFolder}"
     }
   ],
   "compounds": [
     {
-      "name": "Server + Client",
-      "configurations": ["Server", "Client"],
+      "name": "Server + Supervisor",
+      "configurations": ["Server", "Supervisor"],
       "stopAll": true
     }
   ]

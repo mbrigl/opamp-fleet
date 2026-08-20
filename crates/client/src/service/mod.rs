@@ -28,7 +28,7 @@ pub enum ServiceLevel {
 /// The observable state of the installed service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
-    /// No service is registered under this instance's label.
+    /// No service is registered under the product's label.
     NotInstalled,
     /// Registered but not running.
     Stopped,

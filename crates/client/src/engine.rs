@@ -578,7 +578,7 @@ impl Engine {
     }
 
     /// Refreshes what the self-Agent reports as its effective configuration — the (redacted)
-    /// text of `client.toml`, which an applied Supervisor set just rewrote (ADR-0056).
+    /// text of `supervisor.toml`, which an applied Supervisor set just rewrote (ADR-0056).
     pub fn set_self_effective_config(&mut self, source: String) {
         let Some(agent) = self.agents.get_mut(crate::supervisor::SELF_AGENT_INDEX) else {
             return;
@@ -588,7 +588,7 @@ impl Engine {
             .set_process_effective_config(opamp::proto::EffectiveConfig {
                 config_map: Some(opamp::proto::AgentConfigMap {
                     config_map: std::collections::HashMap::from([(
-                        "client.toml".to_string(),
+                        "supervisor.toml".to_string(),
                         opamp::proto::AgentConfigObject {
                             role: String::new(),
                             body: source.into_bytes(),

@@ -49,62 +49,95 @@ Icinga publishes distribution packages and an MSI, no portable tree — so the a
 from the vendor's own packages
 ([ADR-0070](../adr/0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md)).
 
-Build it in a container of the distribution you are building **for** — the tree carries the
-libraries the build host resolves, so the container is the decision, not a flag (see the two rules
-below). To build the Debian 12 artifact:
+Build it **on** the distribution you are building for — the tree carries the libraries the build
+host resolves, so the build host is the decision, not a flag (see the two rules below). This
+project's Dev Container is that host: it is pinned to Debian 12 and carries Icinga's runtime
+libraries for exactly this reason
+([ADR-0074](../adr/0074-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md)), so the
+Debian 12 artifact is built in it directly:
 
 ```console
-$ docker run --rm -v "$PWD:/src" -w /src --network host rust:bookworm bash -lc \
-    'cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.4 --distro bookworm \
-       --platform linux/amd64 --platform windows/amd64 --server http://127.0.0.1:4321'
+$ cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.5 --distro bookworm \
+      --platform linux/amd64 --server http://127.0.0.1:4321
+  reading https://packages.icinga.com/debian/dists/icinga-bookworm/main/binary-amd64/Packages.gz …
+  reading https://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.gz …
   this build needs glibc >= 2.34 on every host it is rolled out to
-  provided /usr/lib/nagios/plugins/check_http as the package's own installation would
-  bundled 49 shared libraries
-  repacked  sha256 c1a1ef6d…
+
+linux/amd64
+  downloading …/icinga2-bin_2.16.5-1+debian12_amd64.deb …
+  verified against upstream's SHA-256
+  …
+  bundled 28 shared libraries
+  repacked  sha256 d60ee0e6…
 ```
 
-Three things about that command line, each of which costs an attempt to discover:
+Two things about that command line, each of which costs an attempt to discover:
 
 - **`--distro bookworm` is the guard, not a choice.** Omitted, the tool builds for whatever the host
-  is and says so; named, it refuses when the container is not that distribution. In a recipe meant
-  to be copied, the refusal is the point — a wrong container then fails loudly instead of quietly
+  is and says so; named, it refuses when the host is not that distribution. In a recipe meant to be
+  copied, the refusal is the point — the wrong build host then fails loudly instead of quietly
   producing an artifact for a different reach.
-- **`cargo run` rather than the binary from this checkout.** The tool is glibc-bound like everything
-  else it builds: compiled in this project's Dev Container (Debian 13) it needs `GLIBC_2.39` and
-  will not start under bookworm or bullseye at all. Build it where it runs.
-- **`--network host`** is only needed for `--server`, and only on Linux. Without an upload, use
-  `--no-upload`, and upload the artifacts from outside afterwards.
+- **`--server` uploads as it goes.** Leave it out with `--no-upload` and upload the artifacts
+  afterwards; the tool prints the two `curl` calls that do it.
+
+Add `--platform windows/amd64` to build the Windows artifact in the same run. It is repacked from
+the MSI and verified by Icinga's own Authenticode signature
+([ADR-0072](../adr/0072-the-windows-artifact-is-verified-by-its-publisher.md)) rather than by a
+digest, so it needs no particular build host and no glibc floor applies to it.
+
+To build for a **different** reach — an older distribution than the Dev Container, for hosts it does
+not cover — run the same tool in a container of that distribution, which is then the build host:
+
+```console
+$ docker run --rm -v "$PWD:/src" -w /src --network host rust:bullseye bash -lc \
+    'cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.5 --distro bullseye \
+       --platform linux/amd64 --no-upload'
+```
+
+`cargo run` rather than the binary from this checkout: the tool is glibc-bound like everything it
+builds, so one compiled in the Dev Container will not start under an older distribution at all.
+Build it where it runs. `--network host` is only needed for `--server`, and only on Linux. That
+container also needs Icinga's runtime libraries installed once — see the refusal below.
 
 The tree carries the daemon, the template library, **the check plugins**
-(`monitoring-plugins`, some 56 of them, with the libraries they need), and the vendor copyright
-files. The plugins come from the distribution rather than from Icinga, and one of them needs a word:
-Debian ships `check_http` through `update-alternatives`, so it exists only after a package is
-*installed* — the repack applies that same rule to the payload, highest priority winning, which is
-why `check_http` is in the tree and is the implementation Debian would have chosen.
+(`monitoring-plugins`, 47 of them, with the libraries they need), and the vendor copyright files.
+For Icinga 2 2.16.5 on Debian 12 that is 140 files and 75 MB unpacked — well inside the limits a
+package tree is held to ([ADR-0023](../adr/0023-multi-file-packages.md)).
+
+The plugins come from the distribution rather than from Icinga, and one of them needs a word: Debian
+ships `check_http` through `update-alternatives`, so it exists only after a package is *installed* —
+the repack applies that same rule to the payload, highest priority winning, which is why
+`check_http` is in the tree and is the implementation Debian would have chosen.
 
 Two rules follow from what the tree carries:
 
 - **Build it on the distribution you are building for.** The tree carries the libraries the build
   host resolves; everything except glibc travels with it. `--distro` states which build you mean and
   is checked against the host; omit it and the host's own is used. Either way the tool refuses to
-  build for a distribution this host is not — which is why the recipe above is a container and not a
-  flag. This project's own Dev Container is Debian 13, so building there without a container gives
-  the **narrowest** reach the tool can produce.
+  build for a distribution this host is not — which is why the second recipe above is a container
+  and not a flag.
 - **The glibc line it prints is the artifact's reach.** A tree built on Debian 13 does not run on
   Debian 12 or RHEL 9; one built on Debian 11 runs on all of them, across families, because glibc is
   backward compatible (ADR-0071). Build on the oldest distribution you must serve — that is the one
-  decision this step really carries.
+  decision this step really carries, and for this project it has been made once, as the Dev
+  Container's image pin (ADR-0074). Bumping that pin narrows every artifact built afterwards.
 
 If the build host is missing a library any of the packages depend on, the tool stops rather than
-packing an incomplete tree — and prints the `apt-get install` line that fixes it, assembled from
-what those packages themselves declare. A fresh container needs it once, before the run above
-succeeds — inside that same container, and without `sudo`, since a container's shell is already
-root:
+packing an incomplete tree — and prints the `apt-get install` line that fixes it, naming the
+packages that provide the libraries it just listed. **The Dev Container already carries them**; a
+container you started for a different reach needs the line once, inside that same container and
+without `sudo`, since a container's shell is already root:
 
 ```console
-$ apt-get update && apt-get install -y --no-install-recommends \
-      libboost-thread1.83.0 libssl3t64 liburiparser1 …
+error: the build host is missing libraries the package needs: libboost_coroutine.so.1.74.0, …
+  install the vendor package's own dependencies first:
+      sudo apt-get install -y --no-install-recommends libboost-coroutine1.74.0 …
+
+$ apt-get update && apt-get install -y --no-install-recommends libboost-coroutine1.74.0 …
 ```
+
+The names carry the distribution's own versions, so they differ per container — which is why the
+tool reads them out of that distribution's package index rather than this page listing them.
 
 ## 2. The block
 
@@ -141,9 +174,12 @@ stay beside the daemon there, because a Windows program finds its DLLs in its ow
 No `LD_LIBRARY_PATH` is needed, and `reload_signal` does not exist, so a configuration change is a
 restart.
 
-A machine-installed Icinga 2 is supervised by the same kind — name `binary` with an absolute path
-(`/usr/lib/x86_64-linux-gnu/icinga2/sbin/icinga2`), drop `program_path`, and disable the native
-service. The Agent then declares no `AcceptsPackages` and the fleet ships it nothing.
+An Icinga 2 the machine already installed is **not** supervised in place: `binary` takes a bare
+file name and nothing else, so there is no block shape that points at
+`/usr/lib/x86_64-linux-gnu/icinga2/sbin/icinga2`. The route across is the one this page describes
+— repack that version with `opamp-package-fetch` and let the fleet deliver it — and the native
+service is disabled once the fleet-delivered tree runs. The host keeps whatever the package
+manager installed; nothing supervises it.
 
 ## 3. Enrolment: the ticket
 
@@ -249,8 +285,12 @@ rather than inside it.
 - **Windows builds, but is unproven.** `opamp-package-fetch` produces a Windows artifact from the
   MSI's payload — verified by Icinga's own signature, since no digest is published — but whether a
   repacked tree finds its paths without the MSI's product registration has not been tried on a
-  Windows host. Until it has, prefer the machine-installed form of the block there. The RPM repack
-  is not built and is optional under ADR-0071.
+  Windows host, and there is no second form of the block to fall back on. **Windows is therefore
+  an open task, not a supported platform**: what it needs is one run on a test host — build the
+  artifact, roll it out, and see whether the daemon finds `include_dir`, `plugin_dir` and its
+  libraries from `${supervisor_dir}/program/tree` without the registry keys the MSI writes. Until
+  someone has done that and this page says so, keep Windows hosts on their MSI installation and
+  outside the fleet. The RPM repack is not built and is optional under ADR-0071.
 - **Removing the Supervisor removes its certificate with the directory.** The Icinga master still
   holds the signed certificate for that node — `icinga2 ca remove` there is the operator's, and the
   Supervisor says so when it is retired.

@@ -10,7 +10,7 @@
 directory relocatable (`supervisor_dir`). That created a hole it did not close: a Foreign Agent is
 told where its configuration is **through its own command line**, and those arguments are passed
 verbatim (`CommandSettings::args` → `ProcessSpec::args` in `crates/client/src/supervisor/command.rs`).
-The example in [`config/client.toml`](../../config/client.toml) is the demonstration:
+The example in [`config/supervisor.toml`](../../config/supervisor.toml) is the demonstration:
 
 ```toml
 command = "/opt/fluent-bit/bin/fluent-bit"

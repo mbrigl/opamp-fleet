@@ -187,7 +187,7 @@ it (AGENTS.md links here).
 - **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
-- **Run the Client:** `cargo run -p client -- --config config/client.toml`
+- **Run the Client:** `cargo run -p client -- --config config/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
   and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
   sign an artifact out of any program) — both documented in
@@ -204,8 +204,15 @@ and the Server for Linux.
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
-`opamp-fleet-client_<version>_<os>_<arch>.7z` for Linux, macOS and Windows on the architectures each ships
-on, plus a `SHA256SUMS` file. The fields are separated by `_` because a name and a version both
+`supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
+ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
+to, not after the product inside them
+([ADR-0078](docs/adr/0078-a-release-is-named-after-the-set-it-becomes.md)) — and since
+[ADR-0082](docs/adr/0082-the-fleets-own-agent-is-called-supervisor.md) the program inside them and
+its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
+the **product's** name, `opamp-fleet`
+([ADR-0084](docs/adr/0084-the-product-names-the-installation.md)): that is the name that
+identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
 contain `-` ([ADR-0032](docs/adr/0032-release-artifacts-separate-their-fields-with-underscores.md)),
 and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
 `darwin_arm64`, …), so uploading a whole release under one package
@@ -235,7 +242,7 @@ A minimal closed control loop on one machine:
    docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
    with Basic credentials
    ([ADR-0067](docs/adr/0067-basic-authentication-on-the-operator-plane.md)).
-2. **Start a Client:** `cargo run -p client -- --config config/client.toml` — it connects over
+2. **Start a Client:** `cargo run -p client -- --config config/supervisor.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
@@ -292,24 +299,27 @@ The Client registers *itself* as a native service on Linux (systemd), macOS (lau
 (SCM) — [ADR-0010](docs/adr/0010-client-os-service-and-cli.md):
 
 ```console
-$ opamp-fleet-client service install --config /etc/opamp/client.toml     # system service (root/Administrator)
-$ opamp-fleet-client service start
-$ opamp-fleet-client service status
-$ opamp-fleet-client service stop
-$ opamp-fleet-client service uninstall                                   # never deletes layout or state
+$ supervisor service install --config /etc/opamp/supervisor.toml     # system service (root/Administrator)
+$ supervisor service start
+$ supervisor service status
+$ supervisor service stop
+$ supervisor service uninstall                                   # never deletes layout or state
 ```
 
-- **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
-  independent service (`opamp-fleet-client-<name>`) with its own configuration, install root,
-  and state — several differently-configured Clients coexist on one host.
-- **Install root:** `--root <dir>` puts everything under one directory; nothing is ever installed
-  to a fixed path. Without it, a Linux system install splits the defaults: the executable layout —
-  `versions/opamp-fleet-client-<version>-<commit>/` and the `current` pointer the service runs
-  from — lives at `/opt/opamp-fleet/client/<instance>`, while `client.toml` and the default
-  `state/` directory stay at `/var/lib/opamp-fleet/client/<instance>` (SELinux never lets systemd
-  execute a binary under `/var/lib` —
-  [ADR-0053](docs/adr/0053-the-linux-service-executes-from-opt.md)). macOS, Windows, and user
-  scope keep one default directory for everything.
+- **One service per build:** the service is named after the product, `opamp-fleet`, with no suffix
+  and nothing to look up — so the verbs above take no name at all. A second installation on one
+  host is a second *build* with its own `PRODUCT_NAME`, not a runtime flag
+  ([ADR-0084](docs/adr/0084-the-product-names-the-installation.md)).
+- **Two roots:** `--root <dir>` given alone puts everything under the one directory it names;
+  nothing is ever installed to a fixed path. Without it, a Linux system install splits the
+  defaults: the executable layout — `versions/supervisor-<version>-<commit>/` and the `current`
+  pointer the service runs from — lives at `/opt/opamp-fleet`, while `supervisor.toml` and the
+  default `state/` directory stay at `/var/lib/opamp-fleet` (SELinux never lets systemd execute a
+  binary under `/var/lib`). `--data-root <dir>` names that second half explicitly. macOS, Windows
+  and user scope keep one directory for everything — including a Windows host installed by the
+  MSI, where `Program Files` holds the delivered payload and the layout goes under
+  `%ProgramData%\opamp-fleet`, because the self-update rewrites the layout at runtime and
+  `Program Files` is not a tree a service account should be able to write.
 - **Scope:** `--user` targets the user-level manager (development); the default is a system
   service that starts at boot.
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
@@ -322,7 +332,7 @@ $ opamp-fleet-client service uninstall                                   # never
 
   ```toml
   [self_update]
-  package = "opamp-fleet-client"   # only this package is ever installed over this binary
+  package = "supervisor"           # only this package is ever installed over this binary
   ```
 
   A new version is staged beside the running one under `versions/`, run once to prove it is this
@@ -339,11 +349,10 @@ doing and nothing else asserts it. The test is `crates/client/tests/service_smok
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
-(`journalctl -u opamp-fleet-client` on Linux, Console/`log show` on macOS), the Agent in
-the fleet UI, a second `--instance` beside the first, and an **SELinux-enforcing host** (Fedora,
-RHEL, or SUSE 16 with `getenforce` answering `Enforcing`): the `.rpm` install must start —
-a service dying with `status=203/EXEC` and an AVC denial in `ausearch -m avc` is the failure
-ADR-0053 exists to prevent. Known platform gaps (tracked in the ADR):
+(`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
+the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
+answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
+an AVC denial in `ausearch -m avc` is the failure ADR-0084 clause 3 exists to prevent. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
 `<state_dir>/logs` on every platform (ADR-0041), which is where to look when the manager shows a
@@ -361,7 +370,7 @@ docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
 crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
-config/               # annotated example configuration files (server.toml, client.toml)
+config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 .devcontainer/        # Dev Container definition (base image + Features)

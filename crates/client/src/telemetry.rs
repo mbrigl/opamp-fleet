@@ -2,7 +2,7 @@
 //!
 //! Three capabilities, one mechanism. `ReportsOwnMetrics`, `ReportsOwnTraces`, and `ReportsOwnLogs`
 //! each mean "the Agent can report own <signal> to the destination specified by the Server via
-//! `ConnectionSettingsOffers.own_*`" — so nothing here is configured in `client.toml`, and with no
+//! `ConnectionSettingsOffers.own_*`" — so nothing here is configured in `supervisor.toml`, and with no
 //! destination offered this module builds nothing and costs nothing.
 //!
 //! What "own" means here is what this Client can honestly observe: its own process, and the

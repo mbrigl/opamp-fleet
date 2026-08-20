@@ -41,7 +41,7 @@ use client::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 /// The version directory laid out before the update. Joined one component at a time, never as
 /// `versions/<name>`: this test builds the Windows pointer with `mklink`, a `cmd` builtin that
 /// reads an embedded `/` as the start of a switch.
-const PREVIOUS_VERSION_DIR: &str = "opamp-fleet-client-0.0.0-previous";
+const PREVIOUS_VERSION_DIR: &str = "supervisor-0.0.0-previous";
 
 async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -87,6 +87,190 @@ fn version_of(binary: &Path) -> String {
         .last()
         .expect("a version in the output")
         .to_string()
+}
+
+/// A `file://` URL for a local path, spelled the way git wants it on every platform.
+///
+/// `file://` rather than a plain path, for two reasons that only bite in CI: git ignores `--depth`
+/// on a local path, and it refuses the local-clone optimisation against a *shallow* source — which
+/// is what `actions/checkout` leaves behind at its default depth of one. Windows then needs the
+/// spelling fixed twice over: canonicalisation there yields an extended-length path (`\\?\C:\…`)
+/// and native separators, and neither belongs in a URL. Getting this wrong is what `exit code: 128`
+/// on the Windows runner looked like, so the shape is pinned by a test that runs everywhere.
+fn file_url(path: &Path) -> String {
+    let text = path.display().to_string();
+    let text = text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .replace('\\', "/");
+    // `file://` plus a path that already starts with `/` gives the three slashes a URL needs; a
+    // Windows path starts with its drive letter and has to be given the third.
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}
+
+/// The three spellings this has to survive: a Unix path, and a Windows one with and without the
+/// extended-length prefix `std::fs::canonicalize` puts in front of it.
+#[test]
+fn a_local_path_becomes_a_file_url_git_accepts() {
+    assert_eq!(file_url(Path::new("/workspace")), "file:///workspace");
+    assert_eq!(
+        file_url(Path::new(r"\\?\C:\a\opamp-fleet")),
+        "file:///C:/a/opamp-fleet"
+    );
+    assert_eq!(
+        file_url(Path::new(r"C:\a\opamp-fleet")),
+        "file:///C:/a/opamp-fleet"
+    );
+}
+
+/// The version the artifact under offer is built as — greater than anything this repository has
+/// released, so it is an upgrade for whatever the test runs.
+const NEWER_VERSION: &str = "9.9.9";
+
+/// A Client binary that is a *newer version* than the one this test runs, built once per test
+/// binary with the override the build script documents (`OPAMP_FLEET_VERSION`, ADR-0026), and its
+/// version as an operator would type it.
+///
+/// A second build, rather than offering the running binary back to itself, because that offer is
+/// one the fleet no longer makes: a Set reaches an Agent only as an **upgrade** (ADR-0076), and a
+/// Client reports the version it runs whether or not a package put it there — so a Set at the
+/// running version reaches nobody, which is what `a_set_at_the_running_version_reaches_nobody`
+/// asserts. What is left to test here is the update itself, and an update needs something newer to
+/// install.
+///
+/// It is built from a **tagless clone** of this repository rather than from the checkout itself,
+/// and that is the whole reason a clone appears in a test: `build.rs` refuses a build whose
+/// `OPAMP_FLEET_VERSION` disagrees with a `version/*` tag on HEAD (ADR-0026's drift rule), so this
+/// helper broke on precisely the commits a release is cut from. The clone carries no tags, so the
+/// override is the only version statement there is and the build is an ordinary `-dev` one.
+///
+/// What that costs: the artifact is built from the **committed** state. Uncommitted changes to the
+/// Client are in the binary under test but not in the one it installs, which for what these tests
+/// assert — a program that self-checks at the offered version, comes up, and reports `Installed` —
+/// is a difference that does not show. Cheap after the first run: the clone is refreshed to HEAD
+/// and both it and its target directory are kept under `CARGO_TARGET_TMPDIR`, without debug info.
+fn newer_client() -> &'static (PathBuf, String) {
+    static NEWER: std::sync::OnceLock<(PathBuf, String)> = std::sync::OnceLock::new();
+    NEWER.get_or_init(|| {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("newer-client");
+        let checkout = root.join("checkout");
+        let target = root.join("target");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the workspace root resolves");
+        let url = file_url(&workspace);
+
+        let git = |args: &[&str], what: &str| {
+            let out = Command::new("git")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("cannot run git to {what}: {e}"));
+            // stderr, not just the code: this runs on three platforms in CI, where `exit code:
+            // 128` on its own says nothing about which of them git objected to.
+            assert!(
+                out.status.success(),
+                "cannot {what}: {}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        };
+        // A clone that did not finish leaves a directory git will not clone into again ("already
+        // exists and is not an empty directory") while `Cargo.toml` is still missing, so the two
+        // branches below cannot be chosen by the presence of a file the reuse path needs. Ask
+        // instead whether there is a repository to fetch into, and clear anything else out of the
+        // way -- `target/` survives between CI runs, which is what makes a half-written clone here
+        // outlive the run that abandoned it.
+        let reusable = checkout.join(".git").exists() && checkout.join("Cargo.toml").exists();
+        if !reusable && checkout.exists() {
+            std::fs::remove_dir_all(&checkout).expect("clear an unusable checkout");
+        }
+        if reusable {
+            // Kept between runs, so it has to follow HEAD rather than stay where it was cloned.
+            let dir = checkout.to_string_lossy().to_string();
+            git(
+                &[
+                    "-C",
+                    &dir,
+                    "fetch",
+                    "--no-tags",
+                    "--depth",
+                    "1",
+                    &url,
+                    "HEAD",
+                ],
+                "fetch the sources to build the newer Client from",
+            );
+            git(
+                &["-C", &dir, "reset", "--hard", "FETCH_HEAD"],
+                "move the newer Client's sources to HEAD",
+            );
+        } else {
+            std::fs::create_dir_all(&root).expect("create the build directory");
+            git(
+                &[
+                    "clone",
+                    "--no-tags",
+                    "--depth",
+                    "1",
+                    &url,
+                    &checkout.to_string_lossy(),
+                ],
+                "clone the sources to build the newer Client from",
+            );
+        }
+
+        // `--no-tags` is the intent; this is the guarantee. The whole point of the clone is a HEAD
+        // no `version/*` tag points at, and a tag that arrived anyway — by a git that copies refs
+        // on a local optimisation, or by a source whose refs moved — would put the drift rule back
+        // in the way with a message nobody would connect to this helper.
+        let dir = checkout.to_string_lossy().to_string();
+        let listed = Command::new("git")
+            .args(["-C", &dir, "tag", "-l"])
+            .output()
+            .expect("list the clone's tags");
+        for tag in String::from_utf8_lossy(&listed.stdout).lines() {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                git(&["-C", &dir, "tag", "-d", tag], "drop a tag from the clone");
+            }
+        }
+
+        let release = !cfg!(debug_assertions);
+        let mut build = Command::new(env!("CARGO"));
+        build
+            .current_dir(&checkout)
+            .args(["build", "-p", "client", "--bin", "supervisor"])
+            .env("OPAMP_FLEET_VERSION", NEWER_VERSION)
+            .env("CARGO_TARGET_DIR", &target)
+            // Nothing here is debugged; the binary only has to run and to say what it is.
+            .env("CARGO_PROFILE_DEV_DEBUG", "0");
+        if release {
+            build.arg("--release");
+        }
+        let status = build.status().expect("run cargo");
+        assert!(
+            status.success(),
+            "building the newer Client failed: {status}"
+        );
+
+        let binary = target
+            .join(if release { "release" } else { "debug" })
+            .join(CLIENT_BINARY);
+        let full = version_of(&binary);
+        let identity = opamp::version::identity(&full)
+            .unwrap_or_else(|| panic!("{full:?} is not a version"))
+            .to_string();
+        assert!(
+            identity.starts_with(NEWER_VERSION),
+            "the override did not reach the build: {full:?}"
+        );
+        (binary, identity)
+    })
 }
 
 /// Lays out `<root>/versions/<dir>/<client>` + `<root>/current` the way `service install` would,
@@ -192,9 +376,9 @@ impl Drop for Supervised {
 }
 
 /// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0033). The Client's
-/// configured `name` is its *instance* name; its `service.name` is the constant type
-/// `opamp-fleet-client`, the same on every host in the fleet, which is what a Selector aiming the
-/// Client's own package matches on.
+/// configured `name` is its *instance* name; its `service.name` is the constant type `supervisor`
+/// (ADR-0077), the same on every host in the fleet, which is what a Selector aiming the Client's own
+/// package matches on.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
@@ -221,27 +405,22 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
+    // The artifact is a Client built as a greater version — the only thing that will pass the
+    // staged binary's own self-check, which requires it to *be* an OpAMP Fleet Client at the
+    // offered version, and the only thing the fleet will offer a Client at all (ADR-0076).
+    //
     // Offered the way an operator uploads a release: the number on the archive, without the commit
     // the build carries (ADR-0029). The staged binary reports the full string and must still be
     // recognised as this release — the failure that ADR exists for.
-    let full = version_of(&client);
-    // Whether the two actually differ depends on how this build was versioned, so the guarantee
-    // itself is pinned by `selfupdate`'s own `the_probe_ignores_the_commit_a_build_came_from`;
-    // what this test adds is that the whole loop runs on the operator's spelling.
-    let version = opamp::version::identity(&full)
-        .unwrap_or_else(|| panic!("{full:?} is not a version"))
-        .to_string();
-
-    // The artifact is this very binary: the only thing that will pass the staged binary's own
-    // self-check, which requires it to *be* an OpAMP Fleet Client at the offered version.
-    let artifact = std::fs::read(&client).expect("read the client binary");
+    let (newer, version) = newer_client();
+    let artifact = std::fs::read(newer).expect("read the newer client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // The Client's own Agent reports the constant type `opamp-fleet-client` (ADR-0033), and a Set
-    // reaches only Agents of its type — the type is part of its identity (ADR-0052).
-    let set = server::packages::SetId::new("opamp-fleet-client", "opamp-fleet-client", &version)
-        .expect("set id");
+    // The Client's own Agent reports the constant type `supervisor` (ADR-0033, ADR-0077), and a Set
+    // reaches only Agents of its type — the type is part of its identity (ADR-0052). Its name is
+    // the same string, which is what the consent below is narrowed to.
+    let set = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
     store
         .create_or_update(&set, Default::default(), false)
         .expect("create set");
@@ -253,9 +432,8 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let root = dir.path().join("install");
     let program = install_layout(&root, &client);
     let state_dir = dir.path().join("client-state");
-    let config = dir.path().join("client.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-fleet-client"))
-        .expect("write config");
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -276,22 +454,19 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
         service.tend();
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent
-            .packages
-            .iter()
-            .find(|p| p.name == "opamp-fleet-client")?;
-        (package.status == "Installed" && package.version == version).then_some(())
+        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+        (package.status == "Installed" && package.version == *version).then_some(())
     })
     .await;
 
-    // The configured `name` names this instance; the type is the shipped binary's name and the
-    // same for every Client in the fleet, so one Selector aims the Client's package at all of them
-    // without naming a host (ADR-0028, ADR-0033).
+    // The configured `name` names this instance; the type is the constant `supervisor`, the same
+    // for every Client in the fleet, so one Selector aims the Client's package at all of them
+    // without naming a host (ADR-0033, ADR-0077).
     assert_eq!(
         view(&state.snapshot(), "self-updating-client")
             .expect("the client's own agent")
             .service_name,
-        "opamp-fleet-client"
+        "supervisor"
     );
 
     assert!(
@@ -336,18 +511,14 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 #[tokio::test]
 async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
-    let full = version_of(&client);
-    let version = opamp::version::identity(&full)
-        .unwrap_or_else(|| panic!("{full:?} is not a version"))
-        .to_string();
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
 
-    // Offer the Client a version of itself, exactly as the test above does.
-    let artifact = std::fs::read(&client).expect("read the client binary");
+    // Offer the Client a newer version of itself, exactly as the test above does.
+    let (newer, version) = newer_client();
+    let artifact = std::fs::read(newer).expect("read the newer client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    let set = server::packages::SetId::new("opamp-fleet-client", "opamp-fleet-client", &version)
-        .expect("set id");
+    let set = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
     store
         .create_or_update(&set, Default::default(), false)
         .expect("create set");
@@ -359,12 +530,22 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     let root = dir.path().join("install");
     let program = install_layout(&root, &client);
     let state_dir = dir.path().join("client-state");
-    let config = dir.path().join("client.toml");
+    let config = dir.path().join("supervisor.toml");
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
-    // every time it is (re)started. An absolute path: the machine's program, run but never updated,
-    // which is exactly what a locally written block may name (ADR-0057).
-    let stub = env!("CARGO_BIN_EXE_stub_agent");
+    // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
+    // by a bare file name, which since ADR-0085 is the only shape a block may carry: a Managed
+    // Process is always one this Client installed.
+    let stub = {
+        let program_dir = state_dir.join("supervisors/managed/program");
+        std::fs::create_dir_all(&program_dir).expect("create the supervisor's program directory");
+        let target = program_dir.join("stub-agent");
+        std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &target).expect("place the stub");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stub executable");
+        "stub-agent"
+    };
     let marker = dir.path().join("managed.pid");
     std::fs::write(
         &config,
@@ -375,7 +556,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
                 "state_dir = {state:?}\n",
                 "heartbeat_interval_secs = 1\n\n",
                 "[self_update]\n",
-                "package = \"opamp-fleet-client\"\n\n",
+                "package = \"supervisor\"\n\n",
                 "[[supervisor]]\n",
                 "type = \"command\"\n",
                 "name = \"managed\"\n",
@@ -422,11 +603,8 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
         }
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent
-            .packages
-            .iter()
-            .find(|p| p.name == "opamp-fleet-client")?;
-        (package.status == "Installed" && package.version == version).then_some(())
+        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+        (package.status == "Installed" && package.version == *version).then_some(())
     })
     .await;
 
@@ -443,6 +621,97 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     }
 }
 
+/// The bug this exists for: a Server holding the 0.4.0 package offered it to Clients already
+/// running 0.4.0, and to one running 0.4.1-dev — a downgrade of the host that manages the host.
+///
+/// Both come from one gap. ADR-0076 holds a Set against what the Agent reports installed, and a
+/// Client that arrived by `.deb`, `.rpm`, MSI or by hand had installed no *package*, so it reported
+/// nothing and the fourth test had nothing to measure against. It now reports the version it runs —
+/// which is what this asserts across the process boundary, together with what the Server then does
+/// with it: an equal Set and an older one reach nobody, a greater one reaches this Client.
+#[tokio::test]
+async fn a_set_at_the_running_version_reaches_nobody() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
+    let full = version_of(&client);
+    let running = opamp::version::identity(&full)
+        .unwrap_or_else(|| panic!("{full:?} is not a version"))
+        .to_string();
+
+    // Three Sets differing only in their version. What is *in* them never matters here: no offer
+    // is expected to reach the Client at all, and the one that may is asserted at the rollout act
+    // rather than on the host.
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    let set_of = |version: &str| {
+        let id = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
+        store
+            .create_or_update(&id, Default::default(), false)
+            .expect("create set");
+        store
+            .put_entry(&id, &this_host(), None, b"not a client".to_vec())
+            .expect("put entry");
+        id
+    };
+    let same = set_of(&running);
+    let older = set_of("0.0.1");
+    let newer = set_of("9.9.9");
+
+    let (addr, state) = spawn_server(store).await;
+    let root = dir.path().join("install");
+    let program = install_layout(&root, &client);
+    let state_dir = dir.path().join("client-state");
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
+
+    // A Client installed the way a package manager installs one: a layout, a binary, and no record
+    // of any package ever having been installed over it.
+    assert!(
+        !state_dir.join("installed-package.json").exists(),
+        "this Client must start without an install record for the test to mean anything"
+    );
+    let mut service = Supervised::start(&program, &config);
+
+    let (reported_version, reported_status) =
+        wait_until("the Client to report what it runs", || {
+            service.tend();
+            let snapshot = state.snapshot();
+            let agent = view(&snapshot, "self-updating-client")?;
+            let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+            (!package.version.is_empty()).then(|| (package.version.clone(), package.status.clone()))
+        })
+        .await;
+    assert_eq!(
+        reported_version, running,
+        "a Client states the version it runs, whatever put it there"
+    );
+    assert_eq!(reported_status, "Installed");
+
+    assert_eq!(
+        state.rollout_package(&same).expect("the act runs"),
+        0,
+        "a Set at the version this Client already runs must reach nobody (ADR-0076)"
+    );
+    assert_eq!(
+        state.rollout_package(&older).expect("the act runs"),
+        0,
+        "and an older one must never be installed over a newer Client"
+    );
+    // The control: what the gate refuses is the version, not this Client — a greater Set still
+    // reaches it, which is the whole point of being able to update a fleet at all.
+    assert_eq!(
+        state.rollout_package(&newer).expect("the act runs"),
+        1,
+        "a greater Set still reaches this Client"
+    );
+
+    assert!(
+        service.exits.is_empty(),
+        "nothing was installed and nothing restarted: exits {:?}",
+        service.exits
+    );
+}
+
 /// The name in `[self_update]` is the whole of the protection (ADR-0020): a package with an empty
 /// Selector reaches every consenting Agent, and one written over the Client would take the host
 /// out of reach. Anything not called what that section says is refused and reported — never
@@ -450,20 +719,21 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_opamp-fleet-client"));
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     let version = version_of(&client);
 
     // A perfectly good Client artifact — under a name this Client did not consent to.
     let artifact = std::fs::read(&client).expect("read the client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // Typed so that it *does* reach the Client, which is the only way this test can still test what
-    // it is named for. ADR-0034 makes the Server refuse to send a package of another type, but the
-    // two guards are independent by design — so the case exercised here is the one where the
-    // Server's guard does not fire: an operator uploads a Collector artifact and mistypes its
-    // agent type as the Client's. The Client's name check (ADR-0020) is then all that is left.
-    let set =
-        server::packages::SetId::new("otelcol", "opamp-fleet-client", &version).expect("set id");
+    // Typed — and numbered — so that it *does* reach the Client, which is the only way this test
+    // can still test what it is named for. ADR-0034 makes the Server refuse to send a package of
+    // another type, and ADR-0076/ADR-0079 one that is not an upgrade over the version this Client
+    // reports running; the guards are independent by design, so the case exercised here is the one
+    // where neither of the Server's fires: an operator uploads a Collector artifact, mistypes its
+    // agent type as the Client's, and numbers it higher than anything released. The Client's name
+    // check (ADR-0020) is then all that is left.
+    let set = server::packages::SetId::new("otelcol", "supervisor", NEWER_VERSION).expect("set id");
     store
         .create_or_update(&set, Default::default(), false)
         .expect("create set");
@@ -476,9 +746,8 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let program = install_layout(&root, &client);
     let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
     let state_dir = dir.path().join("client-state");
-    let config = dir.path().join("client.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "opamp-fleet-client"))
-        .expect("write config");
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -505,12 +774,22 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     .await;
 
     assert!(
-        error.contains("opamp-fleet-client") && error.contains("otelcol"),
+        error.contains("supervisor") && error.contains("otelcol"),
         "the refusal names both what it takes and what it was offered: {error:?}"
     );
-    assert!(
-        state.snapshot().iter().all(|a| a.packages.is_empty()),
-        "nothing was installed"
+    // Nothing was installed: the only package this Client reports is the one it *is* — its own
+    // binary, at the version it runs, which it states whether or not a package put it there
+    // (ADR-0076). The refused `otelcol` is not among them.
+    let snapshot = state.snapshot();
+    let agent = view(&snapshot, "self-updating-client").expect("the client's own agent");
+    let names: Vec<&str> = agent.packages.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["supervisor"], "nothing was installed");
+    assert_eq!(
+        agent.packages[0].version,
+        opamp::version::identity(&version)
+            .expect("this build's version parses")
+            .to_string(),
+        "and what it reports installed is still the binary that is running"
     );
     assert!(
         service.exits.is_empty(),

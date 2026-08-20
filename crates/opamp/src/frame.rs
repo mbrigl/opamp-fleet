@@ -17,7 +17,7 @@ use prost::Message;
 ///
 /// The Baseline requires both ends to enforce a receive limit and to keep what they send under one
 /// — on both transports — and *recommends* 64 MiB as the default while asking that the limit be
-/// configurable. This constant is that recommended default; `server.toml` and `client.toml` each
+/// configurable. This constant is that recommended default; `server.toml` and `supervisor.toml` each
 /// carry a `max_message_size_bytes` key for deployments that want a tighter one.
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20; // 64 MiB
 

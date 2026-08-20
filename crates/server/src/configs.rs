@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn a_typed_revision_reaches_only_agents_of_its_type() {
         let otelcol = description(&[("service.name", "otelcol"), ("os.type", "linux")]);
-        let client = description(&[("service.name", "opamp-fleet-client")]);
+        let client = description(&[("service.name", "supervisor")]);
 
         let for_otelcol = typed(revision(&[], "b"), "otelcol");
         assert!(fits(&for_otelcol, Some(&otelcol)));

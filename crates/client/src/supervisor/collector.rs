@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{ProcessSpec, Runner, VersionProbe};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
@@ -113,9 +113,19 @@ impl Plugin for CollectorPlugin {
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),
-            // A Collector's own `--version` would serve as a preflight, but nothing has asked for
-            // one: the swap has always been the first thing to try a new binary here (ADR-0068).
-            preflight: None,
+            // The same `--version`, asked of the *staged* program before the running one is
+            // stopped (ADR-0068). It is the same question the probe above asks and the same cost,
+            // so the only thing that was ever missing here was asking it early: until now the swap
+            // itself was the first thing to try a new binary, and a build the host cannot run —
+            // one linked against a libc newer than this host's — paid for that with a stop, a
+            // swap, a failed start and a rollback instead of a refusal that touches nothing.
+            //
+            // No environment: the probe already invokes the live program bare, so a Collector that
+            // needs one to answer `--version` would report no version today either.
+            preflight: Some(Preflight {
+                args: vec!["--version".to_string()],
+                env: Vec::new(),
+            }),
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0060), which is also what the reference supervisor does.
             reload_signal: None,

@@ -108,7 +108,7 @@ stale_after_secs = 90
 # per Set, holding its metadata and one artifact per platform. A Set is identified by its NAME,
 # the AGENT TYPE it is built for, and its VERSION — stated at creation, never edited; a new
 # version is a new Set. The type is compared raw against the `service.name` the Agents report
-# (ADR-0034), so spell it exactly — a Client updating itself is typed `opamp-fleet-client`.
+# (ADR-0034), so spell it exactly — a Client updating itself is typed `supervisor`.
 #
 # Create a Set (always a draft) with
 # PUT /api/v1/packages/{name}/{agent_type}/{version} — body {"selector": {...}, "addon": false}.

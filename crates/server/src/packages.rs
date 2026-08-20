@@ -4,8 +4,10 @@
 //! reference (ADR-0018), with the SHA-256 content hash and an optional Ed25519 signature. A
 //! saved Set reaches nobody by itself (ADR-0061): what an Agent is offered is composed from the
 //! per-Agent assignments the operator's rollout acts wrote; [`resolve`] only computes the
-//! **candidates** such an act would release. The immutability of an assigned Set's entries is
-//! enforced by the fleet, which knows the assignments.
+//! **candidates** such an act would release. Since ADR-0076 a Set reaches an Agent only as an
+//! **upgrade**: what the Agent reports as installed is the fourth matching test, beside type,
+//! platform and Selector. The immutability of an assigned Set's entries is enforced by the fleet,
+//! which knows the assignments.
 //!
 //! Package *bodies* are opaque bytes: what a package contains and how it is applied is the Agent's
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
@@ -909,16 +911,39 @@ impl PackageStore {
     }
 
     /// The identities of the Sets a rollout act would release to this Agent — the **candidates**
-    /// (ADR-0061): fitted by type, platform and Selector, then resolved by specificity and
-    /// version (ADR-0052). Never an offer. `Err` when the targeting is ambiguous and the Server
-    /// refuses to guess; the fleet view shows the refusal.
+    /// (ADR-0061): fitted by type, platform and Selector, held to an upgrade over what the Agent
+    /// reports installed (ADR-0076), then resolved by specificity and version (ADR-0052). Never
+    /// an offer. `Err` when the targeting is ambiguous and the Server refuses to guess; the fleet
+    /// view shows the refusal.
     pub fn candidate_ids(
         &self,
         description: Option<&AgentDescription>,
+        installed: &InstalledVersions,
     ) -> Result<Vec<SetId>, String> {
         let sets = self.sets.read().expect("sets lock");
-        resolve(&sets, description)
+        resolve(&sets, description, installed)
             .map(|matching| matching.iter().map(|(set, _)| set.id.clone()).collect())
+    }
+
+    /// The identities of the Sets that **fit and aim at** this Agent, version-blind: its type,
+    /// an entry for its platform, and a Selector that matches — no ranking, and not ADR-0076's
+    /// upgrade test.
+    ///
+    /// This is the other half of the answer the Set view needs (ADR-0076 point 8). A Set reaching
+    /// nobody means one of two unrelated things — it aims at nobody, or everyone it aims at is
+    /// already at this version or newer — and only the first is a mistake to go looking for.
+    pub fn aiming_at(&self, description: Option<&AgentDescription>) -> Vec<SetId> {
+        let sets = self.sets.read().expect("sets lock");
+        let (Some(platform), Some(service_name)) = (
+            Platform::reported(description),
+            reported_service_name(description),
+        ) else {
+            return Vec::new();
+        };
+        sets.values()
+            .filter(|set| fits_and_aims(set, &platform, service_name, description))
+            .map(|set| set.id.clone())
+            .collect()
     }
 
     /// The Sets a **pre-ADR-0061** offer would have released to this Agent: the candidate
@@ -935,20 +960,28 @@ impl PackageStore {
             .filter(|(id, _)| self.formerly_published.contains(id))
             .map(|(id, set)| (id.clone(), set.clone()))
             .collect();
-        resolve(&subset, description)
+        // Version-blind on purpose (ADR-0076 point 6): this reproduces what the old publication
+        // model *had* offered, and reading history through today's test would seed a different
+        // fleet than the one that was actually running.
+        resolve(&subset, description, &InstalledVersions::new())
             .map(|matching| matching.iter().map(|(set, _)| set.id.clone()).collect())
             .unwrap_or_default()
     }
 
-    /// Whether an explicit rollout act may release this Set to this Agent (ADR-0061): the Set
-    /// must exist, hold an entry for the platform the Agent reports, be built for its type, and
-    /// its Selector must match. Deliberately **not** the version ranking of [`resolve`] — the
-    /// candidate computation proposes the greatest version, but an operator rolling out an older
-    /// Set by name is the rollback ADR-0052 described, now as the one explicit act.
+    /// Whether an explicit rollout act may release this Set to this Agent: the Set must exist,
+    /// hold an entry for the platform the Agent reports, be built for its type, its Selector must
+    /// match (ADR-0061), and its version must be an **upgrade** over what the Agent reports
+    /// installed under that name (ADR-0076).
+    ///
+    /// Still **not** the version *ranking* of [`resolve`]: rolling out a Set older than a sibling
+    /// the store also holds stays the operator's to make. What ADR-0076 forbids is aiming an act
+    /// at an Agent it would move backwards, or not move at all — the count beside the button and
+    /// the button itself now answer the same question.
     pub fn fits_agent(
         &self,
         id: &SetId,
         description: Option<&AgentDescription>,
+        installed: &InstalledVersions,
     ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
@@ -979,6 +1012,25 @@ impl PackageStore {
             return Err(format!(
                 "the Selector of set {id} does not match this Agent"
             ));
+        }
+        if !upgrades(set, installed, description) {
+            // Which versions were compared is the operator's first question here, so the refusal
+            // names both of them and where each was read (ADR-0079, ADR-0081) — the two now hold
+            // the Set in different directions, and a refusal that named only one would read like
+            // the wrong rule applied.
+            let runs = reported_service_version(description).unwrap_or_default();
+            return match claimed_version(set, installed) {
+                Some(has) => Err(format!(
+                    "set {id} is not an upgrade for this Agent, which reports {has:?} installed \
+                     for package {:?} and runs {runs:?}",
+                    set.id.name
+                )),
+                None => Err(format!(
+                    "set {id} is not an upgrade for this Agent, which reports no version for \
+                     package {:?} and runs {runs:?}",
+                    set.id.name
+                )),
+            };
         }
         Ok(())
     }
@@ -1065,6 +1117,93 @@ fn assigned_entries<'a>(
         .collect()
 }
 
+/// What an Agent reports it has installed, per package name: `PackageStatuses.packages[name]
+/// .agent_has_version` as the Agent last sent it (ADR-0015). A name that is absent — and a name
+/// whose reported version is empty, which is how an Agent that has installed nothing reports a
+/// package it was offered — means *nothing is installed under that name*.
+pub type InstalledVersions = BTreeMap<String, String>;
+
+/// ADR-0076's fourth matching test: a Set reaches an Agent only as an **upgrade**.
+///
+/// An Agent reports up to two versions, and since ADR-0081 the test holds a Set against **both**,
+/// each in the direction it is good for. Compared as ADR-0029 compares versions.
+///
+/// *What it claims* is the **package status** for this Set's name — a statement about this very
+/// package, derived from what an install once wrote. It keeps the guard it is good for: a Set
+/// *lower* than the claim never matches, so a claim can still not be moved backwards, and a value
+/// that cannot be ordered refuses the match outright (ADR-0076 point 3) — the safe direction, and
+/// the Client's own (`selfupdate::install_offer`): what cannot be ordered must not be installed
+/// over what is running.
+///
+/// *What it runs* is the reported **`service.version`** — a statement about the present, which a
+/// record about the past cannot overrule. The Set must be strictly greater than the **lower** of
+/// the two, which is what lets a Set equal to a claim the Agent's own program denies running reach
+/// it again (ADR-0081), and what makes this the whole test where no package status is reported
+/// (ADR-0079). It never blocks on its own: a program numbering itself in its own space — `1.19`,
+/// `24.04.1`, or above the package that carries it — cannot hold back a Set the claim admits, and
+/// a value that cannot be ordered abstains rather than refusing.
+///
+/// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
+fn upgrades(
+    set: &PackageSet,
+    installed: &InstalledVersions,
+    description: Option<&AgentDescription>,
+) -> bool {
+    use std::cmp::Ordering;
+    let greater =
+        |has: &str| opamp::version::precedence(&set.id.version, has) == Some(Ordering::Greater);
+    // An unorderable `service.version` says nothing at all — it is dropped here rather than
+    // refusing, so what remains is either a version to be greater than or no statement.
+    let runs = reported_service_version(description)
+        .filter(|running| opamp::version::parse(running).is_some());
+    match claimed_version(set, installed) {
+        Some(claimed) => match opamp::version::precedence(&set.id.version, claimed) {
+            // Ahead of the claim: already greater than the lower of the two, whatever runs.
+            Some(Ordering::Greater) => true,
+            // The version the claim names, which the Agent may or may not be running. Only its
+            // own program can admit it — and only by saying it runs something older.
+            Some(Ordering::Equal) => runs.is_some_and(greater),
+            // Behind the claim, or unorderable against it: never, in either direction.
+            _ => false,
+        },
+        None => runs.is_none_or(greater),
+    }
+}
+
+/// What an Agent claims to have installed under this Set's name, if it claims anything: a package
+/// status reported with an empty version is no claim (ADR-0076).
+fn claimed_version<'a>(set: &PackageSet, installed: &'a InstalledVersions) -> Option<&'a str> {
+    installed
+        .get(&set.id.name)
+        .map(String::as_str)
+        .filter(|has| !has.is_empty())
+}
+
+/// The version an Agent reports as `service.version` — its program's own number, and since ADR-0079
+/// what a Set is held against when the Agent reports no version for the package itself. Since
+/// ADR-0081 it is also read beside a reported one, as what the Agent actually runs.
+fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
+    opamp::attributes::string_value(
+        &description?.identifying_attributes,
+        opamp::attributes::SERVICE_VERSION,
+    )
+    .filter(|version| !version.is_empty())
+}
+
+/// Whether a Set **fits** this Agent and its Selector **aims** at it (ADR-0034, ADR-0031,
+/// ADR-0017) — the three version-blind tests, shared by everything that matches a Set to an Agent
+/// so they cannot drift apart.
+fn fits_and_aims(
+    set: &PackageSet,
+    platform: &Platform,
+    service_name: &str,
+    description: Option<&AgentDescription>,
+) -> bool {
+    set.id.service_name == service_name
+        && set.entries.contains_key(platform)
+        && matches(&set.selector, description)
+}
+
 /// Which Sets a rollout act would release to one Agent — **fit, aim, then version** (ADR-0052),
 /// at most one Set per package name. Since ADR-0061 this computes the **candidates** the fleet
 /// view shows as waiting and the bulk acts assign; it never composes an offer.
@@ -1078,6 +1217,11 @@ fn assigned_entries<'a>(
 /// wins, compared as ADR-0029 compares versions. A tie the version comparison cannot break is a
 /// conflict — nothing is proposed under that name, and it is reported rather than guessed.
 ///
+/// *Upgrade* is ADR-0076, and it runs with the fit: a Set whose version is not greater than what
+/// the Agent reports installed under that name is no candidate at all, so it never enters the
+/// ranking and never raises a conflict. Ranking what the Agent cannot receive would propose an
+/// act that changes nothing.
+///
 /// Then the Baseline's own shape: every matching addon, and **one** top-level package across all
 /// names — "normally only one top-level package", and a Supervisor has one binary to replace.
 /// Between top-level winners of *different* names, the most specific Selector wins and an equal
@@ -1086,6 +1230,7 @@ fn assigned_entries<'a>(
 fn resolve<'a>(
     sets: &'a BTreeMap<SetId, PackageSet>,
     description: Option<&AgentDescription>,
+    installed: &InstalledVersions,
 ) -> Result<Vec<(&'a PackageSet, &'a Entry)>, String> {
     let Some(platform) = Platform::reported(description) else {
         return Ok(Vec::new());
@@ -1097,15 +1242,16 @@ fn resolve<'a>(
     };
     let mut by_name: BTreeMap<&str, Vec<(&PackageSet, &Entry)>> = BTreeMap::new();
     for set in sets.values() {
-        if set.id.service_name != service_name {
+        if !fits_and_aims(set, &platform, service_name, description) {
             continue;
         }
-        if !matches(&set.selector, description) {
+        if !upgrades(set, installed, description) {
             continue;
         }
-        let Some(entry) = set.entries.get(&platform) else {
-            continue;
-        };
+        let entry = set
+            .entries
+            .get(&platform)
+            .expect("the fit proved the entry");
         by_name.entry(&set.id.name).or_default().push((set, entry));
     }
 
@@ -1480,6 +1626,19 @@ mod tests {
         }
     }
 
+    /// An Agent that reports what its program is, as a Client does: `service.version`, identifying,
+    /// beside the type (ADR-0033).
+    fn running_agent(version: &str) -> AgentDescription {
+        let mut description = agent("linux", "amd64", &[]);
+        description.identifying_attributes.push(KeyValue {
+            key: "service.version".to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(version.to_string())),
+            }),
+        });
+        description
+    }
+
     /// A Set with one uploaded linux entry — stored, which since ADR-0061 reaches nobody until
     /// an assignment names it.
     fn stored_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> SetId {
@@ -1500,10 +1659,27 @@ mod tests {
             .collect()
     }
 
-    /// The candidates a rollout act would release to this Agent, as `(name, version)`.
+    /// What an Agent reports installed, as the record hands it to the store (ADR-0076).
+    fn installed(versions: &[(&str, &str)]) -> InstalledVersions {
+        versions
+            .iter()
+            .map(|(name, version)| ((*name).to_string(), (*version).to_string()))
+            .collect()
+    }
+
+    /// The candidates a rollout act would release to an Agent that has installed nothing.
     fn candidates(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
+        candidates_for(store, description, &InstalledVersions::new())
+    }
+
+    /// The candidates a rollout act would release to this Agent, as `(name, version)`.
+    fn candidates_for(
+        store: &PackageStore,
+        description: &AgentDescription,
+        installed: &InstalledVersions,
+    ) -> Vec<(String, String)> {
         let mut names: Vec<(String, String)> = store
-            .candidate_ids(Some(description))
+            .candidate_ids(Some(description), installed)
             .expect("resolution")
             .into_iter()
             .map(|id| (id.name, id.version))
@@ -1602,10 +1778,10 @@ mod tests {
     }
 
     /// The gate an explicit rollout act runs (ADR-0061): the Set must hold entries, fit the
-    /// Agent's type and platform, and its Selector must match — but the version ranking stays
-    /// out, because rolling out an older Set by name is the rollback.
+    /// Agent's type and platform, and its Selector must match. The version *ranking* stays out —
+    /// an Agent that has installed nothing takes the older Set as readily as the newer one.
     #[test]
-    fn fits_agent_checks_fit_and_aim_but_not_the_version() {
+    fn fits_agent_checks_fit_and_aim_but_not_the_ranking() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let empty = id("otelcol", "0.9.0");
@@ -1613,7 +1789,11 @@ mod tests {
             .create_or_update(&empty, BTreeMap::new(), false)
             .expect("create");
         assert!(store
-            .fits_agent(&empty, Some(&agent("linux", "amd64", &[])))
+            .fits_agent(
+                &empty,
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new()
+            )
             .expect_err("empty refused")
             .contains("holds no entries"));
 
@@ -1625,28 +1805,335 @@ mod tests {
 
         let ringed = agent("linux", "amd64", &[("ring", "canary")]);
         assert!(
-            store.fits_agent(&old, Some(&ringed)).is_ok(),
-            "a rollback target fits"
+            store
+                .fits_agent(&old, Some(&ringed), &InstalledVersions::new())
+                .is_ok(),
+            "the older Set fits an Agent that runs nothing yet"
         );
-        assert!(store.fits_agent(&new, Some(&ringed)).is_ok());
         assert!(store
-            .fits_agent(&old, Some(&agent("linux", "amd64", &[])))
+            .fits_agent(&new, Some(&ringed), &InstalledVersions::new())
+            .is_ok());
+        assert!(store
+            .fits_agent(
+                &old,
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new()
+            )
             .expect_err("outside the ring")
             .contains("Selector"));
         assert!(store
-            .fits_agent(&new, Some(&agent("windows", "amd64", &[])))
+            .fits_agent(
+                &new,
+                Some(&agent("windows", "amd64", &[])),
+                &InstalledVersions::new()
+            )
             .expect_err("wrong platform")
             .contains("no entry for"));
         assert!(
             store
-                .fits_agent(&new, Some(&AgentDescription::default()))
+                .fits_agent(
+                    &new,
+                    Some(&AgentDescription::default()),
+                    &InstalledVersions::new()
+                )
                 .is_err(),
             "no platform and no type fits nothing"
         );
         assert!(store
-            .fits_agent(&id("otelcol", "9.9.9"), Some(&ringed))
+            .fits_agent(
+                &id("otelcol", "9.9.9"),
+                Some(&ringed),
+                &InstalledVersions::new(),
+            )
             .expect_err("unknown set")
             .contains("no package set"));
+    }
+
+    /// ADR-0076's fourth test at the gate: an act may only be aimed at an Agent the Set would
+    /// move *forward*. Equal is not greater — a Set the Agent already runs changes nothing — and
+    /// a reported version that cannot be ordered is refused rather than guessed at.
+    #[test]
+    fn fits_agent_refuses_what_is_not_an_upgrade() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let host = agent("linux", "amd64", &[]);
+
+        let running_v2 = installed(&[("otelcol", "2.0.0")]);
+        assert!(store
+            .fits_agent(&old, Some(&host), &running_v2)
+            .expect_err("backwards")
+            .contains("not an upgrade"));
+        assert!(store
+            .fits_agent(&new, Some(&host), &running_v2)
+            .expect_err("the same version")
+            .contains("not an upgrade"));
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "1.0.0")]))
+                .is_ok(),
+            "forward is what a rollout act is for"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "")]))
+                .is_ok(),
+            "an empty reported version is nothing installed, not an unorderable one"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("otelcol", "nightly")]))
+                .is_err(),
+            "what cannot be ordered must not be installed over what is running"
+        );
+        assert!(
+            store
+                .fits_agent(&new, Some(&host), &installed(&[("promtail", "9.9.9")]))
+                .is_ok(),
+            "another package's version says nothing about this one"
+        );
+    }
+
+    /// The same test on the way in (ADR-0076): a Set the Agent already runs is no candidate, so
+    /// nothing proposes it and no count includes it. The Set the Agent is *behind* still is one.
+    #[test]
+    fn a_set_that_is_no_upgrade_is_no_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "1.0.0", b"v1");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let host = agent("linux", "amd64", &[]);
+
+        assert_eq!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "1.0.0")])),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+        );
+        assert!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "2.0.0")])).is_empty(),
+            "an Agent already at the greatest version is proposed nothing"
+        );
+        assert!(
+            candidates_for(&store, &host, &installed(&[("otelcol", "3.0.0")])).is_empty(),
+            "and one ahead of the store is proposed nothing either"
+        );
+    }
+
+    /// ADR-0079: an Agent that reports no version for the package is held against the version it
+    /// reports *running*. This is what reaches the Clients released before the one that reports its
+    /// own package version — they cannot state it, and they all state `service.version`.
+    #[test]
+    fn a_set_is_held_against_the_version_an_agent_reports_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let nothing = InstalledVersions::new();
+
+        // The build metadata every Client appends takes no part in it (ADR-0029).
+        for running in ["2.0.0", "2.0.0+a1b2c3d", "3.0.0"] {
+            assert!(
+                candidates_for(&store, &running_agent(running), &nothing).is_empty(),
+                "an Agent already running {running} is proposed nothing"
+            );
+        }
+        assert_eq!(
+            candidates_for(&store, &running_agent("1.0.0"), &nothing),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+            "and one genuinely behind is still reached"
+        );
+
+        // The act at the gate says the same thing, and says which version it read.
+        let refusal = store
+            .fits_agent(
+                &id("otelcol", "2.0.0"),
+                Some(&running_agent("2.0.0")),
+                &nothing,
+            )
+            .expect_err("the same version is no upgrade");
+        assert!(
+            refusal.contains("not an upgrade") && refusal.contains("runs \"2.0.0\""),
+            "the refusal names the version it compared against: {refusal}"
+        );
+    }
+
+    /// The package status keeps the guard it is good for (ADR-0076, ADR-0079 point 1, ADR-0081
+    /// point 2): it is a statement about *this package*, which a program's own number is not — an
+    /// addon or a repacked tree may be numbered nothing like the program it belongs to. So a
+    /// program numbering itself above its package never holds a Set back, and no Set ever reaches
+    /// an Agent *below* what its package status claims.
+    #[test]
+    fn a_reported_package_version_wins_over_the_version_the_agent_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+
+        assert_eq!(
+            candidates_for(
+                &store,
+                &running_agent("9.9.9"),
+                &installed(&[("otelcol", "1.0.0")])
+            ),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+            "the package this Agent has is at 1.0.0, whatever the program calls itself"
+        );
+
+        // A Collector that numbers itself far below the Set that carries it: the low number admits
+        // the version the claim names, and never one behind it.
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        stored_set(&store, "otelcol", "1.5.0", b"v15");
+        assert_eq!(
+            candidates_for(
+                &store,
+                &running_agent("0.98.0"),
+                &installed(&[("otelcol", "2.0.0")])
+            ),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+            "a program's own number must not propose moving its package backwards"
+        );
+        assert!(
+            store
+                .fits_agent(
+                    &id("otelcol", "1.5.0"),
+                    Some(&running_agent("0.98.0")),
+                    &installed(&[("otelcol", "2.0.0")])
+                )
+                .is_err(),
+            "and the act at the gate refuses the same downgrade"
+        );
+    }
+
+    /// ADR-0081: a claim the Agent's own program denies no longer holds the Set back. A Client that
+    /// reports `supervisor 0.4.1` installed while reporting that it runs 0.4.0 has a record about a
+    /// binary that is gone — and until this rule it was offered nothing, for good.
+    #[test]
+    fn a_claim_the_running_program_denies_no_longer_holds_the_set_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "supervisor", "0.4.1", b"v041");
+        let claims_041 = installed(&[("supervisor", "0.4.1")]);
+
+        assert_eq!(
+            candidates_for(&store, &running_agent("0.4.0"), &claims_041),
+            [("supervisor".to_string(), "0.4.1".to_string())],
+            "the version it runs is what it has; the record says only how it once got there"
+        );
+        assert!(
+            store
+                .fits_agent(
+                    &id("supervisor", "0.4.1"),
+                    Some(&running_agent("0.4.0")),
+                    &claims_041
+                )
+                .is_ok(),
+            "and the act at the gate agrees, as all three consumers must"
+        );
+
+        // Corroborated, and nothing changes: an Agent that runs what it claims is proposed nothing.
+        assert!(
+            candidates_for(&store, &running_agent("0.4.1"), &claims_041).is_empty(),
+            "a claim its program confirms is still the end of it"
+        );
+        let refusal = store
+            .fits_agent(
+                &id("supervisor", "0.4.1"),
+                Some(&running_agent("0.4.1+a1b2c3d")),
+                &claims_041,
+            )
+            .expect_err("the version it runs is the version offered");
+        assert!(
+            refusal.contains("\"0.4.1\" installed") && refusal.contains("runs \"0.4.1+a1b2c3d\""),
+            "the refusal names both versions it read: {refusal}"
+        );
+
+        // A program that cannot be ordered abstains here too (ADR-0079 point 3): it neither admits
+        // the claim's own version nor blocks anything.
+        assert!(
+            candidates_for(&store, &running_agent("nightly"), &claims_041).is_empty(),
+            "an unorderable program version says nothing, and the claim stands"
+        );
+    }
+
+    /// ADR-0079 point 3: the stand-in abstains where it cannot be ordered, rather than refusing.
+    /// A GLPI Agent numbers itself `1.19` and an appliance `24.04.1`; failing closed on those would
+    /// make a program's numbering habit into a fleet that cannot deliver to it at all.
+    #[test]
+    fn a_program_version_nothing_can_order_leaves_the_set_reaching() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let nothing = InstalledVersions::new();
+
+        for running in ["1.19", "24.04.1", "unknown", "v2.0.0"] {
+            assert_eq!(
+                candidates_for(&store, &running_agent(running), &nothing),
+                [("otelcol".to_string(), "2.0.0".to_string())],
+                "{running:?} orders against nothing, so it says nothing"
+            );
+        }
+
+        // And an Agent reporting no version at all is the first rollout, unchanged (ADR-0076).
+        assert_eq!(
+            candidates_for(&store, &agent("linux", "amd64", &[]), &nothing),
+            [("otelcol".to_string(), "2.0.0".to_string())],
+        );
+    }
+
+    /// A Set that is no upgrade leaves the ranking altogether, so it cannot tie with one that is
+    /// (ADR-0076): the conflict of two equally specific, unorderable versions disappears once the
+    /// Agent has installed something neither of them beats.
+    #[test]
+    fn what_is_no_upgrade_never_raises_a_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "nightly-a", b"a");
+        stored_set(&store, "otelcol", "nightly-b", b"b");
+        let host = agent("linux", "amd64", &[]);
+        assert!(store
+            .candidate_ids(Some(&host), &InstalledVersions::new())
+            .expect_err("two versions nothing can order tie")
+            .contains("cannot be ordered"));
+        assert!(
+            store
+                .candidate_ids(Some(&host), &installed(&[("otelcol", "1.0.0")]))
+                .expect("neither is an upgrade")
+                .is_empty(),
+            "neither can be ordered against what runs, so neither is ranked at all"
+        );
+    }
+
+    /// The count beside the button needs both answers (ADR-0076 point 8): whom the Set aims at,
+    /// version-blind, and whom it would actually reach. Aiming stays blind to what is installed
+    /// and to the sibling ranking — it answers "is this Set aimed at anybody at all".
+    #[test]
+    fn aiming_at_is_version_blind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let host = agent("linux", "amd64", &[]);
+
+        let mut aimed = store.aiming_at(Some(&host));
+        aimed.sort();
+        assert_eq!(aimed, vec![old, new.clone()], "both aim at this Agent");
+        assert!(
+            store
+                .aiming_at(Some(&agent("windows", "amd64", &[])))
+                .is_empty(),
+            "no entry for the reported platform is the aim mistake worth seeing"
+        );
+        assert_eq!(
+            store.aiming_at(Some(&host)).len(),
+            2,
+            "what the Agent already runs does not narrow the aim"
+        );
+        assert!(
+            store
+                .candidate_ids(Some(&host), &installed(&[("otelcol", "2.0.0")]))
+                .expect("resolution")
+                .is_empty(),
+            "though it does narrow the reach"
+        );
+        let _ = new;
     }
 
     /// ADR-0052's candidate ladder within one name: the most specific Selector wins; among
@@ -1703,7 +2190,10 @@ mod tests {
         stored_set(&store, "otelcol", "nightly-a", b"a");
         stored_set(&store, "otelcol", "nightly-b", b"b");
         let err = store
-            .candidate_ids(Some(&agent("linux", "amd64", &[])))
+            .candidate_ids(
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new(),
+            )
             .expect_err("refused");
         assert!(err.contains("cannot be ordered"), "{err}");
     }
@@ -1717,7 +2207,10 @@ mod tests {
         stored_set(&store, "otelcol-a", "1.0.0", b"a");
         stored_set(&store, "otelcol-b", "1.0.0", b"b");
         let err = store
-            .candidate_ids(Some(&agent("linux", "amd64", &[])))
+            .candidate_ids(
+                Some(&agent("linux", "amd64", &[])),
+                &InstalledVersions::new(),
+            )
             .expect_err("refused");
         assert!(err.contains("equally specific"), "{err}");
     }
@@ -1745,7 +2238,10 @@ mod tests {
         );
         assert!(
             store
-                .candidate_ids(Some(&AgentDescription::default()))
+                .candidate_ids(
+                    Some(&AgentDescription::default()),
+                    &InstalledVersions::new()
+                )
                 .expect("resolution")
                 .is_empty(),
             "no platform and no type fits nothing"

@@ -9,7 +9,7 @@ depends on them, and a fleet can be operated entirely through the REST API witho
 
 | Tool | Use it to |
 |---|---|
-| **[`opamp-package-fetch`](#opamp-package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Telegraf, Icinga 2 — verify it, and hand it to the Server with its default configuration |
+| **[`opamp-package-fetch`](#opamp-package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Telegraf, Icinga 2, or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`opamp-package-sign`](#opamp-package-sign)** | build, hash, and sign a package artifact out of *any* program you have |
 
 Reach for `opamp-package-fetch` first: for the agents it knows, it replaces every step of
@@ -31,7 +31,7 @@ $ cargo run --bin opamp-package-sign -- pack --out promtail-3.0.0.tar.gz ./promt
 `--bin` resolves across the workspace, so naming the crate is optional; `-p package-tools` is
 there when you want to be explicit.
 
-**A release does not ship them.** The `.7z` artifacts and the `.deb`/`.rpm`/`.msi` installers
+**A release does not ship them.** The `.tar.gz` artifacts and the `.deb`/`.rpm`/`.msi` installers
 carry the Client and nothing else, because these tools run wherever an operator works rather than
 on a managed host. Build them once from a checkout and put them on your `PATH`:
 
@@ -51,7 +51,7 @@ $ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For five agent types it knows where the release lives, what the assets are called, and which
+For six agent types it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -60,6 +60,7 @@ checksum file goes with them:
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `telegraf` | `dl.influxdata.com` (versions from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
+| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0020](../adr/0020-client-self-update.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 | `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0072) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 
 Four things it does on every run:
@@ -87,6 +88,7 @@ Which agent:
   glpi-agent       linux/amd64 windows/amd64
   telegraf         linux/amd64+arm64+386 darwin/amd64+arm64 windows/amd64+arm64
   icinga2          linux/amd64 (Debian 12+/Ubuntu 22.04+/RHEL 9+) windows/amd64
+  supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
 Which platforms (space to select, enter to confirm)
@@ -120,9 +122,14 @@ question below shows what *that release* actually has. Two need a word:
   [its limits](icinga2.md#limits-worth-knowing-before-you-start); the Windows artifact comes from
   the MSI and needs no such host.
 
-The version list is the **five most recent releases**, newest first — enough to reach the one
-before last when a release turns out badly. Release candidates and the tags a repository keeps
-for other things (the Collector repository tags its builder alongside) are filtered out.
+The version list is the **three most recent release series**, newest first — a series being a
+`major.minor` line, of which only its newest patch is offered. That is the difference between a
+list you can go back through and one you cannot: Icinga 2 published five 2.16 patches, and offering
+tags would have filled the whole list with that one line while hiding 2.15 and 2.14 entirely. An
+older patch of a series already on the list is not a choice anyone makes, so it is not offered;
+where an agent versions in two parts and has no patch to collapse (GLPI's `1.15`), the list is
+simply the last three versions. Release candidates and the tags a repository keeps for other things
+(the Collector repository tags its builder alongside) are filtered out.
 
 The platform list is what *that release actually publishes*, read from its assets rather than
 from a table that could go stale — so a platform upstream added appears without this tool being
@@ -142,7 +149,7 @@ $ opamp-package-fetch --agent telegraf --version 1.39.3 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, `telegraf`, or `icinga2`. |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, `telegraf`, `icinga2`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -165,6 +172,16 @@ Done. What a Supervisor needs to install these:
       command = "telegraf.exe"
 ```
 
+For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
+the consent that lets it take the package over itself, which is also its default
+([ADR-0075](../adr/0075-the-self-update-consent-stands-unless-it-is-withdrawn.md)):
+
+```
+Done. What a Client needs to take these:
+  linux/amd64  ./artifacts/supervisor_1.2.3_linux_amd64.tar.gz
+      [self_update] package = "supervisor"  (the default)
+```
+
 With `--no-upload` (or a declined prompt) it also prints the two `curl` calls that would have
 uploaded the artifacts, so the step can be done later or from somewhere else, and names the
 default configuration that was not uploaded either.
@@ -184,6 +201,7 @@ released binary:
 | `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
 | `telegraf` | `telegraf-conf` | Agent type `telegraf` |
 | `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
+| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0056](../adr/0056-the-client-accepts-its-supervisor-set-from-the-server.md)) |
 
 Two rules keep this from surprising anyone:
 

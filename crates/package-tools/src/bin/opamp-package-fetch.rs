@@ -1,12 +1,13 @@
-//! `opamp-package-fetch` — an operator helper that turns an upstream agent release into package
-//! artifacts this fleet can install, and optionally uploads them (ADR-0018, ADR-0052, ADR-0064).
+//! `opamp-package-fetch` — an operator helper that turns an agent release into package artifacts
+//! this fleet can install, and optionally uploads them (ADR-0018, ADR-0052, ADR-0064).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
-//! for the four agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`, and
-//! `telegraf` — and asks the operator only what it cannot know: which one, which version, which
-//! platforms, and where to send the result.
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`,
+//! `telegraf`, `icinga2`, and `supervisor`, this fleet's own Client (ADR-0078) — and asks the
+//! operator only what it cannot know: which one, which version, which platforms, and where to send
+//! the result.
 //!
 //! Two rules shape what it produces:
 //!
@@ -30,9 +31,9 @@ use clap::{Parser, ValueEnum};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use sha2::{Digest, Sha256};
 
-/// How many versions the operator is offered. Enough to reach the release before last when one
-/// turns out badly, few enough to read without scrolling.
-const VERSIONS_SHOWN: usize = 5;
+/// How many release series the operator is offered. Enough to reach the release before last when
+/// one turns out badly, few enough to read without scrolling.
+const SERIES_SHOWN: usize = 3;
 
 /// The member cap a tree package is held to (ADR-0023). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
@@ -41,7 +42,7 @@ const MAX_TREE_MEMBERS: usize = 10_000;
 #[derive(Parser)]
 #[command(
     name = "opamp-package-fetch",
-    about = "Fetch an upstream agent release and turn it into fleet package artifacts"
+    about = "Fetch an agent release and turn it into fleet package artifacts"
 )]
 struct Cli {
     /// Which agent to fetch. Omitted, it is asked for.
@@ -92,6 +93,9 @@ enum AgentKind {
     /// Icinga 2, repacked from the vendor's distribution packages (ADR-0070).
     #[value(name = "icinga2")]
     Icinga2,
+    /// This fleet's own Client — the package a Client updates *itself* from (ADR-0020, ADR-0078).
+    #[value(name = "supervisor")]
+    Supervisor,
 }
 
 /// Everything that differs between one upstream project and the next, in one place.
@@ -127,6 +131,13 @@ impl AgentKind {
                 service_name: "icinga2",
                 repo: "Icinga/icinga2",
             },
+            // This repository's own releases. The Client is an Agent like any other (ADR-0020), so
+            // the artifact that updates it is fetched the way every other agent's is — and since
+            // ADR-0078 it is named and packed like one too, which is what makes that possible.
+            AgentKind::Supervisor => Source {
+                service_name: "supervisor",
+                repo: "mbrigl/opamp-fleet",
+            },
         }
     }
 
@@ -145,6 +156,14 @@ impl AgentKind {
             | AgentKind::Telegraf
             | AgentKind::Icinga2 => {
                 let rest = tag.strip_prefix('v')?;
+                let parts: Vec<&str> = rest.split('.').collect();
+                (parts.len() == 3 && parts.iter().all(|p| numeric(p))).then(|| rest.to_string())
+            }
+            // `version/1.2.3` — this project tags its releases with the prefix the release
+            // workflow creates them under (ADR-0026), and nothing else in the repository looks
+            // like that.
+            AgentKind::Supervisor => {
+                let rest = tag.strip_prefix("version/")?;
                 let parts: Vec<&str> = rest.split('.').collect();
                 (parts.len() == 3 && parts.iter().all(|p| numeric(p))).then(|| rest.to_string())
             }
@@ -167,6 +186,7 @@ impl AgentKind {
             | AgentKind::Icinga2 => {
                 format!("v{version}")
             }
+            AgentKind::Supervisor => format!("version/{version}"),
             AgentKind::GlpiAgent => version.to_string(),
         }
     }
@@ -203,6 +223,11 @@ impl AgentKind {
             // one for the distribution this run is on, and no other. Asking the host is therefore
             // not a convenience, it is the only way the line can be true of the build that follows.
             AgentKind::Icinga2 => icinga2_reach(host),
+            // Named rather than left to the release, unlike the Collectors': this is *this*
+            // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
+            // this repository decides it should — and the column's question, "does it run on the
+            // hosts I have", deserves the concrete answer where one can be given.
+            AgentKind::Supervisor => group_platforms(SUPERVISOR_PLATFORMS.iter().copied()),
         }
     }
 
@@ -213,9 +238,21 @@ impl AgentKind {
         !matches!(self, AgentKind::Telegraf | AgentKind::Icinga2)
     }
 
+    /// The line that introduces the per-platform hints printed when the fetch is done.
+    ///
+    /// Every other agent is installed by a Supervisor, which needs a block; this fleet's own Client
+    /// is installed *by itself* over itself, and what admits that is a consent rather than a block
+    /// (ADR-0020, ADR-0075). One sentence, so the hints below it read as the answer to it.
+    fn install_hint(self) -> &'static str {
+        match self {
+            AgentKind::Supervisor => "What a Client needs to take these:",
+            _ => "What a Supervisor needs to install these:",
+        }
+    }
+
     /// The Configurations this agent needs before it can do anything, aimed the way
     /// `scripts/seed_test_configs.sh` aims them — which is where these bodies come from, and why
-    /// they agree with the `[[supervisor]]` blocks in `config/client.toml` down to the file names.
+    /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     ///
     /// Icinga 2 gets two, because it reads one root file and includes the rest by name (ADR-0068).
     /// Its ticket and its parent's certificate are *not* here: both are per host, one is a secret,
@@ -249,6 +286,10 @@ impl AgentKind {
                 service_name: "telegraf",
                 body: include_str!("../../../../config/examples/telegraf-conf.toml"),
             }],
+            // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
+            // deliberately does not own (ADR-0056 admits only `[[supervisor]]` blocks), and none
+            // of it has a default this tool could put on a Server.
+            AgentKind::Supervisor => &[],
             AgentKind::Icinga2 => &[
                 DefaultConfiguration {
                     name: "icinga2-conf",
@@ -303,8 +344,9 @@ struct Plan {
     action: Action,
     /// The artifact's file name in `--out-dir`.
     out_name: String,
-    /// What a `[[supervisor]]` block has to say to install it — printed at the end, because the
-    /// answer differs per agent and platform and is the next thing an operator needs.
+    /// What a `[[supervisor]]` block has to say to install it — or, for this fleet's own Client,
+    /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
+    /// because the answer differs per agent and platform and is the next thing an operator needs.
     block_hint: String,
 }
 
@@ -393,8 +435,20 @@ async fn run(cli: Cli) -> Result<(), String> {
     };
     let available = plans(agent, &version, &assets, cli.distro.as_deref()).await?;
     if available.is_empty() {
+        // For this project's own releases the likeliest reason is a known one, and saying it saves
+        // the operator a trip to the release page: everything published before ADR-0078 carries
+        // the old name and container, and a Set built from those fits no Client reporting the type
+        // `supervisor` anyway (ADR-0077).
+        let why = match agent {
+            AgentKind::Supervisor => {
+                " — a release from before the rename publishes \
+                 `opamp-fleet-client_<version>_<os>_<arch>.7z`, which is a package no Client of \
+                 this type installs (ADR-0078)"
+            }
+            _ => "",
+        };
         return Err(format!(
-            "{} {version} publishes nothing this tool can install",
+            "{} {version} publishes nothing this tool can install{why}",
             source.service_name
         ));
     }
@@ -416,7 +470,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         upload_default_configurations(server, agent).await?;
     }
 
-    eprintln!("\nDone. What a Supervisor needs to install these:");
+    eprintln!("\nDone. {}", agent.install_hint());
     for (plan, artifact) in &produced {
         eprintln!(
             "  {}/{}  {}\n      {}",
@@ -436,17 +490,21 @@ async fn run(cli: Cli) -> Result<(), String> {
             name = source.service_name,
             version = version
         );
-        eprintln!(
-            "  The default configuration ({}) is not uploaded either; an upload puts it there \
-             when the Server has none of that name. Or seed it from config/examples/ with \
-             scripts/seed_test_configs.sh.",
-            agent
-                .default_configurations()
-                .iter()
-                .map(|c| c.name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        // Silent for an agent that has none — the Client's own configuration is its host's
+        // (ADR-0056), so there is nothing here to offer and nothing to apologise for.
+        if !agent.default_configurations().is_empty() {
+            eprintln!(
+                "  The default configuration ({}) is not uploaded either; an upload puts it there \
+                 when the Server has none of that name. Or seed it from config/examples/ with \
+                 scripts/seed_test_configs.sh.",
+                agent
+                    .default_configurations()
+                    .iter()
+                    .map(|c| c.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -645,7 +703,13 @@ fn upload_target(cli: &Cli) -> Result<Option<String>, String> {
 
 // ── Upstream ────────────────────────────────────────────────────────────────
 
-/// The most recent [`VERSIONS_SHOWN`] release versions, newest first.
+/// The newest version of each of the last [`SERIES_SHOWN`] release series, newest first.
+///
+/// A *series* is a `major.minor` line, and only its newest patch is offered: nobody installing
+/// 2.16 wants 2.16.3 when 2.16.5 exists, and an agent that patches often — Icinga 2 published five
+/// 2.16 patches — would otherwise fill the whole list with one line and hide every version an
+/// operator might actually be looking for. Where an agent's versions carry no patch number at all,
+/// every version is its own series and this is simply the last three.
 ///
 /// Tags rather than releases: a Collector release object carries hundreds of assets, so listing
 /// twenty of them to read their names would move megabytes to answer a question tags answer in
@@ -666,8 +730,28 @@ async fn recent_versions(agent: AgentKind, source: &Source) -> Result<Vec<String
         .collect();
     versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
     versions.dedup();
-    versions.truncate(VERSIONS_SHOWN);
-    Ok(versions)
+    Ok(newest_per_series(&versions))
+}
+
+/// The newest version of each of the last [`SERIES_SHOWN`] `major.minor` series, given a list
+/// already sorted newest first — so the first version of a series encountered *is* its newest.
+fn newest_per_series(versions: &[String]) -> Vec<String> {
+    let mut newest = Vec::new();
+    let mut series_seen: Vec<Vec<u64>> = Vec::new();
+    for version in versions {
+        // A version with no minor part is its own series, which is what makes an agent that
+        // versions in two parts behave as "the last three versions" without a special case.
+        let series: Vec<u64> = version_key(version).into_iter().take(2).collect();
+        if series_seen.contains(&series) {
+            continue;
+        }
+        series_seen.push(series);
+        newest.push(version.clone());
+        if newest.len() == SERIES_SHOWN {
+            break;
+        }
+    }
+    newest
 }
 
 /// A version's parts as numbers, so `0.9.0` sorts below `0.10.0` — which it does not as text.
@@ -712,6 +796,7 @@ async fn plans(
             Ok(collector_plans(agent, version, assets))
         }
         AgentKind::GlpiAgent => Ok(glpi_plans(version, assets)),
+        AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
         AgentKind::Telegraf => Ok(telegraf_plans(version)),
         AgentKind::Icinga2 => {
             // Omitted, it is *this host* — the only distribution it can build for, since the tree
@@ -959,6 +1044,45 @@ fn package_names(depends: &str) -> Vec<String> {
         .collect()
 }
 
+/// The packages of a `Depends` union that provide the libraries `ldd` could not resolve — the
+/// remedy for *this* refusal rather than the vendor's whole dependency list.
+///
+/// A `Depends` union names everything the vendor packages need, most of which a build host already
+/// has and some of which is not a library at all: run verbatim it also installs the distribution's
+/// own `icinga2-common` — a *different* version of the very package being repacked, with its
+/// configuration and its `nagios` account — for no library gained. So the union is filtered down to
+/// the entries that answer the sonames the error above names.
+///
+/// The match is by shape, because nothing in a `Packages` index maps a soname to a package: both
+/// sides lose everything but letters and digits, and a soname additionally loses its `.so` infix,
+/// which turns `libboost_program_options.so.1.74.0` into the prefix `libboostprogramoptions1.74.0`
+/// of `libboost-program-options1.74.0`. A prefix rather than an equality, because a package may say
+/// more than its soname does — `libboost-regex1.74.0-icu72` names the ICU it was built against.
+///
+/// **When any soname finds no package at all, the whole union comes back.** A remedy that is
+/// incomplete is worse than one that is broad: it would be run, fail again on the library it left
+/// out, and read as the tool having lied. Breadth costs a few packages on a build host; a gap costs
+/// the trust in the line.
+fn packages_providing(missing: &[&str], dependencies: &[String]) -> Vec<String> {
+    fn shape(name: &str) -> String {
+        name.chars().filter(char::is_ascii_alphanumeric).collect()
+    }
+    let mut providing: Vec<String> = Vec::new();
+    for soname in missing {
+        let wanted = shape(&soname.replace(".so", ""));
+        let Some(package) = dependencies
+            .iter()
+            .find(|package| shape(package).starts_with(&wanted))
+        else {
+            return dependencies.to_vec();
+        };
+        if !providing.contains(package) {
+            providing.push(package.clone());
+        }
+    }
+    providing
+}
+
 /// The `libc6 (>= 2.34)` out of a `Depends` field — the oldest glibc this build runs on.
 fn libc_floor(depends: &str) -> Option<String> {
     depends.split(',').find_map(|dep| {
@@ -1004,6 +1128,68 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
             action: Action::AsPublished,
             out_name: name.clone(),
             block_hint: format!("binary = {program:?}  (type = \"collector\")"),
+        });
+    }
+    plans.sort_by(|a, b| (&a.os, &a.arch).cmp(&(&b.os, &b.arch)));
+    plans
+}
+
+/// The platforms this project's own release publishes, in the order its build matrix states them
+/// (`.github/workflows/release.yml`). The agent menu names them
+/// ([`AgentKind::platforms`]); what is actually fetched comes from the release's assets, so this
+/// list understating a new target costs a menu line and never a download.
+const SUPERVISOR_PLATFORMS: [(&str, &str); 5] = [
+    ("linux", "amd64"),
+    ("linux", "arm64"),
+    ("darwin", "arm64"),
+    ("darwin", "amd64"),
+    ("windows", "amd64"),
+];
+
+/// This fleet's own Client, as its release publishes it: one `.tar.gz` per platform named
+/// `supervisor_<version>_<os>_<arch>` (ADR-0078), holding the binary under the name it is installed
+/// as. Nothing is repacked — the artifact *is* the package, which is the point of packing the
+/// release with this project's own packer.
+///
+/// The `.deb`, `.rpm` and `.msi` of the same release are installers for a machine to run, not
+/// artifacts a fleet distributes, so they are passed over exactly as the Collector's MSI is.
+fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
+    let package = AgentKind::Supervisor.source().service_name;
+    let prefix = format!("{package}_{version}_");
+    // One file for the whole release, written by the publish job from every artifact's own
+    // checksum — `<hash>  <name>` lines, which is the shape `ChecksumSource::Sums` looks up by.
+    let sums: Vec<String> = assets
+        .iter()
+        .filter(|(name, _)| name == "SHA256SUMS")
+        .map(|(_, url)| url.clone())
+        .collect();
+    let mut plans = Vec::new();
+    for (name, url) in assets {
+        let Some(rest) = name
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix(".tar.gz"))
+        else {
+            continue;
+        };
+        let Some((os, arch)) = rest.split_once('_') else {
+            continue;
+        };
+        let (Some(os), Some(arch)) = (normalize_os(os), normalize_arch(arch)) else {
+            continue;
+        };
+        plans.push(Plan {
+            os,
+            arch,
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: ChecksumSource::Sums { urls: sums.clone() },
+            }],
+            action: Action::AsPublished,
+            out_name: name.clone(),
+            // Not a `[[supervisor]]` block: a Client installs this one over itself, and what
+            // admits that is the consent in its own `supervisor.toml` (ADR-0020, ADR-0075) — which
+            // names this very package by default, so most hosts need no line at all.
+            block_hint: format!("[self_update] package = {package:?}  (the default)"),
         });
     }
     plans.sort_by(|a, b| (&a.os, &a.arch).cmp(&(&b.os, &b.arch)));
@@ -1720,13 +1906,14 @@ fn bundle_one(program: &Path, lib_dir: &Path, dependencies: &[String]) -> Result
     if !missing.is_empty() {
         // The vendor states what it needs, so the refusal can name the command rather than the
         // problem alone. The tree carries what `ldd` resolves here, and what it cannot resolve
-        // would be missing from every host this artifact reaches.
+        // would be missing from every host this artifact reaches. The line names the packages that
+        // answer *these* sonames, not the vendor's whole dependency list — see `packages_providing`.
         let remedy = if dependencies.is_empty() {
             "install the vendor package's own dependencies on this host first".to_string()
         } else {
             format!(
                 "install the vendor package's own dependencies first:\n      sudo apt-get install -y --no-install-recommends {}",
-                dependencies.join(" ")
+                packages_providing(&missing, dependencies).join(" ")
             )
         };
         return Err(format!(
@@ -2463,6 +2650,90 @@ SHA256: cccc
         assert_eq!(super::libc_floor("libssl3 (>= 3.0.0)"), None);
     }
 
+    /// The `Depends` union of the four vendor packages, sorted and deduplicated the way
+    /// `icinga2_plans` hands it to the packer — real bookworm data for Icinga 2 2.16.5.
+    fn bookworm_dependencies() -> Vec<String> {
+        [
+            "adduser",
+            "icinga2-common",
+            "iputils-ping",
+            "libboost-coroutine1.74.0",
+            "libboost-filesystem1.74.0",
+            "libboost-iostreams1.74.0",
+            "libboost-program-options1.74.0",
+            "libboost-regex1.74.0-icu72",
+            "libboost-thread1.74.0",
+            "libc6",
+            "libedit2",
+            "libgcc-s1",
+            "libprotobuf-lite32",
+            "libssl3",
+            "libstdc++6",
+            "libsystemd0",
+            "lsb-base",
+            "lsb-release",
+            "monitoring-plugins-common",
+            "procps",
+            "ucf",
+        ]
+        .map(str::to_string)
+        .to_vec()
+    }
+
+    /// The refusal names sonames; the line under it has to name packages, and only the ones that
+    /// answer those sonames. Run as the whole `Depends` union it also installs the distribution's
+    /// own `icinga2-common` — another version of the package being repacked — plus `procps`, `ucf`
+    /// and the rest, none of which is a library that was missing. The two names that do not match
+    /// by spelling are the point of the test: `libboost_regex.so.1.74.0` is answered by a package
+    /// that names its ICU too, and `libprotobuf-lite.so.32` moves the version across a hyphen.
+    #[test]
+    fn the_remedy_names_only_the_packages_that_provide_the_missing_libraries() {
+        let missing = [
+            "libboost_coroutine.so.1.74.0",
+            "libboost_filesystem.so.1.74.0",
+            "libboost_iostreams.so.1.74.0",
+            "libboost_thread.so.1.74.0",
+            "libboost_program_options.so.1.74.0",
+            "libboost_regex.so.1.74.0",
+            "libprotobuf-lite.so.32",
+        ];
+        assert_eq!(
+            super::packages_providing(&missing, &bookworm_dependencies()),
+            [
+                "libboost-coroutine1.74.0",
+                "libboost-filesystem1.74.0",
+                "libboost-iostreams1.74.0",
+                "libboost-thread1.74.0",
+                "libboost-program-options1.74.0",
+                "libboost-regex1.74.0-icu72",
+                "libprotobuf-lite32",
+            ]
+        );
+
+        // One missing library asks for one package, not for the twenty-one around it.
+        assert_eq!(
+            super::packages_providing(&["libedit.so.2"], &bookworm_dependencies()),
+            ["libedit2"]
+        );
+    }
+
+    /// Nothing in a `Packages` index maps a soname to a package, so the match is by shape and can
+    /// come up empty — `libicuuc.so.72` is carried by `libicu72`, which the shape does not reach.
+    /// Then the whole union comes back: a line that leaves out a library would be run, fail on
+    /// exactly that library, and read as the tool having lied.
+    #[test]
+    fn a_library_no_dependency_accounts_for_falls_back_to_the_whole_list() {
+        let missing = ["libboost_thread.so.1.74.0", "libicuuc.so.72"];
+        assert_eq!(
+            super::packages_providing(&missing, &bookworm_dependencies()),
+            bookworm_dependencies()
+        );
+
+        // The same rule with nothing to fall back to: an empty union stays empty, and the caller
+        // prints the wording that names no command at all.
+        assert!(super::packages_providing(&missing, &[]).is_empty());
+    }
+
     use super::*;
 
     /// The tag patterns are what keep a version list from offering things that are not releases of
@@ -2497,6 +2768,21 @@ SHA256: cccc
             Some("1.7.1".to_string())
         );
         assert_eq!(AgentKind::GlpiAgent.version_of_tag("1.0-beta1"), None);
+
+        // This project's own tags carry the prefix its release workflow creates them under, and
+        // the round trip is what `--version` relies on: an operator types what the release page
+        // shows, and the tag is derived from it.
+        assert_eq!(
+            AgentKind::Supervisor.version_of_tag("version/1.2.3"),
+            Some("1.2.3".to_string())
+        );
+        for other in ["v1.2.3", "1.2.3", "version/1.2", "version/1.2.3-dev"] {
+            assert_eq!(AgentKind::Supervisor.version_of_tag(other), None, "{other}");
+        }
+        assert_eq!(
+            AgentKind::Supervisor.tag_of_version("1.2.3"),
+            "version/1.2.3"
+        );
     }
 
     /// Versions sort by their numbers: `0.9.0` is older than `0.10.0`, which as text it is not.
@@ -2509,6 +2795,37 @@ SHA256: cccc
         ];
         versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
         assert_eq!(versions, vec!["0.158.0", "0.10.0", "0.9.0"]);
+    }
+
+    /// The list offers release *series*, not tags. Icinga 2 is the agent that makes the difference
+    /// visible: five 2.16 patches would have been the entire list, so the one question an operator
+    /// asks it — which versions can I still go back to — had no answer in it. Only the newest patch
+    /// of a series is offered, because an older one of the same line is not a choice anybody makes.
+    #[test]
+    fn the_version_list_offers_the_newest_patch_of_each_recent_series() {
+        let icinga: Vec<String> = [
+            "2.16.5", "2.16.4", "2.16.3", "2.16.2", "2.16.1", "2.16.0", "2.15.2", "2.15.1",
+            "2.14.6", "2.13.10",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            super::newest_per_series(&icinga),
+            ["2.16.5", "2.15.2", "2.14.6"]
+        );
+
+        // An agent that versions in two parts has no patch to collapse, so every version is its own
+        // series and the list is simply the last three (GLPI tags `1.15`, `1.14`, …).
+        let glpi: Vec<String> = ["1.15", "1.14", "1.13", "1.12"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(super::newest_per_series(&glpi), ["1.15", "1.14", "1.13"]);
+
+        // Fewer series than asked for is the whole list, not an error — a young repository has
+        // nothing else to offer.
+        let young: Vec<String> = ["0.2.1", "0.2.0"].map(str::to_string).to_vec();
+        assert_eq!(super::newest_per_series(&young), ["0.2.1"]);
+        assert!(super::newest_per_series(&[]).is_empty());
     }
 
     fn asset(name: &str) -> (String, String) {
@@ -2550,6 +2867,76 @@ SHA256: cccc
             contrib[0].out_name,
             "otelcol-contrib_0.158.0_linux_amd64.tar.gz"
         );
+    }
+
+    /// This project's own release is fetched like any other agent's (ADR-0078): the `.tar.gz` per
+    /// platform is the package, the installers beside it are not, and the one `SHA256SUMS` the
+    /// publish job writes is what every artifact is verified against.
+    #[test]
+    fn the_supervisor_takes_the_archives_of_its_own_release_and_not_the_installers() {
+        let assets = vec![
+            asset("supervisor_1.2.3_linux_amd64.tar.gz"),
+            asset("supervisor_1.2.3_linux_amd64.deb"),
+            asset("supervisor_1.2.3_linux_amd64.rpm"),
+            asset("supervisor_1.2.3_linux_arm64.tar.gz"),
+            asset("supervisor_1.2.3_darwin_arm64.tar.gz"),
+            asset("supervisor_1.2.3_darwin_amd64.tar.gz"),
+            asset("supervisor_1.2.3_windows_amd64.tar.gz"),
+            asset("supervisor_1.2.3_windows_amd64.msi"),
+            asset("supervisor_1.1.0_linux_amd64.tar.gz"),
+            asset("SHA256SUMS"),
+        ];
+
+        let plans = supervisor_plans("1.2.3", &assets);
+        let platforms: Vec<String> = plans
+            .iter()
+            .map(|p| format!("{}/{}", p.os, p.arch))
+            .collect();
+        assert_eq!(
+            platforms,
+            vec![
+                "darwin/amd64",
+                "darwin/arm64",
+                "linux/amd64",
+                "linux/arm64",
+                "windows/amd64",
+            ],
+            "an installer is not an artifact a fleet distributes, and another release's archive              is not this version"
+        );
+        // The menu promises exactly these, so a target added to the workflow and not to the list
+        // is caught here rather than by an operator who cannot find their platform.
+        let promised: Vec<String> = SUPERVISOR_PLATFORMS
+            .iter()
+            .map(|(os, arch)| format!("{os}/{arch}"))
+            .collect();
+        let mut promised_sorted = promised.clone();
+        promised_sorted.sort();
+        assert_eq!(platforms, promised_sorted);
+
+        for plan in &plans {
+            assert!(
+                matches!(plan.action, Action::AsPublished),
+                "the release is packed by this project's own packer; repacking it would only                  break the published hash"
+            );
+            match &plan.sources[0].checksum {
+                ChecksumSource::Sums { urls } => {
+                    assert_eq!(urls.len(), 1, "one file holds every artifact's line");
+                    assert!(urls[0].ends_with("SHA256SUMS"), "{urls:?}");
+                }
+                other => panic!(
+                    "the release publishes sums, not {:?}",
+                    std::mem::discriminant(other)
+                ),
+            }
+            assert!(
+                plan.block_hint.contains("[self_update]"),
+                "a Client takes this one over itself, so the hint is its consent and not a                  [[supervisor]] block: {:?}",
+                plan.block_hint
+            );
+        }
+
+        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0056).
+        assert!(AgentKind::Supervisor.default_configurations().is_empty());
     }
 
     /// The checksum layout changed at 0.158.0, so which one a release uses is read from its assets
@@ -2775,18 +3162,31 @@ SHA256: cccc
         );
     }
 
-    /// Every agent this tool can fetch carries a default Configuration, and each one is storable:
-    /// the name follows the ADR-0010 grammar the Server enforces (which admits no dot, so no file
-    /// extension), the body is not empty (the Server refuses an empty one), and it is aimed at
-    /// something — by Selector or by Agent type — rather than at the whole fleet.
+    /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
+    /// is storable: the name follows the ADR-0010 grammar the Server enforces (which admits no dot,
+    /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
+    /// aimed at something — by Selector or by Agent type — rather than at the whole fleet.
     ///
     /// This is the test that fails when a variant is added and its default is forgotten, which is
-    /// the only way an agent could reach a Server with a package and nothing to run.
+    /// the only way an agent could reach a Server with a package and nothing to run. The Client's
+    /// own package is the one exemption, and it is stated below rather than skipped.
     #[test]
     fn every_agent_carries_a_storable_default_configuration() {
         for agent in AgentKind::value_variants() {
             let defaults = agent.default_configurations();
             let service_name = agent.source().service_name;
+            if matches!(agent, AgentKind::Supervisor) {
+                // The one package nothing supervises. A Client reads `supervisor.toml` on its own
+                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0056), so
+                // there is no body this tool could put on a Server — and an offer needs none: the
+                // consent that admits this package is already in that file (ADR-0075).
+                assert!(
+                    defaults.is_empty(),
+                    "{service_name} is the Client itself; a Configuration for it would be a \
+                     decision this test has not been told about"
+                );
+                continue;
+            }
             assert!(
                 !defaults.is_empty(),
                 "{service_name} has no default configuration"

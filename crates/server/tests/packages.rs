@@ -4,8 +4,8 @@
 mod support;
 
 use opamp::proto::{
-    AgentCapabilities, PackageStatus, PackageStatusEnum, PackageStatuses, ServerCapabilities,
-    ServerToAgent,
+    AgentCapabilities, AgentToServer, PackageStatus, PackageStatusEnum, PackageStatuses,
+    ServerCapabilities, ServerToAgent,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -147,11 +147,12 @@ async fn set_selector(
         .expect("put selector")
 }
 
-/// ADR-0052's versions under ADR-0061: versions are first-class Sets, and the rollback is the
-/// same explicit act pointed at the older version — no one produces an old artifact again, and
-/// no publication state is juggled.
+/// ADR-0052's versions under ADR-0061: versions are first-class Sets, and the act names the one
+/// the operator releases — no one produces an old artifact again, and no publication state is
+/// juggled. An Agent that has reported nothing installed takes either of them; what happens once
+/// it *has* reported is ADR-0076's, tested below.
 #[tokio::test]
-async fn rolling_out_the_older_version_is_the_rollback() {
+async fn the_act_names_the_version_it_releases() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let server_ref = &server;
@@ -176,7 +177,9 @@ async fn rolling_out_the_older_version_is_the_rollback() {
         "0.157.0"
     );
 
-    // The rollback: the same act, pointed at the older version — its artifact is still here.
+    // The same act, pointed at the older version. This Agent reports no package statuses, so it
+    // has nothing installed to be held against (ADR-0076) and the older Set still reaches it —
+    // and its artifact is still here.
     assert_eq!(
         rollout(&server, "otelcol", "0.156.0").await["assigned_agents"],
         1
@@ -869,6 +872,123 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .packages_available
         .expect("an offer");
     assert!(offer.packages.contains_key("otelcol"));
+}
+
+/// ADR-0076 end to end: a Set reaches an Agent only as an **upgrade**. What the Agent reports
+/// installed is the fourth matching test, so the count, the per-Agent act and the bulk act all
+/// refuse to move a host backwards — or to move it nowhere at all. The assignment path is
+/// deliberately exempt: an installed package stays in the Agent's offer, or the Agent would be
+/// told the package is no longer wanted.
+#[tokio::test]
+async fn a_set_reaches_an_agent_only_as_an_upgrade() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+
+    /// A report that says "I run this version of this package".
+    fn running(uid: &InstanceUid, sequence: u64, version: &str) -> AgentToServer {
+        let mut report = full_report(uid, "collector", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64
+            | AgentCapabilities::ReportsPackageStatuses as u64;
+        report.package_statuses = Some(PackageStatuses {
+            packages: [(
+                "otelcol".to_string(),
+                PackageStatus {
+                    name: "otelcol".to_string(),
+                    agent_has_version: version.to_string(),
+                    status: PackageStatusEnum::Installed as i32,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            // Empty: this Agent is never in sync with an offer, so the hash gate never silences
+            // one and every exchange shows what it would be offered.
+            server_provided_all_packages_hash: Vec::new(),
+            error_message: String::new(),
+        });
+        report
+    }
+
+    /// The two counts the Set view carries (ADR-0076 point 8): whom it aims at, and whom it
+    /// would actually reach.
+    async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
+        let list: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+            .send()
+            .await
+            .expect("list")
+            .json()
+            .await
+            .expect("json");
+        let row = list
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|p| p["version"] == version)
+            .unwrap_or_else(|| panic!("no set at {version} in the list"))
+            .clone();
+        (
+            row["matching_agents"].as_i64().expect("matching_agents"),
+            row["targeted_agents"].as_i64().expect("targeted_agents"),
+        )
+    }
+
+    exchange(&server, &running(&uid, 1, "1.0.0")).await;
+    upload(&server, "otelcol", "1.0.0", b"what-it-runs").await;
+
+    // It aims at the one Agent there is, and reaches nobody: the Agent already runs it.
+    assert_eq!(counts(&server, "1.0.0").await, (1, 0));
+    assert_eq!(
+        rollout(&server, "otelcol", "1.0.0").await["assigned_agents"],
+        0,
+        "the bulk act skips an Agent it would not move"
+    );
+
+    // The per-Agent act says so rather than doing nothing quietly.
+    let refused = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/rollout",
+            server.rest_addr
+        ))
+        .json(&serde_json::json!({
+            "package": { "name": "otelcol", "agent_type": support::AGENT_TYPE, "version": "1.0.0" }
+        }))
+        .send()
+        .await
+        .expect("rollout to agent");
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
+            .contains("not an upgrade"),
+        "{body}"
+    );
+
+    // A greater version aims at the same Agent and reaches it.
+    upload(&server, "otelcol", "2.0.0", b"the-next-one").await;
+    assert_eq!(counts(&server, "2.0.0").await, (1, 1));
+    assert_eq!(
+        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        1
+    );
+    let offer = exchange(&server, &running(&uid, 2, "1.0.0"))
+        .await
+        .packages_available
+        .expect("an offer");
+    assert_eq!(offer.packages["otelcol"].version, "2.0.0");
+
+    // And once the Agent reports it installed, the assignment keeps composing the offer — the
+    // Set the Agent runs must not vanish from its desired state (ADR-0076 point 5).
+    let offer = exchange(&server, &running(&uid, 3, "2.0.0"))
+        .await
+        .packages_available
+        .expect("the assignment still composes an offer");
+    assert_eq!(offer.packages["otelcol"].version, "2.0.0");
+
+    // But it is no longer waiting for anything, and no count proposes it.
+    assert_eq!(counts(&server, "2.0.0").await, (1, 0));
+    assert_eq!(counts(&server, "1.0.0").await, (1, 0));
 }
 
 /// The silent no-op ADR-0034 named: a Set can target nobody through a mistyped Agent type, a

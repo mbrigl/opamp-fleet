@@ -18,7 +18,7 @@ The example is `promtail` — one static binary, which is the requirement (see
 - [5. Aim it, then roll it out](#5-aim-it-then-roll-it-out)
 - [6. Send its configuration](#6-send-its-configuration)
 - [7. Watch it land](#7-watch-it-land)
-- [8. Ship an update, and take it back](#8-ship-an-update-and-take-it-back)
+- [8. Ship an update](#8-ship-an-update)
 - [Troubleshooting](#troubleshooting)
 
 ## Limits worth knowing first
@@ -58,8 +58,8 @@ version_args = ["--version"]
 Two things this block gets right that are easy to get wrong:
 
 - `command = "promtail"` is **not** looked up in `$PATH`. It names a file in that Supervisor's own
-  `program/` directory — which is exactly why the Server may write there. An absolute path would
-  make this the machine's program, supervised but never updated.
+  `program/` directory — which is exactly why the Server may write there. An absolute path is
+  refused at startup; a bare file name is the only shape a block accepts.
 - `${config_dir}` is a placeholder, so the argument cannot drift when `supervisor_dir`
   moves or the Supervisor is renamed. `promtail-conf` is the *name of the Configuration on the
   Server*, which is what the written entry file is called.
@@ -70,13 +70,13 @@ plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, 
 version arrives the same way every later one does.
 
 **The block does not have to be written on the host either.** A Configuration typed
-`opamp-fleet-client` whose body carries this `[[supervisor]]` block rolls the block
-itself out to every matching Client, which writes it into its own `client.toml` and starts the
-Supervisor — the walkthrough's remaining steps are the same either way. A
+`supervisor` — the Client's own Agent type — whose body carries this `[[supervisor]]` block rolls
+the block itself out to every matching Client, which writes it into its own `supervisor.toml` and
+starts the Supervisor — the walkthrough's remaining steps are the same either way. A
 Server-delivered block may name its program **only by a bare file name** — one this Client owns and
 updates from signed packages; a block that names an absolute path is refused, because
 that would let the Server spawn a machine binary that never passed through package signing. An
-absolute-path Supervisor is the operator's to write in `client.toml` on the host, not the Server's
+absolute-path Supervisor is the operator's to write in `supervisor.toml` on the host, not the Server's
 to push.
 
 ## 2. Build the artifact
@@ -236,10 +236,12 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 ```
 
 Each pair must equal an attribute the Agent reported — `env` here comes from `[attributes]` in
-`client.toml`. The Selector aims **every platform** of the Set at once, because the aim belongs
+`supervisor.toml`. The Selector aims **every platform** of the Set at once, because the aim belongs
 to the Set; the platform decides only which bytes each host gets. Editing it distributes nothing:
-it decides whom the next act reaches, and `targeted_agents` on the Set says how many that is —
-check it now, `0` means the type, the platforms, or the Selector missed.
+it decides whom the next act reaches, and the Set's two counts say how many that is — check them
+now. `matching_agents` is whom it aims at: `0` there means the type, the platforms, or the
+Selector missed. `targeted_agents` is whom it would actually upgrade, which is what the act
+changes.
 
 **The rollout act is what distributes** — nothing before this press changed any host:
 
@@ -302,7 +304,7 @@ Behind that, on the host: the artifact is streamed to `<supervisor_dir>/promtail
 verified, unpacked, swapped over `program/promtail`, made executable, restarted, and **health-gated
 on `apply_grace_secs`** — a version that will not stay up is rolled back to its predecessor.
 
-## 8. Ship an update, and take it back
+## 8. Ship an update
 
 An update is steps 2, 4 and 5 again with a new version — a new version is a new Set, and the old
 one stays in the store beside it:
@@ -313,25 +315,36 @@ $ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "cana
 $ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
        "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/entries/linux/amd64?signature=$sig"
 $ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/rollout
-# …and if 3.1.0 turns out badly:
-$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/rollout
 ```
 
-The rollback is the same act pointed at the older Set; the Selector is untouched, and the old
-artifact is still here to serve. To take one host back rather than the ring, name the older
-version in that host's per-Agent rollout instead. This is the Server-side undo — distinct from
-the Client's own automatic rollback in step 7, which reacts to a binary that will not stay up on
-one host.
+The Selector is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **rolling 3.0.0 out
+again is not how you take 3.1.0 back**. A Set reaches an Agent only as an upgrade over the version
+that Agent reports installed
+([ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md)), so once the ring reports
+3.1.0 the older act reaches nobody: the bulk act answers `{"assigned_agents": 0}` and the
+per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
+version it reports *running* instead
+([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)),
+so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
+the Set is held against the lower of the two and never reaches it below what its package status
+claims ([ADR-0081](../adr/0081-what-an-agent-runs-is-what-it-has.md)).
+
+What takes a bad version back is the host: the version 3.1.0 superseded is kept for
+`retain_previous_secs`, and a binary that will not stay up past `apply_grace_secs` is put back
+automatically — step 7's health gate. If the new version is bad in a way the health gate cannot
+see, publish the old content as a **new, greater version** (`3.1.1`) and roll that out; the fleet
+only moves forward.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| The Agent never shows `AcceptsPackages` | Its program is named by an absolute path, so it is the machine's and is never written to. The startup log states, per Supervisor, what it resolved and what it decided. |
+| The Agent never shows `AcceptsPackages` | Every Supervisor declares it, so the Agent is not the one you think it is — check which Supervisor the row belongs to. The startup log states, per Supervisor, what it resolved and what it decided. |
 | `InstallFailed`, "holds no member named …" | The archive's member name does not match the configured program. The error lists what the archive *does* hold; repack with `--program-name`. |
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
+| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0081); the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |

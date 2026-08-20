@@ -1,6 +1,6 @@
 # ADR-0030: One service name on every platform — `opamp-fleet-client`, with the instance as a suffix
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0082](0082-the-fleets-own-agent-is-called-supervisor.md)
 - **Date:** 2026-08-08
 - **Deciders:** Markus Brigl
 

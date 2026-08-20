@@ -57,7 +57,7 @@ async fn spawn_armed_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile:
 
 fn spawn_client(config_path: &Path) -> ClientUnderTest {
     ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_opamp-fleet-client"))
+        Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(config_path)
             .stdout(Stdio::null())
@@ -76,8 +76,8 @@ async fn an_offer_is_verified_persisted_and_reported_applied() {
         addr = addr,
         state_dir = state_dir.to_string_lossy(),
     );
-    let config_path = dir.path().join("client.toml");
-    std::fs::write(&config_path, toml).expect("write client.toml");
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml).expect("write supervisor.toml");
 
     let client = spawn_client(&config_path);
 

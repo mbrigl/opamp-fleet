@@ -67,12 +67,13 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             .with_attributes(config.agent_attributes(None))
             .with_namespace(config.service_namespace.clone()),
     );
-    // Consenting to be updated is its own decision, made per Client, and it names the package it
-    // will take — anything else is refused rather than written over this binary (ADR-0020).
-    if let Some(self_update) = &config.self_update {
-        self_state.accept_packages_named(self_update.package.clone());
+    // Consenting to be updated names the package it will take — anything else is refused rather
+    // than written over this binary (ADR-0020). Since ADR-0075 the consent stands unless the file
+    // withdraws it, so this is the ordinary path rather than the opted-into one.
+    if let Some(package) = config.self_update_package() {
+        self_state.accept_packages_named(package.to_string());
     }
-    // The self-Agent's effective configuration is its own file — `client.toml` is what this
+    // The self-Agent's effective configuration is its own file — `supervisor.toml` is what this
     // Client runs (a file that fails to load fails startup), so the fleet view can finally answer
     // it. The text was redacted at load; without it, echoing a stored offer would say nothing
     // about this Client. No file means the defaults run, and there is nothing truthful to show.
@@ -80,7 +81,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         self_state.set_process_effective_config(opamp::proto::EffectiveConfig {
             config_map: Some(opamp::proto::AgentConfigMap {
                 config_map: std::collections::HashMap::from([(
-                    "client.toml".to_string(),
+                    "supervisor.toml".to_string(),
                     opamp::proto::AgentConfigObject {
                         role: String::new(),
                         body: source.clone().into_bytes(),
@@ -224,27 +225,22 @@ pub fn start_supervisor(
             .with_attributes(config.agent_attributes(Some(block)))
             .with_namespace(config.service_namespace.clone()),
     );
-    // Owning the directory the program sits in *is* the consent (ADR-0021): a Supervisor that
-    // has it takes whichever top-level package the Server selects for it (ADR-0015, ADR-0017).
-    // Logged either way — the consent is now derived rather than written, and an operator who
-    // changes a path should not have to infer what it did to the fleet.
-    if program.owned {
-        // What the target itself needs — for a tree that is its root and nothing below it,
-        // since the live tree arrives by renaming a directory over that name (ADR-0023).
-        install.prepare()?;
-        state.accept_packages();
-        info!(
-            supervisor = %block.name,
-            program = %program.path.display(),
-            "packages accepted: the program is this supervisor's own"
-        );
-    } else {
-        info!(
-            supervisor = %block.name,
-            program = %program.path.display(),
-            "packages declined: the program is named by an absolute path"
-        );
-    }
+    // Every Managed Process is the fleet's (ADR-0085), so every Supervisor takes whichever
+    // top-level package the Server selects for it (ADR-0015, ADR-0017). There is no second branch:
+    // a block naming a program on the machine no longer parses, so the consent ADR-0021 derived
+    // from the path is discharged by the type system rather than by a rule. The log line stays and
+    // loses its "declined" half — it now says *where* the program is, which is the thing an
+    // operator reading a startup log actually wants.
+    //
+    // What the target itself needs — for a tree that is its root and nothing below it, since the
+    // live tree arrives by renaming a directory over that name (ADR-0023).
+    install.prepare()?;
+    state.accept_packages();
+    info!(
+        supervisor = %block.name,
+        program = %program.path.display(),
+        "packages accepted: the program is this supervisor's own"
+    );
 
     // Each Supervisor stops on its own channel (ADR-0056): the Client-wide shutdown is forwarded
     // into it, and retiring the Supervisor fires it alone — its Endpoint releases the port and
@@ -372,12 +368,15 @@ mod tests {
         supervisor.capabilities & AgentCapabilities::AcceptsPackages as u64 != 0
     }
 
-    /// ADR-0021's rule where it actually becomes visible to the Server: owning the directory the
-    /// program sits in is the consent, so the capability follows the shape of the path and nothing
-    /// else. The directory is created for the owned case — the swap renames inside it, so it has
-    /// to exist before the first package rather than after it.
+    /// ADR-0085 where it becomes visible to the Server: **every** Supervisor declares
+    /// `AcceptsPackages`, because every Managed Process is one this Client installed. The
+    /// capability is a constant of this Client now, not a function of a path — which is why the
+    /// second half of this test is a startup refusal rather than a second capability.
+    ///
+    /// The `program/` directory is created either way, before the first package: the swap renames
+    /// inside it, so it has to exist beforehand rather than after.
     #[tokio::test]
-    async fn the_program_path_decides_the_declared_package_capability() {
+    async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
 
@@ -386,13 +385,14 @@ mod tests {
         let mut engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             accepts_packages(&mut engine),
-            "a bare name puts the program in our own directory, which is the consent"
+            "the program is in this Client's own directory, which is what makes it updatable"
         );
         assert!(
             dir.path().join("state/supervisors/agent/program").is_dir(),
             "the directory the swap renames inside exists before any package arrives"
         );
 
+        // The shape that used to declare nothing now does not start at all (ADR-0085).
         let foreign = dir.path().join("elsewhere/managed-agent");
         let machines: ClientConfig = toml::from_str(&config(
             dir.path(),
@@ -400,19 +400,10 @@ mod tests {
             Some(dir.path().join("other")),
         ))
         .expect("parse");
-        let mut engine = build_engine(&machines, &shutdown).expect("build");
-        assert!(
-            !accepts_packages(&mut engine),
-            "an absolute path is the machine's program; we declare nothing"
-        );
-        assert!(
-            !dir.path().join("other/agent/program").exists(),
-            "nothing is created for a program we do not own"
-        );
-        assert!(
-            dir.path().join("other/agent/instance-uid").is_file(),
-            "the relocated root is where the supervisor's state went"
-        );
+        let Err(err) = build_engine(&machines, &shutdown) else {
+            panic!("a program on the machine must be refused at startup");
+        };
+        assert!(err.contains("only programs it installs"), "{err}");
     }
 
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
@@ -427,20 +418,31 @@ mod tests {
         let engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             engine.installs_packages(),
-            "an owned program is package-updatable, so the Client installs packages"
+            "the program is package-updatable, so the Client installs packages"
         );
 
-        let foreign = dir.path().join("elsewhere/managed-agent");
-        let machines: ClientConfig = toml::from_str(&config(
-            dir.path(),
-            &foreign.to_string_lossy(),
-            Some(dir.path().join("other")),
-        ))
+        // Since ADR-0085 every Supervisor is package-updatable, so the only way for an Engine to
+        // answer *no* is to have no Supervisor and a withdrawn self-update consent. That is worth
+        // keeping green: the startup check this feeds warns about an unconfigured verification
+        // key, and a Client that installs nothing has nothing for that key to protect.
+        let alone: ClientConfig = toml::from_str(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n[self_update]\nenabled = false\n",
+        )
         .expect("parse");
-        let engine = build_engine(&machines, &shutdown).expect("build");
+        let engine = build_engine(&alone, &shutdown).expect("build");
         assert!(
             !engine.installs_packages(),
-            "an absolute program is the machine's; the Client installs no packages"
+            "no Supervisor and no self-update consent means nothing here takes a package"
+        );
+
+        // The Client's own Agent consents by default (ADR-0075), so a Client with no Supervisor at
+        // all still installs packages — its own.
+        let bare: ClientConfig =
+            toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse");
+        let engine = build_engine(&bare, &shutdown).expect("build");
+        assert!(
+            engine.installs_packages(),
+            "the Client's own Agent consents by default"
         );
     }
 
@@ -530,13 +532,13 @@ mod tests {
     }
 
     /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:
-    /// the first report carries `client.toml`'s (redacted) text, which is what fills the fleet
+    /// the first report carries `supervisor.toml`'s (redacted) text, which is what fills the fleet
     /// view's empty column for every Client.
     #[tokio::test]
     async fn the_self_agent_reports_its_file_as_the_effective_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
-        let path = dir.path().join("client.toml");
+        let path = dir.path().join("supervisor.toml");
         std::fs::write(
             &path,
             format!(
@@ -555,7 +557,7 @@ mod tests {
             .as_ref()
             .expect("the first report is a full one and carries the effective configuration");
         let map = &effective.config_map.as_ref().expect("map").config_map;
-        let body = String::from_utf8(map["client.toml"].body.clone()).expect("utf-8");
+        let body = String::from_utf8(map["supervisor.toml"].body.clone()).expect("utf-8");
         assert!(body.contains("# written by the operator"), "{body}");
         assert!(body.contains("endpoint = \"ws://127.0.0.1:1/v1/opamp\""));
         assert!(

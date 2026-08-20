@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Seeds one minimal test Configuration (ADR-0012) per example supervisor from config/client.toml,
+# Seeds one minimal test Configuration (ADR-0012) per example supervisor from config/supervisor.toml,
 # each aimed at the Agent that should receive it — the two Collectors by Selector, the two
 # Foreign Agents by Agent type (ADR-0054), whose bodies are formats no other kind of Agent
 # could read:
@@ -42,7 +42,7 @@
 # then holds. The rollout ends the hold; seeding first avoids the window altogether.
 #
 # The bodies live in config/examples/; install the processes with scripts/install_tools.sh.
-# After seeding: start the Server, uncomment the [[supervisor]] blocks in config/client.toml,
+# After seeding: start the Server, uncomment the [[supervisor]] blocks in config/supervisor.toml,
 # and start the Client; each Agent then receives exactly its Configuration.
 
 set -euo pipefail

@@ -1,6 +1,6 @@
 # ADR-0062: The system service may run under an operator-named account — and the instance's files belong to that account
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0084](0084-the-product-names-the-installation.md)
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 
