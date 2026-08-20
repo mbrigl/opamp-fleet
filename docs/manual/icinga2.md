@@ -174,9 +174,12 @@ stay beside the daemon there, because a Windows program finds its DLLs in its ow
 No `LD_LIBRARY_PATH` is needed, and `reload_signal` does not exist, so a configuration change is a
 restart.
 
-A machine-installed Icinga 2 is supervised by the same kind — name `binary` with an absolute path
-(`/usr/lib/x86_64-linux-gnu/icinga2/sbin/icinga2`), drop `program_path`, and disable the native
-service. The Agent then declares no `AcceptsPackages` and the fleet ships it nothing.
+An Icinga 2 the machine already installed is **not** supervised in place: `binary` takes a bare
+file name and nothing else, so there is no block shape that points at
+`/usr/lib/x86_64-linux-gnu/icinga2/sbin/icinga2`. The route across is the one this page describes
+— repack that version with `opamp-package-fetch` and let the fleet deliver it — and the native
+service is disabled once the fleet-delivered tree runs. The host keeps whatever the package
+manager installed; nothing supervises it.
 
 ## 3. Enrolment: the ticket
 
@@ -282,8 +285,12 @@ rather than inside it.
 - **Windows builds, but is unproven.** `opamp-package-fetch` produces a Windows artifact from the
   MSI's payload — verified by Icinga's own signature, since no digest is published — but whether a
   repacked tree finds its paths without the MSI's product registration has not been tried on a
-  Windows host. Until it has, prefer the machine-installed form of the block there. The RPM repack
-  is not built and is optional under ADR-0071.
+  Windows host, and there is no second form of the block to fall back on. **Windows is therefore
+  an open task, not a supported platform**: what it needs is one run on a test host — build the
+  artifact, roll it out, and see whether the daemon finds `include_dir`, `plugin_dir` and its
+  libraries from `${supervisor_dir}/program/tree` without the registry keys the MSI writes. Until
+  someone has done that and this page says so, keep Windows hosts on their MSI installation and
+  outside the fleet. The RPM repack is not built and is optional under ADR-0071.
 - **Removing the Supervisor removes its certificate with the directory.** The Icinga master still
   holds the signed certificate for that node — `icinga2 ca remove` there is the operator's, and the
   Supervisor says so when it is retired.

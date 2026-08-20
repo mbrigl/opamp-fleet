@@ -56,9 +56,9 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟢 accepted |
 | [0026](0026-version-from-cargo-toml.md) | The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it | 🟢 accepted |
 | [0027](0027-interactive-install-writes-the-first-configuration.md) | The first configuration is written by an interactive install — asked once, never overwritten, validated before the service is registered | 🟢 accepted |
-| [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | 🟢 accepted |
+| [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
 | [0029](0029-a-version-is-compared-and-shown-without-its-build-metadata.md) | A version is compared and shown without its build metadata — the commit is provenance, not identity | 🟢 accepted |
-| [0030](0030-one-service-name-on-every-platform.md) | One service name on every platform — `opamp-fleet-client`, with the instance as a suffix | 🟢 accepted |
+| [0030](0030-one-service-name-on-every-platform.md) | One service name on every platform — `opamp-fleet-client`, with the instance as a suffix | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
 | [0031](0031-per-platform-package-variants.md) | One platform vocabulary from the release file name to the offer — a package is one name with one artifact per platform | 🟢 accepted |
 | [0032](0032-release-artifacts-separate-their-fields-with-underscores.md) | A release artifact separates its four fields with `_` — `name_version_os_arch.7z` | 🟢 accepted |
 | [0033](0033-an-agents-type-and-its-instance-name-are-two-attributes.md) | An Agent's type and its instance name are two attributes — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
@@ -81,7 +81,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟢 accepted |
 | [0051](0051-agent-records-persist-across-a-server-restart.md) | Agent records persist behind a storage port — filesystem by default, connectedness runtime-only | 🟢 accepted |
 | [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟢 accepted |
-| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | 🟢 accepted |
+| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | ⚪ superseded by [0084](0084-the-product-names-the-installation.md) |
 | [0054](0054-a-configuration-may-state-the-agent-type-it-is-for.md) | A Configuration may state the Agent type it is for — and then reaches no Agent of another | 🟢 accepted |
 | [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | ⚪ superseded by [0061](0061-a-rollout-is-an-explicit-act.md) |
 | [0056](0056-the-client-accepts-its-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's | 🟢 accepted |
@@ -90,7 +90,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0059](0059-a-removed-supervisor-is-purged.md) | A removed Supervisor is purged — its Managed Process stops and its directory goes with it | 🟢 accepted |
 | [0060](0060-unified-supervisor-lifecycle-port.md) | One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin | 🟢 accepted |
 | [0061](0061-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
-| [0062](0062-the-service-runs-under-an-operator-named-account.md) | The system service may run under an operator-named account — and the instance's files belong to that account | 🟢 accepted |
+| [0062](0062-the-service-runs-under-an-operator-named-account.md) | The system service may run under an operator-named account — and the instance's files belong to that account | ⚪ superseded by [0084](0084-the-product-names-the-installation.md) |
 | [0063](0063-the-glpi-agent-is-supervised-by-the-command-kind.md) | The GLPI Agent is supervised by the `command` kind — one documented recipe per platform, no new plugin | 🟢 accepted |
 | [0064](0064-self-contained-glpi-agent-packages-for-both-platforms.md) | Self-contained GLPI Agent packages — the Windows zip as published, the Linux AppImage repacked as a tree | 🟢 accepted |
 | [0065](0065-the-operator-package-tools-live-in-their-own-crate.md) | The operator package tools live in their own crate, depending on the Client rather than shipping inside it | 🟢 accepted |
@@ -104,9 +104,13 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0073](0073-both-listeners-bound-connection-setup.md) | Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it | 🟢 accepted |
 | [0074](0074-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
 | [0075](0075-the-self-update-consent-stands-unless-it-is-withdrawn.md) | The self-update consent stands unless it is withdrawn — and the installers can ask | 🟢 accepted |
-| [0076](0076-a-set-reaches-an-agent-only-as-an-upgrade.md) | A Set reaches an Agent only as an upgrade — the reported installed version is the fourth matching test | 🟢 accepted |
-| [0077](0077-the-clients-own-agent-type-is-supervisor.md) | The Client's own Agent type is `supervisor` — and so is the package that carries it | 🟢 accepted |
-| [0078](0078-a-release-is-named-after-the-set-it-becomes.md) | A release is named after the Set it becomes, and packed as `.tar.gz` like every other package | 🟢 accepted |
-| [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | 🟢 accepted |
-| [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | 🟡 proposed |
-| [0081](0081-what-an-agent-runs-is-what-it-has.md) | What an Agent runs is what it has — a Set is held against the lower of the two versions it reports | 🟢 accepted |
+| [0076](0076-a-set-reaches-an-agent-only-as-an-upgrade.md) | A Set reaches an Agent only as an upgrade — the reported installed version is the fourth matching test | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
+| [0077](0077-the-clients-own-agent-type-is-supervisor.md) | The Client's own Agent type is `supervisor` — and so is the package that carries it | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
+| [0078](0078-a-release-is-named-after-the-set-it-becomes.md) | A release is named after the Set it becomes, and packed as `.tar.gz` like every other package | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
+| [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
+| [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
+| [0081](0081-what-an-agent-runs-is-what-it-has.md) | What an Agent runs is what it has — a Set is held against the lower of the two versions it reports | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
+| [0082](0082-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟡 proposed |
+| [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟡 proposed |
+| [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟡 proposed |
+| [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟡 proposed |

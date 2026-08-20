@@ -58,8 +58,8 @@ version_args = ["--version"]
 Two things this block gets right that are easy to get wrong:
 
 - `command = "promtail"` is **not** looked up in `$PATH`. It names a file in that Supervisor's own
-  `program/` directory — which is exactly why the Server may write there. An absolute path would
-  make this the machine's program, supervised but never updated.
+  `program/` directory — which is exactly why the Server may write there. An absolute path is
+  refused at startup; a bare file name is the only shape a block accepts.
 - `${config_dir}` is a placeholder, so the argument cannot drift when `supervisor_dir`
   moves or the Supervisor is renamed. `promtail-conf` is the *name of the Configuration on the
   Server*, which is what the written entry file is called.
@@ -339,7 +339,7 @@ only moves forward.
 
 | Symptom | Cause |
 |---|---|
-| The Agent never shows `AcceptsPackages` | Its program is named by an absolute path, so it is the machine's and is never written to. The startup log states, per Supervisor, what it resolved and what it decided. |
+| The Agent never shows `AcceptsPackages` | Every Supervisor declares it, so the Agent is not the one you think it is — check which Supervisor the row belongs to. The startup log states, per Supervisor, what it resolved and what it decided. |
 | `InstallFailed`, "holds no member named …" | The archive's member name does not match the configured program. The error lists what the archive *does* hold; repack with `--program-name`. |
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |

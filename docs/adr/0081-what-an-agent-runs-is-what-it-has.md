@@ -1,6 +1,6 @@
 # ADR-0081: What an Agent runs is what it has — the lower of the two versions it reports
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0083](0083-what-reaches-an-agent.md)
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 

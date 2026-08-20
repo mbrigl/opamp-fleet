@@ -1,6 +1,6 @@
 # ADR-0080: The program is `supervisor`, and so is its service and its configuration file
 
-- **Status:** 🟡 proposed
+- **Status:** ⚪ superseded by [ADR-0082](0082-the-fleets-own-agent-is-called-supervisor.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 

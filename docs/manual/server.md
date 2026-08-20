@@ -341,7 +341,7 @@ Package delivery is armed by `packages_dir`; the Server declares the capability 
 holds something. A package is offered to an Agent when the package **fits** it — built for its Agent
 type *and* for the machine it reported — *and* the package's Selector matches it, *and* the Agent
 accepts packages at all, which is the Client's decision, made by how it names its program
-(see [the Client](client.md#which-programs-take-updates)).
+(see [the Client](client.md#how-a-block-names-its-program)).
 
 **Nothing is offered before it is rolled out**. Uploading stores a Set — complete, typed, aimed,
 and reaching no Agent however finished it is. Distribution is the **rollout act**, the same act

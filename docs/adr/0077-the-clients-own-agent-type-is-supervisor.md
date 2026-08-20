@@ -1,6 +1,6 @@
 # ADR-0077: The Client's own Agent type is `supervisor` — and so is the package that carries it
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0082](0082-the-fleets-own-agent-is-called-supervisor.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 

@@ -1,6 +1,6 @@
 # ADR-0076: A Set reaches an Agent only as an upgrade — the reported installed version is the fourth matching test
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0083](0083-what-reaches-an-agent.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 

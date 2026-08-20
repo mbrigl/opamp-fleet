@@ -1,6 +1,6 @@
 # ADR-0078: A release is named after the Set it becomes, and packed as `.tar.gz` like every other package
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0082](0082-the-fleets-own-agent-is-called-supervisor.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 

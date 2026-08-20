@@ -1,6 +1,6 @@
 # ADR-0053: The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0084](0084-the-product-names-the-installation.md)
 - **Date:** 2026-08-12
 - **Deciders:** Markus Brigl
 

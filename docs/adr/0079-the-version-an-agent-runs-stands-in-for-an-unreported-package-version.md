@@ -1,6 +1,6 @@
 # ADR-0079: The version an Agent reports running stands in for a package version it does not report
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0083](0083-what-reaches-an-agent.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 
