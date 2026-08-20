@@ -171,15 +171,18 @@
       of an unset property resolves to nothing — so the consenting command line is character for
       character the one this package sent before ADR-0075.
 
-      **No `--root` here, and that is ADR-0084 clause 3.** These lines used to pass
-      `--root "[INSTALLFOLDER]\"`, where the doubled backslash was load-bearing: a directory
-      property always resolves with a trailing backslash, and the C runtime that builds the
-      client's argv reads a backslash before a quote as an escaped, literal quote rather than the
-      end of the argument — so the root swallowed the rest of the line and the install died with
-      error 1722. With INSTALLFOLDER no longer being the install root, no directory property
-      reaches a command line at all and the hazard has no way back in.
-      `tests/msi_exe_command.rs` parses these lines exactly as the CRT will and asserts both: that
-      they still survive the split, and that they name no root.
+      **No root flag here, and that is ADR-0084 clause 3.** These lines used to pass one, naming
+      `[INSTALLFOLDER]` with a doubled backslash that was load-bearing: a directory property always
+      resolves with a trailing backslash, and the C runtime that builds the client's argv reads a
+      backslash before a quote as an escaped, literal quote rather than the end of the argument —
+      so the root swallowed the rest of the line and the install died with error 1722. With
+      INSTALLFOLDER no longer being the install root, no directory property reaches a command line
+      at all and the hazard has no way back in. `tests/msi_exe_command.rs` parses these lines
+      exactly as the CRT will and asserts both: that they still survive the split, and that they
+      name no root.
+
+      (Spelled without the flag's own name on purpose: an XML comment may not contain a double
+      hyphen, so writing it out here is a build error, not a typo somebody can fix later.)
     -->
     <CustomAction Id="RegisterServiceWithEndpoint"
                   FileRef="SupervisorExe"

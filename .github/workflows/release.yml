@@ -31,12 +31,14 @@ permissions:
 env:
   # What every published artifact is named after, and the name of the Set an operator uploads them
   # to (ADR-0078). The same string the Client's own Agent reports as its type since ADR-0077 and —
-  # since ADR-0080 — the name of the program inside the archive, of its service, and of its
-  # configuration file. A Set built from these files is `supervisor@<version>@supervisor`.
+  # since ADR-0082 — the name of the program inside the archive and of its configuration file.
+  # A Set built from these files is `supervisor@<version>@supervisor`.
   #
-  # The one name that is *not* this is the dpkg/rpm/MSI package identity, which stays
-  # `opamp-fleet-client` (ADR-0080) so that an `apt`, `dnf` or MSI upgrade stays an upgrade; it
-  # lives in crates/client/Cargo.toml and packaging/windows/supervisor.wxs, not here.
+  # The names that are *not* this are the ones that identify an installation rather than a program:
+  # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
+  # `opamp-fleet` (ADR-0084). Keeping the program's name off the product's is what lets one
+  # published Set serve every variant build. They live in crates/client/Cargo.toml and
+  # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
 
 jobs:
@@ -257,11 +259,19 @@ jobs:
           # ADR-0048: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          # The executable layout the removal takes back lives under /opt since ADR-0053; the
-          # pre-ADR-0053 leftovers under the data root are cleaned by the same scriptlet.
+          # The two halves of ADR-0048's remove/purge distinction, redrawn across the two roots by
+          # ADR-0084 clause 3: a removal takes the executable layout under /opt, and only a purge
+          # takes the data root with the identity and the credential in it. Asserting both is what
+          # makes a scriptlet that silently became its own file name fail here.
+          #
+          # This used to assert `rm -rf "$data_root/versions"` — the pre-ADR-0053 leftovers a host
+          # upgraded across that change still carried beside its data. ADR-0084 clause 8 removed
+          # that cleanup with every other migration branch, because no host was ever installed
+          # under the paths it swept.
+          #
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
-          grep -qF 'rm -rf "$data_root/versions"' <<<"$scripts"
+          grep -qF 'rm -rf "$data_root"' <<<"$scripts"
           # And the arch inside the package is the ecosystem's, not the file name's (ADR-0046).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 
@@ -354,8 +364,10 @@ jobs:
           ## Installing on a host
 
           The installers deliver the binary and then run \`supervisor service install\`
-          themselves — the same install every platform gets, not a second one. **They register the
-          service and leave it stopped**: a Client with no configuration would dial the development
+          themselves — the same install every platform gets, not a second one. \`supervisor\` is the
+          **program**; what lands on your \`PATH\` is \`opamp-fleet\`, the **product**, as a symlink
+          through the layout's \`current\` pointer, so the command always answers for the version the
+          service runs (ADR-0084). **They register the service and leave it stopped**: a Client with no configuration would dial the development
           default and manage nothing (ADR-0027), so starting it is the last step and it is yours.
 
           \`\`\`console
@@ -364,20 +376,22 @@ jobs:
           # RHEL, Fedora, openSUSE
           sudo dnf install ./${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_linux_amd64.rpm
 
-          sudo supervisor service install --endpoint wss://<server>/v1/opamp
-          sudo systemctl start supervisor
+          sudo opamp-fleet service install --endpoint wss://<server>/v1/opamp
+          sudo systemctl start opamp-fleet
           \`\`\`
 
           Use \`service install --interactive\` in place of \`--endpoint\` to be asked for the
           credential and the private CA as well; both refuse to overwrite a configuration that is
           already there.
 
-          On Windows the \`.msi\` asks for the installation folder and the endpoint. The same file
-          installs unattended, which is how Intune, Group Policy and SCCM deploy it:
+          On Windows the \`.msi\` asks for the installation folder and the endpoint. That folder
+          holds the program; the configuration and the state go to \`%ProgramData%\opamp-fleet\`,
+          which is what an uninstall leaves behind (ADR-0084). The same file installs unattended,
+          which is how Intune, Group Policy and SCCM deploy it:
 
           \`\`\`console
           msiexec /i ${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_windows_amd64.msi /qn ^
-            INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
+            INSTALLFOLDER="C:\Program Files\opamp-fleet" ^
             ENDPOINT="wss://<server>/v1/opamp"
           \`\`\`
 
