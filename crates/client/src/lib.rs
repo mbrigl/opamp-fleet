@@ -24,6 +24,7 @@ pub mod gateway;
 pub mod install;
 pub mod logging;
 pub mod packages;
+pub mod product;
 pub mod reconfigure;
 pub mod selfupdate;
 pub mod service;

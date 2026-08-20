@@ -1,6 +1,6 @@
 # ADR-0019: One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-06
 - **Deciders:** Markus Brigl
 

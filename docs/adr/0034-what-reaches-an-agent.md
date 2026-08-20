@@ -1,6 +1,6 @@
 # ADR-0034: What reaches an Agent — fit, aim, and the version it is already running
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 
