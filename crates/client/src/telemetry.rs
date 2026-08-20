@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
+use opamp::attributes::{string_value, SERVICE_INSTANCE_NAME};
 use opamp::proto::{AgentDescription, ConnectionSettingsOffers, TelemetryConnectionSettings};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::KeyValue;
@@ -83,6 +84,22 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
     if let Err(e) = handle.modify(|slot| *slot = layer) {
         warn!(error = %e, "cannot install the OTLP log bridge");
     }
+}
+
+/// One Agent's own metrics: which Agent a series belongs to, and the process to read it from.
+///
+/// Both names travel together because neither answers on its own. The uid is the identity the
+/// protocol keys everything by, and the instance name is the only part of it an operator recognises
+/// (ADR-0033) — a series labelled with one and not the other is either unreadable or ambiguous.
+#[derive(Clone)]
+pub struct SamplingTarget {
+    /// The Agent's `service.instance.id`.
+    pub uid: String,
+    /// The operator's name for it.
+    pub instance_name: String,
+    /// The process to sample: this one for the Client's own Agent, the Managed Process for a
+    /// Supervisor-backed one.
+    pub pid: u32,
 }
 
 /// The providers currently in force, if any.
@@ -194,24 +211,31 @@ impl Telemetry {
         refused
     }
 
-    /// Samples the process behind `pid` and records it against this Agent's meter. A pid that has
-    /// gone away records nothing — a Managed Process between restarts is not an error.
-    pub fn sample(&self, system: &mut sysinfo::System, pid: u32, agent: &str) {
+    /// Samples the process behind `target`'s pid and records it against that Agent's meter. A pid
+    /// that has gone away records nothing — a Managed Process between restarts is not an error.
+    pub fn sample(&self, system: &mut sysinfo::System, target: &SamplingTarget) {
         let this = self.providers();
         let Some(meters) = &this.meters else {
             return;
         };
-        let pid = sysinfo::Pid::from_u32(pid);
+        let pid = sysinfo::Pid::from_u32(target.pid);
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         let Some(process) = system.process(pid) else {
             return;
         };
 
         let meter = meters.meter(SCOPE);
-        let attributes = [KeyValue::new(
-            opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
-            agent.to_string(),
-        )];
+        // Per Agent rather than left to the Resource: the Resource is the *Client's* identity
+        // (`apply` is handed the self-Agent's description), so a Managed Process's series would
+        // otherwise carry the Supervisor's uid and the Supervisor's name. Both keys are restated
+        // here for the same reason — one identifies the series, the other makes it readable.
+        let attributes = [
+            KeyValue::new(
+                opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
+                target.uid.clone(),
+            ),
+            KeyValue::new(SERVICE_INSTANCE_NAME, target.instance_name.clone()),
+        ];
         // Gauges rather than counters: what is sampled is a level, and the exporter's periodic
         // reader is what turns a series of levels into a time series.
         meter
@@ -469,7 +493,8 @@ fn is_unique_local(addr: Ipv6Addr) -> bool {
 }
 
 /// The OTLP Resource: the Agent's identifying attributes, as the Baseline asks — "the combination
-/// of identifying attributes SHOULD be sufficient to uniquely identify the Agent's own telemetry".
+/// of identifying attributes SHOULD be sufficient to uniquely identify the Agent's own telemetry"
+/// — plus the one name that makes the result readable.
 fn resource(description: &AgentDescription) -> Resource {
     let attributes = description.identifying_attributes.iter().filter_map(|kv| {
         let value = match kv.value.as_ref()?.value.as_ref()? {
@@ -478,8 +503,17 @@ fn resource(description: &AgentDescription) -> Resource {
         };
         Some(KeyValue::new(kv.key.clone(), value))
     });
+    // `service.instance.name` is non-identifying only because the Baseline has no key for a human
+    // instance name and identity stays `service.instance.id` (ADR-0033) — that is a statement about
+    // *identity*, not about what the telemetry is worth carrying. Without it every series at the
+    // receiving end is a uuid the operator cannot place against the fleet view they searched by.
+    let name = string_value(
+        &description.non_identifying_attributes,
+        SERVICE_INSTANCE_NAME,
+    )
+    .map(|name| KeyValue::new(SERVICE_INSTANCE_NAME, name.to_string()));
     Resource::builder_empty()
-        .with_attributes(attributes)
+        .with_attributes(attributes.chain(name))
         .build()
 }
 
@@ -573,7 +607,12 @@ mod tests {
                     )),
                 }),
             }],
-            non_identifying_attributes: vec![],
+            non_identifying_attributes: vec![ProtoKeyValue {
+                key: "service.instance.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("edge-01".to_string())),
+                }),
+            }],
         }
     }
 
@@ -816,14 +855,35 @@ mod tests {
     }
 
     /// The Resource carries what identifies the Agent, which is what makes one host's several
-    /// Agents distinguishable at the receiving end.
+    /// Agents distinguishable at the receiving end — and the operator's name for it beside them,
+    /// which is what makes the result placeable against the fleet view.
     #[test]
     fn the_resource_carries_the_agents_identifying_attributes() {
         let resource = resource(&description());
-        let name = resource
+        let attribute = |key: &str| {
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(
+            attribute("service.name").as_deref(),
+            Some("opamp-fleet-client")
+        );
+        assert_eq!(
+            attribute("service.instance.name").as_deref(),
+            Some("edge-01")
+        );
+    }
+
+    /// The instance name is non-identifying, so it is reported where an Agent has one and left out
+    /// where it does not — an absent attribute says "unknown" where an empty one says nothing true.
+    #[test]
+    fn an_agent_without_an_instance_name_reports_none() {
+        let mut description = description();
+        description.non_identifying_attributes.clear();
+        assert!(resource(&description)
             .iter()
-            .find(|(key, _)| key.as_str() == "service.name")
-            .map(|(_, value)| value.to_string());
-        assert_eq!(name.as_deref(), Some("opamp-fleet-client"));
+            .all(|(key, _)| key.as_str() != "service.instance.name"));
     }
 }

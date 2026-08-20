@@ -50,6 +50,34 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **Own telemetry now carries the operator's name for the Agent it came from.** `service.instance.name`
+  ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)) is
+  non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled with
+  a `service.instance.id` uuid and nothing an operator could place against the fleet view they had
+  searched by. The Resource now carries it beside the identifying attributes, and each process-metric
+  data point carries the *sampled* Agent's uid and name — so a Supervisor's Managed Process is no
+  longer labelled with the Client's identity. **What to do:** nothing on the Agent side. Dashboards
+  and alerts keyed on `service.instance.id` keep working unchanged; queries can now group by
+  `service.instance.name` instead.
+
+- **The version an Agent reports *running* now decides which packages reach it, and the version its
+  package status claims is no longer read beside it**
+  ([ADR-0083](docs/adr/0083-what-reaches-an-agent.md)). A Set had to be greater than the lower of the
+  two versions an Agent reports *and* never lower than the one its package status claimed. That
+  second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
+  named `supervisor 0.4.2` after a self-update that staged and did not take, while its program
+  reported 0.4.0, was refused a rollout of 0.4.1 as a downgrade — for good. A package status is
+  derived from what an install once wrote and outlives the binary it describes; `service.version` is
+  the running program's own word. The running one now decides in both directions, and the claim is
+  consulted only where no running version can be ordered. **What to do:** nothing, unless you run an
+  Agent that reports a `service.version` numbered in a different space than the Set that carries it
+  — which means the Client itself, or an OpAMP-aware Managed Process such as a Collector carrying
+  `opampextension`; an Icinga 2 or GLPI Agent reports none and is unaffected. For those, a Set
+  numbered *below* the program no longer reaches it at all, and one *between* the program's number
+  and the claim can now move the package backwards. Number a Set the way the program it carries
+  numbers itself and neither arises. A refusal names the version that decided and says whether the
+  claim was consulted.
+
 - **An Agent now accepts a cleartext OTLP destination anywhere in the private address space, not
   only on loopback.** `http://` was refused beyond the loopback interface, which meant a Collector
   one hop away on the LAN needed TLS and a certificate in front of it before any Agent would report

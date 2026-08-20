@@ -447,17 +447,26 @@ installed no package and has none to report: no Client is offered the version it
 none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
 nothing, so an Agent whose program numbers itself its own way stays reachable.
 
-**Where an Agent reports both, each version guards one direction**
-([ADR-0081](../adr/0081-what-an-agent-runs-is-what-it-has.md)). A Set must be greater than the
-**lower** of the two, and never lower than the version the package status claims. What the Agent
-*runs* is a statement about the present and a record of an install is one about the past, so a claim
-its own program denies no longer holds the package back: a Client reporting `supervisor 0.4.1`
-installed while reporting that it runs 0.4.0 — a state directory that outlived its binary, a version
-switch that did not take effect — is offered 0.4.1 again instead of being stranded on 0.4.0 for
-good. The claim still forbids the other direction, so a program numbered below the package that
-carries it (a Collector calling itself `0.98.0` under an `otelcol` Set at `2.0.0`) is never proposed
-a Set behind what it has; it is proposed the version it does not confirm running, and the `409` says
-which two versions were read.
+**Where an Agent reports both, what it *runs* decides**
+([ADR-0083](../adr/0083-what-reaches-an-agent.md) points 2 and 3). The Set must be greater than the
+`service.version` the Agent reports, and the package status is not read beside it — neither to admit
+a Set the running version refuses, nor to refuse one it admits. A statement about the present
+outranks a record of an install, which outlives the binary it describes. So a claim the Agent's own
+program denies never holds the package back, in either direction: a Client reporting `supervisor
+0.4.2` installed while reporting that it runs 0.4.0 — a state directory that outlived its binary, a
+self-update that staged and did not take effect — is offered 0.4.1, where the claim used to refuse
+it as a downgrade and strand the host for good. The `409` names the version that decided and says
+that the claim was not consulted.
+
+**What this costs, and whom it touches.** Where a program reports a version *above* the Set that
+carries it, no Set below that number reaches it any more, and where it reports one below, a Set
+between the two can move its package backwards — a Collector calling itself `0.98.0` under an
+`otelcol` Set at `2.0.0` can be assigned a `1.5.0`. Nothing moves on its own: a rollout is an
+explicit act and you see the version you press. This reaches only Agents that report a
+`service.version` of their own — the Client itself, and an OpAMP-aware Managed Process such as a
+Collector carrying `opampextension`. An Icinga 2 or a GLPI Agent reports none, so its Sets keep
+being matched on the package status alone. **Number a Set the way the program it carries numbers
+itself**, and neither case arises.
 
 Versions are still kept side by side — a new version is a new Set, and the older artifact stays in
 the store — but **taking a bad version back is not a rollout**:

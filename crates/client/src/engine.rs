@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
+use crate::telemetry::SamplingTarget;
 
 /// One Agent as [`Engine::with_processes`] takes it: the protocol state machine plus the handles
 /// the Engine drives its Supervisor with — all `None` for the self-Agent.
@@ -90,7 +91,7 @@ pub struct Engine {
     restart_for_update: bool,
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0036), which runs beside
     /// a transport that holds this Engine mutably for the whole of a connection.
-    sampling: Arc<Mutex<Vec<(String, u32)>>>,
+    sampling: Arc<Mutex<Vec<SamplingTarget>>>,
 }
 
 /// What the Engine needs to install a new version of the Client and to close out one that is on
@@ -201,10 +202,11 @@ impl Engine {
         }
     }
 
-    /// What own metrics are sampled from (ADR-0036): every Agent's `service.instance.id` paired
-    /// with the pid to sample for it — this process for the Client's own Agent, the Managed
-    /// Process for a Supervisor-backed one, and nothing while that process is not running.
-    pub fn sampling_targets(&self) -> Vec<(String, u32)> {
+    /// What own metrics are sampled from (ADR-0036): every Agent, named as the protocol keys it and
+    /// as the operator calls it, paired with the pid to sample for it — this process for the
+    /// Client's own Agent, the Managed Process for a Supervisor-backed one, and nothing while that
+    /// process is not running.
+    pub fn sampling_targets(&self) -> Vec<SamplingTarget> {
         self.agents
             .iter()
             .filter_map(|agent| {
@@ -212,7 +214,11 @@ impl Engine {
                     false => std::process::id(),
                     true => agent.state.process_pid()?,
                 };
-                Some((agent.state.uid().to_string(), pid))
+                Some(SamplingTarget {
+                    uid: agent.state.uid().to_string(),
+                    instance_name: agent.state.instance_name().to_string(),
+                    pid,
+                })
             })
             .collect()
     }
@@ -220,7 +226,7 @@ impl Engine {
     /// A handle on [`sampling_targets`](Self::sampling_targets) the metrics sampler can read while
     /// the transport holds the Engine mutably — which it does for the whole of a connection.
     /// Refreshed whenever a pid changes, so a Managed Process that restarts is followed.
-    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<(String, u32)>>> {
+    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<SamplingTarget>>> {
         self.sampling.clone()
     }
 

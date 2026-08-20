@@ -405,6 +405,13 @@ impl AgentState {
         self.uid
     }
 
+    /// The operator's name for this Agent (ADR-0033). The Supervisor's own value, never the
+    /// Managed Process's: a process reporting under that key is ignored in `describe`, so this is
+    /// the one answer to "which Agent is this" that a human can read.
+    pub fn instance_name(&self) -> &str {
+        &self.instance_name
+    }
+
     /// A configuration stored `APPLYING` and not yet handed to the process adapter, if any.
     pub fn take_pending_apply(&mut self) -> Option<AgentRemoteConfig> {
         self.pending_apply.take()

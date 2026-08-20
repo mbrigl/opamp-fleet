@@ -106,8 +106,8 @@
   // developer, not the network.
   "forwardPorts": [4321],
   "portsAttributes": {
-    "4320": { "label": "OpAMP Fleet Server (OpAMP + downloads)" },
-    "4321": { "label": "OpAMP Fleet Server (Control plane: REST + UI)" },
+    "4320": { "label": "Fleet Server (OpAMP + downloads)" },
+    "4321": { "label": "Fleet Server (Control plane: REST + UI)" },
     // The Collector listens in this container's network namespace, so VS Code sees its sockets and
     // would offer to forward ports Docker already publishes from the same service. Labelled for
     // the Ports view, ignored by the auto-forwarder.

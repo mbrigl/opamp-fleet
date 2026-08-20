@@ -243,8 +243,8 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                     outcome = &mut transport => break outcome?,
                     _ = tick.tick(), if telemetry.reporting() => {
                         let targets = sampling.lock().map(|t| t.clone()).unwrap_or_default();
-                        for (agent, pid) in targets {
-                            telemetry.sample(&mut system, pid, &agent);
+                        for target in &targets {
+                            telemetry.sample(&mut system, target);
                         }
                     }
                 }
