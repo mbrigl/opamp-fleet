@@ -1,6 +1,6 @@
 # ADR-0085: The Client manages only programs it installs — a Managed Process is always the fleet's
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 

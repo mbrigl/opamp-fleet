@@ -110,7 +110,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
 | [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
 | [0081](0081-what-an-agent-runs-is-what-it-has.md) | What an Agent runs is what it has — a Set is held against the lower of the two versions it reports | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
-| [0082](0082-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟡 proposed |
-| [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟡 proposed |
-| [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟡 proposed |
-| [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟡 proposed |
+| [0082](0082-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟢 accepted |
+| [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
+| [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟢 accepted |
+| [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟢 accepted |

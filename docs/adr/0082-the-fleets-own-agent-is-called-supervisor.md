@@ -1,6 +1,6 @@
 # ADR-0082: The fleet's own agent is called `supervisor` — the type, the package, the release and the program
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 

@@ -1,6 +1,6 @@
 # ADR-0084: The product names the installation — one build-time name, one layout, one account
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 
