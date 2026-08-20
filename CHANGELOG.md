@@ -329,6 +329,48 @@ carries a date once its tag exists.
   retry the rollout. Ordinary uploaded packages are unaffected; a CDN mirror that redirects to signed
   storage keeps working, since a download with no headers follows redirects exactly as before.
 
+- **Own telemetry crashed its exporter thread instead of exporting.** The first export panicked with
+  `there is no reactor running, must be called from the context of a Tokio 1.x runtime`, and the
+  signal died with the thread. The SDK does not export on the async runtime: each batch processor
+  and the metrics reader run on a **dedicated OS thread** and block on the export there, so the
+  asynchronous HTTP client the exporters were given had no reactor to work with. That was true from
+  the day own telemetry landed — it simply could not be reached until a destination was actually
+  offered. The exporters now dispatch each request onto this process's runtime and await the
+  result, so the socket work happens where the reactor is.
+  **What to do:** nothing. If own telemetry appeared to do nothing before, it should now arrive —
+  verified end to end against a local OTLP receiver: logs and metrics both, metrics on their 10 s
+  interval, no panic.
+
+- **A Server offering only telemetry destinations was ignored, and re-offered for ever.** With a
+  `[telemetry_offer]` and no `[connection_offer]`, the Server sends a connection-settings message
+  carrying no OpAMP settings — which is what the protocol asks it to do, and what its own test
+  asserts. The Client required OpAMP settings to be present and dropped the message whole: no
+  acknowledgement, so the Server's hash gate never closed and it re-sent the offer on every
+  exchange, while own metrics, traces and logs never started. Such an offer is now applied in place
+  and acknowledged, without a verification connection and without a reconnect — the protocol names
+  three classes of destination with deliberately different sequences, and scopes its
+  verify-by-connecting requirement to the OpAMP settings alone
+  ([ADR-0086](docs/adr/0086-a-telemetry-destination-is-an-offer-of-its-own-class.md)). A telemetry
+  endpoint change no longer disconnects the fleet either.
+  **What to do:** `[telemetry_offer]` alone is now enough; a `[connection_offer]` added only to work
+  around this can be removed. A Server that can offer anything at all — settings, telemetry, or a
+  `[client_ca]` — now declares `OffersConnectionSettings`, where before it declared the bit only for
+  `[connection_offer]` and exercised the capability undeclared for the other two.
+
+- **The Client kept reporting what a Server said it could not accept.** Capability negotiation is a
+  MUST in both directions, and only two of the seven Server bits changed any behaviour here: package
+  status went to Servers without `AcceptsPackagesStatus`, connection-settings status to Servers
+  without `OffersConnectionSettings`. Both are now gated by one stated rule — optimistic until the
+  Server has declared anything, binding once it has
+  ([ADR-0087](docs/adr/0087-a-servers-capabilities-bind-what-the-client-reports.md)). A Server that
+  has actually *sent* an offer still gets its acknowledgement whatever its bitmask says, because
+  withholding it would leave that Server re-offering for ever. `remote_config_status` is
+  deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
+  the non-gate is not mistaken for an omission.
+  **What to do:** nothing against this project's Server, which declares what it exercises. This
+  matters for third-party Servers (ADR-0040): one implementing only the two mandatory bits now sees
+  a Client that respects that.
+
 - **A refused own-telemetry destination was acknowledged as applied.** A destination the Client would
   not use — cleartext beyond loopback, or one carrying `tls`/`proxy` settings — was written to the
   log and the offer was still reported `APPLIED`, so the fleet showed telemetry flowing that was not.
@@ -340,6 +382,14 @@ carries a date once its tag exists.
   and is never accepted from the Server.
   **What to do:** check the fleet view after upgrading. A destination that was quietly refused will
   now show as `FAILED` with the reason; that is the gap becoming visible, not a new failure.
+
+- **Own metrics were reported six times more slowly than the protocol recommends.** The Baseline's
+  recommended reporting interval for own metrics is 10 seconds; this Client sampled every 30 s and
+  left the OpenTelemetry SDK's periodic reader at its 60 s default, so a backend saw a value once a
+  minute. Both are now 10 s, driven by one constant — exporting more often than sampling would only
+  ship each value repeatedly.
+  **What to do:** expect roughly six times the metric volume per Agent from a fleet that has an
+  `own_metrics` destination offered. Traces and logs are unaffected; neither is on an interval.
 
 - **Buffered spans and log records were lost on every stop.** The daemon returned without flushing
   its OTLP exporters, so the records explaining a shutdown — the ones that matter after a crash and

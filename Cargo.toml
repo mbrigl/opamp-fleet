@@ -112,6 +112,13 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
 opentelemetry-appender-tracing = "0.32"
+# The OTLP exporters' HTTP client trait. Both crates are already compiled into this binary through
+# `opentelemetry-otlp`; declaring them directly adds no supply chain, it only makes the trait
+# nameable so the exporters can be handed a client bound to this process's Tokio runtime — see
+# `client/src/telemetry.rs` for why that binding is necessary.
+opentelemetry-http = { version = "0.32", default-features = false, features = ["reqwest"] }
+async-trait = "0.1"
+
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
 # three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

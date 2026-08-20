@@ -52,6 +52,8 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry-semantic-conventions.workspace = true
 opentelemetry-appender-tracing.workspace = true
+opentelemetry-http.workspace = true
+async-trait.workspace = true
 # `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
 # `host.mac` (ADR-0050).
 sysinfo = { workspace = true, features = ["network"] }

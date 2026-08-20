@@ -101,7 +101,11 @@ pub fn merge(
             offer.own_logs.as_ref(),
             stored.and_then(|s| s.own_logs.as_ref()),
         ),
-        opamp: Some(OpAmpConnectionSettings {
+        // Built only when one of the two sides actually has OpAMP settings (ADR-0086 clause 6).
+        // Emitting a block unconditionally would have a telemetry-only offer persist the claim that
+        // the Server offered OpAMP settings it never offered — a lie in the one file an operator is
+        // told to inspect and delete, and one that makes the honest assertion untestable.
+        opamp: (offered.is_some() || previous.is_some()).then(|| OpAmpConnectionSettings {
             destination_endpoint: pick(|s| !s.destination_endpoint.is_empty())
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
@@ -117,6 +121,19 @@ pub fn merge(
         }),
         ..Default::default()
     }
+}
+
+/// Whether an offer carries anything this Client can put in force (ADR-0086 clause 1): OpAMP
+/// settings, or a destination for one of the three own-telemetry signals.
+///
+/// `other_connections` deliberately does not count. `AcceptsOtherConnectionSettings` is undeclared,
+/// so a conforming Server never sends one — and acknowledging what cannot be applied is the lie this
+/// whole path exists to prevent.
+pub fn carries_settings(offers: &ConnectionSettingsOffers) -> bool {
+    offers.opamp.is_some()
+        || offers.own_metrics.is_some()
+        || offers.own_traces.is_some()
+        || offers.own_logs.is_some()
 }
 
 /// What to report for an offer that has been verified and applied: `Ok` when the Client honoured
@@ -296,6 +313,63 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    fn telemetry_only(hash: &[u8], endpoint: &str) -> ConnectionSettingsOffers {
+        ConnectionSettingsOffers {
+            hash: hash.to_vec(),
+            own_metrics: Some(TelemetryConnectionSettings {
+                destination_endpoint: endpoint.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0086 clause 1: an offer that names a telemetry destination is actionable, whether or not
+    /// it carries OpAMP settings — and one that carries nothing this Client applies is not.
+    #[test]
+    fn an_offer_carries_settings_when_it_names_anything_this_client_applies() {
+        assert!(carries_settings(&telemetry_only(
+            b"h",
+            "https://x/v1/metrics"
+        )));
+        assert!(carries_settings(&offer_with(
+            b"h",
+            "wss://x/v1/opamp",
+            None,
+            0
+        )));
+        assert!(!carries_settings(&ConnectionSettingsOffers::default()));
+    }
+
+    /// Clause 6: what is persisted says only what was offered. A telemetry-only offer against a
+    /// fresh state directory must not leave behind an empty `opamp` block claiming the Server
+    /// offered settings it never sent.
+    #[test]
+    fn merge_leaves_opamp_absent_when_neither_side_has_one() {
+        let merged = merge(None, &telemetry_only(b"t1", "https://x/v1/metrics"));
+        assert!(merged.opamp.is_none());
+        assert!(merged.own_metrics.is_some());
+        assert_eq!(merged.hash, b"t1");
+    }
+
+    /// And the fold still works the other way: a telemetry-only offer arriving over settings
+    /// already in force leaves the OpAMP endpoint and credential exactly where they were.
+    #[test]
+    fn merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward() {
+        let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("Bearer t"), 20);
+        let merged = merge(
+            Some(&stored),
+            &telemetry_only(b"t2", "https://x/v1/metrics"),
+        );
+
+        let opamp = merged.opamp.expect("the settings in force survive");
+        assert_eq!(opamp.destination_endpoint, "wss://server/v1/opamp");
+        assert_eq!(opamp.heartbeat_interval_seconds, 20);
+        assert_eq!(offered_authorization(&opamp), Some("Bearer t"));
+        assert!(merged.own_metrics.is_some());
+        assert_eq!(merged.hash, b"t2", "the new offer's hash is acknowledged");
     }
 
     #[test]

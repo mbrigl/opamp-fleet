@@ -102,6 +102,11 @@ pub struct AgentState {
     /// The Server's declared Capability Set, once a reply carried it. Capability negotiation is
     /// binding in both directions: we stop reporting what the Server cannot accept.
     server_capabilities: Option<u64>,
+    /// This Server has sent a connection-settings offer at least once. It then gets the status for
+    /// one whether or not it declared `OffersConnectionSettings` (ADR-0087 clause 2) — exercising a
+    /// capability says more about what a peer accepts than its bitmask does, and withholding the
+    /// acknowledgement would leave it re-offering for ever.
+    settings_offered: bool,
     send_full: bool,
     send_status: bool,
     /// A Managed Process stands behind this Agent: a received configuration is acknowledged
@@ -211,6 +216,7 @@ impl AgentState {
             applied,
             status,
             server_capabilities: None,
+            settings_offered: false,
             send_full: true,
             send_status: false,
             managed: false,
@@ -500,6 +506,14 @@ impl AgentState {
             msg.health = Some(self.health());
         }
         if self.send_full || self.send_status {
+            // Deliberately **not** gated on `OffersRemoteConfig` (ADR-0087 clause 5), and this is a
+            // decision rather than an oversight — do not "fix" it. That bit says the Server *can
+            // offer* configuration; what licenses an inbound status report is `AcceptsStatus`, which
+            // every Server MUST set, and no `AcceptsRemoteConfigStatus` exists. Gating here would
+            // also be dangerous where it bit: `last_remote_config_hash` is the sole input to the
+            // Server's re-offer decision, so a Server that stopped declaring the bit would silence
+            // the hash and put the fleet in a permanent re-offer loop. And where it would not bite
+            // it does nothing — the status is unset until a configuration has actually been offered.
             msg.remote_config_status = self.status.clone();
             if self.server_accepts_effective_config() {
                 msg.effective_config = Some(match &self.process_effective_config {
@@ -510,7 +524,9 @@ impl AgentState {
                 });
             }
         }
-        if self.send_full || self.send_settings_status {
+        if self.server_accepts_connection_settings_status()
+            && (self.send_full || self.send_settings_status)
+        {
             msg.connection_settings_status = self.connection_settings_status.clone();
         }
         if let Some(csr) = self.pending_csr.take() {
@@ -520,7 +536,10 @@ impl AgentState {
                 }),
             });
         }
-        if self.accepts_packages && (self.send_full || self.send_package_status) {
+        if self.accepts_packages
+            && self.server_accepts_package_statuses()
+            && (self.send_full || self.send_package_status)
+        {
             msg.package_statuses = Some(self.package_statuses());
         }
         // Available components ride the Baseline's two-step shape: the hash in every full
@@ -712,12 +731,17 @@ impl AgentState {
         // an offer this Agent already runs (APPLIED, same hash) is not re-entered; a re-offer
         // after FAILED or a lost in-flight verification retries.
         if let Some(offers) = &reply.connection_settings {
+            // A Server that has sent an offer accepts the status for it, whatever its capability
+            // bitmask says (ADR-0087 clause 2). Latched before the actionable check on purpose: even
+            // an offer this Client cannot act on arms the report, because a Server that offers and
+            // then learns nothing can never stop offering.
+            self.settings_offered = true;
             let applied = self.connection_settings_status.as_ref().is_some_and(|s| {
                 s.last_connection_settings_hash == offers.hash
                     && s.status == ConnectionSettingsStatuses::Applied as i32
             });
-            if offers.opamp.is_some() && !applied {
-                info!(hash = %hex::encode(&offers.hash), "connection settings offered; verifying");
+            if crate::connection::carries_settings(offers) && !applied {
+                info!(hash = %hex::encode(&offers.hash), "connection settings offered; applying");
                 self.connection_settings_status = Some(ConnectionSettingsStatus {
                     last_connection_settings_hash: offers.hash.clone(),
                     status: ConnectionSettingsStatuses::Applying as i32,
@@ -1020,8 +1044,37 @@ impl AgentState {
     fn server_accepts_effective_config(&self) -> bool {
         // Until the Server has declared anything, report optimistically; once it has, its word is
         // binding ("Interoperability of Partial Implementations").
+        self.server_accepts(ServerCapabilities::AcceptsEffectiveConfig)
+    }
+
+    /// Whether the Server takes package status. Same shape as the effective-config gate, and for
+    /// the same reason (ADR-0087 clauses 1 and 3).
+    ///
+    /// A status suppressed here is *not* held for later: the dirty flag clears as usual, and the
+    /// report returns with the full snapshot that follows any reconnect or `ReportFullState`.
+    /// Holding the flag would deliver a stale status the moment the bit appeared.
+    fn server_accepts_package_statuses(&self) -> bool {
+        self.server_accepts(ServerCapabilities::AcceptsPackagesStatus)
+    }
+
+    /// Whether the Server takes connection-settings status.
+    ///
+    /// A **received offer outranks the bitmask** (ADR-0087 clause 2). Gating on the capability alone
+    /// would deadlock against Servers that offer without declaring it — including this project's
+    /// own, which sets the bit from `[connection_offer]` and so omits it for a telemetry-only or
+    /// `[client_ca]`-only configuration. A Server that offers and never hears back can never stop
+    /// offering, so the offer itself arms the report.
+    fn server_accepts_connection_settings_status(&self) -> bool {
+        self.settings_offered || self.server_accepts(ServerCapabilities::OffersConnectionSettings)
+    }
+
+    /// The Baseline's negotiation rule, in the direction this Client owes it: optimistic until the
+    /// Server has declared anything, binding once it has. A `capabilities` of zero is *"MAY be
+    /// omitted in subsequent ServerToAgent messages"* — silence, not a retraction — so the last
+    /// non-zero declaration is what `server_capabilities` holds.
+    fn server_accepts(&self, capability: ServerCapabilities) -> bool {
         self.server_capabilities
-            .map(|caps| caps & ServerCapabilities::AcceptsEffectiveConfig as u64 != 0)
+            .map(|caps| caps & capability as u64 != 0)
             .unwrap_or(true)
     }
 
@@ -2473,6 +2526,153 @@ mod tests {
         assert!(statuses.packages.is_empty(), "nothing was installed");
         // A refusal is a report, not a loop: the aggregate is echoed so the offer ends.
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
+    }
+
+    /// A reply declaring a Capability Set, so a test can say what the Server accepts.
+    fn declaring(capabilities: u64) -> ServerToAgent {
+        ServerToAgent {
+            capabilities,
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0087 clause 3: once the Server has declared its capabilities, package status stops going
+    /// to one that cannot take it. The Baseline makes this a MUST in both directions, and until now
+    /// only two of seven Server bits changed any behaviour here.
+    #[test]
+    fn package_statuses_stop_once_the_server_says_it_accepts_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        agent.accept_packages();
+
+        // A Server that takes status reports and offers configuration, but no package status.
+        agent.handle(&declaring(
+            ServerCapabilities::AcceptsStatus as u64
+                | ServerCapabilities::OffersRemoteConfig as u64,
+        ));
+        agent.force_full();
+        assert!(
+            agent.next_report().package_statuses.is_none(),
+            "an undeclared capability must not be exercised"
+        );
+
+        // …and it comes back the moment the Server declares the bit.
+        agent.handle(&declaring(
+            ServerCapabilities::AcceptsStatus as u64
+                | ServerCapabilities::AcceptsPackagesStatus as u64,
+        ));
+        agent.force_full();
+        assert!(agent.next_report().package_statuses.is_some());
+    }
+
+    /// And the optimistic half (clause 1): before the Server has said anything there is nothing to
+    /// obey, so the first report — which necessarily precedes any declaration — carries everything.
+    #[test]
+    fn package_statuses_ride_until_the_server_has_spoken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        agent.accept_packages();
+        assert!(agent.next_report().package_statuses.is_some());
+    }
+
+    /// ADR-0087 clause 2, and the reason the naive gate is wrong: a Server may send an offer
+    /// *without* declaring `OffersConnectionSettings` — this project's own does exactly that for a
+    /// `[telemetry_offer]`-only or `[client_ca]`-only configuration. Withholding the acknowledgement
+    /// would leave its hash gate open and have it re-offer for ever, so the offer arms the report.
+    #[test]
+    fn a_connection_settings_status_is_reported_to_a_server_that_offered_without_declaring_the_bit()
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::new("self".to_string(), storage).expect("agent");
+
+        agent.handle(&ServerToAgent {
+            // Only the one bit every Server MUST set — no OffersConnectionSettings.
+            capabilities: ServerCapabilities::AcceptsStatus as u64,
+            connection_settings: Some(opamp::proto::ConnectionSettingsOffers {
+                hash: b"offer-1".to_vec(),
+                own_logs: Some(opamp::proto::TelemetryConnectionSettings {
+                    destination_endpoint: "https://collector.example:4318/v1/logs".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let status = agent
+            .next_report()
+            .connection_settings_status
+            .expect("the offer arms the report whatever the bitmask says");
+        assert_eq!(status.last_connection_settings_hash, b"offer-1");
+    }
+
+    /// The other side of clause 2, and the only shape where the gate is actually observable: a
+    /// **restarted** Client holds a status from its persisted settings (ADR-0014) without any offer
+    /// having arrived in this process. Sent to a Server that declares only the mandatory bit, that
+    /// status exercises a capability the Server never claimed — so it is withheld until the Server
+    /// either declares the bit or offers something.
+    #[test]
+    fn a_restored_connection_settings_status_is_withheld_from_a_server_that_never_offers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::new("self".to_string(), storage).expect("agent");
+        // What `runtime.rs` does at startup when `connection-settings.pb` exists.
+        agent.adopt_connection_settings(b"persisted-1");
+
+        agent.handle(&declaring(ServerCapabilities::AcceptsStatus as u64));
+        agent.force_full();
+        assert!(
+            agent.next_report().connection_settings_status.is_none(),
+            "an undeclared capability must not be exercised"
+        );
+
+        // Declaring the bit brings it straight back.
+        agent.handle(&declaring(
+            ServerCapabilities::AcceptsStatus as u64
+                | ServerCapabilities::OffersConnectionSettings as u64,
+        ));
+        agent.force_full();
+        assert!(agent.next_report().connection_settings_status.is_some());
+    }
+
+    /// ADR-0087 clause 5, written as an assertion so the deliberate non-gate cannot be silently
+    /// reversed by someone applying the MUST field by field. `OffersRemoteConfig` says the Server
+    /// *can offer* configuration; what licenses this inbound status is `AcceptsStatus`, and gating
+    /// it would silence the hash the Server's re-offer decision depends on.
+    #[test]
+    fn a_remote_config_status_rides_to_a_server_that_offers_no_remote_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+
+        // A configuration was offered and acknowledged at some point…
+        agent.handle(&ServerToAgent {
+            remote_config: Some(AgentRemoteConfig {
+                config: Some(AgentConfigMap {
+                    config_map: Default::default(),
+                }),
+                config_hash: b"cfg-1".to_vec(),
+            }),
+            ..Default::default()
+        });
+        // …and the Server now declares nothing but the mandatory bit.
+        agent.handle(&declaring(ServerCapabilities::AcceptsStatus as u64));
+        agent.force_full();
+
+        let status = agent
+            .next_report()
+            .remote_config_status
+            .expect("the config hash must keep flowing, or the Server re-offers for ever");
+        assert_eq!(status.last_remote_config_hash, b"cfg-1");
     }
 
     /// The headers a `DownloadableFile` names travel to the download that has to use them — the

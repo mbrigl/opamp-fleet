@@ -190,7 +190,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // Own telemetry (ADR-0036) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
-    let mut telemetry = crate::telemetry::Telemetry::new();
+    let telemetry = crate::telemetry::Telemetry::new();
     let mut system = sysinfo::System::new();
     let sampling = engine.sampling_handle();
 
@@ -226,10 +226,12 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             let transport = async {
                 match config.transport()? {
                     TransportKind::WebSocket => {
-                        transport::ws::run(&mut engine, &mut config, &mut shutdown).await
+                        transport::ws::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
                     }
                     TransportKind::Http => {
-                        transport::http::run(&mut engine, &mut config, &mut shutdown).await
+                        transport::http::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
                     }
                 }
             };
@@ -265,21 +267,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
-                // The same verified offer may have named new telemetry destinations (ADR-0036).
-                if let Some(stored) = connection::load(&config.state_dir) {
-                    let refused = telemetry.apply(&stored, &engine.self_description(), &config);
-                    if !refused.is_empty() {
-                        // The transport reported the OpAMP half APPLIED before it handed control
-                        // back; a refusal here is the rest of the same offer, and it corrects that
-                        // acknowledgement rather than letting it stand. The correction rides the
-                        // next connection's reports, and the Server's gate stops re-offering on any
-                        // terminal status, so a FAILED after an APPLIED ends the offer rather than
-                        // restarting it.
-                        let error = refused.join("; ");
-                        tracing::warn!(reason = %error, "not reporting own telemetry");
-                        engine.connection_settings_outcome(&stored.hash, Err(&error));
-                    }
-                }
+                // The telemetry destinations of the same offer are already in force: since
+                // ADR-0086 `process_connection_offer` applies them before it asks for the
+                // reconnect, and it composes the one acknowledgement that names anything refused.
+                // Re-applying here would be a no-op through `in_force` whose only visible effect
+                // was a `warn!` with no acknowledgement attached — which was the bug.
                 if let Some(handle) = gateway.take() {
                     handle.abort();
                     // The listener is only released once the task has unwound; binding the new

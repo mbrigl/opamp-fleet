@@ -123,6 +123,103 @@ pub async fn process_self_configuration<S: ReportSink>(
     true
 }
 
+/// What handling a connection-settings offer asks of the transport loop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OfferOutcome {
+    /// No offer was pending.
+    None,
+    /// The offer was applied — or refused — in place. The acknowledgement is owed, and the
+    /// connection stays up. A telemetry-only offer always lands here (ADR-0086 clause 4): no
+    /// destination it names is reached over the OpAMP connection, so there is nothing to reconnect
+    /// for.
+    Applied,
+    /// Verified OpAMP settings took effect (ADR-0014): the caller drops the connection so the
+    /// runtime re-resolves the effective configuration and reconnects with them.
+    Reconnect,
+}
+
+/// Handles a pending connection-settings offer, whichever transport is carrying it.
+///
+/// The two transports differ in how they end a connection, not in what an offer means — so the
+/// meaning lives here, once. Before ADR-0086 both carried a byte-identical copy of this, and both
+/// assumed every offer had to be proved by reconnecting.
+///
+/// The order of the steps is load-bearing:
+///
+/// 1. **The OpAMP half, only when there is one.** It is verified by actually connecting, which is
+///    ADR-0014's MUST and is scoped to this half alone — the Baseline puts that requirement under
+///    `ConnectionSettingsOffers.opamp` and justifies it by not losing access to the *Server*. A
+///    telemetry destination cannot be proved that way and is not: a receiver that is momentarily
+///    down is not an offer that is wrong.
+/// 2. **Persist, then apply telemetry from what was persisted** — never from the raw offer. An
+///    offer carries only what changed, so applying `own_metrics` alone from the raw message would
+///    compare against `traces: None, logs: None` and tear down exporters the Server never asked to
+///    stop. `merge` is what puts the unchanged ones back.
+/// 3. **One acknowledgement for the whole message** (ADR-0086 clause 3). The Baseline hashes all
+///    settings together, so the Agent answers the message, not its parts: a single status whose
+///    `error_message` names everything dropped across both halves.
+///
+/// A failed verification of the OpAMP half persists and applies **nothing**, telemetry included, and
+/// reports `FAILED`. Half-applying an offer whose other half was rejected would leave the Server
+/// unable to tell what is running.
+pub async fn process_connection_offer(
+    engine: &mut Engine,
+    config: &ClientConfig,
+    telemetry: &crate::telemetry::Telemetry,
+) -> OfferOutcome {
+    let Some(offer) = engine.take_connection_offer() else {
+        return OfferOutcome::None;
+    };
+    let mut errors: Vec<String> = Vec::new();
+    let mut reconnect = false;
+
+    if let Some(settings) = &offer.opamp {
+        let probe = || engine.probe_report();
+        if let Err(e) = crate::connection::verify(settings, config, probe).await {
+            tracing::warn!(error = %e, "offered connection settings failed verification");
+            engine.connection_settings_outcome(&offer.hash, Err(&e));
+            return OfferOutcome::Applied;
+        }
+        // The issued certificate is stored only now, after connecting with it proved it works — the
+        // old one stayed in force until here (ADR-0035).
+        if let Some(certificate) = &settings.certificate {
+            if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
+                tracing::warn!(error = %e, "cannot store the issued certificate");
+            } else {
+                tracing::info!("a client certificate was issued and is now in force");
+            }
+        }
+        if let Err(e) = crate::connection::unhonoured(settings) {
+            tracing::warn!(error = %e, "connection settings partly applied");
+            errors.push(e);
+        }
+        reconnect = true;
+    }
+
+    let merged =
+        crate::connection::merge(crate::connection::load(&config.state_dir).as_ref(), &offer);
+    if let Err(e) = crate::connection::store(&config.state_dir, &merged) {
+        tracing::warn!(error = %e, "cannot persist the connection settings");
+    }
+    errors.extend(telemetry.apply(&merged, &engine.self_description(), config));
+
+    if errors.is_empty() {
+        engine.connection_settings_outcome(&offer.hash, Ok(()));
+    } else {
+        let error = errors.join("; ");
+        tracing::warn!(error = %error, "connection settings partly applied");
+        engine.connection_settings_outcome(&offer.hash, Err(&error));
+    }
+
+    if reconnect {
+        tracing::info!("connection settings verified; reconnecting with them");
+        OfferOutcome::Reconnect
+    } else {
+        tracing::info!("telemetry destinations applied");
+        OfferOutcome::Applied
+    }
+}
+
 /// Why a transport run ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -233,6 +330,117 @@ mod tests {
         assert!(
             within(after_reset, Duration::from_secs(1)),
             "{after_reset:?}"
+        );
+    }
+
+    /// An Engine holding one self-Agent, and the config that goes with it.
+    fn engine_with_state_dir(dir: &tempfile::TempDir) -> (Engine, ClientConfig, Vec<u8>) {
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let state = AgentState::new("self".to_string(), storage).expect("agent");
+        let mut engine = Engine::new(vec![state]);
+        let uid = engine.poll_reports()[0].instance_uid.clone();
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        (engine, config, uid)
+    }
+
+    fn telemetry_only_offer(uid: Vec<u8>, endpoint: &str) -> ServerToAgent {
+        ServerToAgent {
+            instance_uid: uid,
+            connection_settings: Some(opamp::proto::ConnectionSettingsOffers {
+                hash: b"telemetry-1".to_vec(),
+                own_metrics: Some(opamp::proto::TelemetryConnectionSettings {
+                    destination_endpoint: endpoint.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0086: an offer carrying only a telemetry destination is applied **in place** — no
+    /// verification by connecting, no reconnect — and acknowledged. Before it, the Client required
+    /// `opamp` to be present and dropped this message whole: no `APPLYING`, no status, no
+    /// exporters, and a Server whose hash gate therefore never closed and re-offered for ever.
+    #[tokio::test]
+    async fn a_telemetry_only_offer_is_applied_without_reconnecting() {
+        crate::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, config, uid) = engine_with_state_dir(&dir);
+        // Loopback is the cleartext exception (ADR-0036) — nothing leaves the machine.
+        engine.handle(&telemetry_only_offer(
+            uid,
+            "http://127.0.0.1:4318/v1/metrics",
+        ));
+
+        let telemetry = crate::telemetry::Telemetry::new();
+        let outcome = process_connection_offer(&mut engine, &config, &telemetry).await;
+
+        assert_eq!(
+            outcome,
+            OfferOutcome::Applied,
+            "a telemetry destination is not reached over the OpAMP connection, so nothing is \
+             gained by dropping it"
+        );
+        assert!(telemetry.reporting(), "the exporter is in force");
+
+        // Persisted — and honestly: the Server offered no OpAMP settings, so none are claimed.
+        let stored = crate::connection::load(&config.state_dir).expect("settings persisted");
+        assert!(stored.own_metrics.is_some());
+        assert!(
+            stored.opamp.is_none(),
+            "a synthetic empty block would claim an offer that was never made"
+        );
+
+        // And the Server is told, which is what closes its gate.
+        let status = engine.owed_reports()[0]
+            .connection_settings_status
+            .clone()
+            .expect("an acknowledgement is owed");
+        assert_eq!(status.last_connection_settings_hash, b"telemetry-1");
+        assert_eq!(
+            status.status,
+            opamp::proto::ConnectionSettingsStatuses::Applied as i32,
+            "{}",
+            status.error_message
+        );
+        telemetry.shutdown();
+    }
+
+    /// And a destination this Client refuses is reported `FAILED` naming the reason, on the same
+    /// offer — not warned to a log while the Server is told everything applied.
+    #[tokio::test]
+    async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
+        crate::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, config, uid) = engine_with_state_dir(&dir);
+        // Cleartext beyond loopback: the Baseline's "MAY refuse", taken.
+        engine.handle(&telemetry_only_offer(
+            uid,
+            "http://collector.example:4318/v1/metrics",
+        ));
+
+        let telemetry = crate::telemetry::Telemetry::new();
+        let outcome = process_connection_offer(&mut engine, &config, &telemetry).await;
+
+        assert_eq!(outcome, OfferOutcome::Applied);
+        assert!(!telemetry.reporting(), "the destination was refused");
+
+        let status = engine.owed_reports()[0]
+            .connection_settings_status
+            .clone()
+            .expect("an acknowledgement is owed");
+        assert_eq!(
+            status.status,
+            opamp::proto::ConnectionSettingsStatuses::Failed as i32
+        );
+        assert!(
+            status.error_message.contains("cleartext"),
+            "the Server must learn *why*: {}",
+            status.error_message
         );
     }
 

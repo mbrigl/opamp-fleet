@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::{ReportSink, RunOutcome};
+use crate::transport::{OfferOutcome, ReportSink, RunOutcome};
 
 use opamp::endpoint::PROTOBUF_CONTENT_TYPE;
 use opamp::uid::InstanceUid;
@@ -24,6 +24,7 @@ pub async fn run(
     engine: &mut Engine,
     config: &mut ClientConfig,
     shutdown: &mut Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
 ) -> Result<RunOutcome, String> {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
@@ -103,47 +104,12 @@ pub async fn run(
             // certificate if it signs them and this Client needs one. The answer arrives as an
             // ordinary connection-settings offer, handled just below.
             engine.request_certificate(config);
-            // A connection-settings offer (ADR-0014): verify by actually connecting. Success
-            // persists the settings and leaves this loop so the runtime reconnects with them;
-            // failure reports FAILED with the owed reports of the next round.
-            if let Some(offer) = engine.take_connection_offer() {
-                let settings = offer.opamp.clone().unwrap_or_default();
-                let probe = || engine.probe_report();
-                match crate::connection::verify(&settings, config, probe).await {
-                    Ok(()) => {
-                        // The issued certificate is stored only now, after connecting with it
-                        // proved it works — the old one stayed in force until here (ADR-0035).
-                        if let Some(certificate) = &settings.certificate {
-                            if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert)
-                            {
-                                warn!(error = %e, "cannot store the issued certificate");
-                            } else {
-                                info!("a client certificate was issued and is now in force");
-                            }
-                        }
-                        // Applied as far as this Client honours it, and said so (ADR-0035).
-                        match crate::connection::unhonoured(&settings) {
-                            Ok(()) => engine.connection_settings_outcome(&offer.hash, Ok(())),
-                            Err(e) => {
-                                warn!(error = %e, "connection settings partly applied");
-                                engine.connection_settings_outcome(&offer.hash, Err(&e));
-                            }
-                        }
-                        let merged = crate::connection::merge(
-                            crate::connection::load(&config.state_dir).as_ref(),
-                            &offer,
-                        );
-                        if let Err(e) = crate::connection::store(&config.state_dir, &merged) {
-                            warn!(error = %e, "cannot persist the connection settings");
-                        }
-                        info!("connection settings verified; reconnecting with them");
-                        return Ok(RunOutcome::Reconfigured);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "offered connection settings failed verification");
-                        engine.connection_settings_outcome(&offer.hash, Err(&e));
-                    }
-                }
+            // A connection-settings offer (ADR-0014, ADR-0086). An OpAMP half is verified by
+            // connecting and ends this run so the runtime reconnects with it; a telemetry-only
+            // offer is applied in place and the acknowledgement rides the reports owed below.
+            match crate::transport::process_connection_offer(engine, config, telemetry).await {
+                OfferOutcome::Reconnect => return Ok(RunOutcome::Reconfigured),
+                OfferOutcome::None | OfferOutcome::Applied => {}
             }
             // A package offer (ADR-0015): download and verify; the outcome rides the owed reports.
             let endpoint = config.endpoint.clone();

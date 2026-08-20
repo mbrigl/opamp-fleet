@@ -628,12 +628,20 @@ impl AppState {
     }
 
     /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
-    /// while a connection offer is configured and `OffersPackages` / `AcceptsPackagesStatus`
+    /// while there is anything to offer and `OffersPackages` / `AcceptsPackagesStatus`
     /// while a non-empty package store is armed — an undeclared capability is never exercised, a
     /// declared one never hollow.
     fn capabilities(&self) -> u64 {
         let mut caps = SERVER_CAPABILITIES;
-        if self.connection_offer.is_some() {
+        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0086 clause 5): the
+        // standing `[connection_offer]`, the own-telemetry destinations of `[telemetry_offer]`, and
+        // the certificate a `[client_ca]` issues in answer to a CSR — which travels as an ordinary
+        // offer. Keying the bit on the first alone left the other two exercising a capability this
+        // Server had not declared, which is exactly what the sentence above promises never happens.
+        if self.connection_offer.is_some()
+            || !self.telemetry_offer.is_empty()
+            || self.client_ca.is_some()
+        {
             caps |= ServerCapabilities::OffersConnectionSettings as u64;
         }
         if self.packages.as_ref().is_some_and(|p| !p.store.is_empty()) {

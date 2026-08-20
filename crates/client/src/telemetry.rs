@@ -33,8 +33,18 @@ use tracing::{info, warn};
 
 use crate::config::ClientConfig;
 
-/// How often process metrics are sampled and handed to the periodic exporter.
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+/// How often process metrics are sampled, and how often the exporter ships them.
+///
+/// The Baseline's recommendation for own metrics, taken as written: *"The Agent SHOULD periodically
+/// report its metrics to the destination offered in the own_metrics field. The recommended
+/// reporting interval is 10 seconds."*
+///
+/// One constant for both halves on purpose. What reaches the backend is only as fresh as the
+/// sampling behind it: exporting every 10 s off a 30 s sample would ship each value three times and
+/// turn a gauge series into a step function — a reporting interval in name only. The SDK's periodic
+/// reader defaults to 60 s and must therefore be told this explicitly; leaving it at the default is
+/// how the interval silently became six times the recommendation.
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The instrumentation scope every signal this Client emits is attributed to.
 const SCOPE: &str = "opamp-fleet-client";
@@ -79,8 +89,21 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
 /// Held rather than left to the SDK's globals because the destination is not a startup decision: it
 /// arrives from the Server and can change. Applying a new offer means building fresh providers and
 /// shutting these down, which needs a handle on exactly what is running.
+///
+/// **Interior mutability, deliberately.** The exporters outlive a connection (ADR-0036), so this is
+/// owned by the runtime loop — but a destination is put in force from *inside* a transport, where
+/// the offer's acknowledgement is composed (ADR-0086). Both the sampler arm of the runtime's
+/// `select!` and the transport future it drives therefore hold this at once, which `&mut self`
+/// cannot express. One `Mutex` gives both a shared borrow and costs nothing else: every method
+/// under the lock is synchronous, so the guard is never held across an `.await` and no deadlock
+/// class is introduced. An `Arc` would buy a clone nobody needs.
 #[derive(Default)]
 pub struct Telemetry {
+    inner: std::sync::Mutex<Providers>,
+}
+
+#[derive(Default)]
+struct Providers {
     meters: Option<SdkMeterProvider>,
     tracers: Option<SdkTracerProvider>,
     loggers: Option<SdkLoggerProvider>,
@@ -100,12 +123,20 @@ impl Telemetry {
         Telemetry::default()
     }
 
+    /// The providers, recovering from a poisoned lock rather than propagating the panic: a thread
+    /// that died mid-export must not take the Client down with it.
+    fn providers(&self) -> std::sync::MutexGuard<'_, Providers> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Puts the offered destinations in force, replacing whatever was running.
     ///
     /// Returns the destinations it refused, if any, so the caller can report them rather than drop
     /// them silently — the same honesty the OpAMP settings get (ADR-0035).
     pub fn apply(
-        &mut self,
+        &self,
         settings: &ConnectionSettingsOffers,
         description: &AgentDescription,
         config: &ClientConfig,
@@ -115,19 +146,20 @@ impl Telemetry {
             traces: endpoint_of(settings.own_traces.as_ref()),
             logs: endpoint_of(settings.own_logs.as_ref()),
         };
-        if wanted == self.in_force {
+        let mut this = self.providers();
+        if wanted == this.in_force {
             return Vec::new();
         }
 
         let mut refused = Vec::new();
         let resource = resource(description);
-        self.shutdown();
+        this.stop();
 
         if let Some(settings) = settings.own_metrics.as_ref() {
             match check(settings, "own_metrics")
                 .and_then(|()| metric_provider(settings, resource.clone(), config))
             {
-                Ok(provider) => self.meters = Some(provider),
+                Ok(provider) => this.meters = Some(provider),
                 Err(e) => refused.push(e),
             }
         }
@@ -137,7 +169,7 @@ impl Telemetry {
             {
                 Ok(provider) => {
                     opentelemetry::global::set_tracer_provider(provider.clone());
-                    self.tracers = Some(provider);
+                    this.tracers = Some(provider);
                 }
                 Err(e) => refused.push(e),
             }
@@ -148,14 +180,14 @@ impl Telemetry {
             {
                 Ok(provider) => {
                     set_bridge(Some(&provider));
-                    self.loggers = Some(provider);
+                    this.loggers = Some(provider);
                 }
                 Err(e) => refused.push(e),
             }
         }
 
-        self.in_force = wanted;
-        if self.meters.is_some() || self.tracers.is_some() || self.loggers.is_some() {
+        this.in_force = wanted;
+        if this.meters.is_some() || this.tracers.is_some() || this.loggers.is_some() {
             info!("reporting own telemetry to the destinations the Server offered");
         }
         refused
@@ -164,7 +196,8 @@ impl Telemetry {
     /// Samples the process behind `pid` and records it against this Agent's meter. A pid that has
     /// gone away records nothing — a Managed Process between restarts is not an error.
     pub fn sample(&self, system: &mut sysinfo::System, pid: u32, agent: &str) {
-        let Some(meters) = &self.meters else {
+        let this = self.providers();
+        let Some(meters) = &this.meters else {
             return;
         };
         let pid = sysinfo::Pid::from_u32(pid);
@@ -204,17 +237,20 @@ impl Telemetry {
 
     /// Whether any destination is in force, so a caller can skip the sampling work entirely.
     pub fn reporting(&self) -> bool {
-        self.meters.is_some() || self.tracers.is_some() || self.loggers.is_some()
-    }
-
-    /// The logger provider, for the `tracing` bridge to attach to.
-    pub fn loggers(&self) -> Option<&SdkLoggerProvider> {
-        self.loggers.as_ref()
+        let this = self.providers();
+        this.meters.is_some() || this.tracers.is_some() || this.loggers.is_some()
     }
 
     /// Stops every provider in force, flushing what it holds. Called before a new destination is
     /// installed and on shutdown; an exporter that cannot flush is logged, never fatal.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
+        self.providers().stop();
+    }
+}
+
+impl Providers {
+    /// Stops and drops every provider, flushing what each holds.
+    fn stop(&mut self) {
         if let Some(provider) = self.meters.take() {
             if let Err(e) = provider.shutdown() {
                 warn!(error = %e, "the metrics exporter did not shut down cleanly");
@@ -300,11 +336,69 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
 /// *"It is not recommended that the Agent accepts this CA as an authority for any purposes."* It
 /// exists so a TLS-terminating intermediary can verify the client later, not so the Agent can widen
 /// whom it trusts on a Server's say-so — the same reasoning that refuses `tls`.
+/// An OTLP HTTP client bound to the Tokio runtime this process runs on.
+///
+/// **Why this wrapper exists.** The SDK's exporters do not run on the async runtime. A
+/// `BatchLogProcessor` — and the metrics `PeriodicReader`, and the span batch processor — each
+/// spawn a **dedicated OS thread** and drive the export with `futures_executor::block_on`. That
+/// thread has no Tokio reactor. An asynchronous `reqwest::Client` handed to it panics the moment it
+/// resolves a name:
+///
+/// ```text
+/// thread 'OpenTelemetry.Logs.BatchProcessor' panicked at hyper-util .../connect/dns.rs:
+/// there is no reactor running, must be called from the context of a Tokio 1.x runtime
+/// ```
+///
+/// This is not a consequence of supplying our own client: with the `reqwest-client` feature
+/// `opentelemetry-otlp` builds exactly the same asynchronous client when given none, so the fault
+/// was latent from the day ADR-0036 chose that feature and surfaced only once a destination was
+/// actually offered. ADR-0036's reasoning — *"this Client is a tokio process"* — is true of the
+/// process and false of the thread the export happens on.
+///
+/// The fix keeps the asynchronous client the ADR chose and puts the work where it belongs: every
+/// request is `spawn`ed onto the runtime handle captured when the exporter was built, and the
+/// exporter thread merely awaits the join. Awaiting a `JoinHandle` needs no reactor of its own —
+/// it is a waker-driven channel — so the blocking executor on that thread is satisfied while the
+/// socket work happens on the runtime that owns the reactor.
+struct RuntimeBoundClient {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+#[async_trait::async_trait]
+impl opentelemetry_http::HttpClient for RuntimeBoundClient {
+    async fn send_bytes(
+        &self,
+        request: opentelemetry_http::Request<opentelemetry_http::Bytes>,
+    ) -> Result<
+        opentelemetry_http::Response<opentelemetry_http::Bytes>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let client = self.client.clone();
+        // The request/response translation stays the library's: this delegates to its own
+        // `HttpClient for reqwest::Client`, only from inside the runtime.
+        self.handle
+            .spawn(
+                async move { opentelemetry_http::HttpClient::send_bytes(&client, request).await },
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("the OTLP export task did not complete: {e}").into()
+            })?
+    }
+}
+
+impl std::fmt::Debug for RuntimeBoundClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RuntimeBoundClient")
+    }
+}
+
 fn exporter_client(
     settings: &TelemetryConnectionSettings,
     field: &str,
     config: &ClientConfig,
-) -> Result<reqwest::Client, String> {
+) -> Result<RuntimeBoundClient, String> {
     let offered = settings
         .certificate
         .as_ref()
@@ -316,9 +410,15 @@ fn exporter_client(
         offered,
     )
     .map_err(|e| format!("{field}: {e}"))?;
-    builder
+    let client = builder
         .build()
-        .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))
+        .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))?;
+    // Captured here, on the runtime thread that applies the offer — the exporter thread this is
+    // handed to has no runtime of its own to ask.
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+        format!("{field}: own telemetry can only be started from within the Tokio runtime")
+    })?;
+    Ok(RuntimeBoundClient { client, handle })
 }
 
 fn is_loopback(endpoint: &str) -> bool {
@@ -372,9 +472,14 @@ fn metric_provider(
         .with_http_client(exporter_client(settings, "own_metrics", config)?)
         .build()
         .map_err(|e| format!("own_metrics: cannot build the exporter: {e}"))?;
+    // The reader is built explicitly rather than through `with_periodic_exporter`, which would take
+    // the SDK's 60 s default and quietly miss the Baseline's recommended reporting interval.
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
+        .with_interval(SAMPLE_INTERVAL)
+        .build();
     Ok(SdkMeterProvider::builder()
         .with_resource(resource)
-        .with_periodic_exporter(exporter)
+        .with_reader(reader)
         .build())
 }
 
@@ -446,7 +551,7 @@ mod tests {
     /// Server's offer is what arms it.
     #[test]
     fn no_destination_builds_nothing() {
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let refused = telemetry.apply(
             &ConnectionSettingsOffers::default(),
             &description(),
@@ -460,7 +565,7 @@ mod tests {
     /// told rather than left believing the telemetry flows.
     #[test]
     fn a_cleartext_destination_beyond_loopback_is_refused() {
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://collector.example:4318/v1/metrics")),
             ..Default::default()
@@ -473,10 +578,10 @@ mod tests {
 
     /// Loopback is the exception: a Collector on the same host over plain HTTP is the ordinary
     /// development and sidecar shape, and nothing leaves the machine.
-    #[test]
-    fn a_loopback_destination_is_allowed_in_cleartext() {
+    #[tokio::test]
+    async fn a_loopback_destination_is_allowed_in_cleartext() {
         crate::tls::install_ring_provider();
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
             ..Default::default()
@@ -491,7 +596,7 @@ mod tests {
     /// reasons — named, not dropped in silence (ADR-0035, ADR-0036).
     #[test]
     fn offered_tls_settings_are_refused_by_name() {
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_logs: Some(TelemetryConnectionSettings {
                 destination_endpoint: "https://collector.example:4318/v1/logs".to_string(),
@@ -513,8 +618,8 @@ mod tests {
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
-    #[test]
-    fn an_offered_certificate_is_presented_by_the_exporter() {
+    #[tokio::test]
+    async fn an_offered_certificate_is_presented_by_the_exporter() {
         crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         // What the CSR flow leaves behind: the key the request was made for, and the certificate
@@ -546,7 +651,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let refused = telemetry.apply(&offer, &description(), &config);
         assert!(refused.is_empty(), "{refused:?}");
         assert!(telemetry.reporting());
@@ -576,7 +681,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let refused = telemetry.apply(&offer, &description(), &config);
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("own_metrics"), "{}", refused[0]);
@@ -589,7 +694,7 @@ mod tests {
     /// certificate is obtained through a CSR.
     #[test]
     fn an_offered_private_key_is_refused_by_name() {
-        let mut telemetry = Telemetry::new();
+        let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_traces: Some(TelemetryConnectionSettings {
                 destination_endpoint: "https://collector.example:4318/v1/traces".to_string(),
@@ -611,6 +716,16 @@ mod tests {
             refused[0]
         );
         assert!(!telemetry.reporting());
+    }
+
+    /// The Baseline names a number for own metrics — *"The recommended reporting interval is 10
+    /// seconds"* — and this pins it, because the way it drifts is silent: the SDK's periodic reader
+    /// defaults to 60 s, so an exporter built without an explicit interval reports six times more
+    /// slowly than recommended and nothing says so. Sampling and export share the constant, so this
+    /// guards both.
+    #[test]
+    fn metrics_are_reported_at_the_interval_the_baseline_recommends() {
+        assert_eq!(Telemetry::new().sample_interval(), Duration::from_secs(10));
     }
 
     /// The Resource carries what identifies the Agent, which is what makes one host's several
