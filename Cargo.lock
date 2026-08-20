@@ -400,8 +400,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "client"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-server",
  "base64",
@@ -414,6 +415,7 @@ dependencies = [
  "opamp",
  "opentelemetry",
  "opentelemetry-appender-tracing",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
@@ -1641,7 +1643,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opamp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "flate2",
  "git2",
@@ -1751,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "package-tools"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "client",
@@ -2409,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "axum-server",

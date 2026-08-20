@@ -190,7 +190,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // Own telemetry (ADR-0024) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
-    let mut telemetry = crate::telemetry::Telemetry::new();
+    let telemetry = crate::telemetry::Telemetry::new();
     let mut system = sysinfo::System::new();
     let sampling = engine.sampling_handle();
 
@@ -204,8 +204,15 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         engine.adopt_connection_settings(&stored.hash);
         // …and resumes reporting to the destinations it was last told about, before it has spoken
         // to anyone: telemetry from a Client that cannot reach the Server is the useful kind.
-        for refused in telemetry.apply(&stored, &engine.self_description()) {
-            tracing::warn!(reason = %refused, "not reporting own telemetry");
+        let refused = telemetry.apply(&stored, &engine.self_description(), &config);
+        if !refused.is_empty() {
+            // And the Server hears about it. The line above just reported these settings APPLIED;
+            // saying nothing here would have this Client claim, on every reconnect for the life of
+            // the state directory, that a destination is in force which it refused to use
+            // (ADR-0024: refused *and reported*).
+            let error = refused.join("; ");
+            tracing::warn!(reason = %error, "not reporting own telemetry");
+            engine.connection_settings_outcome(&stored.hash, Err(&error));
         }
     }
     for uid in engine.uids() {
@@ -219,10 +226,12 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             let transport = async {
                 match config.transport()? {
                     TransportKind::WebSocket => {
-                        transport::ws::run(&mut engine, &mut config, &mut shutdown).await
+                        transport::ws::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
                     }
                     TransportKind::Http => {
-                        transport::http::run(&mut engine, &mut config, &mut shutdown).await
+                        transport::http::run(&mut engine, &mut config, &mut shutdown, &telemetry)
+                            .await
                     }
                 }
             };
@@ -242,19 +251,27 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             }
         };
         match outcome {
-            RunOutcome::Shutdown => return Ok(Exit::Normal),
-            RunOutcome::RestartForUpdate => return Ok(Exit::RestartForUpdate),
+            // Both exits flush first: the batch exporters hold spans and log records that have not
+            // left yet, and a process that simply returns drops them. The stop path is exactly when
+            // the last records are worth having — a crash-and-restart is what they explain.
+            RunOutcome::Shutdown => {
+                telemetry.shutdown();
+                return Ok(Exit::Normal);
+            }
+            RunOutcome::RestartForUpdate => {
+                telemetry.shutdown();
+                return Ok(Exit::RestartForUpdate);
+            }
             // Verified connection settings took effect (ADR-0014): re-resolve the effective
             // configuration — endpoint, credential, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
-                // The same verified offer may have named new telemetry destinations (ADR-0024).
-                if let Some(stored) = connection::load(&config.state_dir) {
-                    for refused in telemetry.apply(&stored, &engine.self_description()) {
-                        tracing::warn!(reason = %refused, "not reporting own telemetry");
-                    }
-                }
+                // The telemetry destinations of the same offer are already in force: since
+                // ADR-0024 `process_connection_offer` applies them before it asks for the
+                // reconnect, and it composes the one acknowledgement that names anything refused.
+                // Re-applying here would be a no-op through `in_force` whose only visible effect
+                // was a `warn!` with no acknowledgement attached — which was the bug.
                 if let Some(handle) = gateway.take() {
                     handle.abort();
                     // The listener is only released once the task has unwound; binding the new
