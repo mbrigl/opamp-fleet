@@ -175,7 +175,7 @@ max_package_size_bytes = 1073741824
 # Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
 # them leaves the file with a duplicated table header, which is an error rather than a merge.
 #
-# (1) Development — the stack in deploy/observability/ is a `docker compose up` away and publishes
+# (1) Development — the stack in .devcontainer/ comes up with the Dev Container and publishes
 #     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because loopback is
 #     inside the private address space, which is why this reads http:// and why the ports are
 #     published rather than left on a compose network.
