@@ -204,8 +204,15 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         engine.adopt_connection_settings(&stored.hash);
         // …and resumes reporting to the destinations it was last told about, before it has spoken
         // to anyone: telemetry from a Client that cannot reach the Server is the useful kind.
-        for refused in telemetry.apply(&stored, &engine.self_description()) {
-            tracing::warn!(reason = %refused, "not reporting own telemetry");
+        let refused = telemetry.apply(&stored, &engine.self_description(), &config);
+        if !refused.is_empty() {
+            // And the Server hears about it. The line above just reported these settings APPLIED;
+            // saying nothing here would have this Client claim, on every reconnect for the life of
+            // the state directory, that a destination is in force which it refused to use
+            // (ADR-0036: refused *and reported*).
+            let error = refused.join("; ");
+            tracing::warn!(reason = %error, "not reporting own telemetry");
+            engine.connection_settings_outcome(&stored.hash, Err(&error));
         }
     }
     for uid in engine.uids() {
@@ -242,8 +249,17 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             }
         };
         match outcome {
-            RunOutcome::Shutdown => return Ok(Exit::Normal),
-            RunOutcome::RestartForUpdate => return Ok(Exit::RestartForUpdate),
+            // Both exits flush first: the batch exporters hold spans and log records that have not
+            // left yet, and a process that simply returns drops them. The stop path is exactly when
+            // the last records are worth having — a crash-and-restart is what they explain.
+            RunOutcome::Shutdown => {
+                telemetry.shutdown();
+                return Ok(Exit::Normal);
+            }
+            RunOutcome::RestartForUpdate => {
+                telemetry.shutdown();
+                return Ok(Exit::RestartForUpdate);
+            }
             // Verified connection settings took effect (ADR-0014): re-resolve the effective
             // configuration — endpoint, credential, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
@@ -251,8 +267,17 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 config = load_effective_config(&spec)?;
                 // The same verified offer may have named new telemetry destinations (ADR-0036).
                 if let Some(stored) = connection::load(&config.state_dir) {
-                    for refused in telemetry.apply(&stored, &engine.self_description()) {
-                        tracing::warn!(reason = %refused, "not reporting own telemetry");
+                    let refused = telemetry.apply(&stored, &engine.self_description(), &config);
+                    if !refused.is_empty() {
+                        // The transport reported the OpAMP half APPLIED before it handed control
+                        // back; a refusal here is the rest of the same offer, and it corrects that
+                        // acknowledgement rather than letting it stand. The correction rides the
+                        // next connection's reports, and the Server's gate stops re-offering on any
+                        // terminal status, so a FAILED after an APPLIED ends the offer rather than
+                        // restarting it.
+                        let error = refused.join("; ");
+                        tracing::warn!(reason = %error, "not reporting own telemetry");
+                        engine.connection_settings_outcome(&stored.hash, Err(&error));
                     }
                 }
                 if let Some(handle) = gateway.take() {

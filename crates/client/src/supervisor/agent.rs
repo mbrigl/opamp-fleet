@@ -841,6 +841,19 @@ impl AgentState {
             download_url: file.download_url.clone(),
             content_hash: file.content_hash.clone(),
             signature: file.signature.clone(),
+            // The Baseline asks the Agent to send these on the GET; the Server fills them for a
+            // referenced source from what the operator said it needs (ADR-0018).
+            headers: file
+                .headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .headers
+                        .iter()
+                        .map(|header| (header.key.clone(), header.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         info!(package = %name, version = %available.version, "package offered; installing");
         self.installing = Some(download.clone());
@@ -2462,6 +2475,56 @@ mod tests {
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
 
+    /// The headers a `DownloadableFile` names travel to the download that has to use them — the
+    /// credential a referenced source needs (ADR-0018), which the Server fills from the operator's
+    /// configuration.
+    #[test]
+    fn a_package_offer_hands_its_download_headers_to_the_transport() {
+        use opamp::proto::{
+            DownloadableFile, Header, Headers, PackageAvailable, PackagesAvailable,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent =
+            AgentState::supervised("otelcol".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        agent.accept_packages();
+
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        r#type: PackageType::TopLevel as i32,
+                        version: "1.2.3".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "https://mirror.example/otelcol.tar.gz".to_string(),
+                            content_hash: b"hash".to_vec(),
+                            signature: Vec::new(),
+                            headers: Some(Headers {
+                                headers: vec![Header {
+                                    key: "X-Api-Key".to_string(),
+                                    value: "operator-secret".to_string(),
+                                }],
+                            }),
+                        }),
+                        hash: b"pkg".to_vec(),
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg".to_vec(),
+            }),
+            ..Default::default()
+        });
+
+        let download = handled.package_download.expect("a download");
+        assert_eq!(
+            download.headers,
+            vec![("X-Api-Key".to_string(), "operator-secret".to_string())]
+        );
+    }
+
     #[test]
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2479,6 +2542,7 @@ mod tests {
             download_url: String::new(),
             content_hash: Vec::new(),
             signature: Vec::new(),
+            headers: Vec::new(),
         });
 
         agent.package_applied(b"bad".to_vec(), Err("would not stay up".to_string()));

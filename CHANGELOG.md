@@ -315,6 +315,44 @@ carries a date once its tag exists.
 
 ### Fixed
 
+- **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
+  a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
+  a private source ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)) — and the Client
+  dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
+  The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
+  for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
+  them only while scheme, host and port are unchanged: HTTP clients strip only `Authorization`,
+  `Cookie` and `Proxy-Authorization` across origins, so a custom token would otherwise have been
+  handed to wherever a mirror redirected. Values are never logged, and a header that is not a valid
+  HTTP header now fails the download naming its key.
+  **What to do:** nothing, unless a referenced entry's download was failing — upgrade the Client and
+  retry the rollout. Ordinary uploaded packages are unaffected; a CDN mirror that redirects to signed
+  storage keeps working, since a download with no headers follows redirects exactly as before.
+
+- **A refused own-telemetry destination was acknowledged as applied.** A destination the Client would
+  not use — cleartext beyond loopback, or one carrying `tls`/`proxy` settings — was written to the
+  log and the offer was still reported `APPLIED`, so the fleet showed telemetry flowing that was not.
+  The refusal now reaches the Server as a `FAILED` status naming what was dropped, including one
+  found at startup when persisted settings are put back in force. An offered client `certificate` is
+  now honoured rather than ignored ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)):
+  the exporter presents it, paired with the key this Client generated for its signing request. A
+  `private_key` *in the offer* is refused by name — this Client's private key never leaves its host
+  and is never accepted from the Server.
+  **What to do:** check the fleet view after upgrading. A destination that was quietly refused will
+  now show as `FAILED` with the reason; that is the gap becoming visible, not a new failure.
+
+- **Buffered spans and log records were lost on every stop.** The daemon returned without flushing
+  its OTLP exporters, so the records explaining a shutdown — the ones that matter after a crash and
+  restart — never left the host. Both exit paths now flush first.
+
+- **Throttling and backoff follow the protocol.** A `503` or `429` on plain HTTP was treated as a
+  generic error and the next poll went out on the ordinary interval; `Retry-After` is now waited out
+  (30 s when the Server names no interval). A `413` no longer arms a full state report, which had
+  made the *next* request larger than the one just refused. And the reconnect backoff now carries
+  jitter, so a fleet coming back after a Server restart spreads over each interval instead of
+  arriving on the same instants.
+  **What to do:** nothing. A Server that never throttles sees no change.
+
 - **An agent that claims a package version it is not running is offered that version again.** Until
   now the version an Agent reported *installed* for a package settled the matter, so a host whose
   record outlived its binary — a version switch that did not take effect, or an older Client

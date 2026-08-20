@@ -114,3 +114,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
 | [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟢 accepted |
 | [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟢 accepted |
+| [0086](0086-a-telemetry-destination-is-an-offer-of-its-own-class.md) | A telemetry destination is an offer of its own class — applied without a connection to prove it | 🟡 proposed |
+| [0087](0087-a-servers-capabilities-bind-what-the-client-reports.md) | A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask | 🟡 proposed |

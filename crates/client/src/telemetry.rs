@@ -31,6 +31,8 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing::{info, warn};
 
+use crate::config::ClientConfig;
+
 /// How often process metrics are sampled and handed to the periodic exporter.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -106,6 +108,7 @@ impl Telemetry {
         &mut self,
         settings: &ConnectionSettingsOffers,
         description: &AgentDescription,
+        config: &ClientConfig,
     ) -> Vec<String> {
         let wanted = Endpoints {
             metrics: endpoint_of(settings.own_metrics.as_ref()),
@@ -121,36 +124,33 @@ impl Telemetry {
         self.shutdown();
 
         if let Some(settings) = settings.own_metrics.as_ref() {
-            match check(settings, "own_metrics") {
+            match check(settings, "own_metrics")
+                .and_then(|()| metric_provider(settings, resource.clone(), config))
+            {
+                Ok(provider) => self.meters = Some(provider),
                 Err(e) => refused.push(e),
-                Ok(()) => match metric_provider(settings, resource.clone()) {
-                    Ok(provider) => self.meters = Some(provider),
-                    Err(e) => refused.push(e),
-                },
             }
         }
         if let Some(settings) = settings.own_traces.as_ref() {
-            match check(settings, "own_traces") {
+            match check(settings, "own_traces")
+                .and_then(|()| trace_provider(settings, resource.clone(), config))
+            {
+                Ok(provider) => {
+                    opentelemetry::global::set_tracer_provider(provider.clone());
+                    self.tracers = Some(provider);
+                }
                 Err(e) => refused.push(e),
-                Ok(()) => match trace_provider(settings, resource.clone()) {
-                    Ok(provider) => {
-                        opentelemetry::global::set_tracer_provider(provider.clone());
-                        self.tracers = Some(provider);
-                    }
-                    Err(e) => refused.push(e),
-                },
             }
         }
         if let Some(settings) = settings.own_logs.as_ref() {
-            match check(settings, "own_logs") {
+            match check(settings, "own_logs")
+                .and_then(|()| log_provider(settings, resource, config))
+            {
+                Ok(provider) => {
+                    set_bridge(Some(&provider));
+                    self.loggers = Some(provider);
+                }
                 Err(e) => refused.push(e),
-                Ok(()) => match log_provider(settings, resource) {
-                    Ok(provider) => {
-                        set_bridge(Some(&provider));
-                        self.loggers = Some(provider);
-                    }
-                    Err(e) => refused.push(e),
-                },
             }
         }
 
@@ -268,6 +268,18 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
     if settings.proxy.is_some() {
         unhonoured.push("proxy");
     }
+    // An offered certificate *is* honoured (ADR-0036 point 10) — but only its `cert`, paired with
+    // the key this Client already holds. A `private_key` in the offer is a key the Server generated
+    // for us, and ADR-0035's rule is that this Client's private key never leaves its host and is
+    // never handed to it: that is the whole point of asking for a certificate through a CSR. Refused
+    // by name rather than quietly ignored, so a Server issuing pairs learns why nothing happened.
+    if settings
+        .certificate
+        .as_ref()
+        .is_some_and(|certificate| !certificate.private_key.is_empty())
+    {
+        unhonoured.push("certificate.private_key");
+    }
     if !unhonoured.is_empty() {
         return Err(format!(
             "{field}: this Client does not implement the offered {} settings",
@@ -275,6 +287,38 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
         ));
     }
     Ok(())
+}
+
+/// The HTTP client the OTLP exporters send through: this Client's TLS trust, plus the client
+/// certificate the offer named, if it named one.
+///
+/// The certificate machinery is ADR-0035's, reused as-is (ADR-0036 point 10): the offered `cert` is
+/// paired with the key already on disk — the one the CSR was made for — because that key is what
+/// proves the certificate belongs to this host, and it never travels.
+///
+/// `ca_cert` is deliberately *not* added to the trust store. The Baseline is explicit about it:
+/// *"It is not recommended that the Agent accepts this CA as an authority for any purposes."* It
+/// exists so a TLS-terminating intermediary can verify the client later, not so the Agent can widen
+/// whom it trusts on a Server's say-so — the same reasoning that refuses `tls`.
+fn exporter_client(
+    settings: &TelemetryConnectionSettings,
+    field: &str,
+    config: &ClientConfig,
+) -> Result<reqwest::Client, String> {
+    let offered = settings
+        .certificate
+        .as_ref()
+        .map(|certificate| certificate.cert.as_slice())
+        .filter(|cert| !cert.is_empty());
+    let builder = crate::tls::trust_and_identity_for(
+        reqwest::Client::builder().use_rustls_tls(),
+        config,
+        offered,
+    )
+    .map_err(|e| format!("{field}: {e}"))?;
+    builder
+        .build()
+        .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))
 }
 
 fn is_loopback(endpoint: &str) -> bool {
@@ -319,11 +363,13 @@ fn headers(settings: &TelemetryConnectionSettings) -> HashMap<String, String> {
 fn metric_provider(
     settings: &TelemetryConnectionSettings,
     resource: Resource,
+    config: &ClientConfig,
 ) -> Result<SdkMeterProvider, String> {
     let exporter = MetricExporter::builder()
         .with_http()
         .with_endpoint(&settings.destination_endpoint)
         .with_headers(headers(settings))
+        .with_http_client(exporter_client(settings, "own_metrics", config)?)
         .build()
         .map_err(|e| format!("own_metrics: cannot build the exporter: {e}"))?;
     Ok(SdkMeterProvider::builder()
@@ -335,11 +381,13 @@ fn metric_provider(
 fn trace_provider(
     settings: &TelemetryConnectionSettings,
     resource: Resource,
+    config: &ClientConfig,
 ) -> Result<SdkTracerProvider, String> {
     let exporter = SpanExporter::builder()
         .with_http()
         .with_endpoint(&settings.destination_endpoint)
         .with_headers(headers(settings))
+        .with_http_client(exporter_client(settings, "own_traces", config)?)
         .build()
         .map_err(|e| format!("own_traces: cannot build the exporter: {e}"))?;
     Ok(SdkTracerProvider::builder()
@@ -351,11 +399,13 @@ fn trace_provider(
 fn log_provider(
     settings: &TelemetryConnectionSettings,
     resource: Resource,
+    config: &ClientConfig,
 ) -> Result<SdkLoggerProvider, String> {
     let exporter = LogExporter::builder()
         .with_http()
         .with_endpoint(&settings.destination_endpoint)
         .with_headers(headers(settings))
+        .with_http_client(exporter_client(settings, "own_logs", config)?)
         .build()
         .map_err(|e| format!("own_logs: cannot build the exporter: {e}"))?;
     Ok(SdkLoggerProvider::builder()
@@ -367,7 +417,9 @@ fn log_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{any_value, AnyValue, KeyValue as ProtoKeyValue, TlsConnectionSettings};
+    use opamp::proto::{
+        any_value, AnyValue, KeyValue as ProtoKeyValue, TlsCertificate, TlsConnectionSettings,
+    };
 
     fn description() -> AgentDescription {
         AgentDescription {
@@ -395,7 +447,11 @@ mod tests {
     #[test]
     fn no_destination_builds_nothing() {
         let mut telemetry = Telemetry::new();
-        let refused = telemetry.apply(&ConnectionSettingsOffers::default(), &description());
+        let refused = telemetry.apply(
+            &ConnectionSettingsOffers::default(),
+            &description(),
+            &ClientConfig::default(),
+        );
         assert!(refused.is_empty());
         assert!(!telemetry.reporting());
     }
@@ -409,7 +465,7 @@ mod tests {
             own_metrics: Some(destination("http://collector.example:4318/v1/metrics")),
             ..Default::default()
         };
-        let refused = telemetry.apply(&offer, &description());
+        let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("cleartext"), "{}", refused[0]);
         assert!(!telemetry.reporting());
@@ -425,7 +481,7 @@ mod tests {
             own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
             ..Default::default()
         };
-        let refused = telemetry.apply(&offer, &description());
+        let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
         assert!(refused.is_empty(), "{refused:?}");
         assert!(telemetry.reporting());
         telemetry.shutdown();
@@ -447,9 +503,113 @@ mod tests {
             }),
             ..Default::default()
         };
-        let refused = telemetry.apply(&offer, &description());
+        let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("tls"), "{}", refused[0]);
+        assert!(!telemetry.reporting());
+    }
+
+    /// ADR-0036 point 10: the offered `certificate` is *honoured*, not refused — the ADR-0035
+    /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
+    /// already generated for its CSR. With that key present, an offer naming a certificate builds
+    /// an exporter that presents it.
+    #[test]
+    fn an_offered_certificate_is_presented_by_the_exporter() {
+        crate::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // What the CSR flow leaves behind: the key the request was made for, and the certificate
+        // the Server signed for it. Self-signed here — nothing verifies the chain in this test, the
+        // point is that key and certificate pair into a usable identity.
+        let key = rcgen::KeyPair::generate().expect("key");
+        let params =
+            rcgen::CertificateParams::new(vec!["agent.example".to_string()]).expect("params");
+        let cert = params.self_signed(&key).expect("cert");
+        std::fs::write(
+            dir.path().join(crate::tls::ISSUED_KEY_FILE),
+            key.serialize_pem(),
+        )
+        .expect("write key");
+
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let offer = ConnectionSettingsOffers {
+            own_metrics: Some(TelemetryConnectionSettings {
+                destination_endpoint: "http://127.0.0.1:4318/v1/metrics".to_string(),
+                certificate: Some(TlsCertificate {
+                    cert: cert.pem().into_bytes(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut telemetry = Telemetry::new();
+        let refused = telemetry.apply(&offer, &description(), &config);
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(telemetry.reporting());
+        telemetry.shutdown();
+    }
+
+    /// And an offered certificate with no key to go with it is refused *by name* rather than
+    /// dropped: without the CSR key there is nothing to prove possession with, so an exporter that
+    /// silently connected without the certificate would be reporting success it did not have.
+    #[test]
+    fn an_offered_certificate_without_its_key_is_refused_and_named() {
+        crate::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let offer = ConnectionSettingsOffers {
+            own_metrics: Some(TelemetryConnectionSettings {
+                destination_endpoint: "http://127.0.0.1:4318/v1/metrics".to_string(),
+                certificate: Some(TlsCertificate {
+                    cert: b"-----BEGIN CERTIFICATE-----".to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut telemetry = Telemetry::new();
+        let refused = telemetry.apply(&offer, &description(), &config);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("own_metrics"), "{}", refused[0]);
+        assert!(refused[0].contains("no key"), "{}", refused[0]);
+        assert!(!telemetry.reporting());
+    }
+
+    /// But a private key *in the offer* is refused by name. ADR-0035's rule is that this Client's
+    /// private key never leaves its host and is never handed to it — which is the whole reason the
+    /// certificate is obtained through a CSR.
+    #[test]
+    fn an_offered_private_key_is_refused_by_name() {
+        let mut telemetry = Telemetry::new();
+        let offer = ConnectionSettingsOffers {
+            own_traces: Some(TelemetryConnectionSettings {
+                destination_endpoint: "https://collector.example:4318/v1/traces".to_string(),
+                certificate: Some(TlsCertificate {
+                    cert: b"-----BEGIN CERTIFICATE-----".to_vec(),
+                    private_key: b"-----BEGIN PRIVATE KEY-----".to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].contains("certificate.private_key"),
+            "{}",
+            refused[0]
+        );
         assert!(!telemetry.reporting());
     }
 

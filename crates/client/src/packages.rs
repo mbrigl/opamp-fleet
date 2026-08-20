@@ -14,7 +14,7 @@ use crate::config::ClientConfig;
 
 /// One offered package the transport must download, verify, and hand to the Supervisor. Built by
 /// the Agent state machine from a `PackageAvailable`; the raw fields it needs travel here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PackageDownload {
     pub name: String,
     pub version: String,
@@ -26,6 +26,39 @@ pub struct PackageDownload {
     pub content_hash: Vec<u8>,
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
+    /// The headers the offer says this download needs — a referenced source's credential
+    /// (ADR-0018), which the Server fills from the operator's configuration. The Baseline: *"The
+    /// Agent SHOULD include the HTTP headers provided in the headers field for the GET request."*
+    ///
+    /// Raw pairs rather than the wire type, like every other field here: what the download needs is
+    /// a name and a value, not a protobuf message.
+    pub headers: Vec<(String, String)>,
+}
+
+/// Written by hand rather than derived, because a header value is a credential.
+///
+/// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
+/// later would otherwise put a fleet credential in the log file that ADR-0041 writes to disk in
+/// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
+impl std::fmt::Debug for PackageDownload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackageDownload")
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("hash", &self.hash)
+            .field("download_url", &self.download_url)
+            .field("content_hash", &self.content_hash)
+            .field("signature", &self.signature)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(key, _)| format!("{key}: <redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// Resolves an offered `download_url` to an absolute URL. An absolute `http(s)://` URL is used as
@@ -102,7 +135,14 @@ pub async fn download_and_verify(
         // allowed but bounded to a small chain. Integrity does not rest on where the bytes come
         // from: the content hash (always) and the signature (when a key is configured) are checked
         // after the download, so a redirect cannot substitute a malicious artifact.
-        .redirect(reqwest::redirect::Policy::limited(5))
+        //
+        // With offered headers in play the chain is walked by hand instead (`send_download`), so
+        // the policy here is what applies to a download that carries none.
+        .redirect(if package.headers.is_empty() {
+            reqwest::redirect::Policy::limited(MAX_REDIRECTS)
+        } else {
+            reqwest::redirect::Policy::none()
+        })
         // Per-operation timeouts, not one for the whole transfer: a large artifact over a modest
         // link legitimately takes minutes, and a total timeout would abort it forever while a
         // stalled connection is what actually needs cutting.
@@ -114,12 +154,9 @@ pub async fn download_and_verify(
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;
-    info!(package = %package.name, url = %url, "downloading package");
-    let mut response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("cannot download {url}: {e}"))?;
+    // A count, never a key and never a value: this line goes to the log file.
+    info!(package = %package.name, url = %url, headers = package.headers.len(), "downloading package");
+    let mut response = send_download(&client, &url, &package.headers).await?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -163,6 +200,99 @@ pub async fn download_and_verify(
     }
     info!(package = %package.name, version = %package.version, bytes = staged.len, "package verified");
     Ok(path)
+}
+
+/// How many redirects an artifact download will follow, whoever follows them.
+const MAX_REDIRECTS: usize = 5;
+
+/// Sends the download request, carrying the headers the offer named.
+///
+/// Without offered headers this is one `GET` and the client follows redirects itself. With them the
+/// chain is walked here, and a header is re-attached only while the scheme, host and port are the
+/// ones it was given for. The reason is narrow and worth stating: `reqwest` strips only
+/// `Authorization`, `Cookie` and `Proxy-Authorization` when a redirect crosses origins, so a custom
+/// credential — `X-JFrog-Art-Api`, `PRIVATE-TOKEN`, whatever the source wants — would be re-sent to
+/// wherever a mirror points it. An operator names a credential for *one* host; a mirror must not be
+/// able to harvest it by bouncing the download. Integrity is unaffected either way, since the
+/// content hash and the signature are checked after the bytes land — this protects the credential,
+/// not the artifact.
+async fn send_download(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<reqwest::Response, String> {
+    if headers.is_empty() {
+        return client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("cannot download {url}: {e}"));
+    }
+    let origin = reqwest::Url::parse(url).map_err(|e| format!("cannot parse {url}: {e}"))?;
+    let mut current = origin.clone();
+    for _ in 0..=MAX_REDIRECTS {
+        let mut request = client.get(current.clone());
+        if same_origin(&origin, &current) {
+            request = with_headers(request, headers)?;
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("cannot download {current}: {e}"))?;
+        let Some(location) = redirect_target(&response) else {
+            return Ok(response);
+        };
+        current = current
+            .join(&location)
+            .map_err(|e| format!("{current} redirected to an unusable location: {e}"))?;
+    }
+    Err(format!("{url} redirected more than {MAX_REDIRECTS} times"))
+}
+
+/// Attaches the offered headers to a request.
+///
+/// A header that is not a valid header fails the download loudly rather than being skipped: a
+/// silently dropped credential comes back as an opaque `401` that nothing explains. The message
+/// names the **key only** — it travels to the Server as `PackageStatuses.error_message` and into
+/// the log file, and the value is the secret.
+fn with_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> Result<reqwest::RequestBuilder, String> {
+    for (key, value) in headers {
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
+            format!("the offered download header {key:?} is not a valid header name")
+        })?;
+        let mut value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            format!(
+                "the offered download header {key:?} carries a value that is not a valid header"
+            )
+        })?;
+        // As the OpAMP transport marks its own credential (`transport/http.rs`).
+        value.set_sensitive(true);
+        request = request.header(name, value);
+    }
+    Ok(request)
+}
+
+/// Whether a redirect stayed where the offered headers may go: same scheme, host, and port.
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// The `Location` of a redirect response, or `None` when the response is the artifact itself.
+fn redirect_target(response: &reqwest::Response) -> Option<String> {
+    if !response.status().is_redirection() {
+        return None;
+    }
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()
+        .map(str::to_string)
 }
 
 /// What streaming the download to disk produced: its size and its content hash.
@@ -352,7 +482,47 @@ mod tests {
             download_url: "/x".to_string(),
             content_hash,
             signature,
+            headers: Vec::new(),
         }
+    }
+
+    /// A header value is a credential, and this struct travels inside a `Debug`-deriving type that
+    /// a log line could one day print. The key is diagnosable, the value never appears.
+    #[test]
+    fn a_download_never_debug_prints_its_header_values() {
+        let mut package = offer(vec![0u8; 32], Vec::new());
+        package.headers = vec![(
+            "Authorization".to_string(),
+            "Bearer super-secret-value".to_string(),
+        )];
+
+        let printed = format!("{package:?}");
+        assert!(
+            printed.contains("Authorization"),
+            "the key stays diagnosable: {printed}"
+        );
+        assert!(
+            !printed.contains("super-secret-value"),
+            "the value must never be printed: {printed}"
+        );
+    }
+
+    /// Only a redirect that stays on the same scheme, host and port may carry the offered headers.
+    #[test]
+    fn same_origin_compares_scheme_host_and_port() {
+        let parse = |url: &str| reqwest::Url::parse(url).expect("url");
+        let source = parse("https://mirror.example/artifact.tar.gz");
+
+        assert!(same_origin(&source, &parse("https://mirror.example/else")));
+        // The default port is the same port.
+        assert!(same_origin(&source, &parse("https://mirror.example:443/x")));
+        // A different host, port, or scheme is somewhere else.
+        assert!(!same_origin(&source, &parse("https://cdn.example/x")));
+        assert!(!same_origin(
+            &source,
+            &parse("https://mirror.example:8443/x")
+        ));
+        assert!(!same_origin(&source, &parse("http://mirror.example/x")));
     }
 
     /// A package name is a file-name token, not a path: the safe set mirrors what the Server
