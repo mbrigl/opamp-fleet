@@ -87,8 +87,12 @@ windows-service.workspace = true
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
 # a second registration knowing nothing of ADR-0030's service name or ADR-0020's restart policy; the
 # maintainer scripts call `service install` instead, which is the one install path (ADR-0010).
+# The package carries the **product's** name (ADR-0084 clause 10), not the program's: a second
+# instance is a second build, and two variants that shared a package name could not be installed
+# side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
+# would use to override it without templating this manifest.
 [package.metadata.deb]
-name = "opamp-fleet-client"
+name = "opamp-fleet"
 maintainer = "Markus Brigl <markus.brigl@gmail.com>"
 copyright = "Copyright the OpAMP Fleet contributors. Licensed under the Apache License 2.0."
 license-file = ["../../LICENSE", "0"]
@@ -109,15 +113,19 @@ depends = "$auto"
 # `usr/libexec`, not `usr/bin` (ADR-0048): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
-assets = [["target/release/supervisor", "usr/libexec/", "755"]]
+#
+# A directory named after the product, holding a file named after the program (ADR-0084 clauses 9
+# and 10): two variant builds ship the same program under different products, so a bare
+# `usr/libexec/supervisor` would be one file two packages both claim to own.
+assets = [["target/release/supervisor", "usr/libexec/opamp-fleet/", "755"]]
 maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
-name = "opamp-fleet-client"
+name = "opamp-fleet"
 # One `Release`, forever: ADR-0026 releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
-    { source = "target/release/supervisor", dest = "/usr/libexec/supervisor", mode = "755" },
+    { source = "target/release/supervisor", dest = "/usr/libexec/opamp-fleet/supervisor", mode = "755" },
 ]
 # These resolve against this manifest's directory. A path that does *not* resolve is silently
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what

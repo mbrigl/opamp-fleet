@@ -326,22 +326,17 @@ fn offered_blocks(
 ///
 /// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
 /// program lives in a directory this Client created and updates from signature-verified packages
-/// (ADR-0021). An absolute path is the machine's own process; letting the Server spawn one would be
-/// arbitrary code execution that never passes through package signing. This binds the delivery path
-/// alone: an operator may still write an absolute-path Supervisor in `supervisor.toml` by hand, a
-/// different principal that `resolve_program` must keep serving — which is why the rule lives here
-/// and not in path resolution.
+/// (ADR-0057). Letting the Server spawn a program on the machine would be arbitrary code execution
+/// that never passes through package signing.
+///
+/// Since ADR-0085 that rule **cannot fire**: no block naming a program on the machine parses at
+/// all, from any principal, so every block reaching here already satisfies it. The check stays as
+/// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
+/// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
+/// enforces it in fact.
 fn validate_offered_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<(), String> {
     crate::supervisor::validate_block(config, block)?;
-    let program = crate::supervisor::resolve_block_program(config, block)?;
-    if !program.owned {
-        return Err(format!(
-            "supervisor {:?}: a Server-delivered supervisor may run only a program this Client \
-             owns — name it with a bare file name, not the absolute path {}",
-            block.name,
-            program.path.display()
-        ));
-    }
+    crate::supervisor::resolve_block_program(config, block)?;
     Ok(())
 }
 
@@ -516,6 +511,10 @@ mod tests {
         }
     }
 
+    /// The attack this guard was written against: a Server that delivers a block spawning a
+    /// program on the machine with arguments of its choosing. Since ADR-0085 it is refused a step
+    /// earlier and for a broader reason — no block naming a program on the machine parses, from
+    /// any principal — but the delivery path must still refuse it, which is what this asserts.
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
         let program = machine_program();
@@ -532,12 +531,12 @@ mod tests {
 
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute path refused");
         assert!(err.contains("\"shell\""), "names the block: {err}");
-        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("only programs it installs"), "{err}");
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (ADR-0021), so a delivered
-    /// block that names one is accepted — the ordinary, intended delivery shape.
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0021, ADR-0085), so a
+    /// delivered block that names one is accepted — since ADR-0085 the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
         let offer = offer_of(&[(
@@ -567,7 +566,7 @@ mod tests {
         config.supervisors = blocks.clone();
 
         let err = validate_offered_block(&config, &blocks[0]).expect_err("absolute binary refused");
-        assert!(err.contains("only a program this Client owns"), "{err}");
+        assert!(err.contains("only programs it installs"), "{err}");
         assert!(err.contains(program), "{err}");
     }
 

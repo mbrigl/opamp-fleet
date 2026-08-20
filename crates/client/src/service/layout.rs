@@ -5,9 +5,9 @@
 //! <root>/current -> versions/supervisor-…/   # symlink (Unix) / junction (Windows)
 //! ```
 //!
-//! The default per-instance state directory is [`STATE_DIR_NAME`] under the *data* root — the
-//! same directory as this layout's root everywhere except Linux system installs, where the
-//! layout executes from `/opt` while data stays in `/var/lib` (ADR-0053).
+//! The default state directory is [`STATE_DIR_NAME`] under the *data* root — the same directory
+//! as this layout's root everywhere except Linux system installs, where the layout executes from
+//! `/opt` while data stays in `/var/lib` (ADR-0084 clause 3, carrying ADR-0053).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
@@ -31,15 +31,21 @@ pub const BINARY_FILENAME: &str = if cfg!(windows) {
     "supervisor"
 };
 
-/// The product's name: the prefix of every version directory (ADR-0028) and, since ADR-0030, the
-/// name the service is registered under as well. One definition, so the two cannot drift.
+/// The **program's** name: the prefix of every version directory, and the same string
+/// [`BINARY_FILENAME`] carries without its Windows extension. One definition, so the directory and
+/// the file it holds cannot drift.
+///
+/// Not the product's, and not the service's. ADR-0084 clause 5 registers the service under
+/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and clause 9 keeps this constant off it on
+/// purpose: the version directory and the archive member a self-update extracts are identical in
+/// every variant build, which is what lets one published package Set serve them all.
 pub const COMPONENT: &str = "supervisor";
 
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
 
-/// The per-instance state directory's name under its root (ADR-0010) — the *data* root, which
-/// ADR-0053 places beside the configuration rather than inside the executable layout on Linux
+/// The state directory's name under its root (ADR-0010) — the *data* root, which ADR-0084
+/// clause 3 places beside the configuration rather than inside the executable layout on Linux
 /// system installs.
 pub const STATE_DIR_NAME: &str = "state";
 

@@ -26,27 +26,22 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use client::cli::{parse_instance_name, InstanceName};
 use client::service::manager::{service_name, NativeService, RESTART_DELAY_SECS};
 use client::service::{ServiceControl, ServiceLevel, ServiceState};
 use server::fleet::{AgentView, AppState};
 
-/// The instance this test installs. Its own name, so a leftover from a failed run is recognisable
-/// and never collides with an operator's `default`.
-const INSTANCE: &str = "ci-smoke";
-
-/// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and reported
-/// as `service.instance.name` (ADR-0033), which is what the fleet view is searched by. Deliberately
-/// not `service.name`: that carries the Agent *type*, which for this Client is always `supervisor`
-/// (ADR-0077) and is the same for every instance.
+/// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
+/// reported as `service.instance.name` (ADR-0033), which is what the fleet view is searched by.
+/// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
+/// `supervisor` (ADR-0077).
+///
+/// Since ADR-0084 there is no `--instance` to isolate this run under, and the service it registers
+/// carries the product's name like any other install. This test therefore takes over the host's
+/// one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
 
-fn instance() -> InstanceName {
-    parse_instance_name(INSTANCE).expect("a legal instance name")
-}
-
 fn service() -> NativeService {
-    NativeService::new(ServiceLevel::System, instance())
+    NativeService::new(ServiceLevel::System)
 }
 
 /// Uninstalls whatever this test installed, however it ends — a leftover service would make the
@@ -67,7 +62,6 @@ fn client(args: &[&str], config: &Path) -> Result<String, String> {
     let output = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(config)
-        .args(["--instance", INSTANCE])
         .args(args)
         .output()
         .map_err(|e| format!("cannot run the client: {e}"))?;
@@ -107,12 +101,12 @@ fn agent(state: &AppState) -> Option<AgentView> {
 fn service_pid() -> Option<u32> {
     // One name on every platform since ADR-0030, so this is what systemd, launchd, and the SCM
     // are each asked about.
-    let qualified = service_name(&instance());
+    let qualified = service_name();
     #[cfg(windows)]
     {
         // `sc queryex` prints `PID                : 1234`.
         let out = Command::new("sc")
-            .args(["queryex", &qualified])
+            .args(["queryex", qualified])
             .output()
             .expect("run sc queryex");
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -131,7 +125,7 @@ fn service_pid() -> Option<u32> {
     {
         // `launchctl list <label>` prints a plist; `"PID" = 1234;` is there while it runs.
         let out = Command::new("launchctl")
-            .args(["list", &qualified])
+            .args(["list", qualified])
             .output()
             .expect("run launchctl list");
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -206,7 +200,8 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::NotInstalled,
-        "a leftover {INSTANCE} service from an earlier run — remove it before running this"
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
     );
 
     let dir = tempfile::tempdir().expect("tempdir");

@@ -179,7 +179,17 @@ fn newer_client() -> &'static (PathBuf, String) {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         };
-        if checkout.join("Cargo.toml").exists() {
+        // A clone that did not finish leaves a directory git will not clone into again ("already
+        // exists and is not an empty directory") while `Cargo.toml` is still missing, so the two
+        // branches below cannot be chosen by the presence of a file the reuse path needs. Ask
+        // instead whether there is a repository to fetch into, and clear anything else out of the
+        // way -- `target/` survives between CI runs, which is what makes a half-written clone here
+        // outlive the run that abandoned it.
+        let reusable = checkout.join(".git").exists() && checkout.join("Cargo.toml").exists();
+        if !reusable && checkout.exists() {
+            std::fs::remove_dir_all(&checkout).expect("clear an unusable checkout");
+        }
+        if reusable {
             // Kept between runs, so it has to follow HEAD rather than stay where it was cloned.
             let dir = checkout.to_string_lossy().to_string();
             git(
@@ -523,9 +533,19 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     let config = dir.path().join("supervisor.toml");
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
-    // every time it is (re)started. An absolute path: the machine's program, run but never updated,
-    // which is exactly what a locally written block may name (ADR-0057).
-    let stub = env!("CARGO_BIN_EXE_stub_agent");
+    // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
+    // by a bare file name, which since ADR-0085 is the only shape a block may carry: a Managed
+    // Process is always one this Client installed.
+    let stub = {
+        let program_dir = state_dir.join("supervisors/managed/program");
+        std::fs::create_dir_all(&program_dir).expect("create the supervisor's program directory");
+        let target = program_dir.join("stub-agent");
+        std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &target).expect("place the stub");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stub executable");
+        "stub-agent"
+    };
     let marker = dir.path().join("managed.pid");
     std::fs::write(
         &config,

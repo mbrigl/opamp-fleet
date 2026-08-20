@@ -18,7 +18,7 @@ pub struct ClientConfig {
     pub endpoint: String,
     /// The operator's name for the Client's own Agent, reported as `service.instance.name`
     /// (ADR-0033) — *which* Client this is. Its `service.name` is the type
-    /// [`CLIENT_SERVICE_NAME`](crate::supervisor::agent::CLIENT_SERVICE_NAME) — `supervisor`, a
+    /// [`CLIENT_AGENT_TYPE`](crate::supervisor::agent::CLIENT_AGENT_TYPE) — `supervisor`, a
     /// constant (ADR-0077) — so this key cannot state it: every Client in a fleet is the same kind
     /// of thing.
     #[serde(default = "default_name")]
@@ -190,28 +190,30 @@ const PACKAGES_DIR: &str = "packages";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     /// What the process is spawned from, and what a package is installed over.
+    ///
+    /// Always inside this Supervisor's own `program/` directory (ADR-0085): a Managed Process is
+    /// always the fleet's. There is no `owned` flag beside this any more, because there is nothing
+    /// left for it to distinguish — every block that parses names a program this Client installs,
+    /// so `AcceptsPackages` is a constant of this Client rather than a function of its
+    /// configuration.
     pub path: PathBuf,
-    /// Whether the Client owns the directory `path` sits in. The swap renames within that
-    /// directory rather than writing the file in place, so owning it is exactly what makes an
-    /// update possible — which is why this is also the Agent's consent to `AcceptsPackages`.
-    pub owned: bool,
 }
 
-/// Resolves the program path of a `[[supervisor]]` block and decides, in the same step, whether
-/// that Supervisor takes package updates (ADR-0021).
+/// Resolves the program path of a `[[supervisor]]` block (ADR-0021 clause 1, as amended by
+/// ADR-0085).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
-/// wrote. Three cases, and nothing between them:
+/// wrote. **One shape**, since ADR-0085 removed the second: a **bare file name**, resolving to
+/// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
+/// (ADR-0023) — a directory this Client creates and owns, so it may replace what is in it. A bare
+/// name cannot escape that directory, which is why nothing here has to sanitize a path.
 ///
-/// - a **bare file name** — the program lives in `<supervisor_dir>/program/`, a directory this
-///   Client creates and owns, so it may be replaced: `owned` is true. A bare name cannot escape
-///   that directory, which is why nothing here has to sanitize a path.
-/// - an **absolute path** — the machine's file, put there by a distribution package or by
-///   configuration management. Spawned, never written to: `owned` is false.
-/// - **anything else** — `./x`, `a/b`, `../x`. Refused, rather than guessed at.
+/// Everything else is refused, and an **absolute path** gets its own message: it is the shape this
+/// Client used to accept, so its refusal is the only notice an operator carrying such a block will
+/// get and it carries the whole explanation rather than a rule number.
 ///
 /// # Errors
-/// Returns an error for the third case, naming the rule.
+/// Returns an error for anything that is not a bare file name, naming the rule and the way across.
 pub fn resolve_program(
     key: &str,
     value: &Path,
@@ -219,32 +221,18 @@ pub fn resolve_program(
     supervisor_dir: &Path,
     name: &str,
 ) -> Result<Program, String> {
-    if value.is_absolute() {
-        // A tree is unpacked into a directory this Client owns, and an absolute path says the
-        // program is the machine's. Refusing beats picking one of the two to ignore.
-        if program_path.is_some() {
-            return Err(format!(
-                "supervisor {name:?}: `{key} = {}` is the machine's program, so there is nowhere \
-                 to unpack a package into — drop `program_path`, or name the program with a bare \
-                 file name to keep it in this Supervisor's own directory",
-                value.display()
-            ));
-        }
-        return Ok(Program {
-            path: value.to_path_buf(),
-            owned: false,
-        });
-    }
-    // On Windows a rooted path with no drive — `\Program Files\otelcol\otelcol.exe` — is
-    // *drive-relative*: it resolves against whichever drive the process happens to be on, which
-    // under a service manager is nothing an operator controls. It looks absolute and is not, so it
-    // gets a message that says which half is missing instead of the general one below.
-    #[cfg(windows)]
-    if value.has_root() {
+    // The machine's program, which this Client no longer manages (ADR-0085). `has_root` rather
+    // than `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`,
+    // no drive letter — folds into the same message: it was only ever a near-miss of the absolute
+    // form, and both now have the same answer.
+    if value.is_absolute() || value.has_root() {
         return Err(format!(
-            "supervisor {name:?}: `{key} = {}` is relative to the current drive rather than \
-             absolute — name the drive (`C:\\...`) to leave the program to the machine, or use a \
-             bare file name to keep it in this Supervisor's own directory",
+            "supervisor {name:?}: `{key} = {}` names a program on the machine, and this Client \
+             manages only programs it installs. A program the fleet is to manage must reach the \
+             host as a package: build or repack it, upload it as a Set, and name it here with a \
+             bare file name — it then lives in this Supervisor's own directory, where an update \
+             is a rename this Client can make. To keep the machine's copy instead, take the block \
+             out and let whatever put the file there keep it.",
             value.display()
         ));
     }
@@ -258,13 +246,12 @@ pub fn resolve_program(
             Some(inside) => supervisor_dir.join(PROGRAM_DIR).join(TREE_DIR).join(inside),
             None => supervisor_dir.join(PROGRAM_DIR).join(value),
         };
-        return Ok(Program { path, owned: true });
+        return Ok(Program { path });
     }
     Err(format!(
-        "supervisor {name:?}: `{key} = {}` is neither — it must be a bare file name, and then \
-         the program lives in this Supervisor's own directory and is updated from Server-offered \
-         packages, or an absolute path, and then it is the machine's program and this Client \
-         leaves it alone",
+        "supervisor {name:?}: `{key} = {}` is not a bare file name — no path separator and no \
+         `..`. The program lives in this Supervisor's own directory and is updated from \
+         Server-offered packages (ADR-0085); name the file, not a path to it",
         value.display()
     ))
 }
@@ -338,13 +325,14 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         }
         // And `accepts_packages = true` said *whether*, while the program's path said *where* —
         // two keys for one truth, and nothing ever checked that the second permitted the first
-        // (ADR-0021). The path alone decides now, so the key would only be a way to disagree.
+        // (ADR-0021). ADR-0085 left one shape, so every Supervisor accepts packages and the key
+        // would only be a way to disagree with a constant.
         if table.contains_key("accepts_packages") {
             return Err(format!(
                 "supervisor {name:?}: `accepts_packages` is no longer a supervisor key — a \
-                 program named by a bare file name lives in this Supervisor's own directory and \
-                 is updated from Server-offered packages; one named by an absolute path belongs \
-                 to the machine and is left alone"
+                 program is named by a bare file name, so it lives in this Supervisor's own \
+                 directory and is updated from Server-offered packages; there is no longer a \
+                 second shape for the key to distinguish"
             ));
         }
         Ok(SupervisorBlock {
@@ -610,7 +598,7 @@ fn default_self_update_enabled() -> bool {
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0077 is a different
 /// string and names the binary, the service, and the version directories rather than the package.
 fn default_self_update_package() -> String {
-    crate::supervisor::agent::CLIENT_SERVICE_NAME.to_string()
+    crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()
 }
 
 /// The `[logging]` section (ADR-0041): this Client's own log, on disk, while it runs as a service.
@@ -1217,7 +1205,7 @@ mod tests {
         let default = ClientConfig::default();
         assert_eq!(
             default.self_update_package(),
-            Some(crate::supervisor::agent::CLIENT_SERVICE_NAME),
+            Some(crate::supervisor::agent::CLIENT_AGENT_TYPE),
             "a Client with nothing configured consents under its own Agent type"
         );
 
@@ -1226,7 +1214,7 @@ mod tests {
             toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
         assert_eq!(
             untouched.self_update_package(),
-            Some(crate::supervisor::agent::CLIENT_SERVICE_NAME)
+            Some(crate::supervisor::agent::CLIENT_AGENT_TYPE)
         );
 
         // And that name is `supervisor` since ADR-0077 — pinned here because the default travels
@@ -1350,7 +1338,7 @@ mod tests {
                 [[supervisor]]
                 type = "command"
                 name = "agent"
-                command = "/usr/local/bin/agent"
+                command = "agent"
                 {extra}
                 "#
             )
@@ -1371,19 +1359,18 @@ mod tests {
             .expect_err("the old consent key must fail loudly");
         let message = consent.to_string();
         assert!(
-            message.contains("bare file name") && message.contains("absolute path"),
+            message.contains("bare file name"),
             "the error states the rule that replaced it: {message}"
         );
     }
 
-    /// A bare name is what makes the program this Client's to replace, and everything that is
-    /// neither a bare name nor absolute is refused rather than guessed at. Both halves are
-    /// spelled the same way on every platform, which is why they are tested here together.
+    /// One shape (ADR-0085): a bare name, which is what puts the program in a directory this
+    /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
     #[test]
-    fn a_bare_name_is_owned_and_anything_between_the_two_cases_is_refused() {
+    fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
 
-        let owned = resolve_program(
+        let resolved = resolve_program(
             "binary",
             Path::new("otelcol-contrib"),
             None,
@@ -1392,10 +1379,9 @@ mod tests {
         )
         .expect("a bare file name resolves");
         assert_eq!(
-            owned,
+            resolved,
             Program {
                 path: dir.join(PROGRAM_DIR).join("otelcol-contrib"),
-                owned: true,
             }
         );
 
@@ -1427,31 +1413,9 @@ mod tests {
             resolved,
             Program {
                 path: dir.join(PROGRAM_DIR).join(TREE_DIR).join("bin/fluent-bit"),
-                owned: true,
             },
             "the spawn path is readable in the file, before any package exists"
         );
-
-        // The machine's program has no directory this Client may unpack into, and picking one of
-        // the two keys to ignore would be the worst of the three answers.
-        //
-        // Written per platform, for the reason the test below this one states: `/opt/...` is not
-        // absolute on Windows, it is *drive-relative*, and it would be refused there for that
-        // reason instead — the same green result for the wrong reason, which is how a rule stops
-        // being tested without anyone noticing.
-        #[cfg(unix)]
-        let foreign = "/opt/fluent-bit/bin/fluent-bit";
-        #[cfg(windows)]
-        let foreign = r"C:\fluent-bit\bin\fluent-bit.exe";
-        let err = resolve_program(
-            "command",
-            Path::new(foreign),
-            Some(Path::new("bin/fluent-bit")),
-            &dir,
-            "fluent-bit",
-        )
-        .expect_err("absolute and a tree cannot both be meant");
-        assert!(err.contains("program_path"), "{err}");
     }
 
     /// Refused at startup, where the operator is still looking at the file — not at rollout time
@@ -1485,36 +1449,36 @@ mod tests {
             .contains("relative"));
     }
 
-    /// The other half of the rule, whose *spelling* is platform-specific even though the rule is
-    /// not: on Unix a leading `/` makes a path absolute, on Windows nothing does until it names a
-    /// drive. Written per platform rather than with one string that only happens to work on the
-    /// machine the tests were first run on.
+    /// ADR-0085: the machine's program is refused, and the message is the only notice an operator
+    /// carrying such a block will get — so it must name the way across, not a rule number.
+    ///
+    /// Whose *spelling* is platform-specific even though the rule is not: on Unix a leading `/`
+    /// makes a path absolute, on Windows nothing does until it names a drive. Written per platform
+    /// rather than with one string that only happens to work on the machine the tests were first
+    /// run on.
     #[test]
-    fn an_absolute_program_path_is_the_machines_and_takes_no_packages() {
+    fn an_absolute_program_path_is_refused_and_names_the_way_across() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
         #[cfg(unix)]
         let foreign = "/usr/local/bin/otelcol-contrib";
         #[cfg(windows)]
         let foreign = r"C:\Program Files\otelcol\otelcol-contrib.exe";
 
-        let resolved = resolve_program("binary", Path::new(foreign), None, &dir, "otelcol")
-            .expect("an absolute path resolves");
-        assert_eq!(
-            resolved,
-            Program {
-                path: PathBuf::from(foreign),
-                owned: false,
-            }
-        );
+        let err = resolve_program("binary", Path::new(foreign), None, &dir, "otelcol")
+            .expect_err("a program on the machine must be refused");
+        assert!(err.contains("only programs it installs"), "{err}");
+        assert!(err.contains("package"), "it names the route: {err}");
+        assert!(err.contains("bare file name"), "it names the shape: {err}");
+        assert!(err.contains(foreign), "it quotes what was written: {err}");
     }
 
     /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
     /// but no drive, so it resolves against whichever drive the process is on — it *looks*
-    /// absolute and is not. Refused like any other in-between path, but told apart from a typo:
-    /// the operator wrote something meaningful, it just is not a path a service can rely on.
+    /// absolute and is not. Since ADR-0085 it folds into the same refusal as the absolute form,
+    /// because it was only ever a near-miss of it and both now have one answer.
     #[cfg(windows)]
     #[test]
-    fn a_drive_relative_windows_path_is_refused_and_says_what_is_missing() {
+    fn a_drive_relative_windows_path_folds_into_the_same_refusal() {
         let dir = PathBuf::from(r"C:\ProgramData\fleet\otelcol");
         let err = resolve_program(
             "binary",
@@ -1524,10 +1488,7 @@ mod tests {
             "otelcol",
         )
         .expect_err("a drive-relative path must be refused");
-        assert!(
-            err.contains("current drive"),
-            "the message names what is missing rather than calling it neither: {err}"
-        );
+        assert!(err.contains("only programs it installs"), "{err}");
     }
 
     /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and

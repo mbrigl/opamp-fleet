@@ -27,13 +27,34 @@ fn spawn_client(config_path: &Path) -> Child {
         .expect("spawn the client")
 }
 
+/// Places the stub where a Managed Process must live since ADR-0085: inside the Supervisor's own
+/// `program/` directory, under a bare name the configuration can spell. `root` is whatever
+/// `supervisor_dir` resolves to for the Client under test — `<state_dir>/supervisors` by default.
+///
+/// Copied rather than symlinked, and named with the platform's executable suffix: Windows spawns
+/// `x.exe` when told `x` and would not find a file missing it.
+fn install_stub(root: &Path, supervisor: &str) -> String {
+    let name = format!("stub-agent{}", std::env::consts::EXE_SUFFIX);
+    let program_dir = root.join(supervisor).join("program");
+    std::fs::create_dir_all(&program_dir).expect("create the supervisor's program directory");
+    let target = program_dir.join(&name);
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &target).expect("place the stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stub executable");
+    }
+    name
+}
+
 fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
     // An unreachable endpoint: supervision must not depend on the Server being there.
     let config = format!
         (
         "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n[[supervisor]]\ntype = \"command\"\nname = \"stub\"\ncommand = {command:?}\nargs = [\"--touch\", {marker:?}]\n",
         state = dir.join("state").to_string_lossy(),
-        command = env!("CARGO_BIN_EXE_stub_agent"),
+        command = install_stub(&dir.join("state/supervisors"), "stub"),
         marker = marker.to_string_lossy(),
     );
     let path = dir.join("supervisor.toml");
@@ -58,7 +79,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
          args = [\"--touch\", {marker:?}, \"-c\", \"${{config_dir}}/agent-conf\", \"--keep\", \"${{FLB_LEVEL}}\"]\n",
         state = dir.path().join("state").to_string_lossy(),
         supervisors = supervisor_dir.to_string_lossy(),
-        command = env!("CARGO_BIN_EXE_stub_agent"),
+        command = install_stub(&supervisor_dir, "stub"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
@@ -165,7 +186,7 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
     let toml = format!(
         "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = {binary:?}\nargs = [\"--touch\", {marker:?}]\n",
         state = dir.path().join("state").to_string_lossy(),
-        binary = env!("CARGO_BIN_EXE_stub_agent"),
+        binary = install_stub(&dir.path().join("state/supervisors"), "otelcol"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
@@ -207,7 +228,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
     let toml = format!(
         "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n[[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = {binary:?}\nargs = [\"--touch\", {marker:?}]\n",
         state = dir.path().join("state").to_string_lossy(),
-        binary = env!("CARGO_BIN_EXE_stub_agent"),
+        binary = install_stub(&dir.path().join("state/supervisors"), "otelcol"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");

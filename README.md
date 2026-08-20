@@ -208,10 +208,11 @@ nobody types a tag. Running it publishes one archive per platform,
 ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
 ([ADR-0078](docs/adr/0078-a-release-is-named-after-the-set-it-becomes.md)) — and since
-[ADR-0080](docs/adr/0080-the-program-and-its-configuration-are-named-supervisor.md) the program
-inside them, its service and its configuration file are called `supervisor` too. Only the
-dpkg/rpm/MSI package identity stays `opamp-fleet-client`, so an `apt`, `dnf` or MSI upgrade stays
-an upgrade. The fields are separated by `_` because a name and a version both
+[ADR-0082](docs/adr/0082-the-fleets-own-agent-is-called-supervisor.md) the program inside them and
+its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
+the **product's** name, `opamp-fleet`
+([ADR-0084](docs/adr/0084-the-product-names-the-installation.md)): that is the name that
+identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
 contain `-` ([ADR-0032](docs/adr/0032-release-artifacts-separate-their-fields-with-underscores.md)),
 and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
 `darwin_arm64`, …), so uploading a whole release under one package
@@ -305,17 +306,20 @@ $ supervisor service stop
 $ supervisor service uninstall                                   # never deletes layout or state
 ```
 
-- **Instances:** every flag accepts `--instance <name>` (default `default`); each instance is an
-  independent service (`supervisor-<name>`) with its own configuration, install root,
-  and state — several differently-configured Clients coexist on one host.
-- **Install root:** `--root <dir>` puts everything under one directory; nothing is ever installed
-  to a fixed path. Without it, a Linux system install splits the defaults: the executable layout —
-  `versions/supervisor-<version>-<commit>/` and the `current` pointer the service runs
-  from — lives at `/opt/opamp-fleet/client/<instance>`, while `supervisor.toml` and the default
-  `state/` directory stay at `/var/lib/opamp-fleet/client/<instance>` (SELinux never lets systemd
-  execute a binary under `/var/lib` —
-  [ADR-0053](docs/adr/0053-the-linux-service-executes-from-opt.md)). macOS, Windows, and user
-  scope keep one default directory for everything.
+- **One service per build:** the service is named after the product, `opamp-fleet`, with no suffix
+  and nothing to look up — so the verbs above take no name at all. A second installation on one
+  host is a second *build* with its own `PRODUCT_NAME`, not a runtime flag
+  ([ADR-0084](docs/adr/0084-the-product-names-the-installation.md)).
+- **Two roots:** `--root <dir>` given alone puts everything under the one directory it names;
+  nothing is ever installed to a fixed path. Without it, a Linux system install splits the
+  defaults: the executable layout — `versions/supervisor-<version>-<commit>/` and the `current`
+  pointer the service runs from — lives at `/opt/opamp-fleet`, while `supervisor.toml` and the
+  default `state/` directory stay at `/var/lib/opamp-fleet` (SELinux never lets systemd execute a
+  binary under `/var/lib`). `--data-root <dir>` names that second half explicitly. macOS, Windows
+  and user scope keep one directory for everything — including a Windows host installed by the
+  MSI, where `Program Files` holds the delivered payload and the layout goes under
+  `%ProgramData%\opamp-fleet`, because the self-update rewrites the layout at runtime and
+  `Program Files` is not a tree a service account should be able to write.
 - **Scope:** `--user` targets the user-level manager (development); the default is a system
   service that starts at boot.
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
@@ -345,11 +349,10 @@ doing and nothing else asserts it. The test is `crates/client/tests/service_smok
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
-(`journalctl -u supervisor` on Linux, Console/`log show` on macOS), the Agent in
-the fleet UI, a second `--instance` beside the first, and an **SELinux-enforcing host** (Fedora,
-RHEL, or SUSE 16 with `getenforce` answering `Enforcing`): the `.rpm` install must start —
-a service dying with `status=203/EXEC` and an AVC denial in `ausearch -m avc` is the failure
-ADR-0053 exists to prevent. Known platform gaps (tracked in the ADR):
+(`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
+the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
+answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
+an AVC denial in `ausearch -m avc` is the failure ADR-0084 clause 3 exists to prevent. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
 `<state_dir>/logs` on every platform (ADR-0041), which is where to look when the manager shows a

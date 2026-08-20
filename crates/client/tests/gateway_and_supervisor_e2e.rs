@@ -77,6 +77,32 @@ fn free_port() -> u16 {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
+/// Places the stub where a Managed Process must live since ADR-0085: inside the Supervisor's own
+/// `program/` directory, under a bare name the configuration can spell. Copied rather than
+/// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
+/// installed package would leave behind.
+fn install_stub(state_dir: &Path, supervisor: &str) -> String {
+    let name = if cfg!(windows) {
+        "stub-agent.exe"
+    } else {
+        "stub-agent"
+    };
+    let program_dir = state_dir
+        .join("supervisors")
+        .join(supervisor)
+        .join("program");
+    std::fs::create_dir_all(&program_dir).expect("create the supervisor's program directory");
+    let target = program_dir.join(name);
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &target).expect("place the stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stub executable");
+    }
+    name.to_string()
+}
+
 #[tokio::test]
 async fn a_host_supervises_and_gateways_at_the_same_time() {
     let (addr, state, dir) = spawn_server().await;
@@ -96,13 +122,13 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
-            "command = {stub:?}\n",
+            "command = {stub}\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
+        stub = format!("{:?}", install_stub(&state_dir, "local-agent")),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
@@ -198,6 +224,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
 
     let marker = dir.path().join("stub-marker");
     let gateway_port = free_port();
+    let state_dir = dir.path().join("client-state");
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -208,13 +235,13 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
-            "command = {stub:?}\n",
+            "command = {stub}\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
-        state = dir.path().join("client-state").to_string_lossy(),
+        state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
-        stub = env!("CARGO_BIN_EXE_stub_agent"),
+        stub = format!("{:?}", install_stub(&state_dir, "local-agent")),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");

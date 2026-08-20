@@ -1,9 +1,14 @@
 //! The command-line surface (ADR-0010).
 //!
 //! A `clap` subcommand CLI that stays deliberately thin: it only parses arguments and hands off.
-//! A bare invocation with no subcommand defaults to `run`, so today's `client --config <path>`
-//! keeps working unchanged. The Client is file-configured (ADR-0008) — there are no environment
-//! fallbacks; the flags only say where the file is and which instance is meant.
+//! A bare invocation with no subcommand defaults to `run`, so `supervisor --config <path>` keeps
+//! working unchanged. The Client is file-configured (ADR-0008) — there are no environment
+//! fallbacks; the flags only say where the file and the state directory are.
+//!
+//! There is no `--instance` (ADR-0084 clause 7). One build installs one service under the
+//! product's name, so the service verbs have nothing to look up and take no name at all; a second
+//! installation is a second build. The *grammar* that flag used survives as
+//! [`parse_instance_name`], because `[[supervisor]]` block names still need it.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -25,10 +30,6 @@ pub struct Cli {
     /// Path to the TOML configuration file; defaults apply if it does not exist.
     #[arg(long, global = true, default_value = "supervisor.toml")]
     pub config: PathBuf,
-    /// Instance name: selects the service identity (`supervisor-<instance>`) and the
-    /// default install root, so several differently-configured Clients coexist on one host.
-    #[arg(long, global = true, default_value = "default", value_parser = parse_instance_name)]
-    pub instance: InstanceName,
     /// Overrides the configuration file's state directory. `service install` bakes this into the
     /// unit so an installed service never depends on a relative path.
     #[arg(long, global = true)]
@@ -43,8 +44,8 @@ pub struct Cli {
 ///
 /// The distinction is load-bearing exactly once. `service install` bakes an absolute config path
 /// into the service unit, and when nobody named a path, the right one is not the default resolved
-/// against a working directory the service manager will not have — it is the install root, which
-/// is derived per platform, scope, and instance.
+/// against a working directory the service manager will not have — it is the data root, which is
+/// derived per platform and scope.
 #[derive(Debug)]
 pub struct Parsed {
     /// The command line as declared.
@@ -149,10 +150,24 @@ pub struct InstallArgs {
     /// System or `--user` scope.
     #[command(flatten)]
     pub scope: ScopeArgs,
-    /// Install root holding `versions/`, `current`, and the default `state/` directory. Defaults
-    /// to the platform data directory for the scope and instance — no path is ever fixed.
+    /// The layout root, holding `versions/` and the `current` pointer. Defaults to
+    /// `<base>/<PRODUCT_NAME>` for the scope — no path is ever fixed (ADR-0084 clause 2).
+    ///
+    /// Given **alone** it collapses layout and data into the one directory it names, exactly as
+    /// ADR-0053 defined it, and the labeling and permissions of that directory are then yours to
+    /// manage.
     #[arg(long)]
     pub root: Option<PathBuf>,
+    // ADR-0084 clause 3.
+    /// The data root, holding `supervisor.toml` and the state directory — everything a reinstall
+    /// cannot recreate.
+    ///
+    /// It exists because Linux at system scope must not execute from `/var/lib`: the layout goes
+    /// to `/opt/<PRODUCT_NAME>` and the data stays behind. Naming it beside `--root` is how an
+    /// operator keeps the two halves apart anywhere else. Left alone, it follows `--root` when
+    /// that is given and the platform default otherwise.
+    #[arg(long)]
+    pub data_root: Option<PathBuf>,
     // ADR-0027.
     /// Ask for the settings a fresh host cannot guess and write the configuration file before
     /// registering the service.
@@ -201,8 +216,8 @@ pub struct InstallArgs {
     )]
     pub self_update_package: Option<String>,
     // ADR-0062.
-    /// Run the service as this account instead of root/`LocalSystem`, and hand the instance's
-    /// files — configuration, state, and the executable layout — over to it.
+    /// Run the service as this account instead of root/`LocalSystem`, and hand this
+    /// installation's files — both roots — over to it.
     ///
     /// System scope only: a `--user` service already runs as its user. On Linux and macOS the
     /// account must exist. On Windows only passwordless account forms are accepted — the
@@ -221,8 +236,13 @@ pub struct ScopeArgs {
     pub user: bool,
 }
 
-/// A validated instance name — the intersection of the systemd-unit, launchd-label, Windows
+/// A name validated against the intersection of the systemd-unit, launchd-label, Windows
 /// service-name, and directory-name grammars (ADR-0010).
+///
+/// Since ADR-0084 removed `--instance`, this no longer names an instance: it governs
+/// `[[supervisor]]` block names, and `build.rs` holds a second copy of the same rules for
+/// `PRODUCT_NAME` — which cannot borrow this one, because a build script cannot depend on the
+/// crate it builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceName(String);
 
@@ -248,8 +268,8 @@ const WINDOWS_RESERVED: [&str; 22] = [
 ];
 
 /// The only way to build an [`InstanceName`]: validated against the grammar above. `pub` because
-/// the service smoke test names the instance it installs, and there is nothing else to construct
-/// one with (ADR-0024 widens visibility by need).
+/// callers outside this module need to construct one and there is nothing else to do it with
+/// (ADR-0024 widens visibility by need).
 ///
 /// # Errors
 /// Returns an error naming the rule the value breaks.
@@ -296,7 +316,23 @@ mod tests {
         let cli = parse(&["client"]);
         assert!(cli.command.is_none());
         assert_eq!(cli.config, PathBuf::from("supervisor.toml"));
-        assert_eq!(cli.instance.as_str(), "default");
+    }
+
+    /// ADR-0084 clause 7: removed, not hidden and not accepted-and-ignored. A unit written by an
+    /// older install would carry it, and this is what makes that fail loudly instead of running a
+    /// Client whose paths silently mean something else.
+    #[test]
+    fn instance_is_not_a_flag_any_more() {
+        assert!(
+            Cli::try_parse_from(["supervisor", "--instance", "prod"]).is_err(),
+            "--instance must be rejected outright"
+        );
+        for verb in ["uninstall", "start", "stop", "status"] {
+            assert!(
+                Cli::try_parse_from(["supervisor", "service", verb, "--instance", "prod"]).is_err(),
+                "`service {verb}` takes no instance name — there is nothing to look up"
+            );
+        }
     }
 
     #[test]
@@ -323,18 +359,22 @@ mod tests {
             "run",
             "--service",
             "--config",
-            "/etc/opamp/supervisor.toml",
-            "--instance",
-            "prod",
+            "/var/lib/opamp-fleet/supervisor.toml",
             "--state-dir",
-            "/var/lib/opamp-fleet/client/prod/state",
+            "/var/lib/opamp-fleet/state",
         ]);
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected run");
         };
         assert!(args.service);
-        assert_eq!(cli.instance.as_str(), "prod");
-        assert!(cli.state_dir.is_some());
+        assert_eq!(
+            cli.config,
+            PathBuf::from("/var/lib/opamp-fleet/supervisor.toml")
+        );
+        assert_eq!(
+            cli.state_dir,
+            Some(PathBuf::from("/var/lib/opamp-fleet/state"))
+        );
     }
 
     #[test]
@@ -348,15 +388,32 @@ mod tests {
         };
         assert!(args.scope.user);
         assert_eq!(args.root, Some(PathBuf::from("/opt/x")));
+        assert_eq!(args.data_root, None, "it follows --root unless named");
 
-        let cli = parse(&["client", "service", "status", "--instance", "staging"]);
+        let cli = parse(&["client", "service", "status"]);
         assert!(matches!(
             cli.command,
             Some(Command::Service {
                 action: ServiceAction::Status(ScopeArgs { user: false })
             })
         ));
-        assert_eq!(cli.instance.as_str(), "staging");
+    }
+
+    /// ADR-0084 clause 3: the two halves can be named apart, which is what the Linux system-scope
+    /// split needs and what the manual tells an operator to do on a host that wants them apart.
+    #[test]
+    fn both_roots_can_be_named() {
+        let args = install(&[
+            "client",
+            "service",
+            "install",
+            "--root",
+            "/opt/opamp-fleet",
+            "--data-root",
+            "/var/lib/opamp-fleet",
+        ]);
+        assert_eq!(args.root, Some(PathBuf::from("/opt/opamp-fleet")));
+        assert_eq!(args.data_root, Some(PathBuf::from("/var/lib/opamp-fleet")));
     }
 
     /// ADR-0027: interactivity is something the operator asks for. Every invocation that existed

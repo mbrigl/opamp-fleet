@@ -229,7 +229,7 @@ pub fn ask() -> Result<Answers, String> {
             Some(
             Input::new()
                 .with_prompt("Name of the package that carries this Client")
-                .default(crate::supervisor::agent::CLIENT_SERVICE_NAME.to_string())
+                .default(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string())
                 .validate_with(|input: &String| {
                     if input.trim().is_empty() {
                         Err("the package name is the whole of the protection; it cannot be empty"
@@ -409,7 +409,7 @@ mod tests {
             name: "host-01".to_string(),
             auth: None,
             ca_file: None,
-            self_update_package: Some(crate::supervisor::agent::CLIENT_SERVICE_NAME.to_string()),
+            self_update_package: Some(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()),
         }
     }
 
@@ -474,7 +474,7 @@ mod tests {
         run_with_endpoint(
             &path,
             "wss://fleet.example.com/v1/opamp",
-            Some(crate::supervisor::agent::CLIENT_SERVICE_NAME),
+            Some(crate::supervisor::agent::CLIENT_AGENT_TYPE),
         )
         .expect("write");
 

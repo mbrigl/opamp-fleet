@@ -2,7 +2,8 @@
 //! ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` makes the system service run as that account, and the
-//! instance's files — the configuration, the state directory, and the executable layout — belong
+//! installation's files — the configuration, the state directory, and the executable layout,
+//! across both roots since ADR-0084 clause 3 — belong
 //! to it afterwards. The two halves live here; *what* the service manager is told is
 //! [`manager`](super::manager)'s and [`windows_config`](super::windows_config)'s business.
 //!
@@ -35,7 +36,8 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the instance's service name — on Windows the one virtual account that may be
+    /// `service` is the service's name, which since ADR-0084 is the product's — on Windows the
+    /// one virtual account that may be
     /// named is the service's own.
     ///
     /// # Errors

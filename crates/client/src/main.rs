@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use client::cli::{self, Command, InstallArgs, InstanceName, ServiceAction};
+use client::cli::{self, Command, InstallArgs, ServiceAction};
 use client::config::ClientConfig;
 use client::config_init;
 use client::selfupdate;
@@ -63,9 +63,7 @@ fn main() {
             };
             run_command(spec, args)
         }
-        Some(Command::Service { action }) => {
-            service_command(&cli.config, config_named, cli.instance, &action)
-        }
+        Some(Command::Service { action }) => service_command(&cli.config, config_named, &action),
         // Answer for this executable so a self-update can prove it before pointing at it
         // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
@@ -100,7 +98,6 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 fn service_command(
     config_path: &Path,
     config_named: bool,
-    instance: InstanceName,
     action: &ServiceAction,
 ) -> Result<(), String> {
     let level = |scope: &cli::ScopeArgs| {
@@ -111,19 +108,19 @@ fn service_command(
         }
     };
     match action {
-        ServiceAction::Install(args) => install(config_path, config_named, instance, args),
+        ServiceAction::Install(args) => install(config_path, config_named, args),
         ServiceAction::Uninstall(scope) => {
-            manager::uninstall(level(scope), &instance)?;
+            manager::uninstall(level(scope))?;
             println!(
                 "service {} uninstalled (the install layout and state remain)",
-                manager::service_name(&instance)
+                manager::service_name()
             );
             Ok(())
         }
-        ServiceAction::Start(scope) => manager::NativeService::new(level(scope), instance).start(),
-        ServiceAction::Stop(scope) => manager::NativeService::new(level(scope), instance).stop(),
+        ServiceAction::Start(scope) => manager::NativeService::new(level(scope)).start(),
+        ServiceAction::Stop(scope) => manager::NativeService::new(level(scope)).stop(),
         ServiceAction::Status(scope) => {
-            let state = manager::NativeService::new(level(scope), instance).state()?;
+            let state = manager::NativeService::new(level(scope)).state()?;
             println!("{}", state.describe());
             Ok(())
         }
@@ -133,12 +130,7 @@ fn service_command(
 /// `service install`: write the configuration if asked to (ADR-0027), validate it, lay out the
 /// versioned install at the chosen root, and register the service against the `current` pointer
 /// (ADR-0010).
-fn install(
-    config_path: &Path,
-    config_named: bool,
-    instance: InstanceName,
-    args: &InstallArgs,
-) -> Result<(), String> {
+fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result<(), String> {
     let level = if args.scope.user {
         ServiceLevel::User
     } else {
@@ -156,21 +148,24 @@ fn install(
     let run_as = args
         .run_as
         .as_deref()
-        .map(|account| run_as::RunAs::resolve(account, &manager::service_name(&instance)))
+        .map(|account| run_as::RunAs::resolve(account, manager::service_name()))
         .transpose()?;
 
-    // Two roots, one flag: the executable layout and the instance's data default to different
-    // places on Linux (ADR-0053 — systemd may not execute from `/var/lib` under SELinux), while
-    // an explicit `--root` keeps ADR-0010's meaning and puts everything under the one directory
-    // the operator named — whose labeling is then the operator's business.
-    let (layout_root, data_root) = match &args.root {
-        Some(root) => {
+    // Two roots and two flags (ADR-0084 clause 3). The executable layout and the data default to
+    // different places on Linux at system scope — and only there — because systemd may not execute
+    // from `/var/lib` under SELinux. `--root` alone keeps ADR-0053's meaning and collapses both
+    // halves into the one directory the operator named, whose labeling and permissions are then
+    // the operator's business; `--data-root` names the other half when they must stay apart.
+    let (layout_root, data_root) = match (&args.root, &args.data_root) {
+        (Some(root), Some(data)) => (absolute(root)?, absolute(data)?),
+        (Some(root), None) => {
             let root = absolute(root)?;
             (root.clone(), root)
         }
-        None => (
-            manager::default_layout_root(level, &instance)?,
-            manager::default_root(level, &instance)?,
+        (None, Some(data)) => (manager::default_layout_root(level)?, absolute(data)?),
+        (None, None) => (
+            manager::default_layout_root(level)?,
+            manager::default_root(level)?,
         ),
     };
 
@@ -196,7 +191,7 @@ fn install(
             Some(
                 args.self_update_package
                     .as_deref()
-                    .unwrap_or(client::supervisor::agent::CLIENT_SERVICE_NAME),
+                    .unwrap_or(client::supervisor::agent::CLIENT_AGENT_TYPE),
             )
         };
         config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
@@ -225,14 +220,13 @@ fn install(
 
     manager::install(&manager::InstallSpec {
         level,
-        instance: instance.clone(),
         program: program.clone(),
         config_path: config_path.clone(),
         state_dir: state_dir.clone(),
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
 
-    // The handover (ADR-0062): the instance's files belong to the account the service runs as —
+    // The handover (ADR-0084 clause 12, carrying ADR-0062): both roots belong to the account —
     // config and state because the service reads and rewrites them (ADR-0056), the executable
     // layout because the self-update that stages into it *is* the service (ADR-0020). The state
     // directory is created first: the daemon must not need rights on its parent to begin.
@@ -242,7 +236,7 @@ fn install(
         run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
     }
 
-    println!("installed {}", manager::service_name(&instance));
+    println!("installed {}", manager::service_name());
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
     println!("  state dir: {}", state_dir.display());
@@ -252,7 +246,7 @@ fn install(
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };
-    println!("start it with: supervisor service start{user} --instance {instance}");
+    println!("start it with: supervisor service start{user}");
     Ok(())
 }
 

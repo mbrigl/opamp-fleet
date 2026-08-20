@@ -157,17 +157,16 @@ state_dir = "client-state"
 # shapes a Collector comes in, the generic Foreign Agent and two concrete ones, and Icinga 2,
 # which has a kind of its own because it needs one.
 #
-# How a block names its program — `binary` for a collector, `command` for a custom one — is also
-# what decides whether the Server may update it, because replacing a program means
-# writing in the directory it sits in:
+# How a block names its program — `binary` for a collector, `command` for a custom one — has one
+# shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory
+# this Client creates and owns, which is what makes replacing it a rename this Client can make.
+# Every Supervisor therefore takes package updates; there is no second shape and no opt-out.
 #
-#   a bare file name    the program lives in <supervisor_dir>/<name>/program/, a directory this
-#                       Client creates and owns. It takes package updates.
-#   an absolute path    the machine's program, put there by a distribution package or by
-#                       configuration management. It is started, never written to.
-#
-# Anything in between — ./x, bin/x — fails at startup rather than being guessed at. Note that a
-# bare name is NOT searched for in $PATH; it names a file in that one directory.
+# An absolute path is refused at startup: the Client manages only programs it installs. To bring
+# an agent the machine already carries under management, repack it and upload it as a Set — the
+# Icinga 2 and GLPI Agent pages walk through exactly that. Anything in between — ./x, bin/x —
+# fails at startup rather than being guessed at, and a bare name is NOT searched for in $PATH; it
+# names a file in that one directory.
 #
 # Every block reports two names, and they answer different questions:
 #
@@ -231,8 +230,8 @@ state_dir = "client-state"
 # the endpoint still comes up on an ephemeral port (it always does), nothing ever connects.
 # Every received config-map entry is written to <supervisor_dir>/<name>/config/ under its
 # Configuration's name and passed as its own --config; a change restarts the collector.
-# The absolute path here is the other half of the rule above: this Collector came from the
-# machine's package manager, so the Server never writes over it — it is supervised, not updated.
+# Named by a bare file name like every other program here, so this Collector too came from a
+# Server-offered package and is updated by the fleet.
 # [[supervisor]]
 # type = "collector"
 # name = "otelcol"
@@ -261,12 +260,17 @@ state_dir = "client-state"
 #
 # Any other ${...} is passed to the process untouched, so an agent's own variable syntax keeps
 # working — which also means a misspelled placeholder is handed over rather than refused. The
-# program itself (command, binary) is never substituted: its written form is what decides package
-# consent, and that must be readable in this file.
+# program itself (command, binary) is never substituted: it is a bare file name, and that must be
+# readable in this file rather than assembled at startup.
+#
+# command is a bare file name and nothing else. The program lives in this Supervisor's own
+# program/ directory, where the Client installed it from a Server-offered package — an absolute
+# path is refused at startup, because the Client manages only programs it installs. To bring an
+# agent the machine already carries under management, repack it and upload it as a Set.
 # [[supervisor]]
 # type = "command"
 # name = "my-agent"
-# command = "/opt/my-agent/bin/my-agent"
+# command = "my-agent"
 # args = ["--config", "${config_dir}/my-agent-conf"]
 # working_dir = "/var/lib/my-agent"     # optional
 # version_args = ["--version"]          # what it reports as service.version

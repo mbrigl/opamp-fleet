@@ -265,6 +265,54 @@ carries a date once its tag exists.
   Icinga 2's per-host pair, the enrolment ticket and the parent's certificate, is deliberately not
   among them.
 
+- **The install path lost two levels, and `--instance` is gone.** The Client installed under
+  `<base>/opamp-fleet/client/<instance>` — a product level, a component level asserting `client`
+  where the program is called `supervisor`, and an instance level holding the constant `default` on
+  every host anyone ever installed. It now installs under `<base>/<product>` alone:
+  `/opt/opamp-fleet` and `/var/lib/opamp-fleet` on Linux, `%ProgramData%\opamp-fleet` on Windows,
+  `/Library/Application Support/opamp-fleet` on macOS
+  ([ADR-0084](docs/adr/0084-the-product-names-the-installation.md)). The product's name is
+  fixed at build time (`OPAMP_FLEET_PRODUCT_NAME`, default `opamp-fleet`), and a second
+  installation on one host is a **second build** rather than a runtime flag — the flag was
+  reachable from no delivery path we ship, was read by nothing at runtime, and could not be
+  recovered by anything once typed.
+  **What to do:** nothing, on any host installed from a published release — there are none. The
+  service is now called `opamp-fleet` rather than `supervisor`, so `systemctl start supervisor`
+  becomes `systemctl start opamp-fleet`; `service uninstall|start|stop|status` take no name at all;
+  and the `PATH` command is `opamp-fleet`. `--instance` is refused outright rather than ignored.
+
+- **`service install` takes `--data-root`.** `--root` still names one directory and, given alone,
+  still collapses the layout and the data into it. `--data-root` names the second half, which is
+  what the Linux system-scope split needs — the executable layout under `/opt` because SELinux
+  never lets systemd execute a binary labelled `var_lib_t`, the configuration and state under
+  `/var/lib`.
+
+- **The MSI puts the program in `Program Files` and everything else under `%ProgramData%`.**
+  `INSTALLFOLDER` is now `C:\Program Files\opamp-fleet` and holds the delivered `supervisor.exe`
+  and nothing more; the versioned layout, `supervisor.toml` and `state/` go to
+  `%ProgramData%\opamp-fleet`. This is the Windows form of the line the `.deb` and `.rpm` already
+  drew between `/usr/libexec` and `/opt`: the self-update rewrites the layout at runtime, and
+  `Program Files` is not a tree a service account should be able to write — which it would have had
+  to, since `--run-as` hands the layout to the account the service runs as. A host installed by the
+  MSI and one unpacked from the archive now put the same things in the same places.
+
+- **The `.deb`, `.rpm` and MSI are named after the product.** The package identity is `opamp-fleet`
+  and the payload lands in `/usr/libexec/opamp-fleet/supervisor`, so two variant builds can be
+  installed side by side without claiming one another's files.
+
+### Removed
+
+- **A `[[supervisor]]` block can no longer name a program on the machine.** `binary` and `command`
+  take a bare file name and nothing else; an absolute path — and the Windows drive-relative form
+  with it — is refused at startup with a message naming the way across
+  ([ADR-0085](docs/adr/0085-the-client-manages-only-programs-it-installs.md)). A Managed Process is
+  always one this Client installed, so every Supervisor now declares `AcceptsPackages` and the
+  capability is a constant of the Client rather than something derived from a path.
+  **What to do:** an agent the machine carries — a distribution-packaged GLPI Agent, a
+  machine-installed Icinga 2 — is brought under management by repacking it and uploading it as a
+  Set, which is the route the GLPI Agent and Icinga 2 pages already document. A block naming an
+  absolute path will stop the Client at startup rather than starting without it.
+
 ### Fixed
 
 - **An agent that claims a package version it is not running is offered that version again.** Until
@@ -428,7 +476,7 @@ carries a date once its tag exists.
   Windows the official portable zip is the artifact, uploaded (or referenced) as published; on
   Linux the tool above builds one deterministically from the official AppImage — extracting it
   once so no fleet host needs FUSE. Both are amd64; see the
-  [GLPI Agent recipe](docs/manual/glpi-agent.md#fleet-delivered-the-agent-as-a-package).
+  [GLPI Agent recipe](docs/manual/glpi-agent.md).
   **What to do:** nothing — this is a new option beside supervising a machine-installed agent.
 - **A `command` Supervisor can reload instead of restart**
   ([ADR-0060](docs/adr/0060-unified-supervisor-lifecycle-port.md)). A `[[supervisor]]` block of

@@ -1,20 +1,26 @@
 #!/bin/sh
 # Post-install for the `.deb` and the `.rpm` alike (ADR-0046 clauses 2 and 3).
 #
-# The package delivered `/usr/libexec/supervisor` and nothing else. The install itself — the
-# versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
+# The package delivered `/usr/libexec/opamp-fleet/supervisor` and nothing else. The install itself —
+# the versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
 # `service install` (ADR-0010), which is all this calls. No package ships a unit file: one that did
 # would know nothing of ADR-0030's service name or ADR-0020's restart policy, and there would be two
 # registrations disagreeing about which is the real one.
 #
 # What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0048),
-# laid here — so `supervisor --version` answers for the binary the service runs, not for
-# whatever this package happened to deliver. The targets name the default system roots and default
-# instance (`default_layout_root` and `default_root` in crates/client/src/service/manager.rs), the
-# only roots a packaged install ever uses: this script calls plain `service install`. They are two
-# roots since ADR-0053 — the executable layout under `/opt`, because SELinux never lets systemd
-# execute a binary labeled `var_lib_t`; the configuration and state under `/var/lib`, where data
-# belongs and where every managed host already has them.
+# laid here — so `opamp-fleet --version` answers for the binary the service runs, not for whatever
+# this package happened to deliver. The link carries the **product's** name and the file it resolves
+# to carries the program's (ADR-0084 clause 5): two variant builds must not collide on one
+# `/usr/bin` entry, and they would if the link were named after the program they share.
+#
+# The paths name the default system roots (`default_layout_root` and `default_root` in
+# crates/client/src/service/manager.rs), the only roots a packaged install ever uses: this script
+# calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
+# because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
+# state under `/var/lib`, where data belongs (ADR-0084 clause 3, carrying ADR-0053).
+#
+# There is no migration branch here, and that is ADR-0084 clause 8: no host was ever installed
+# under the paths or names this release replaces, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
@@ -30,76 +36,23 @@ esac
 # still holds the previous binary while the pointer now names the new one.
 running=no
 if command -v systemctl >/dev/null 2>&1 &&
-	{ systemctl is-active --quiet supervisor.service ||
-		systemctl is-active --quiet opamp-fleet-client.service; }; then
+	systemctl is-active --quiet opamp-fleet.service; then
 	running=yes
 fi
 
-# One-time migration (ADR-0080): the program, its service and its configuration file were renamed
-# from `opamp-fleet-client` to `supervisor`, and this package is the only way across — a
-# self-update cannot deliver a rename of the file it extracts by name. The old registration has to
-# go before the new one is made: this package's own pre-removal deliberately falls through on an
-# upgrade (see packaging/linux/prerm), so nothing else retires it, and the unit it left behind runs
-# `<root>/current/opamp-fleet-client`, which the layout below no longer provides.
-legacy_unit=/etc/systemd/system/opamp-fleet-client.service
-if [ -f "$legacy_unit" ]; then
-	echo "retiring the pre-rename service registration (ADR-0080)"
-	systemctl stop opamp-fleet-client.service >/dev/null 2>&1 || true
-	systemctl disable opamp-fleet-client.service >/dev/null 2>&1 || true
-	rm -f "$legacy_unit"
-	systemctl daemon-reload >/dev/null 2>&1 || true
-	# The old PATH symlink resolves through a `current` that will point at a directory holding
-	# only the new name. `-L`: a regular file there is somebody else's and stays.
-	if [ -L /usr/bin/opamp-fleet-client ]; then
-		rm -f /usr/bin/opamp-fleet-client
-	fi
-	# Staged versions under the old name are binaries nothing can run any more: the unit that
-	# named them is gone, and `service install` below stages under the new one.
-	rm -rf /opt/opamp-fleet/client/default/versions/opamp-fleet-client-*
-fi
-
-# The configuration is *not* renamed here (ADR-0080): a host updated by hand or by a fleet
-# self-update would be left without one while this script pretended otherwise, so the rename is the
-# operator's on every host alike. Until it happens there is nothing to register a service against —
-# the Client refuses to start on a `client.toml` it was not asked for rather than coming up on the
-# development default and managing nothing.
-config=/var/lib/opamp-fleet/client/default/supervisor.toml
-legacy_config=/var/lib/opamp-fleet/client/default/client.toml
-if [ ! -f "$config" ] && [ -f "$legacy_config" ]; then
-	cat <<EOF
-
-This host's configuration still carries its old name, so the service was NOT registered
-(ADR-0080). Two commands finish the upgrade:
-
-  mv $legacy_config $config
-  supervisor service install && systemctl start supervisor
-
-Nothing inside the file changed.
-EOF
-	exit 0
-fi
-
-/usr/libexec/supervisor service install
-
-# One-time migration (ADR-0053): releases before it staged the executable layout under the data
-# root, where SELinux enforcing hosts never let it start. `service install` above has re-registered
-# the unit against the `/opt` layout, so what remains under `/var/lib` is orphaned binaries — the
-# configuration and state beside them stay untouched. A host installed after ADR-0053 has neither
-# path and this removes nothing.
-rm -rf /var/lib/opamp-fleet/client/default/versions
-rm -f /var/lib/opamp-fleet/client/default/current
+/usr/libexec/opamp-fleet/supervisor service install
 
 # `-n`: without it, ln would place the link *inside* the directory an existing link resolves to.
 # On rpm upgrades the erasure of the old package's files deletes this link again; `%posttrans`
 # (packaging/linux/posttrans) re-lays it after that erasure, which dpkg does not need — it removes
 # the obsolete `/usr/bin` file during unpack, before this runs.
-ln -sfn /opt/opamp-fleet/client/default/current/supervisor /usr/bin/supervisor
+ln -sfn /opt/opamp-fleet/current/supervisor /usr/bin/opamp-fleet
 
 if [ "$running" = yes ]; then
 	# Restart, never start. A service that was running was configured by somebody, and it has to
 	# finish this upgrade on the binary the package just delivered rather than on the one it still
 	# has mapped.
-	systemctl restart supervisor.service
+	systemctl restart opamp-fleet.service
 	exit 0
 fi
 
@@ -108,10 +61,10 @@ cat <<'EOF'
 The service is registered and stopped. Not starting it is deliberate: a Client with no
 configuration dials the development default and manages nothing (ADR-0027). Two steps remain:
 
-  supervisor service install --endpoint wss://<server>/v1/opamp
-  systemctl start supervisor
+  opamp-fleet service install --endpoint wss://<server>/v1/opamp
+  systemctl start opamp-fleet
 
-Run `supervisor service install --interactive` instead to be asked for the credential too.
+Run `opamp-fleet service install --interactive` instead to be asked for the credential too.
 
 The configuration that step writes lets the Server update this Client itself (ADR-0075) — the
 fleet then patches its own agent like any other program. Append --no-self-update to keep that

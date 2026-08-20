@@ -7,28 +7,29 @@
 # it cleanly takes back —
 #
 #   remove:  the PATH symlink and the executable layout — every staged version and the `current`
-#            pointer, which since ADR-0053 live under `/opt`. The data root stays: the instance
-#            identity and a credential the operator typed are not binaries, and a reinstall picks
-#            them back up.
+#            pointer, which live under `/opt`. The data root stays: this host's identity and a
+#            credential the operator typed are not binaries, and a reinstall picks them back up.
 #   purge:   (dpkg only) all of the above and the data root itself — state, logs and
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.
+#
+# That distinction is ADR-0048's, with the paths redrawn across the two roots by ADR-0084 clause 3.
 #
 # Only on a real removal. dpkg calls `postrm upgrade <new>` mid-upgrade, where the new version's
 # post-install re-lays the link; rpm's `%postun` gets the count of remaining instances, where `1`
 # means a replacement is installed. Cleaning up there would undo the successor's work.
 #
-# The paths name the default system roots and default instance (`default_layout_root` and
-# `default_root` in crates/client/src/service/manager.rs) — the only roots a packaged install ever
-# uses. A second instance (`--instance prod`) is a manual install and is deliberately not touched.
+# The paths name the default system roots (`default_layout_root` and `default_root` in
+# crates/client/src/service/manager.rs) — the only roots a packaged install ever uses. An install
+# rooted elsewhere with `--root` is a manual one and is deliberately not touched.
 #
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path
 # is an operator's (or an older package's) binary, and deleting somebody else's file on the way
 # out is how uninstalls earn distrust.
 set -e
 
-layout_root=/opt/opamp-fleet/client/default
-data_root=/var/lib/opamp-fleet/client/default
+layout_root=/opt/opamp-fleet
+data_root=/var/lib/opamp-fleet
 
 case "${1-}" in
 # dpkg: a real removal, keeping state and configuration.
@@ -42,20 +43,7 @@ purge)
 *) exit 0 ;;
 esac
 
-if [ -L /usr/bin/supervisor ]; then
-	rm -f /usr/bin/supervisor
-fi
-# A host that came across the ADR-0080 rename may still carry the old link if the upgrade never
-# reached the post-install that retires it.
-if [ -L /usr/bin/opamp-fleet-client ]; then
-	rm -f /usr/bin/opamp-fleet-client
+if [ -L /usr/bin/opamp-fleet ]; then
+	rm -f /usr/bin/opamp-fleet
 fi
 rm -rf "$layout_root"
-# The layout's parents are the package flow's too — but only while empty, and never `/opt`
-# itself: a second instance's layout, or anything else somebody put there, stays.
-rmdir /opt/opamp-fleet/client /opt/opamp-fleet 2>/dev/null || true
-# Hosts upgraded across ADR-0053 had these cleaned by `postinst`; hosts removing an older
-# install directly still carry the pre-ADR-0053 layout beside their data — binaries, so a
-# remove-level cleanup takes them too.
-rm -rf "$data_root/versions"
-rm -f "$data_root/current"

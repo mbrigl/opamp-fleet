@@ -63,11 +63,20 @@ pub struct Handled {
 /// it plays on the host, the Agent that supervises the others. A constant, not the configured
 /// instance name — every Client in a fleet is the same kind of thing, and that is what a type says.
 ///
-/// Since ADR-0080 it is also the shipped program's name, its service's and its configuration
-/// file's — see [`layout::COMPONENT`](crate::service::layout::COMPONENT), which is the same string
-/// for that reason. The package that carries this Client is named after the type too, so
-/// `[self_update] package` defaults to this constant.
-pub const CLIENT_SERVICE_NAME: &str = "supervisor";
+/// Since ADR-0080 it is also the shipped program's name and its configuration file's — see
+/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
+/// **separate** constant. It is *not* the service's name: ADR-0084 clause 5 gives the service the
+/// product's name, and clause 9 keeps this one off
+/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
+/// extracts is the same in every variant build, which is what lets one published package Set
+/// serve them all. Derive this from the product and the fleet carries N products where it has one.
+///
+/// It was called `CLIENT_SERVICE_NAME` until ADR-0084. It never named a service, and with the
+/// service now carrying the product's name the old name would read as the one thing it is not.
+///
+/// The package that carries this Client is named after the type, so `[self_update] package`
+/// defaults to this constant.
+pub const CLIENT_AGENT_TYPE: &str = "supervisor";
 
 pub struct AgentState {
     uid: InstanceUid,
@@ -180,7 +189,7 @@ impl AgentState {
     /// the same applied config hash — and is therefore not reconfigured redundantly.
     ///
     /// `instance_name` is the operator's name for this Agent; the type it presents is
-    /// [`CLIENT_SERVICE_NAME`], since this constructor builds the Client's own Agent. A
+    /// [`CLIENT_AGENT_TYPE`], since this constructor builds the Client's own Agent. A
     /// Supervisor-backed one comes from [`supervised`](Self::supervised), which is told its type.
     pub fn new(instance_name: String, storage: Storage) -> std::io::Result<Self> {
         let uid = storage.load_or_create_uid()?;
@@ -195,7 +204,7 @@ impl AgentState {
             uid,
             sequence_num: 0,
             instance_name,
-            service_name: CLIENT_SERVICE_NAME.to_string(),
+            service_name: CLIENT_AGENT_TYPE.to_string(),
             capabilities: AGENT_CAPABILITIES,
             start_time_ns: now_ns(),
             storage,
@@ -1745,7 +1754,7 @@ mod tests {
         let attributes = reported(&agent.describe());
         assert_eq!(
             attributes.get("service.name").map(String::as_str),
-            Some(CLIENT_SERVICE_NAME)
+            Some(CLIENT_AGENT_TYPE)
         );
         assert_eq!(
             attributes.get("service.instance.name").map(String::as_str),
@@ -1759,9 +1768,9 @@ mod tests {
     /// which is why the two constants are asserted to agree rather than to differ.
     #[test]
     fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
-        assert_eq!(CLIENT_SERVICE_NAME, "supervisor");
+        assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
         assert_eq!(
-            CLIENT_SERVICE_NAME,
+            CLIENT_AGENT_TYPE,
             crate::service::layout::COMPONENT,
             "the type, the program and the service are one word since ADR-0080"
         );

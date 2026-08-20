@@ -2,8 +2,16 @@
 <!--
   The Windows installer (ADR-0046).
 
-  The package delivers one file and then calls the Client's own `service install` (ADR-0010) — it
-  registers no service of its own. An MSI `ServiceInstall` element would write a registration
+  The package delivers one file into `Program Files` and then calls the Client's own
+  `service install` (ADR-0010), which builds the layout and the state directory under
+  `%ProgramData%\opamp-fleet`. That division is ADR-0084 clause 3: `Program Files` is
+  `TrustedInstaller`-owned and read-only once installation finishes, and the layout is rewritten at
+  runtime by the daemon — the self-update stages a new version directory and swings `current`. It
+  is the same line the `.deb` and `.rpm` draw between `/usr/libexec` and `/opt`. The MSI therefore
+  passes **no root at all** and takes the platform defaults, which is also what makes a Windows
+  host installed from the archive and one installed by this package identical.
+
+  It registers no service of its own. An MSI `ServiceInstall` element would write a registration
   knowing nothing of ADR-0030's service name and display name, nor of ADR-0020's SCM recovery
   actions, both of which `service install` sets through calls the `service-manager` backend cannot
   make. There is one install path on four operating systems and this is not a second one.
@@ -13,7 +21,7 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-  <Package Name="OpAMP Fleet Client"
+  <Package Name="OpAMP Fleet Agent"
            Manufacturer="OpAMP Fleet"
            Version="$(Version)"
            Language="1033"
@@ -35,7 +43,7 @@
 
     <MediaTemplate EmbedCab="yes" />
 
-    <SummaryInformation Description="OpAMP Fleet Client — places a machine under OpAMP management" />
+    <SummaryInformation Description="OpAMP Fleet Agent — places a machine under OpAMP management" />
 
     <!--
       Every answer the dialogs collect is a public property (all uppercase) and Secure, and that is
@@ -48,7 +56,7 @@
           how Intune, Group Policy and SCCM will deploy this:
 
               msiexec /i supervisor_1.2.3_windows_amd64.msi /qn ^
-                INSTALLFOLDER="C:\Program Files\OpAMP Fleet Client" ^
+                INSTALLFOLDER="C:\Program Files\opamp-fleet" ^
                 ENDPOINT="wss://fleet.example.com/v1/opamp" ^
                 SELFUPDATE=0
 
@@ -113,13 +121,17 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes" />
 
     <!--
-      One directory for everything (ADR-0046 clause 5): the .exe, the supervisor.toml the install
-      writes, and ADR-0010's versions/, current and state/ all live under INSTALLFOLDER, because
-      the root flag of `service install` already anchors all of them. The operator configures one
-      path, not half of one.
+      One directory the operator configures (ADR-0046 clause 5), holding the payload this package
+      delivers: `supervisor.exe` and nothing else. The layout and the state directory are not here
+      — `service install` puts them under `%ProgramData%\opamp-fleet`, for ADR-0084 clause 3's
+      reason. The operator still configures one path; it simply is not the install root.
+
+      Named after the **product**, not its display name (ADR-0084 clause 2): `nodejs`, `Git` and
+      `PowerShell` sit under `Program Files` under their own slugs, and a directory named for the
+      display name would be the one place a variant build could not tell itself apart.
     -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="OpAMP Fleet Client" />
+      <Directory Id="INSTALLFOLDER" Name="opamp-fleet" />
     </StandardDirectory>
 
     <ComponentGroup Id="ClientFiles" Directory="INSTALLFOLDER">
@@ -131,7 +143,7 @@
       </Component>
     </ComponentGroup>
 
-    <Feature Id="Main" Title="OpAMP Fleet Client" Level="1">
+    <Feature Id="Main" Title="OpAMP Fleet Agent" Level="1">
       <ComponentGroupRef Id="ClientFiles" />
     </Feature>
 
@@ -159,25 +171,26 @@
       of an unset property resolves to nothing — so the consenting command line is character for
       character the one this package sent before ADR-0075.
 
-      The backslash before each [INSTALLFOLDER] closing quote is load-bearing. A directory
-      property always resolves with a trailing backslash, so without it the command line ends in
-      `...Client\" ...` — and the C runtime that builds the client's argv reads a backslash before
-      a quote as an escaped, literal quote, not as the end of the argument. The root then swallows
-      the rest of the line, `service install` stages into an impossible path, and the whole
-      install dies with error 1722. With it, the CRT's rule (2n backslashes + quote = n
-      backslashes, then the quote closes) yields the intended path. `tests/msi_exe_command.rs`
-      parses these lines exactly as the CRT will and fails on a regression.
+      **No `--root` here, and that is ADR-0084 clause 3.** These lines used to pass
+      `--root "[INSTALLFOLDER]\"`, where the doubled backslash was load-bearing: a directory
+      property always resolves with a trailing backslash, and the C runtime that builds the
+      client's argv reads a backslash before a quote as an escaped, literal quote rather than the
+      end of the argument — so the root swallowed the rest of the line and the install died with
+      error 1722. With INSTALLFOLDER no longer being the install root, no directory property
+      reaches a command line at all and the hazard has no way back in.
+      `tests/msi_exe_command.rs` parses these lines exactly as the CRT will and asserts both: that
+      they still survive the split, and that they name no root.
     -->
     <CustomAction Id="RegisterServiceWithEndpoint"
                   FileRef="SupervisorExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot; --endpoint &quot;[ENDPOINT]&quot;[SELFUPDATEFLAG]"
+                  ExeCommand="service install --endpoint &quot;[ENDPOINT]&quot;[SELFUPDATEFLAG]"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
 
     <CustomAction Id="RegisterService"
                   FileRef="SupervisorExe"
-                  ExeCommand="service install --root &quot;[INSTALLFOLDER]\&quot;[SELFUPDATEFLAG]"
+                  ExeCommand="service install[SELFUPDATEFLAG]"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check" />
@@ -187,9 +200,12 @@
       unregistered by hand must still be able to uninstall. Sequenced before RemoveFiles, because a
       type 18 action needs its executable to still be on disk.
 
-      `service uninstall` leaves the install root and the state directory behind, as it does
-      everywhere (ADR-0010) — deleting a supervisor.toml holding a credential the operator typed would
-      be the overwrite ADR-0027 refused, one step later.
+      `service uninstall` leaves both roots behind, as it does everywhere (ADR-0010) — deleting a
+      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0027
+      refused, one step later. What this package's uninstaller then empties is INSTALLFOLDER, which
+      holds only the payload it delivered: exactly right, and the reason ADR-0084 clause 3 moved
+      the data out of `Program Files`. The configuration and the state survive under
+      `%ProgramData%\opamp-fleet`, the same remove-versus-purge shape the `.deb` has.
     -->
     <CustomAction Id="StopService"
                   FileRef="SupervisorExe"
