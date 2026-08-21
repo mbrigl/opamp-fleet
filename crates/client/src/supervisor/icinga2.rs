@@ -665,10 +665,13 @@ async fn intercept(
 ) {
     while let Some(command) = from_core.recv().await {
         let command = match command {
-            ProcessCommand::ApplyConfig { config } => match layout.validate().await {
-                Ok(()) => ProcessCommand::ApplyConfig { config },
+            ProcessCommand::ApplyConfig { config, span } => match layout.validate().await {
+                Ok(()) => ProcessCommand::ApplyConfig { config, span },
                 Err(e) => {
                     tracing::warn!(error = %e, "refusing a configuration Icinga 2 will not accept");
+                    // The apply ends here rather than at the Runner, so this is where its trace
+                    // learns why (ADR-0090).
+                    crate::telemetry::failed(&span, &e);
                     events
                         .send(ProcessEvent::ConfigApplied {
                             hash: config.config_hash,

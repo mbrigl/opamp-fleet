@@ -302,8 +302,13 @@ impl Engine {
         staged: std::path::PathBuf,
         version: String,
         hash: Vec<u8>,
+        span: &tracing::Span,
     ) {
         if index == crate::supervisor::SELF_AGENT_INDEX {
+            // Entered rather than passed on: the self-update runs here, in this task, so the
+            // staging and the probe it does become children of the install by being inside it
+            // (ADR-0090). Nothing is awaited under this guard.
+            let _install = span.enter();
             self.apply_self_update(&staged, version, hash);
             return;
         }
@@ -318,20 +323,19 @@ impl Engine {
                     staged,
                     version,
                     hash: hash.clone(),
+                    span: span.clone(),
                 }) {
+                    let error = "the supervisor is not accepting commands";
                     warn!(error = %e, "cannot hand the package to the supervisor");
-                    agent.state.package_applied(
-                        hash,
-                        Err("the supervisor is not accepting commands".to_string()),
-                    );
+                    crate::telemetry::failed(span, error);
+                    agent.state.package_applied(hash, Err(error.to_string()));
                     agent.owes_report = true;
                 }
             }
             None => {
-                agent.state.package_applied(
-                    hash,
-                    Err("this agent has no process to install a package into".to_string()),
-                );
+                let error = "this agent has no process to install a package into";
+                crate::telemetry::failed(span, error);
+                agent.state.package_applied(hash, Err(error.to_string()));
                 agent.owes_report = true;
             }
         }
@@ -529,17 +533,36 @@ impl Engine {
             } else {
                 match &agent.commands {
                     Some(commands) => {
-                        if let Err(e) = commands.try_send(ProcessCommand::ApplyConfig { config }) {
+                        // The apply's trace (ADR-0090). It opens where the configuration is handed
+                        // over and closes in the adapter, once the Managed Process is back up: the
+                        // hand-over is the start of the operation, not the whole of it, and the
+                        // phases worth timing — the stop, the restart, the health gate — all happen
+                        // on the other side of this channel.
+                        let span = tracing::info_span!(
+                            "config.apply",
+                            agent = %uid,
+                            hash = %hex::encode(&config.config_hash),
+                            otel.status_code = tracing::field::Empty,
+                            otel.status_description = tracing::field::Empty,
+                        );
+                        if let Err(e) = commands.try_send(ProcessCommand::ApplyConfig {
+                            config,
+                            span: span.clone(),
+                        }) {
+                            let error = "the supervisor is not accepting commands";
                             warn!(agent = %uid, error = %e, "cannot hand the configuration to the supervisor");
+                            crate::telemetry::failed(&span, error);
                             agent.state.config_applied(
                                 match e.into_inner() {
-                                    ProcessCommand::ApplyConfig { config } => config.config_hash,
+                                    ProcessCommand::ApplyConfig { config, .. } => {
+                                        config.config_hash
+                                    }
                                     ProcessCommand::ApplyPackage { .. }
                                     | ProcessCommand::Restart
                                     | ProcessCommand::Shutdown
                                     | ProcessCommand::Uninstall => Vec::new(),
                                 },
-                                Err("the supervisor is not accepting commands".to_string()),
+                                Err(error.to_string()),
                             );
                             agent.owes_report = true;
                         }

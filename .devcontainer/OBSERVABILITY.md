@@ -172,12 +172,26 @@ Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** f
 | **Fleet Agents — Logs** | The log stream on its own — volume by level and by client, with service / level / substring filters. |
 | **Fleet Agents — Traces** | Operation rate, error rate, p50/p95/p99 duration, which phase fails most, and a trace detail view. |
 
-**The traces dashboard stays empty for this Client's own telemetry.** The exporter and tracer
-provider are built and registered ([`telemetry.rs`](../crates/client/src/telemetry.rs)), but no
-code creates a span yet — ADR-0036 specifies one span per control-loop operation (a configuration
-applied, a package installed, a self-update) and that instrumentation is not written. The dashboard
-is wired for when it is, and `send-test-telemetry.py` below sends traces in exactly that shape so it
-can be seen working today.
+**What fills the traces dashboard.** Five fleet operations, and nothing else
+([ADR-0090](../docs/adr/0090-own-traces-come-from-the-clients-own-tracing-spans.md)): `package.install`,
+`config.apply` (twice over — a Managed Process's configuration, and the Supervisor set),
+`connection.settings.apply`, and `self.update`. Each is a root span whose children are its phases,
+and whose status is the outcome the Server is told — so *"which phase fails most"* has real rows in
+it and the trace detail view shows a rollout end to end. The transport's own message handling is
+deliberately **not** traced: at one exchange per Agent per interval it would bury those five.
+
+Two things follow, and both are visible here:
+
+- **A log record written inside an operation carries that operation's `TraceId`**, which is what
+  makes the join between `otel_logs` and `otel_traces` above answerable. Log lines outside one carry
+  none — most of them, since most of what a Client logs is not part of a fleet operation.
+- **The very first offer is not in the dashboard.** The span of the `connection.settings.apply` that
+  *installs* the exporter starts before there is an exporter to record it, so that one apply is
+  missing and every operation after it is there. A Client that already holds persisted settings puts
+  the exporter in force at startup and does not have the gap.
+
+`send-test-telemetry.py` below still sends traces in that shape, for looking at the dashboard
+without running a fleet.
 
 Drop any further dashboard JSON into `grafana/dashboards/` — it is picked up within 30 s, no restart.
 

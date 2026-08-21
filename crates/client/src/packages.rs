@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use opamp::proto::PackageDownloadDetails;
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, Instrument as _};
 
 use crate::config::ClientConfig;
 
@@ -154,9 +154,16 @@ pub async fn download_and_verify(
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;
-    // A count, never a key and never a value: this line goes to the log file.
-    info!(package = %package.name, url = %url, headers = package.headers.len(), "downloading package");
-    let mut response = send_download(&client, &url, &package.headers).await?;
+    // A count, never a key and never a value — and the source without whatever authorises reaching
+    // it. This line goes to the log file, and through the bridge to the destination the Server named
+    // (ADR-0036), which is the same reason the span below carries the redacted form: a pre-signed
+    // URL puts its signature in the query, and a log line is a poor place to keep one.
+    let source = source_of(&url);
+    info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
+    let download = tracing::info_span!("download", source = %source);
+    let mut response = send_download(&client, &url, &package.headers)
+        .instrument(download.clone())
+        .await?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -186,6 +193,7 @@ pub async fn download_and_verify(
         progress,
         config.max_artifact_size_bytes,
     )
+    .instrument(download.clone())
     .await
     {
         Ok(hash) => hash,
@@ -194,10 +202,16 @@ pub async fn download_and_verify(
             return Err(e);
         }
     };
+    // The bytes are in; what remains is deciding whether they are the right ones. Its own phase of
+    // the trace (ADR-0090), because the hash and the signature are what a package's security rests
+    // on and "it failed to install" must be able to say which of the two.
+    drop(download);
+    let verify = tracing::info_span!("verify", bytes = staged.len).entered();
     if let Err(e) = verify_staged(&path, &staged, package, config.package_key()) {
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
+    drop(verify);
     info!(package = %package.name, version = %package.version, bytes = staged.len, "package verified");
     Ok(path)
 }
@@ -273,6 +287,27 @@ fn with_headers(
         request = request.header(name, value);
     }
     Ok(request)
+}
+
+/// Where an artifact is being fetched from, without whatever authorises the fetch.
+///
+/// The span this labels leaves the host for a destination the *Server* named (ADR-0090 clause 9), and
+/// a download URL is one of the few strings here that can carry a credential in plain sight: a
+/// pre-signed URL puts its signature in the query. The scheme, host and path answer the question a
+/// trace is read for — *which mirror served this* — and the query answers none of it.
+///
+/// A URL that will not parse is reported as nothing rather than as itself: the one case where the
+/// query cannot be found is the case where it must not be assumed absent.
+fn source_of(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "an unparseable url".to_string();
+    };
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    // A username or password in the URL itself is the other place a credential hides.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.to_string()
 }
 
 /// Whether a redirect stayed where the offered headers may go: same scheme, host, and port.
@@ -443,6 +478,21 @@ fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), Str
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
+
+    /// What labels the download span must not carry what authorises the download: the span goes to
+    /// a destination the Server named (ADR-0090 clause 9), and a pre-signed URL is a credential.
+    #[test]
+    fn the_download_source_drops_whatever_authorises_it() {
+        assert_eq!(
+            source_of("https://mirror.example/artifacts/agent.tar.gz?X-Amz-Signature=deadbeef"),
+            "https://mirror.example/artifacts/agent.tar.gz"
+        );
+        assert_eq!(
+            source_of("https://user:secret@mirror.example/agent.tar.gz#frag"),
+            "https://mirror.example/agent.tar.gz"
+        );
+        assert_eq!(source_of("not a url"), "an unparseable url");
+    }
 
     #[test]
     fn resolve_url_absolutizes_a_path_against_the_endpoint() {

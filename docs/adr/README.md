@@ -118,3 +118,4 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0087](0087-a-servers-capabilities-bind-what-the-client-reports.md) | A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask | 🟢 accepted |
 | [0088](0088-cleartext-own-telemetry-reaches-the-private-address-space.md) | Cleartext own telemetry reaches the private address space — by address, never by name | 🟢 accepted |
 | [0089](0089-an-own-telemetry-offer-states-all-three-destinations.md) | An own-telemetry offer states all three destinations — and an empty endpoint withdraws one | 🟢 accepted |
+| [0090](0090-own-traces-come-from-the-clients-own-tracing-spans.md) | Own traces come from the Client's own `tracing` spans, and a span is a fleet operation | 🟡 proposed |

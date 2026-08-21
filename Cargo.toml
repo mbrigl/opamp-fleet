@@ -112,6 +112,14 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
 opentelemetry-appender-tracing = "0.32"
+# The other half of that bridge (ADR-0090): the appender above converts `tracing` *events* and says
+# so itself — this converts `tracing` *spans* into OpenTelemetry spans, which is what makes the
+# `own_traces` exporter have anything to export. Numbered one release ahead of the OTel crates it
+# binds to, so `0.33` is the one built against `opentelemetry` `0.32`; that pairing is a decision
+# (ADR-0090 clause 1), not a range to widen. It is also what gives the exported log records their
+# TraceId: entering a span activates its OpenTelemetry context, which is where the appender reads
+# the correlation from — the reason its own `experimental_use_tracing_span_context` could be dropped.
+tracing-opentelemetry = "0.33"
 # The OTLP exporters' HTTP client trait. Both crates are already compiled into this binary through
 # `opentelemetry-otlp`; declaring them directly adds no supply chain, it only makes the trait
 # nameable so the exporters can be handed a client bound to this process's Tokio runtime — see

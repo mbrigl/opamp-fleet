@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
+use tracing::Instrument as _;
+
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 
@@ -67,12 +69,23 @@ pub async fn process_package_downloads<S: ReportSink>(
         );
         let progress = crate::packages::Progress::default();
         let started = std::time::Instant::now();
+        // The install's trace (ADR-0090), opened here because this is where the operation begins:
+        // the download and the verification are this task's, the staging and the swap are the
+        // Supervisor's, and the span travels to it with the artifact so the two are one trace.
+        let span = tracing::info_span!(
+            "package.install",
+            package = %name,
+            version = %version,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        );
         // Each Agent stages into its own directory (ADR-0021), so the Supervisor's install is a
         // rename beside the download rather than a copy across filesystems. Keyed by the block
         // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0056).
         let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
-            crate::packages::download_and_verify(&package, config, &staging_dir, &progress);
+            crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
+                .instrument(span.clone());
         tokio::pin!(download);
         // Poll the download and a ticker together: every tick turns the progress the download has
         // been writing into a status report, without the download itself knowing about reporting.
@@ -87,7 +100,7 @@ pub async fn process_package_downloads<S: ReportSink>(
         };
         match result {
             Ok(staged) => {
-                engine.apply_package(index, staged, version, hash);
+                engine.apply_package(index, staged, version, hash, &span);
                 if engine.restart_for_update() {
                     // A self-update moved the `current` pointer (ADR-0020). Whatever else was
                     // queued is moot: this process is about to be replaced, and the caller ends
@@ -97,6 +110,7 @@ pub async fn process_package_downloads<S: ReportSink>(
             }
             Err(e) => {
                 tracing::warn!(package = %name, error = %e, "package download or verification failed");
+                crate::telemetry::failed(&span, &e);
                 engine.package_download_failed(index, hash, e);
             }
         }
@@ -172,13 +186,30 @@ pub async fn process_connection_offer(
     let Some(offer) = engine.take_connection_offer() else {
         return OfferOutcome::None;
     };
+    // Opened here rather than on the function, which is called once per exchange and would
+    // otherwise trace every poll that had nothing to do (ADR-0090 clause 5). What follows is one
+    // operation with an outcome the Server is told about, which is what a span is for here.
+    //
+    // `reconnect` is a field and not a phase: the reconnection itself happens after this returns,
+    // in the transport loop that owns the connection, so a span for it here would measure nothing.
+    let span = tracing::info_span!(
+        "connection.settings.apply",
+        hash = %hex::encode(&offer.hash),
+        reconnect = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+    );
     let mut errors: Vec<String> = Vec::new();
     let mut reconnect = false;
 
     if let Some(settings) = &offer.opamp {
         let probe = || engine.probe_report();
-        if let Err(e) = crate::connection::verify(settings, config, probe).await {
+        if let Err(e) = crate::connection::verify(settings, config, probe)
+            .instrument(tracing::info_span!(parent: &span, "verify"))
+            .await
+        {
             tracing::warn!(error = %e, "offered connection settings failed verification");
+            crate::telemetry::failed(&span, &e);
             engine.connection_settings_outcome(&offer.hash, Err(&e));
             return OfferOutcome::Applied;
         }
@@ -198,18 +229,23 @@ pub async fn process_connection_offer(
         reconnect = true;
     }
 
+    let store = tracing::info_span!(parent: &span, "store").entered();
     let merged =
         crate::connection::merge(crate::connection::load(&config.state_dir).as_ref(), &offer);
     if let Err(e) = crate::connection::store(&config.state_dir, &merged) {
         tracing::warn!(error = %e, "cannot persist the connection settings");
     }
     errors.extend(telemetry.apply(&merged, &engine.self_description(), config));
+    drop(store);
 
+    span.record("reconnect", reconnect);
     if errors.is_empty() {
+        crate::telemetry::succeeded(&span);
         engine.connection_settings_outcome(&offer.hash, Ok(()));
     } else {
         let error = errors.join("; ");
         tracing::warn!(error = %error, "connection settings partly applied");
+        crate::telemetry::failed(&span, &error);
         engine.connection_settings_outcome(&offer.hash, Err(&error));
     }
 

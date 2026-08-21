@@ -12,16 +12,21 @@ use client::service::runtime::{self, RunSpec};
 use client::service::{layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel};
 
 fn main() {
-    // stderr as always, plus an empty slot the OTLP log bridge is dropped into once the Server
-    // names a destination (ADR-0036). The slot has to exist from the start: `tracing` takes one
-    // subscriber for the process, and it is installed long before any destination is known.
+    // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
+    // names a destination: the log bridge for events (ADR-0036) and the span layer for traces
+    // (ADR-0090). Both have to exist from the start: `tracing` takes one subscriber for the
+    // process, and it is installed long before any destination is known.
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let (bridge, handle) = tracing_subscriber::reload::Layer::new(None);
-    client::telemetry::hold_log_bridge(handle);
-    // The bridge goes on first: a reloadable layer is typed for the subscriber it attaches to, and
-    // the registry is the only one of these that stays the same shape when the slot is filled.
+    let (spans, span_handle) = tracing_subscriber::reload::Layer::new(None);
+    client::telemetry::hold_span_layer(span_handle);
+    let (bridge, bridge_handle) = tracing_subscriber::reload::Layer::new(None);
+    client::telemetry::hold_log_bridge(bridge_handle);
+    // The slots go on first, spans before logs: a reloadable layer is typed for the subscriber it
+    // attaches to, and the registry is the only one of these that stays the same shape when a slot
+    // is filled — so the layer that carries that subscriber in its own type goes on the bare one.
     tracing_subscriber::registry()
+        .with(spans)
         .with(bridge)
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()

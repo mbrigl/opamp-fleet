@@ -24,7 +24,13 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`].
-    ApplyConfig { config: AgentRemoteConfig },
+    ApplyConfig {
+        config: AgentRemoteConfig,
+        /// The span of the apply this command is one half of (ADR-0090). The core opens it when the
+        /// configuration is handed over and the adapter's phases hang off it, so one trace covers
+        /// the restart and its health gate rather than ending where the message does.
+        span: tracing::Span,
+    },
     /// A package was downloaded and verified (content hash and signature; ADR-0015): swap its
     /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
@@ -35,6 +41,11 @@ pub enum ProcessCommand {
         staged: PathBuf,
         version: String,
         hash: Vec<u8>,
+        /// The span of the install (ADR-0090), opened where the download started. Carried rather
+        /// than reopened here: staging, preflight, swap, gate and rollback happen in the adapter's
+        /// task, and a trace that ended at the hand-over would stop one phase before the failures
+        /// worth tracing.
+        span: tracing::Span,
     },
     /// The Server commanded a restart (`AcceptsRestartCommand`): stop and respawn on the
     /// *current* files. No configuration changed, so no [`ProcessEvent::ConfigApplied`] follows —

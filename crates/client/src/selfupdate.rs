@@ -62,6 +62,26 @@ pub struct UpdateMarker {
     pub package_hash_hex: String,
     /// How many times a process has started and found this marker.
     pub attempts: u32,
+    /// The trace the install belongs to, and the span inside it that staged this version
+    /// (ADR-0090 clause 6) — hex, as OpenTelemetry writes them.
+    ///
+    /// **Why a telemetry field is in an operational file.** The install necessarily completes in a
+    /// different process than the one that started it, so the span that staged the version is gone
+    /// before the commit or the rollback happens. Without these two ids the trace ends one line
+    /// before the part it exists to explain. The marker is the only thing that crosses that
+    /// boundary, so it is what carries them.
+    ///
+    /// Absent in a marker an older Client wrote, and absent whenever no destination was offered —
+    /// the update proceeds either way, and the following process simply opens its own trace.
+    #[serde(default)]
+    pub trace: Option<TraceRef>,
+}
+
+/// The two ids that name a span in a trace, as [`UpdateMarker`] carries them across the restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceRef {
+    pub trace_id: String,
+    pub span_id: String,
 }
 
 /// What [`on_start`] found, and what the run should therefore do.
@@ -87,6 +107,16 @@ pub struct UpdateOutcome {
     pub package_hash_hex: String,
     /// `None` is `Installed`; `Some(reason)` is `InstallFailed`.
     pub error: Option<String>,
+}
+
+/// The span in which the process that came up after the restart finishes what a previous process
+/// started — a continuation of that install's trace when the marker carries one (ADR-0090 clause 6),
+/// and an ordinary root span when it does not.
+fn continued(marker: &UpdateMarker, span: tracing::Span) -> tracing::Span {
+    if let Some(trace) = &marker.trace {
+        crate::telemetry::continue_trace(&span, &trace.trace_id, &trace.span_id);
+    }
+    span
 }
 
 fn marker_path(state_dir: &Path) -> PathBuf {
@@ -197,10 +227,24 @@ pub fn install(
         info!(version = %version, "the offered version is the one already running");
         return Ok(Install::AlreadyRunning);
     }
-    stage(&new_dir, artifact, version, archive_key)?;
+    // The update's own span (ADR-0090). It sits under the install that downloaded the artifact
+    // when there is one, which there always is today — this is only ever reached from a package
+    // offer — and it is the span the *next* process continues from.
+    //
+    // No status is recorded on it: this process does not learn the outcome. Staging and restarting
+    // is all it does, and claiming success here would call an update good before the version it
+    // installed has started once. The `info!` below is the event that says where it got to.
+    let update = tracing::info_span!("self.update", version = %version).entered();
+    {
+        let _stage = tracing::info_span!("stage", dir = %new_dir.display()).entered();
+        stage(&new_dir, artifact, version, archive_key)?;
+    }
 
     // Prove it before anything points at it.
-    probe(&new_dir.join(BINARY_FILENAME), version)?;
+    {
+        let _probe = tracing::info_span!("probe").entered();
+        probe(&new_dir.join(BINARY_FILENAME), version)?;
+    }
 
     let marker = UpdateMarker {
         previous_dir: running_dir,
@@ -208,12 +252,15 @@ pub fn install(
         version: version.to_string(),
         package_hash_hex: hex::encode(package_hash),
         attempts: 0,
+        trace: crate::telemetry::current_trace()
+            .map(|(trace_id, span_id)| TraceRef { trace_id, span_id }),
     };
     // The marker is written *before* the switch: a crash between the two leaves a marker naming a
     // switch that did not happen, which the next start resolves by pointing at what it names.
     store_marker(state_dir, &marker)?;
     layout.set_current(&new_dir)?;
     info!(version = %version, dir = %new_dir.display(), "staged a new Client version; restarting into it");
+    drop(update);
     Ok(Install::Staged)
 }
 
@@ -333,6 +380,20 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
                 .display()
         );
         warn!(reason, "a self-update did not take effect");
+        // Counted as the rollback phase: nothing was rolled back *here*, but the operation ends the
+        // way a rollback ends — the previous version running and the update reported failed — and
+        // the trace is read for the outcome, not for which code path produced it.
+        let span = continued(
+            &marker,
+            tracing::info_span!(
+                "roll_back",
+                version = %marker.version,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
+            ),
+        );
+        crate::telemetry::failed(&span, &reason);
+        drop(span);
         clear(state_dir);
         store_outcome(
             state_dir,
@@ -353,8 +414,20 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
             marker.version
         );
         warn!(reason, "rolling the Client back to its previous version");
+        let span = continued(
+            &marker,
+            tracing::info_span!(
+                "roll_back",
+                version = %marker.version,
+                attempts = marker.attempts,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
+            ),
+        );
+        let _rolling = span.enter();
         let (layout, _) = Layout::enclosing(&exe).expect("checked above");
         layout.set_current(&marker.previous_dir)?;
+        crate::telemetry::failed(&span, &reason);
         clear(state_dir);
         store_outcome(
             state_dir,
@@ -397,6 +470,18 @@ fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateM
 /// Declares the version this process runs good: the marker goes, and the Server is owed
 /// `Installed`. Called once the Client is up and has reached the Server.
 pub fn commit(state_dir: &Path, marker: &UpdateMarker) {
+    // The last phase of an install that began in a process that no longer exists (ADR-0090).
+    let span = continued(
+        marker,
+        tracing::info_span!(
+            "commit",
+            version = %marker.version,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        ),
+    );
+    let _committing = span.enter();
+    crate::telemetry::succeeded(&span);
     clear(state_dir);
     store_outcome(
         state_dir,
@@ -438,6 +523,7 @@ mod tests {
 
     fn marker(dir: &Path, attempts: u32) -> UpdateMarker {
         UpdateMarker {
+            trace: None,
             previous_dir: dir.join("versions/opamp-client-1.0.0-aaaaaaa"),
             new_dir: dir.join("versions/opamp-client-2.0.0-bbbbbbb"),
             version: "2.0.0".to_string(),
@@ -460,6 +546,38 @@ mod tests {
             !marker_path(dir.path()).exists(),
             "the unreadable marker is removed, not left to be re-read"
         );
+    }
+
+    /// The trace the install belongs to rides in the marker (ADR-0090 clause 6) — and a marker
+    /// written before that field existed still parses.
+    ///
+    /// The second half is the load-bearing one: an update in flight across a version bump is
+    /// exactly when this file is read by a *different* build than the one that wrote it, and a
+    /// marker that failed to parse there would put a Client on probation forever over a field that
+    /// only decorates a trace.
+    #[test]
+    fn a_marker_carries_its_trace_and_one_written_without_it_still_parses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut written = marker(dir.path(), 1);
+        written.trace = Some(TraceRef {
+            trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
+            span_id: "00f067aa0ba902b7".to_string(),
+        });
+        store_marker(dir.path(), &written).expect("store");
+        assert_eq!(load_marker(dir.path()), Some(written));
+
+        // What a Client from before ADR-0090 left behind: every field but this one.
+        let older = serde_json::json!({
+            "previous_dir": dir.path().join("previous"),
+            "new_dir": dir.path().join("new"),
+            "version": "9.9.9",
+            "package_hash_hex": "abcd",
+            "attempts": 1,
+        });
+        std::fs::write(marker_path(dir.path()), older.to_string()).expect("write");
+        let loaded = load_marker(dir.path()).expect("a marker without a trace still loads");
+        assert_eq!(loaded.trace, None);
+        assert_eq!(loaded.version, "9.9.9");
     }
 
     /// A crafted Server offer whose `version` carries `..` or a path separator must be refused

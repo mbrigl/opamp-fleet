@@ -17,6 +17,27 @@ carries a date once its tag exists.
 
 ## [0.4.3]
 
+### Added
+
+- **An Agent reports its own traces.** The `own_traces` destination has been offered, persisted and
+  exported to since 0.4.x, with nothing to export: no code created a span, and the bridge in force
+  converts `tracing` events rather than spans. Five fleet operations are now traces
+  ([ADR-0090](docs/adr/0090-own-traces-come-from-the-clients-own-tracing-spans.md)) — installing a
+  package, applying a configuration (a Managed Process's, and the Supervisor set), applying offered
+  connection settings, and the Client's own self-update — each with its phases as child spans and
+  the outcome the Server is told as the span's status. A failed rollout is one trace naming the
+  phase that failed, instead of a hunt through a day of log lines. A self-update stays **one** trace
+  across its restart: the trace it belongs to rides in the update marker, so the commit or the
+  rollback that a later process performs continues what an earlier one began.
+
+  Two consequences worth knowing before an upgrade. **Exported log records now carry a `TraceId`**
+  where they were written inside one of those operations, which is what makes the cross-signal join
+  in the development stack answerable. And **stderr and the log file gain a span prefix** on those
+  lines — `config.apply{hash=…}: supervisor set applied` — so anything parsing that output by
+  column will see a shape it has not seen before. **What to do:** nothing. With no `own_traces`
+  destination offered the spans are inert, and the transport's own message handling is deliberately
+  *not* traced, so no fleet-wide volume appears where none was asked for.
+
 ### Changed
 
 - **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
