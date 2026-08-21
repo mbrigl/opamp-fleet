@@ -752,10 +752,17 @@ destination *you* name", so this section is the only place a destination comes f
 section, no Agent sends anything.
 
 What arrives: process metrics every 30 seconds (CPU, memory, uptime) for each Client's own process
-*and* for every process it supervises; each Client's own log output as OTLP records; and one span
-per operation that already has a lifecycle here — a configuration being applied, a package being
-installed, a self-update. Each Agent's Resource carries its identifying attributes, so one host's
-several Agents stay apart at the receiving end.
+*and* for every process it supervises; each Client's own log output as OTLP records; and a trace per
+fleet operation — `package.install`, `config.apply` (a Managed Process's configuration, and a
+Client's Supervisor set), `connection.settings.apply`, and `self.update`. Each carries its phases as
+child spans and ends with the outcome the Client reported to this Server, so *which phase* a rollout
+failed in is a question the trace answers. Nothing else is traced: the Clients' own message handling
+would be a continuous stream with no outcome in it, and would bury the operations that have one.
+
+A log record written during one of those operations carries that trace's id, so a backend holding
+both signals can show the lines that explain a failure beside the span that failed. Each Agent's
+Resource carries its identifying attributes, so one host's several Agents stay apart at the
+receiving end.
 
 Two limits worth knowing before you point this somewhere:
 

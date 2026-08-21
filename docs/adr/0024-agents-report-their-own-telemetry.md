@@ -283,6 +283,71 @@ Client off; a literal Server, offering only the signals an operator kept, would 
 supervisor's other signals off. Both directions are interoperability failures, and only one of the
 two readings can be held by both ends.
 
+### Where spans come from
+
+**An exporter is not a producer.** The traces capability is declared, the offer is applied and
+persisted (points 12–15 and 31–33), `telemetry.rs`
+builds the `SpanExporter`, registers the tracer provider globally, and shuts it down on withdrawal —
+and the development stack provisions a dashboard for the result. The first line of the pipeline is
+code that creates a span. Without `#[instrument]`, `span!`, or a tracer outside `telemetry.rs`, a
+Server that offers `own_traces` gets an exporter that has nothing to export.
+
+**Nothing in the log path makes a span, either.** `opentelemetry-appender-tracing` — the bridge of
+point 4 — converts `tracing` **events** into OTLP log records and states the boundary
+itself: *"This crate does not convert `tracing` spans into OpenTelemetry spans. Use
+`tracing-opentelemetry` for that."* So an `#[instrument]` on its own reaches stderr and the log file
+of [ADR-0010](0010-client-os-service.md), and reaches the OTLP destination
+never. The gap is a missing producer, not missing instrumentation, and instrumenting before deciding
+the producer would produce nothing.
+
+**The one-store decision rests on a join that needs a left side.** `.devcontainer/OBSERVABILITY.md`
+justifies collapsing Tempo, Loki and Prometheus into ClickHouse with cross-signal questions —
+*"which log lines belong to the operation that failed"* is a join between `otel_logs` and
+`otel_traces` on `TraceId`. A log record takes its trace context from the span in force, so with no
+span in force every exported log record carries a zero `TraceId`. The store is shaped for a
+correlation only spans can supply.
+
+**Two mechanisms exist in Rust, and the choice between them is no longer awkward.**
+
+- The OpenTelemetry trace API directly: `global::tracer(…)`, a `Context` threaded through the code
+  that is being measured.
+- `tracing-opentelemetry`: a `tracing-subscriber` layer that turns the `tracing` spans a program
+  already writes into OpenTelemetry spans and hands them to the SDK's provider. Version `0.33.0`
+  (2026-05-18) is the one built against `opentelemetry`/`opentelemetry_sdk` `0.32`, which is what
+  this workspace runs; the crate is deliberately numbered one release ahead of the OTel crates it
+  binds to.
+
+The awkwardness between them was correlation. `opentelemetry-appender-tracing` takes a log record's
+trace context from the active OpenTelemetry `Context`, which a `tracing` span did not populate — the
+reason the appender carried an `experimental_use_tracing_span_context` feature, and the reason its
+interaction with `tracing-opentelemetry` produced a run of bug reports
+(`opentelemetry-rust` [#1378](https://github.com/open-telemetry/opentelemetry-rust/issues/1378),
+[#2803](https://github.com/open-telemetry/opentelemetry-rust/issues/2803),
+[#2824](https://github.com/open-telemetry/opentelemetry-rust/issues/2824)). That feature is **gone**
+as of the `0.32` the workspace already depends on, and its changelog says why:
+
+> Remove the `experimental_use_tracing_span_context` since `tracing-opentelemetry` now supports
+> activating the OpenTelemetry context for the current tracing span. This fixes
+> [#3190](https://github.com/open-telemetry/opentelemetry-rust/issues/3190) — the circular dependency
+> introduced by depending on `tracing-opentelemetry` that depends on `opentelemetry`.
+
+`OpenTelemetryLayer::with_context_activation` is the switch that does it, and it is *on by default*:
+entering a `tracing` span attaches its OpenTelemetry context, so the appender finds it. The two
+crates now compose without a feature flag, an experiment, or a workaround — which is what makes this
+decision a small one.
+
+**The reference implementation had the identical gap and closed it.** `opampsupervisor` shipped the
+`reports_own_traces` capability and its exporter before it emitted anything;
+[contrib#38724](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/38724)
+("Emit spans via trace exporter") asked for spans around *"the start of the supervisor"*, *"handling
+messages from the agent"*, *"handling messages from the server"*, and *"applying a new config and
+restarting the collector"*, and was closed by
+[contrib#38797](https://github.com/open-telemetry/opentelemetry-collector-contrib/pull/38797) with
+spans named `GetBootstrapInfo`, `onMessage`, `handleAgentOpAMPMessage` and
+`processRemoteConfigMessage`, whose outcomes are recorded with `span.SetStatus`. Two of those four
+are message-handling spans, and that is the one part of it this decision does not follow — see
+point 40.
+
 ## Decision
 
 We will implement **all three own-telemetry capabilities** through the **OpenTelemetry Rust SDK**,
@@ -547,6 +612,102 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
    carry it there** — it takes no position in `opamp-spec` and opens nothing. What it owes its own
    readers is to say plainly which of the two it follows and why, which is what the row does.
 
+### Own traces come from the Client's own `tracing` spans
+
+We will produce own traces from the **`tracing` spans this Client already writes**, through
+`tracing-opentelemetry`, and treat a span as a **fleet operation with a lifecycle and an outcome** —
+not as a unit of message handling. This is the mechanism behind the Traces row of point
+5: that row says *what* a trace is worth carrying, these points say *how* one comes into
+existence and *which* operations become one.
+
+36. **`tracing-opentelemetry` is the producer.** It joins the three OTel crates of point
+   1, at the version matched to them (`0.33` against `opentelemetry` `0.32`), and it is
+   the only new dependency this decision adds. The reasoning of point 1 carries over
+   unchanged: the standard's own implementation, not a second copy of its schema.
+
+37. **The layer lives in a reload slot, exactly as the log bridge does.** `tracing` takes one
+   subscriber per process and `main` installs it before any destination is known, so the span layer
+   is held open from the start and filled when an offer puts a tracer provider in force — and
+   emptied when the destination is withdrawn (point 33). This is the mechanism
+   `telemetry.rs` already runs for logs, for the same reason, and it keeps the cost of an un-offered
+   destination at what a `tracing` span costs when no layer is interested in it.
+
+38. **Instrumentation is written in `tracing`, never in OpenTelemetry.** `#[instrument]` and
+   `tracing::span!` in the modules being measured; no OTel type outside `telemetry.rs`. An outcome
+   becomes a span status through the crate's reserved fields — `otel.status_code` and
+   `otel.status_description` — so no status vocabulary of this project's own is invented, in keeping
+   with point 2.
+
+39. **These five operations are spans, and their phases are child spans.** Each already has a
+   beginning, an end, named phases in between, and an outcome this Client reports to the Server:
+
+   | Root span | Phases | Where it starts |
+   |---|---|---|
+   | `package.install` | `download`, `verify`, `stage`, `preflight`, `swap`, `gate`, `rollback` | `transport::process_package_downloads` |
+   | `config.apply` (Supervisor set) | `validate`, `stop`, `write`, `purge`, `start` | `reconfigure::apply` |
+   | `config.apply` (Managed Process) | `reload` or `restart`, `gate` | `engine::handle`, where the configuration is handed over |
+   | `connection.settings.apply` | `verify`, `store` | `transport::process_connection_offer` |
+   | `self.update` | `stage`, `probe`, `commit` or `roll_back` | `selfupdate::install` |
+
+   Two of them span **two tasks**: an install and a Managed Process's configuration apply are begun
+   by whoever received the message and finished by the Supervisor's own task. The span travels with
+   the command through the Port, which is why `ProcessCommand::ApplyConfig` and `ApplyPackage` each
+   carry one. A trace that ended at the hand-over would stop exactly where the interesting failures
+   are.
+
+   The names are this project's vocabulary, not a semantic convention. OpenTelemetry defines none for
+   an agent's own lifecycle, and point 2 binds names to the standard *where the standard
+   has one* — which is why the metric names are semconv's and these are not. Stated here so that
+   nobody later "corrects" them towards a convention that does not cover this.
+
+   Two of the five are narrower than the table reads, and the implementation says so rather than
+   forcing the table:
+
+   - **`self.update` is a root only in principle.** A self-update is always reached from a package
+     offer, so in practice it is a child of the `package.install` that downloaded the artifact. That
+     is the better shape — one trace answers *"did this Client update itself"* from the download to
+     the commit — and nothing about it is a separate decision, so it is recorded here rather than
+     given a point of its own.
+   - **`connection.settings.apply` has two phases, not three.** `verify` and `store` are spans;
+     the reconnection is a **field** on the root span, because it happens after the operation
+     returns, in the transport loop that owns the connection. A span for it would measure nothing.
+
+40. **What is deliberately not a span:** the transport exchange (a poll cycle, a WebSocket receive),
+   the metrics sampler tick, and the Supervisor Endpoint's message handling. They have no outcome to
+   carry and no end, and at one exchange per Agent per interval — the Baseline's default is 30 s —
+   they would be an unbounded stream that buries five real operations in the same dashboards, whose
+   *"operation rate"* and *"which phase fails most"* panels are computed over all spans. This is a
+   deliberate divergence from `opampsupervisor`, which spans `onMessage` and
+   `handleAgentOpAMPMessage`: that supervisor is one process managing one Collector, where message
+   handling *is* the work; a Client here multiplexes n Agents over one connection
+   ([ADR-0003](0003-client-modes-and-connection-multiplexing.md)) and runs on every host of a fleet.
+   A failed exchange stays a logged warning, now carrying the trace context of whatever operation was
+   in flight.
+
+41. **The self-update trace crosses the restart.** The trace id and the root span id go into the
+   `UpdateMarker` that ADR-0018 already writes, and the process that comes up after the restart
+   continues that trace: `commit` or `roll_back` is a child of the span that staged the version. Without
+   this the trace ends one line before the part that fails, which is the part the trace exists for. A
+   marker written by an older Client carries no ids; the post-restart span then opens its own trace
+   rather than failing.
+
+42. **No sampler.** Always-on, because the volume is fleet operations and not requests — a handful per
+   host per day. A sampler here would be volume management for a volume that does not exist, and the
+   first thing it would drop is the rare failed rollout the trace was built for.
+
+43. **The logs gain their trace context, and that is part of this decision.** With point
+   37 in force, every log record the appender exports from inside an instrumented
+   operation carries that operation's `TraceId` and `SpanId`. The join
+   `.devcontainer/OBSERVABILITY.md` promises becomes answerable, and the dashboard's trace-detail view
+   can reach the lines that explain a failure.
+
+44. **A span attribute is data leaving the host, and is named one by one.** The same discipline
+   `telemetry.rs` applies to the Resource's descriptive attributes applies here: attributes are
+   chosen individually — a Supervisor name, a package name and version, a configuration hash, a
+   count — and never a whole configuration, a URL with credentials in it, or an offer's headers. The
+   `Debug` impl that already hides package header values exists for this reason and must not be
+   defeated by a span field.
+
 ## Alternatives considered
 
 - **Vendor `opentelemetry-proto` and encode OTLP by hand**, exactly as ADR-0006 vendors the
@@ -566,6 +727,11 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
   as multi-phase lifecycles with outcomes, so the spans are a mapping of state that exists rather
   than new instrumentation. And a bit left undone here would be undone for a reason that stops being
   true the first time someone debugs a rollout.
+  Dropping the promise later, by no longer declaring `ReportsOwnTraces`, is rejected for the same
+  reason and one more: the withdrawal would have to be real — the capability bit, the offer path,
+  the dashboard and the Server's `traces_endpoint` would all have to go. That is more work than
+  instrumenting five operations, and it removes the one signal that answers *why* a rollout failed
+  rather than *that* it did.
 - **Configure the Collector's internal telemetry from the Supervisor**, as `opampsupervisor` does.
   It is the richer answer for a Collector, and it is what an operator coming from upstream will
   expect. Rejected: ADR-0011 forbids this Client from touching a Managed Process's configuration,
@@ -703,6 +869,30 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
   and one Client — ours. If we are going to depart from the text, departing *towards* the
   implementation everyone else runs is the only departure that buys interoperability.
 
+### On producing spans
+
+- **Use the OpenTelemetry trace API directly and add no dependency.** Attractive on the dependency
+  count, and it is what the reference implementation does (in Go, where the context is threaded
+  through every call anyway). Rejected: it puts OTel types and an explicit `Context` into
+  `reconfigure`, `packages`, `selfupdate` and the Supervisor plugins — modules whose whole shape is
+  domain logic with `tracing` on top — and it would leave log correlation to be attached by hand at
+  every site instead of once by a layer. The dependency buys the separation ADR-0011's hexagonal core
+  is built on.
+- **Span every message, as `opampsupervisor` does.** It would make our traces directly comparable to
+  the ecosystem's, which [ADR-0027](0027-interoperability-against-opamp-go.md) generally favours.
+  Rejected on the ground stated in point 40: ADR-0027 makes `opamp-go` the oracle for
+  *protocol behaviour*, and what a Client chooses to measure about itself is not protocol behaviour.
+  Nothing about it reaches the wire.
+- **One span per operation, no child spans.** Simpler, and half the instrumentation. Rejected: the
+  provisioned dashboard's central panel groups child spans by how often they fail, and *"which phase
+  failed"* is the question an operator actually asks of a rollout. A single span answers only *"it
+  failed"*, which the reported package status already says.
+- **Link the post-restart self-update span instead of continuing the trace.** Span links are the
+  standard's way to relate spans in different traces, and a restart is a real boundary. Rejected as
+  the primary mechanism: the operator's question — *"did this update land"* — is one question, and
+  answering it should not require finding a second trace and following a link. The marker carries the
+  ids either way, so this stays a reversible choice about how they are used.
+
 ## Sources / Prior art
 
 - [OpAMP specification — Agent's own telemetry](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md)
@@ -751,6 +941,11 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
   `loadLastReceivedOwnTelemetryConfig`, and the dispatch in `onMessage` — is the source of points
   31–33, read in full rather than summarised; the behaviour in the Context
   section is quoted from it.
+  Its own-traces gap and how it was closed
+  ([contrib#38724](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/38724),
+  [contrib#38797](https://github.com/open-telemetry/opentelemetry-collector-contrib/pull/38797)) —
+  the operations it chose to span and its use of `span.SetStatus` for outcomes: the prior art point
+  39 follows on structure and point 40 departs from on message handling.
 - **`opamp-go`, `client/internal/receivedprocessor.go`** — the pass-through of `OwnMetrics`,
   `OwnTraces`, `OwnLogs` into `MessageData`, gated per capability, with no merge against prior state
   and no persistence. The library leaves the semantics to the Client, which is why the supervisor's
@@ -775,6 +970,22 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
 - [`opentelemetry-appender-tracing`](https://docs.rs/opentelemetry-appender-tracing/latest/opentelemetry_appender_tracing/)
   — `OpenTelemetryTracingBridge`, the standard layer from `tracing` events to OTLP log records,
   registered on the subscriber registry beside the existing `fmt` layer.
+  Version `0.32.0` states that it does not convert `tracing` spans, and its `CHANGELOG` entry removes
+  `experimental_use_tracing_span_context` because `tracing-opentelemetry` now activates the context
+  (fixing the circular dependency of
+  [#3190](https://github.com/open-telemetry/opentelemetry-rust/issues/3190)). Read from the vendored
+  crate source rather than a summary.
+- **[`tracing-opentelemetry` 0.33.0](https://docs.rs/tracing-opentelemetry/0.33.0/tracing_opentelemetry/)**
+  — `OpenTelemetryLayer`, the reserved `otel.name` / `otel.kind` / `otel.status_code` /
+  `otel.status_description` fields, and `with_context_activation` (*"entering a span will activate its
+  OpenTelemetry context, making it available to other OpenTelemetry instrumentation … By default,
+  context activation is enabled"*). Also the version rule that puts `0.33` against `opentelemetry`
+  `0.32`.
+- **`opentelemetry-rust` issues [#1378](https://github.com/open-telemetry/opentelemetry-rust/issues/1378),
+  [#2803](https://github.com/open-telemetry/opentelemetry-rust/issues/2803),
+  [#2824](https://github.com/open-telemetry/opentelemetry-rust/issues/2824)** — the history of
+  log/trace correlation between these two crates, and the reason to state plainly *which* versions
+  this decision depends on.
 - [`opentelemetry-proto`](https://github.com/open-telemetry/opentelemetry-proto) — the schema, which
   this decision deliberately does **not** copy: `opentelemetry-otlp` already depends on the crate
   generated from it, so it is maintained upstream rather than here.
@@ -810,6 +1021,10 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
 - **[ADR-0027](0027-interoperability-against-opamp-go.md)** — `opamp-go` as the behavioural oracle,
   which turns the Client's side of capability negotiation from housekeeping into a requirement; and
   its symmetric-misreading argument, the tie-breaker points 31–35 invoke.
+- **[ADR-0010](0010-client-os-service.md)** — the second `fmt` layer, which is
+  where the visible change to log lines lands.
+- **[ADR-0018](0018-client-self-update.md)** — the `UpdateMarker` and the split across the restart
+  that point 41 rides on.
 
 ## Consequences
 
@@ -968,3 +1183,41 @@ adopted deliberately and recorded as a deviation from the Baseline's text.
   reads upstream's changes anyway. Separately, an Agent that has *stopped* reporting is as invisible
   in the fleet view as a failed rotation is — the same gap the offer-class follow-up names for
   `connection_settings_status`, now with a second reason to close it.
+
+### Of own traces
+
+- **Positive: the third signal exists.** The provisioned dashboard shows real operations instead of
+  what `send-test-telemetry.py` puts there, and a failed rollout is one trace with a failing phase in
+  it rather than a hunt through a day of log lines.
+- **Positive: the logs are joinable.** Trace context on exported log records is what
+  `.devcontainer/OBSERVABILITY.md` assumes when it collapses three stores into one; with spans in
+  force the assumption holds.
+- **Positive: instrumentation is free when nobody asked for it.** With no destination offered the
+  slot is empty, and an `#[instrument]` is a `tracing` span no layer subscribes to.
+- **Negative: a fourth OTel crate, on a release train of its own.** `tracing-opentelemetry` is
+  numbered one ahead of the OTel crates and released after them, so a future `opentelemetry` bump has
+  a second cadence to wait for. That is a real maintenance cost and it is why the version pairing is
+  written into point 36 rather than left to `cargo update`.
+- **Negative: stderr and the log file change shape.** The `fmt` layers print the enclosing span's name
+  and fields on every event inside an instrumented operation, so lines an operator knows gain a
+  `package.install{package=…}:` prefix. Better context, different output — including in the ADR-0010
+  file, which is read with a pager and by whatever the operator greps with.
+- **Negative: a second surface where data leaves the host.** Point 44 states the
+  discipline, but it is a discipline: a span field is as easy to add as a log field and reaches a
+  destination the *Server* named. This is the same exposure the Resource attributes have, spread
+  across five modules instead of one function.
+- **Negative: the offer that switches tracing on is itself untraced.** The span of the
+  `connection.settings.apply` that installs the exporter is created before the exporter exists, so
+  that one apply is missing from the destination it just configured. It cannot be otherwise — there
+  is nothing to export to until that operation is half done — and it corrects itself on the next
+  start, where the persisted settings put the exporter in force before anything runs. Worth knowing
+  before somebody reads the gap as a bug.
+- **Negative: the update marker becomes a telemetry carrier.** It is an operational file with a safety
+  role, and point 41 puts two ids in it that have nothing to do with that role. The
+  fallback keeps an old marker working, but the file has two reasons to change.
+- **Follow-ups:** whether Gateway Mode should carry trace context across the hop — it forwards
+  messages unchanged and speaks in no Agent's name ([ADR-0025](0025-gateway-mode.md)), so relating a
+  downstream Agent's operation to the Gateway's own would be a new decision, not an implementation
+  detail of this one. And whether a Server should be able to ask for less than everything (a sampling
+  hint in the offer) if a large fleet ever makes point 42 wrong; the Baseline offers no
+  field for it.

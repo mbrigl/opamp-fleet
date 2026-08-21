@@ -15,7 +15,64 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.4.2]
+## [0.4.3]
+
+### Added
+
+- **An Agent reports its own traces.** The `own_traces` destination has been offered, persisted and
+  exported to since 0.4.x, with nothing to export: no code created a span, and the bridge in force
+  converts `tracing` events rather than spans. Five fleet operations are now traces
+  ([ADR-0024](docs/adr/0024-agents-report-their-own-telemetry.md)) — installing a
+  package, applying a configuration (a Managed Process's, and the Supervisor set), applying offered
+  connection settings, and the Client's own self-update — each with its phases as child spans and
+  the outcome the Server is told as the span's status. A failed rollout is one trace naming the
+  phase that failed, instead of a hunt through a day of log lines. A self-update stays **one** trace
+  across its restart: the trace it belongs to rides in the update marker, so the commit or the
+  rollback that a later process performs continues what an earlier one began.
+
+  Two consequences worth knowing before an upgrade. **Exported log records now carry a `TraceId`**
+  where they were written inside one of those operations, which is what makes the cross-signal join
+  in the development stack answerable. And **stderr and the log file gain a span prefix** on those
+  lines — `config.apply{hash=…}: supervisor set applied` — so anything parsing that output by
+  column will see a shape it has not seen before. **What to do:** nothing. With no `own_traces`
+  destination offered the spans are inert, and the transport's own message handling is deliberately
+  *not* traced, so no fleet-wide volume appears where none was asked for.
+
+### Changed
+
+- **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
+  carried the Agent's `service.instance.id` and the operator's name for it; it now also carries
+  `service.name` — the Agent *type*
+  ([ADR-0023](docs/adr/0023-what-describes-an-agent.md)), which
+  differs per Agent within one Client and therefore belongs on the sample rather than on the
+  Resource — while the OTLP Resource carries `os.type`, `host.arch` and `os.description` beside
+  what identifies the Client. A series can be read as "this Agent, of this type, on this platform"
+  without a lookup elsewhere. Nothing else from the Agent description is sent: not the host's
+  addresses, not the operator's own `[attributes]`. **What to do:** nothing — the attributes that
+  were there are unchanged, these are additional.
+
+- **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
+  the running version, the configuration file, the state directory, the endpoint and the number of
+  Supervisors — the version appeared in no log line until now, so a file a self-update left behind
+  ([ADR-0018](docs/adr/0018-client-self-update.md),
+  [ADR-0010](docs/adr/0010-client-os-service.md)) could not be attributed to
+  the version that wrote it — and then the trust and the client certificate actually in force,
+  which is a Server-issued one no `supervisor.toml` mentions when there is one
+  ([ADR-0013](docs/adr/0013-agent-admission-on-the-opamp-endpoint.md)). A
+  configuration file that is not there is now said out loud as well, because a mistyped `--config`
+  otherwise starts cleanly on defaults and supervises nothing. **What to do:** nothing; anything
+  parsing the log gains lines, and loses none.
+
+- **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
+  unpacked because it sits outside the program's own directory
+  ([ADR-0015](docs/adr/0015-package-delivery-for-managed-processes.md)) is now named, not only counted; the Collector
+  Supervisor states which config-map entries it hands the Collector on every (re)start; and the
+  `command` Supervisor states the fully expanded invocation of its Foreign Agent
+  ([ADR-0019](docs/adr/0019-supervisor-directory-programs-and-supervisor-set.md)) — its
+  environment by variable name only, never by value. **What to do:** nothing, unless you are
+  chasing one of those, in which case `RUST_LOG=debug` now answers it.
+
+## [0.4.2] - 2026-08-21
 
 ### Added
 

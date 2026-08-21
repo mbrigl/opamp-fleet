@@ -20,9 +20,12 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use opamp::attributes::{string_value, SERVICE_INSTANCE_NAME};
+use opamp::attributes::{
+    string_value, HOST_ARCH, OS_DESCRIPTION, OS_TYPE, SERVICE_INSTANCE_NAME, SERVICE_NAME,
+};
 use opamp::proto::{AgentDescription, ConnectionSettingsOffers, TelemetryConnectionSettings};
 use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{
     LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig,
@@ -70,6 +73,30 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(SAMPLE_INTERVAL.as_secs() /
 /// The instrumentation scope every signal this Client emits is attributed to.
 const SCOPE: &str = "opamp-fleet-client";
 
+/// The non-identifying attributes the Resource carries beside what identifies the Agent — named
+/// one by one rather than taken as a bag.
+///
+/// **Why a list and not "everything non-identifying".** That bag also holds `host.ip`, `host.mac`
+/// and whatever the operator wrote under `[attributes]` in `supervisor.toml`. ADR-0024 says out loud
+/// that the Resource is what leaves the host for a destination the *Server* named, so widening this
+/// to the whole bag is a decision about what gets sent somewhere else — naming what describes the
+/// platform is not.
+///
+/// - `service.instance.name` is non-identifying only because the Baseline has no key for a human
+///   instance name and identity stays `service.instance.id` (ADR-0023) — that is a statement about
+///   *identity*, not about what the telemetry is worth carrying. Without it every series at the
+///   receiving end is a uuid the operator cannot place against the fleet view they searched by.
+/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0017), and
+///   `os.description` is the readable form of the first. They sit on the Resource rather than on
+///   each sample because they are a property of the *host*: this Client samples its own process and
+///   the Managed Processes it holds the pids of, so every Agent in one export runs on the machine
+///   this Resource describes. Per-sample they would be a constant repeated on every data point.
+///
+/// Each is reported only where the description carries it — an absent attribute says "unknown",
+/// where one carrying a placeholder would say something false.
+const DESCRIPTIVE_ATTRIBUTES: [&str; 4] =
+    [SERVICE_INSTANCE_NAME, OS_TYPE, HOST_ARCH, OS_DESCRIPTION];
+
 /// The layer the `tracing` subscriber reserves for the OTLP bridge, so a destination that arrives
 /// at runtime has somewhere to go (ADR-0024).
 ///
@@ -82,15 +109,139 @@ type BridgeLayer = Option<
         opentelemetry_sdk::logs::SdkLogger,
     >,
 >;
-static BRIDGE: std::sync::OnceLock<
-    tracing_subscriber::reload::Handle<BridgeLayer, tracing_subscriber::Registry>,
+static BRIDGE: std::sync::OnceLock<tracing_subscriber::reload::Handle<BridgeLayer, WithSpans>> =
+    std::sync::OnceLock::new();
+
+/// The second slot, for the span exporter (ADR-0024). The appender above converts `tracing`
+/// *events* and says so in its own documentation; this is what converts `tracing` *spans*, and
+/// without it the `own_traces` exporter has nothing to export.
+///
+/// Two slots rather than one, because the two destinations are independent: an offer may name
+/// traces and not logs, or withdraw one and keep the other (ADR-0024).
+///
+/// Public because `main` builds the slot and has to name what it holds — the subscriber is
+/// installed there, long before this module has anything to put in it.
+pub type SpanLayer = Option<
+    tracing_opentelemetry::OpenTelemetryLayer<
+        tracing_subscriber::Registry,
+        opentelemetry_sdk::trace::SdkTracer,
+    >,
+>;
+
+/// The subscriber the *log* slot sits on: the registry with the span slot already added.
+///
+/// The span slot goes on first so the layer inside it is typed for the bare `Registry` rather than
+/// for a stack of layers. The order is otherwise immaterial — the filter that governs both is a
+/// layer of the same subscriber, so neither slot filters the other.
+pub type WithSpans = tracing_subscriber::layer::Layered<
+    tracing_subscriber::reload::Layer<SpanLayer, tracing_subscriber::Registry>,
+    tracing_subscriber::Registry,
+>;
+
+static SPANS: std::sync::OnceLock<
+    tracing_subscriber::reload::Handle<SpanLayer, tracing_subscriber::Registry>,
 > = std::sync::OnceLock::new();
 
 /// Hands this module the slot the subscriber reserved. Called once, from the binary's startup.
-pub fn hold_log_bridge(
-    handle: tracing_subscriber::reload::Handle<BridgeLayer, tracing_subscriber::Registry>,
-) {
+pub fn hold_log_bridge(handle: tracing_subscriber::reload::Handle<BridgeLayer, WithSpans>) {
     let _ = BRIDGE.set(handle);
+}
+
+/// The same, for the span slot (ADR-0024).
+pub fn hold_span_layer(
+    handle: tracing_subscriber::reload::Handle<SpanLayer, tracing_subscriber::Registry>,
+) {
+    let _ = SPANS.set(handle);
+}
+
+fn set_spans(provider: Option<&SdkTracerProvider>) {
+    let Some(handle) = SPANS.get() else {
+        return;
+    };
+    let layer =
+        provider.map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer(SCOPE)));
+    if let Err(e) = handle.modify(|slot| *slot = layer) {
+        warn!(error = %e, "cannot install the OTLP span layer");
+    }
+}
+
+/// The two fields every operation span declares empty and fills in when it ends.
+///
+/// They are `tracing-opentelemetry`'s reserved names, not this project's: recording them turns into
+/// the OpenTelemetry span status, which is what ADR-0024 meant by *"the existing outcome becomes the
+/// span status"*. Declared empty at creation because a field can only be recorded on a span that
+/// declared it — and the outcome is, by definition, not known then.
+///
+/// Written through [`failed`] and [`succeeded`] rather than by hand at a dozen call sites, so the
+/// spelling of the status codes lives in one place.
+pub const STATUS_CODE: &str = "otel.status_code";
+/// The description beside [`STATUS_CODE`]; recorded only with an error, as the crate ignores it
+/// otherwise.
+pub const STATUS_DESCRIPTION: &str = "otel.status_description";
+
+/// Marks the operation `span` measures as failed, with the message the Server is told.
+///
+/// The message is this Client's own error text — the same string that reaches the Server as the
+/// operation's status and the log as a `warn!`. Nothing is composed for the trace alone: a trace
+/// that says something different from the report beside it is worse than no trace.
+pub fn failed(span: &tracing::Span, error: &str) {
+    span.record(STATUS_CODE, "ERROR");
+    span.record(STATUS_DESCRIPTION, error);
+}
+
+/// Marks the operation `span` measures as succeeded.
+///
+/// Explicit rather than implied by the absence of an error: an unset status is *"unset"* in the
+/// standard's own vocabulary, which is what a span that ended abruptly also looks like.
+pub fn succeeded(span: &tracing::Span) {
+    span.record(STATUS_CODE, "OK");
+}
+
+/// The trace the operation in force belongs to, as the two hex ids that identify it — or `None`
+/// when nothing is being traced, which is every run with no destination offered.
+///
+/// Exists so a caller can persist a trace across something a span cannot survive: the self-update's
+/// restart (ADR-0024 clause 41), where the process that stages a version is not the process that
+/// commits or rolls back one. The OpenTelemetry types stay here; what leaves this module is two
+/// strings.
+#[must_use]
+pub fn current_trace() -> Option<(String, String)> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let context = span.span_context();
+    context.is_valid().then(|| {
+        (
+            context.trace_id().to_string(),
+            context.span_id().to_string(),
+        )
+    })
+}
+
+/// Makes `span` a continuation of the trace [`current_trace`] returned in an earlier process.
+///
+/// The parent is marked **remote**, which is what it is: the span it names ended with a process
+/// that is gone. Ids that do not parse are ignored rather than reported — they come from a file an
+/// older version wrote, and a trace is not worth failing an update over.
+pub fn continue_trace(span: &tracing::Span, trace_id: &str, span_id: &str) {
+    use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId};
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let (Ok(trace_id), Ok(span_id)) = (TraceId::from_hex(trace_id), SpanId::from_hex(span_id))
+    else {
+        return;
+    };
+    let parent = SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        true,
+        opentelemetry::trace::TraceState::default(),
+    );
+    // The error case is "there is no such span to give a parent to" — a closed span, or a run with
+    // no subscriber interested in it. Nothing to report: this whole function is best-effort
+    // decoration on an update that proceeds either way.
+    let _ = span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
 }
 
 fn set_bridge(provider: Option<&SdkLoggerProvider>) {
@@ -107,15 +258,20 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
 
 /// One Agent's own metrics: which Agent a series belongs to, and the process to read it from.
 ///
-/// Both names travel together because neither answers on its own. The uid is the identity the
-/// protocol keys everything by, and the instance name is the only part of it an operator recognises
-/// (ADR-0023) — a series labelled with one and not the other is either unreadable or ambiguous.
+/// All three names travel together because none answers on its own. The uid is the identity the
+/// protocol keys everything by, the instance name is the only part of it an operator recognises,
+/// and the type says what the thing *is* (ADR-0023) — a series labelled with one and not the others
+/// is either unreadable or ambiguous.
 #[derive(Clone)]
 pub struct SamplingTarget {
     /// The Agent's `service.instance.id`.
     pub uid: String,
     /// The operator's name for it.
     pub instance_name: String,
+    /// The Agent *type* it is reported under — `service.name` (ADR-0023). Per Agent rather than on
+    /// the Resource: one Client reports its own `supervisor` beside an `otelcol` and an `icinga2`,
+    /// so unlike the platform this differs *within* a single export.
+    pub service_name: String,
     /// The process to sample: this one for the Client's own Agent, the Managed Process for a
     /// Supervisor-backed one.
     pub pid: u32,
@@ -206,6 +362,10 @@ impl Telemetry {
             {
                 Ok(provider) => {
                     opentelemetry::global::set_tracer_provider(provider.clone());
+                    // The spans themselves come from this Client's `tracing` spans (ADR-0024); the
+                    // global provider above is for anything reaching the OpenTelemetry API
+                    // directly, which nothing here does.
+                    set_spans(Some(&provider));
                     this.tracers = Some(provider);
                 }
                 Err(e) => refused.push(e),
@@ -251,14 +411,17 @@ impl Telemetry {
         let meter = meters.meter(SCOPE);
         // Per Agent rather than left to the Resource: the Resource is the *Client's* identity
         // (`apply` is handed the self-Agent's description), so a Managed Process's series would
-        // otherwise carry the Supervisor's uid and the Supervisor's name. Both keys are restated
-        // here for the same reason — one identifies the series, the other makes it readable.
+        // otherwise carry the Supervisor's uid, name and type. All three keys are restated here for
+        // the same reason — one identifies the series, one makes it readable, and one says what the
+        // Agent is. `service.name` in particular means two different things on the two levels: on
+        // the Resource it is the Client's type (`supervisor`), here it is the sampled Agent's.
         let attributes = [
             KeyValue::new(
                 opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
                 target.uid.clone(),
             ),
             KeyValue::new(SERVICE_INSTANCE_NAME, target.instance_name.clone()),
+            KeyValue::new(SERVICE_NAME, target.service_name.clone()),
         ];
         // Gauges rather than counters: what is sampled is a level, and the exporter's periodic
         // reader is what turns a series of levels into a time series.
@@ -306,6 +469,9 @@ impl Providers {
             }
         }
         if let Some(provider) = self.tracers.take() {
+            // Detached before the provider goes, for the reason the bridge is: a span opened during
+            // shutdown must not reach an exporter that is closing.
+            set_spans(None);
             if let Err(e) = provider.shutdown() {
                 warn!(error = %e, "the traces exporter did not shut down cleanly");
             }
@@ -538,17 +704,12 @@ fn resource(description: &AgentDescription) -> Resource {
         };
         Some(KeyValue::new(kv.key.clone(), value))
     });
-    // `service.instance.name` is non-identifying only because the Baseline has no key for a human
-    // instance name and identity stays `service.instance.id` (ADR-0023) — that is a statement about
-    // *identity*, not about what the telemetry is worth carrying. Without it every series at the
-    // receiving end is a uuid the operator cannot place against the fleet view they searched by.
-    let name = string_value(
-        &description.non_identifying_attributes,
-        SERVICE_INSTANCE_NAME,
-    )
-    .map(|name| KeyValue::new(SERVICE_INSTANCE_NAME, name.to_string()));
+    let descriptive = DESCRIPTIVE_ATTRIBUTES.iter().filter_map(|key| {
+        string_value(&description.non_identifying_attributes, key)
+            .map(|value| KeyValue::new(*key, value.to_string()))
+    });
     Resource::builder_empty()
-        .with_attributes(attributes.chain(name))
+        .with_attributes(attributes.chain(descriptive))
         .build()
 }
 
@@ -939,6 +1100,50 @@ mod tests {
         );
     }
 
+    /// The platform travels with the telemetry, because a series that cannot be placed on an
+    /// operating system and an architecture (ADR-0017) cannot be read against a fleet whose Agents
+    /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
+    /// host this Resource describes, so per-sample it would be a constant repeated on every point.
+    #[test]
+    fn the_resource_carries_the_platform() {
+        let mut description = description();
+        for (key, value) in [("os.type", "linux"), ("host.arch", "amd64")] {
+            description
+                .non_identifying_attributes
+                .push(opamp::attributes::string_attr(key, value));
+        }
+        let resource = resource(&description);
+        let attribute = |key: &str| {
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(attribute("os.type").as_deref(), Some("linux"));
+        assert_eq!(attribute("host.arch").as_deref(), Some("amd64"));
+    }
+
+    /// And nothing else does. The non-identifying attributes are a bag that also holds the host's
+    /// addresses and whatever the operator tagged this Agent with (ADR-0012) — the Resource is what
+    /// leaves the host for a destination the *Server* named, so what goes in it is a named list,
+    /// not the bag. This is the test that fails if that list is ever replaced by a filter.
+    #[test]
+    fn the_resource_carries_no_other_non_identifying_attribute() {
+        let mut description = description();
+        for (key, value) in [("host.name", "edge-01.example"), ("team", "platform")] {
+            description
+                .non_identifying_attributes
+                .push(opamp::attributes::string_attr(key, value));
+        }
+        let resource = resource(&description);
+        for key in ["host.name", "team"] {
+            assert!(
+                resource.iter().all(|(k, _)| k.as_str() != key),
+                "{key} reached the Resource"
+            );
+        }
+    }
+
     /// The instance name is non-identifying, so it is reported where an Agent has one and left out
     /// where it does not — an absent attribute says "unknown" where an empty one says nothing true.
     #[test]
@@ -987,5 +1192,135 @@ mod tests {
                 .is_some_and(reqwest::Error::is_timeout),
             "a silent destination must time out, got {outcome:?}"
         );
+    }
+
+    /// The whole chain the traces half rests on (ADR-0024): a `tracing` span this Client writes,
+    /// through the layer, the provider and the exporter, to the destination the Server offered.
+    ///
+    /// Worth an end-to-end test rather than a unit one because every link was already in place
+    /// *except* the first, and the failure it guards against is silent: the exporter builds, the
+    /// offer is acknowledged, the dashboard stays empty. It asserts the span's name and its
+    /// recorded status, which is what makes a trace worth reading.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_span_this_client_writes_reaches_the_offered_destination() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        crate::tls::install_ring_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/traces", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.expect("the exporter connects");
+            // Read until the exporter has nothing more to say, then answer: the body is protobuf
+            // and this stub has no reason to parse it — the span's name and status travel as plain
+            // strings inside it, which is exactly what is being asserted.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(Ok(read)) =
+                tokio::time::timeout(Duration::from_millis(200), connection.read(&mut chunk)).await
+            {
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let _ = connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = tx.send(request);
+        });
+
+        let provider = trace_provider(
+            &destination(&endpoint),
+            Resource::builder_empty().build(),
+            &ClientConfig::default(),
+        )
+        .expect("the provider builds");
+        // The layer the slot holds in a real run, installed for this thread only: the process-wide
+        // subscriber belongs to `main`, and a test must not take it from the other tests.
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SCOPE)));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "package.install",
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
+            );
+            let _entered = span.enter();
+            failed(&span, "the artifact would not start");
+        });
+
+        // Blocking, on a thread of its own: the batch processor drives its export with a blocking
+        // wait, and the export itself needs this runtime to send the request.
+        let flushed = provider.clone();
+        tokio::task::spawn_blocking(move || flushed.shutdown())
+            .await
+            .expect("the flush thread")
+            .expect("the exporter flushes");
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("the exporter posts within the export timeout")
+            .expect("the stub answers");
+        let body = String::from_utf8_lossy(&request);
+        assert!(
+            body.contains("package.install"),
+            "the span's name is exported"
+        );
+        assert!(
+            body.contains("the artifact would not start"),
+            "the recorded status description travels with it"
+        );
+    }
+
+    /// ADR-0024 clause 41: an operation that outlives the process it started in stays **one** trace.
+    ///
+    /// Asserted through the two functions the self-update uses — the ids it writes into its marker,
+    /// and the parent it builds from them afterwards — because what the restart breaks is exactly
+    /// the link between those two, and nothing else about it can be tested in one process.
+    #[test]
+    fn a_trace_survives_being_written_down_and_picked_up_again() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        // No exporter: what is under test is the identity of the trace, not its delivery.
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SCOPE)));
+        tracing::subscriber::with_default(subscriber, || {
+            // The process that stages the version: it records what it is part of.
+            let staged = {
+                let install = tracing::info_span!("package.install");
+                let _entered = install.enter();
+                current_trace().expect("an install is being traced")
+            };
+
+            // The process that comes up after the restart: a fresh span, told what it continues.
+            let commit = tracing::info_span!("commit");
+            continue_trace(&commit, &staged.0, &staged.1);
+            let _entered = commit.enter();
+            let continued = current_trace().expect("the commit is being traced");
+
+            assert_eq!(continued.0, staged.0, "the same trace");
+            assert_ne!(continued.1, staged.1, "a span of its own within it");
+        });
+    }
+
+    /// And an unusable pair changes nothing: the ids come from a file an older version wrote, and
+    /// an update is not worth failing over a trace.
+    #[test]
+    fn an_unreadable_trace_reference_is_ignored() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(SCOPE)));
+        tracing::subscriber::with_default(subscriber, || {
+            let commit = tracing::info_span!("commit");
+            continue_trace(&commit, "not-a-trace-id", "nor-a-span-id");
+            let _entered = commit.enter();
+            assert!(
+                current_trace().is_some(),
+                "the span still belongs to a trace of its own"
+            );
+        });
     }
 }

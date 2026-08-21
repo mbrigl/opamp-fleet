@@ -105,8 +105,8 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
           "unit": "reqps"
@@ -162,8 +162,8 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
           "unit": "reqps"
@@ -219,8 +219,8 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
           "unit": "ms"

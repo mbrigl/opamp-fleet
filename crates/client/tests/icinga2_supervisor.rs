@@ -130,6 +130,7 @@ async fn apply_config(harness: &Harness) {
                 config_hash: b"hash".to_vec(),
                 ..Default::default()
             },
+            span: tracing::Span::current(),
         })
         .await
         .expect("send");

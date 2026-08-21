@@ -138,24 +138,90 @@ separates a Managed Process from the Client that sampled it, and every "which Ag
 latter. Metric names are stored unmodified — `process.memory.usage`, `process.cpu.utilization`,
 `process.uptime` — with no Prometheus-style normalisation to unpick.
 
+**The platform is on the Resource too.** `ResourceAttributes['os.type']` and `['host.arch']` — the
+two halves ADR-0017 selects a package variant by — plus `['os.description']` for the readable form.
+They describe the *host*, not one Agent: this Client samples its own process and the Managed
+Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
+Nothing else from the `AgentDescription`'s non-identifying attributes is sent — not the host's
+addresses, not the operator's own `[attributes]` — see `DESCRIPTIVE_ATTRIBUTES` in
+[`telemetry.rs`](../crates/client/src/telemetry.rs) for why that is a named list rather than a
+filter.
+
+**`service.name` means two different things on the two levels.** On the Resource it is the
+*Client's* type (`supervisor`); on the data point it is the type of the Agent the sample is *about*
+— `otelcol`, `icinga2`, `supervisor` — the Managed Process's own word where it reports one and the
+configured type otherwise, which is the same value the fleet view shows. One Client reports all
+three side by side, so unlike the platform this differs *within* a single export and cannot live on
+the Resource. The dashboard's **Client type** variable filters the former; the **Type** column and
+the series label carry the latter.
+
+The metric panels put all of it to work: a series is *grouped* by
+`Attributes['service.instance.id']` and *labelled* with a string built in SQL from the Agent's name,
+its type and its host's `os.type` — `edge-01 · otelcol · linux`, with empty parts dropped rather
+than left as hanging separators. The uid stays the grouping key on purpose: two Agents on different
+hosts may well carry the same instance name, and grouping by the readable one would silently average
+them into a single series.
+
 ## What is already there
 
 Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** folder:
 
 | Dashboard | Shows |
 | --------- | ----- |
-| **Fleet Agents — Overview** | All three signals on one page: how many agents report, their memory / CPU / uptime, log volume by level with a live tail, and operation rate with the recent ones. Filterable by client type and agent. |
+| **Fleet Agents — Overview** | All three signals on one page: how many agents report, their memory / CPU / uptime, log volume by level with a live tail, and operation rate with the recent ones. Filterable by client type, agent, and platform. |
 | **Fleet Agents — Logs** | The log stream on its own — volume by level and by client, with service / level / substring filters. |
 | **Fleet Agents — Traces** | Operation rate, error rate, p50/p95/p99 duration, which phase fails most, and a trace detail view. |
 
-**The traces dashboard stays empty for this Client's own telemetry.** The exporter and tracer
-provider are built and registered ([`telemetry.rs`](../crates/client/src/telemetry.rs)), but no
-code creates a span yet — ADR-0024 specifies one span per control-loop operation (a configuration
-applied, a package installed, a self-update) and that instrumentation is not written. The dashboard
-is wired for when it is, and `send-test-telemetry.py` below sends traces in exactly that shape so it
-can be seen working today.
+**What fills the traces dashboard.** Five fleet operations, and nothing else
+([ADR-0024](../docs/adr/0024-agents-report-their-own-telemetry.md)): `package.install`,
+`config.apply` (twice over — a Managed Process's configuration, and the Supervisor set),
+`connection.settings.apply`, and `self.update`. Each is a root span whose children are its phases,
+and whose status is the outcome the Server is told — so *"which phase fails most"* has real rows in
+it and the trace detail view shows a rollout end to end. The transport's own message handling is
+deliberately **not** traced: at one exchange per Agent per interval it would bury those five.
+
+Two things follow, and both are visible here:
+
+- **A log record written inside an operation carries that operation's `TraceId`**, which is what
+  makes the join between `otel_logs` and `otel_traces` above answerable. Log lines outside one carry
+  none — most of them, since most of what a Client logs is not part of a fleet operation.
+- **The very first offer is not in the dashboard.** The span of the `connection.settings.apply` that
+  *installs* the exporter starts before there is an exporter to record it, so that one apply is
+  missing and every operation after it is there. A Client that already holds persisted settings puts
+  the exporter in force at startup and does not have the gap.
+
+`send-test-telemetry.py` below still sends traces in that shape, for looking at the dashboard
+without running a fleet.
 
 Drop any further dashboard JSON into `grafana/dashboards/` — it is picked up within 30 s, no restart.
+
+### Why the line panels set an interval and a null threshold
+
+Dashboard JSON carries no comments, so the reasoning for three settings that look arbitrary lives
+here.
+
+Every metric panel queries in *long format* — one row per (bucket, agent) — and Grafana turns that
+into one column per agent over a shared time axis. A bucket in which one agent has no sample
+becomes a `null` in its column, even when that bucket exists only because *another* agent sampled
+there. With `spanNulls: false` and `showPoints: "never"`, two agents whose samples fall into
+alternating buckets therefore have a `null` between every pair of their own points, and a line panel
+draws nothing at all: legend, tooltip and values are there, the canvas is empty. One agent never
+shows it — its rows are contiguous — so the failure appears exactly when a second Client starts
+reporting.
+
+The buckets alternate because each Client's `PeriodicReader` runs in its own phase (the samples of
+*one* Client share a timestamp, so its Managed Processes stay aligned), and because
+`$__timeInterval` resolves from the panel's width — around 5 s over an hour, well below the 10 s
+sampling interval ADR-0024 sets.
+
+Hence:
+
+- **`"interval": "30s"`** on the three metric panels — three samples per bucket, so a bucket without
+  a sample is a real absence rather than a phase artefact.
+- **`"spanNulls": 60000`** instead of `false` — bridges a single missing bucket, and leaves anything
+  longer as the visible gap it is. The uptime panel's *"a gap is a process that was not running"*
+  still holds; what it no longer reports is the join's own nulls.
+- **`"showPoints": "auto"`** — a sample with no neighbour is drawn as a point instead of vanishing.
 
 ## Seeding test data
 

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
@@ -50,6 +51,16 @@ fn collector_spec(
     if entries.is_empty() {
         return None;
     }
+    // Which files the Collector is about to be handed. This spec is rebuilt on every (re)start, so
+    // the line stands between "a configuration arrived" and "the Collector restarted" — which is
+    // where *"it is still running the old configuration"* is settled: the entries are written
+    // before the respawn, so a set that does not match what the Server sent is a storage question
+    // and one that matches is a Collector question. Neither is answerable from the outside today.
+    debug!(
+        config_dir = %config_dir.display(),
+        configs = ?entries.iter().map(|e| e.display().to_string()).collect::<Vec<_>>(),
+        "collector configuration in force"
+    );
     let mut args = Vec::with_capacity(entries.len() * 2 + extra_args.len());
     for entry in entries {
         args.push("--config".to_string());
