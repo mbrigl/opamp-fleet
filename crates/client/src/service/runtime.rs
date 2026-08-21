@@ -138,6 +138,63 @@ fn start_log_file(config: &crate::config::ClientConfig) {
     }
 }
 
+/// What this process is and what it will use, in one line each, before it uses any of it.
+///
+/// **The version is the point of the first line.** It rides in every report to the Server and names
+/// the directory this binary runs from (ADR-0010), and until now it appeared in no log line at all
+/// — so the file a self-update left behind (ADR-0020, ADR-0041) could not be attributed to the
+/// version that wrote it, which is the situation that file exists for. The rest of the line is what
+/// an operator otherwise has to reconstruct from the command line of a service they did not start.
+///
+/// **The second line is the trust and the identity in force**, resolved through the same two
+/// accessors the transports build their TLS from (ADR-0007, ADR-0035) rather than read off the
+/// configuration — so it states what *will* be presented, including a Server-issued certificate
+/// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
+/// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
+/// end that knows least about it.
+fn announce(config: &ClientConfig, config_path: &std::path::Path) {
+    // A missing file is not an error — `ClientConfig::load` runs on defaults, deliberately, so a
+    // Client can start before anything is written. It is worth a word all the same: a mistyped
+    // `--config` produces exactly this, and the result is a Client that starts cleanly, points at
+    // the default endpoint and supervises nothing, which reads like a healthy start. Said here
+    // rather than in `config`, which parses and does not log.
+    if !config_path.exists() {
+        tracing::warn!(
+            config = %config_path.display(),
+            "no configuration file there; running on defaults"
+        );
+    }
+    tracing::info!(
+        version = opamp::version::current(),
+        config = %config_path.display(),
+        state_dir = %config.state_dir.display(),
+        endpoint = %config.endpoint,
+        supervisors = config.supervisors.len(),
+        "client starting"
+    );
+    let (trust, identity) = tls_posture(config);
+    tracing::info!(trust = %trust, client_certificate = %identity, "outbound tls");
+}
+
+/// What the transports will trust, and what they will present — as the two strings the line above
+/// reports.
+///
+/// Its own function because it makes a claim worth a test: the certificate named here is whichever
+/// [`ClientConfig::client_identity`] resolves to, which prefers the **Server-issued** one in the
+/// state directory over anything `[tls]` names (ADR-0035). A line that reported the configured
+/// certificate while the connection presented the issued one would be worse than no line at all.
+fn tls_posture(config: &ClientConfig) -> (String, String) {
+    let trust = config.ca_file().map_or_else(
+        || "the built-in roots".to_string(),
+        |ca| ca.display().to_string(),
+    );
+    let identity = config.client_identity().map_or_else(
+        || "none".to_string(),
+        |(cert, _)| cert.display().to_string(),
+    );
+    (trust, identity)
+}
+
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
 /// none are), and run the transport the endpoint selects (ADR-0007) until `shutdown` fires.
 ///
@@ -149,6 +206,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     if spec.service {
         start_log_file(&config);
     }
+    // After the log file, so the line that says which version is running is the first line *in the
+    // file* — a log whose opening line is already about work in progress starts one step too late.
+    announce(&config, &spec.config_path);
 
     // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
@@ -374,5 +434,50 @@ mod tests {
         let (tx, mut shutdown) = shutdown_channel();
         drop(tx);
         shutdown.requested().await;
+    }
+
+    /// With nothing configured, the line says so in both halves rather than leaving an operator to
+    /// read an absent field as "unknown".
+    #[test]
+    fn the_tls_line_reports_the_defaults_as_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let (trust, identity) = tls_posture(&config);
+        assert_eq!(trust, "the built-in roots");
+        assert_eq!(identity, "none");
+    }
+
+    /// And it reports what will actually be presented: a Server-issued pair in the state directory
+    /// outranks the configured one (ADR-0035), so the line has to name the issued one — that is the
+    /// whole reason it resolves the identity instead of printing `[tls] cert_file`.
+    #[test]
+    fn the_tls_line_names_the_issued_certificate_over_the_configured_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let configured = dir.path().join("operator-cert.pem");
+        std::fs::write(&configured, b"cert").expect("write");
+        std::fs::write(dir.path().join("operator-key.pem"), b"key").expect("write");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            tls: Some(crate::config::TlsConfig {
+                ca_file: None,
+                cert_file: Some(configured.clone()),
+                key_file: Some(dir.path().join("operator-key.pem")),
+            }),
+            ..ClientConfig::default()
+        };
+
+        // With no issued pair on disk, the operator's is what gets presented.
+        let (_, identity) = tls_posture(&config);
+        assert_eq!(identity, configured.display().to_string());
+
+        // Once the Server has issued one, that is the pair — and the line must follow.
+        let issued = dir.path().join(crate::tls::ISSUED_CERT_FILE);
+        std::fs::write(&issued, b"cert").expect("write");
+        std::fs::write(dir.path().join(crate::tls::ISSUED_KEY_FILE), b"key").expect("write");
+        let (_, identity) = tls_posture(&config);
+        assert_eq!(identity, issued.display().to_string());
     }
 }

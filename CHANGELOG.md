@@ -30,6 +30,27 @@ carries a date once its tag exists.
   addresses, not the operator's own `[attributes]`. **What to do:** nothing — the attributes that
   were there are unchanged, these are additional.
 
+- **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
+  the running version, the configuration file, the state directory, the endpoint and the number of
+  Supervisors — the version appeared in no log line until now, so a file a self-update left behind
+  ([ADR-0020](docs/adr/0020-client-self-update.md),
+  [ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)) could not be attributed to
+  the version that wrote it — and then the trust and the client certificate actually in force,
+  which is a Server-issued one no `supervisor.toml` mentions when there is one
+  ([ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)). A
+  configuration file that is not there is now said out loud as well, because a mistyped `--config`
+  otherwise starts cleanly on defaults and supervises nothing. **What to do:** nothing; anything
+  parsing the log gains lines, and loses none.
+
+- **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
+  unpacked because it sits outside the program's own directory
+  ([ADR-0023](docs/adr/0023-multi-file-packages.md)) is now named, not only counted; the Collector
+  Supervisor states which config-map entries it hands the Collector on every (re)start; and the
+  `command` Supervisor states the fully expanded invocation of its Foreign Agent
+  ([ADR-0022](docs/adr/0022-supervisor-path-placeholders-in-process-arguments.md)) — its
+  environment by variable name only, never by value. **What to do:** nothing, unless you are
+  chasing one of those, in which case `RUST_LOG=debug` now answers it.
+
 ## [0.4.2] - 2026-08-21
 
 ### Added
