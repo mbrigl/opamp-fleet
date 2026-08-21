@@ -387,6 +387,21 @@ carries a date once its tag exists.
   verified end to end against a local OTLP receiver: logs and metrics both, metrics on their 10 s
   interval, no panic.
 
+- **Own telemetry stopped for good when a destination went silent.** Nothing on the export path
+  bounded a request. The SDK's periodic reader documents that it enforces no export timeout and
+  stops exporting new metrics if one never returns; the batch processors behind traces and logs
+  block on their export the same way and then drop records once their queue fills; and
+  `opentelemetry-otlp` applies the timeout it resolves only to an HTTP client it builds itself, not
+  to the one this Client hands it. A destination that *refused* always recovered by itself, since
+  OTLP/HTTP is a fresh request per interval and the next one simply succeeds. One that accepted the
+  connection and then said nothing — a host asleep, a NAT that dropped its mapping, a network gone
+  dark — held the exporter thread on a socket that never closed, and that signal stayed dead until
+  the Client was restarted. An export now gives up after five seconds, half the reporting interval,
+  in time for the next one to be tried on schedule.
+  **What to do:** nothing. Telemetry that disappears during a network interruption now comes back by
+  itself once the destination answers again. What the outage produced is still lost — there is no
+  retry buffer, so expect a gap rather than a backfill.
+
 - **A Server offering only telemetry destinations was ignored, and re-offered for ever.** With a
   `[telemetry_offer]` and no `[connection_offer]`, the Server sends a connection-settings message
   carrying no OpAMP settings — which is what the protocol asks it to do, and what its own test

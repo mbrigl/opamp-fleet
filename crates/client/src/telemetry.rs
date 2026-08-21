@@ -48,6 +48,25 @@ use crate::config::ClientConfig;
 /// how the interval silently became six times the recommendation.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long one export may take before it is abandoned.
+///
+/// Nothing else on the export path bounds it. The SDK's `PeriodicReader` says so in its own
+/// documentation — *"does **not** enforce a timeout for exports … If an export operation never
+/// returns, `PeriodicReader` will **stop exporting new metrics**"* — and the batch processors
+/// behind traces and logs block on their export the same way, then drop records once their queue
+/// fills. `opentelemetry-otlp` resolves a timeout but applies it only to the HTTP client it builds
+/// itself; the one handed to it through `with_http_client` keeps whatever bound it was built with,
+/// and `reqwest`'s default is none. A destination that stops answering rather than refusing — a
+/// host asleep, a NAT that dropped the mapping, a network gone dark — therefore left the exporter
+/// thread blocked on a socket that never closes, and own telemetry stayed dead until this Client
+/// was restarted. That is the failure this bound exists for: refusal already recovers by itself,
+/// since OTLP/HTTP is a fresh request per interval and the next one simply succeeds.
+///
+/// Half the reporting interval, so a stalled export gives up in time for the next one to be tried
+/// on schedule. A bound at the interval would have every cycle finish late, and the reader answers
+/// a late export by running the next one immediately — the stall would turn into a queue.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(SAMPLE_INTERVAL.as_secs() / 2);
+
 /// The instrumentation scope every signal this Client emits is attributed to.
 const SCOPE: &str = "opamp-fleet-client";
 
@@ -435,7 +454,11 @@ fn exporter_client(
         .map(|certificate| certificate.cert.as_slice())
         .filter(|cert| !cert.is_empty());
     let builder = crate::tls::trust_and_identity_for(
-        reqwest::Client::builder().use_rustls_tls(),
+        // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps its own
+        // for the client it would have built, and never applies it to this one.
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .timeout(EXPORT_TIMEOUT),
         config,
         offered,
     )
@@ -885,5 +908,44 @@ mod tests {
         assert!(resource(&description)
             .iter()
             .all(|(key, _)| key.as_str() != "service.instance.name"));
+    }
+
+    /// The bound nothing else on the path supplies. A destination that *refuses* recovers by
+    /// itself — the next interval is a fresh request — so what is worth a test is the one that
+    /// does not: a socket accepted and then left silent, which without this holds the exporter
+    /// thread for good and takes own telemetry down until the process restarts.
+    #[tokio::test]
+    async fn an_export_to_a_destination_that_never_answers_gives_up() {
+        crate::tls::install_ring_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/metrics", listener.local_addr().unwrap());
+        let _silent = tokio::spawn(async move {
+            // Accepted and held: closing the socket would be an answer, and an answer is the case
+            // that was never broken.
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                connections.push(connection);
+            }
+        });
+
+        let client = exporter_client(
+            &destination(&endpoint),
+            "own_metrics",
+            &ClientConfig::default(),
+        )
+        .expect("the client builds");
+        // Bounded from the outside as well: without the client's own timeout this send never
+        // returns, and a regression should fail the test rather than hang it.
+        let outcome = tokio::time::timeout(SAMPLE_INTERVAL, client.client.post(&endpoint).send())
+            .await
+            .expect("the export gives up within the interval that drives it");
+
+        assert!(
+            outcome
+                .as_ref()
+                .err()
+                .is_some_and(reqwest::Error::is_timeout),
+            "a silent destination must time out, got {outcome:?}"
+        );
     }
 }
