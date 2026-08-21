@@ -114,3 +114,8 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
 | [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟢 accepted |
 | [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟢 accepted |
+| [0086](0086-a-telemetry-destination-is-an-offer-of-its-own-class.md) | A telemetry destination is an offer of its own class — applied without a connection to prove it | 🟢 accepted |
+| [0087](0087-a-servers-capabilities-bind-what-the-client-reports.md) | A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask | 🟢 accepted |
+| [0088](0088-cleartext-own-telemetry-reaches-the-private-address-space.md) | Cleartext own telemetry reaches the private address space — by address, never by name | 🟢 accepted |
+| [0089](0089-an-own-telemetry-offer-states-all-three-destinations.md) | An own-telemetry offer states all three destinations — and an empty endpoint withdraws one | 🟢 accepted |
+| [0090](0090-own-traces-come-from-the-clients-own-tracing-spans.md) | Own traces come from the Client's own `tracing` spans, and a span is a fleet operation | 🟢 accepted |

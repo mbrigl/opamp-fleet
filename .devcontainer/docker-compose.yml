@@ -1,0 +1,137 @@
+# The Dev Container and the development observability stack, as one Compose project.
+#
+# The workspace container is one service beside three that watch it: OTLP in, Grafana out. What runs
+# *inside* the container — a Client under `cargo run`, a browser tab on a forwarded port — reaches
+# the Collector, Grafana and ClickHouse without anything being published to the host first.
+#
+#   traces  ─┐
+#   metrics ─┼─▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana
+#   logs    ─┘
+#
+# One store instead of Tempo + Prometheus + Loki: one query language for all three signals, one
+# place to retain and delete, and joins *across* signals that three separate stores cannot do at
+# all. What it costs is named in OBSERVABILITY.md — read it before assuming this is strictly better.
+#
+# Nothing shipped depends on the three observability services. They exist so own telemetry
+# (ADR-0036) can be looked at while working on the Client and the Server, and dropping them from
+# `runServices` in devcontainer.json is how they are turned off.
+#
+# This does not weaken ADR-0002. No Docker socket is mounted and nothing in the workspace container
+# can drive the host daemon; the `docker compose up` runs on the *host*, issued by the Dev
+# Containers CLI before it attaches. What the container gains here is neighbours, not an engine.
+#
+# Every relative path below resolves against .devcontainer/, which is this file's directory and so
+# the Compose project directory.
+#
+# Ports published on the host:
+#   4320 Agent plane, 4317 OTLP/gRPC, 4318 OTLP/HTTP, 8888 Collector self-metrics,
+#   3000 Grafana, 8123 ClickHouse HTTP, 9000 ClickHouse native.
+
+name: opamp-observability
+
+services:
+  # The container VS Code attaches to — `service` in devcontainer.json names it.
+  workspace:
+    # Pinned to a Debian *release*, not the floating `:debian` tag: this container is the build host
+    # for the Icinga 2 artifact, so its glibc is that artifact's reach (ADR-0070, ADR-0071) and a tag
+    # that moves would move the reach with it. bookworm => `libc6 >= 2.34` => Debian 12+, Ubuntu
+    # 22.04+, RHEL 9+. Changing this line is a decision about which hosts the fleet can serve — see
+    # ADR-0074.
+    image: mcr.microsoft.com/devcontainers/base:debian12
+    # The Dev Containers CLI replaces the entrypoint with a keep-alive of its own, so this matters
+    # only when the project is brought up with a plain `docker compose up`.
+    command: sleep infinity
+    volumes:
+      # Relative to .devcontainer/ (see the header), which makes this the repository root.
+      - ..:/workspace
+    ports:
+      # The Agent plane (ADR-0066), where the fleet connects: bound to 0.0.0.0 so the Server is
+      # reachable under the host's own IP, not only from the host via localhost. This is what
+      # `appPort` used to do — a Compose-based Dev Container ignores that property, so the
+      # publication lives here now.
+      - "0.0.0.0:4320:4320"
+      # The Collector's receivers. They listen in *this* container's network namespace (see
+      # `otel-collector` below), so they are published from here rather than from its own service.
+      - "4317:4317"   # OTLP/gRPC
+      - "4318:4318"   # OTLP/HTTP  <- the Client's exporters speak this
+      - "8888:8888"   # the Collector's own Prometheus metrics
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.7.4.58
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: otel
+    # ClickHouse opens a lot of files; below this it refuses to start on many hosts.
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"   # HTTP — what `curl` and OBSERVABILITY.md's checks use
+      - "9000:9000"   # native protocol — what the Collector and Grafana speak
+    healthcheck:
+      # The client is in the image, so this needs no extra tool and tests the thing that matters:
+      # that the server answers a query as the user the Collector will connect as.
+      test: ["CMD", "clickhouse-client", "--user", "otel", "--password", "otel", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    # The one service that cannot just be a neighbour. The Client refuses a cleartext OTLP
+    # destination beyond the private address space (ADR-0036, ADR-0088) — it is refused, not warned
+    # about — and `otel-collector` resolves to no address at all outside Compose's own network.
+    # Sharing the workspace container's network namespace puts the Collector's receivers on that
+    # container's loopback, so `http://localhost:4318/v1/logs` means inside the container exactly
+    # what it means on the host, and `server.toml` needs no second spelling.
+    #
+    # A container inside another's namespace publishes nothing of its own, so this service declares
+    # no `ports:` — the workspace service above publishes 4317/4318/8888 on its behalf. Compose adds
+    # the implied `depends_on: workspace` with `restart: true`, so restarting the workspace container
+    # takes the Collector with it instead of leaving it on a dead namespace.
+    network_mode: "service:workspace"
+    depends_on:
+      clickhouse:
+        # Not `service_started`: the exporter creates its tables on the first batch, and a
+        # ClickHouse that is still opening its databases fails that in a way the retry can outlive.
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Open the stack read-only, so looking at a dashboard costs no login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      # The ClickHouse datasource is not built in. `_SYNC` because the plugin has to be on disk
+      # before Grafana reads the provisioning below — the async variant races it. Unpinned on
+      # purpose: Grafana resolves the newest version compatible with itself, and a pin here goes
+      # stale against the image above. To pin, append it: "grafana-clickhouse-datasource@4.20.0".
+      GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource
+      # Opens straight on the overview instead of Grafana's welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/agents-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:
+  grafana-data:

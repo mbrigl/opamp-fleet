@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use crate::config::ClientConfig;
 use crate::engine::Engine;
 use crate::service::runtime::Shutdown;
-use crate::transport::{too_big_close, Backoff, RunOutcome};
+use crate::transport::{too_big_close, Backoff, OfferOutcome, RunOutcome};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -41,6 +41,7 @@ pub async fn run(
     engine: &mut Engine,
     config: &mut ClientConfig,
     shutdown: &mut Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
 ) -> Result<RunOutcome, String> {
     // Trust and identity in one configuration: a private CA when one is configured, and this
     // Client's client certificate when it has one (ADR-0007, ADR-0035).
@@ -91,7 +92,7 @@ pub async fn run(
             Ok((socket, _)) => {
                 info!(endpoint = %config.endpoint, "connected");
                 backoff.reset();
-                match serve(socket, engine, config, shutdown).await {
+                match serve(socket, engine, config, shutdown, telemetry).await {
                     Served::Shutdown => {
                         // Usually already stopped before the goodbyes went out; idempotent.
                         engine.shutdown_processes().await;
@@ -129,6 +130,7 @@ async fn serve(
     engine: &mut Engine,
     config: &mut ClientConfig,
     shutdown: &mut Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
 ) -> Served {
     let limit = config.max_message_size_bytes;
 
@@ -205,62 +207,29 @@ async fn serve(
                         // to sign a certificate if it signs them and this Client needs one. The
                         // answer arrives as an ordinary connection-settings offer.
                         engine.request_certificate(config);
-                        // A connection-settings offer (ADR-0014): the APPLYING acknowledgement
-                        // just went out with the owed reports; now verify by actually
-                        // connecting. Success persists the settings and reconnects with them;
-                        // failure reports FAILED and stays on the working connection.
-                        if let Some(offer) = engine.take_connection_offer() {
-                            let settings = offer.opamp.clone().unwrap_or_default();
-                            let probe = || engine.probe_report();
-                            match crate::connection::verify(&settings, config, probe).await {
-                                Ok(()) => {
-                                    // Applied as far as this Client honours the offer, and said
-                                    // so — `FAILED` when it had to drop a field (ADR-0035).
-                                    // The issued certificate is stored only now, after connecting with it
-                                    // proved it works — the old one stayed in force until here (ADR-0035).
-                                    if let Some(certificate) = &settings.certificate {
-                                        if let Err(e) = crate::csr::accept(
-                                            &config.state_dir,
-                                            &certificate.cert,
-                                        ) {
-                                            warn!(error = %e, "cannot store the issued certificate");
-                                        } else {
-                                            info!("a client certificate was issued and is now in force");
-                                        }
-                                    }
-                                    // Applied as far as this Client honours it, and said so (ADR-0035).
-                                    match crate::connection::unhonoured(&settings) {
-                                        Ok(()) => engine
-                                            .connection_settings_outcome(&offer.hash, Ok(())),
-                                        Err(e) => {
-                                            warn!(error = %e, "connection settings partly applied");
-                                            engine.connection_settings_outcome(
-                                                &offer.hash,
-                                                Err(&e),
-                                            );
-                                        }
-                                    }
-                                    let merged = crate::connection::merge(
-                                        crate::connection::load(&config.state_dir).as_ref(),
-                                        &offer,
-                                    );
-                                    if let Err(e) =
-                                        crate::connection::store(&config.state_dir, &merged)
-                                    {
-                                        warn!(error = %e, "cannot persist the connection settings");
-                                    }
-                                    info!("connection settings verified; reconnecting with them");
-                                    let _ = socket.close(None).await;
-                                    return Served::Reconfigured;
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "offered connection settings failed verification");
-                                    engine.connection_settings_outcome(&offer.hash, Err(&e));
-                                    if send_all(&mut socket, engine.owed_reports(), limit).await.is_err() {
-                                        return Served::ConnectionLost;
-                                    }
+                        // A connection-settings offer (ADR-0014, ADR-0086): the APPLYING
+                        // acknowledgement just went out with the owed reports. A verified OpAMP
+                        // half reconnects; a telemetry-only offer is applied in place and its
+                        // acknowledgement is flushed here, on the connection that is staying up.
+                        match crate::transport::process_connection_offer(engine, config, telemetry)
+                            .await
+                        {
+                            OfferOutcome::Reconnect => {
+                                let _ = socket.close(None).await;
+                                return Served::Reconfigured;
+                            }
+                            // Both an APPLIED and a FAILED are owed now — before ADR-0086 only the
+                            // failure branch flushed, which would have left a telemetry-only
+                            // acknowledgement sitting on the machine until something else spoke.
+                            OfferOutcome::Applied => {
+                                if send_all(&mut socket, engine.owed_reports(), limit)
+                                    .await
+                                    .is_err()
+                                {
+                                    return Served::ConnectionLost;
                                 }
                             }
+                            OfferOutcome::None => {}
                         }
                         // A package offer (ADR-0015): download and verify; the Installed/Failed
                         // status flows back through the process events, but a synchronous
@@ -415,7 +384,14 @@ mod tests {
             .await
             .expect("connect");
 
-        let outcome = serve(socket, &mut engine, &mut config, &mut shutdown).await;
+        let outcome = serve(
+            socket,
+            &mut engine,
+            &mut config,
+            &mut shutdown,
+            &crate::telemetry::Telemetry::new(),
+        )
+        .await;
         assert!(
             matches!(outcome, Served::ConnectionLost),
             "an oversized message ends the connection"

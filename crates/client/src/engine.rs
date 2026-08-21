@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::packages::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
+use crate::telemetry::SamplingTarget;
 
 /// One Agent as [`Engine::with_processes`] takes it: the protocol state machine plus the handles
 /// the Engine drives its Supervisor with — all `None` for the self-Agent.
@@ -90,7 +91,7 @@ pub struct Engine {
     restart_for_update: bool,
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0036), which runs beside
     /// a transport that holds this Engine mutably for the whole of a connection.
-    sampling: Arc<Mutex<Vec<(String, u32)>>>,
+    sampling: Arc<Mutex<Vec<SamplingTarget>>>,
 }
 
 /// What the Engine needs to install a new version of the Client and to close out one that is on
@@ -201,10 +202,11 @@ impl Engine {
         }
     }
 
-    /// What own metrics are sampled from (ADR-0036): every Agent's `service.instance.id` paired
-    /// with the pid to sample for it — this process for the Client's own Agent, the Managed
-    /// Process for a Supervisor-backed one, and nothing while that process is not running.
-    pub fn sampling_targets(&self) -> Vec<(String, u32)> {
+    /// What own metrics are sampled from (ADR-0036): every Agent, named as the protocol keys it, as
+    /// the operator calls it and as its type is reported, paired with the pid to sample for it — this process for the
+    /// Client's own Agent, the Managed Process for a Supervisor-backed one, and nothing while that
+    /// process is not running.
+    pub fn sampling_targets(&self) -> Vec<SamplingTarget> {
         self.agents
             .iter()
             .filter_map(|agent| {
@@ -212,7 +214,12 @@ impl Engine {
                     false => std::process::id(),
                     true => agent.state.process_pid()?,
                 };
-                Some((agent.state.uid().to_string(), pid))
+                Some(SamplingTarget {
+                    uid: agent.state.uid().to_string(),
+                    instance_name: agent.state.instance_name().to_string(),
+                    service_name: agent.state.service_name().to_string(),
+                    pid,
+                })
             })
             .collect()
     }
@@ -220,7 +227,7 @@ impl Engine {
     /// A handle on [`sampling_targets`](Self::sampling_targets) the metrics sampler can read while
     /// the transport holds the Engine mutably — which it does for the whole of a connection.
     /// Refreshed whenever a pid changes, so a Managed Process that restarts is followed.
-    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<(String, u32)>>> {
+    pub fn sampling_handle(&self) -> Arc<Mutex<Vec<SamplingTarget>>> {
         self.sampling.clone()
     }
 
@@ -295,8 +302,13 @@ impl Engine {
         staged: std::path::PathBuf,
         version: String,
         hash: Vec<u8>,
+        span: &tracing::Span,
     ) {
         if index == crate::supervisor::SELF_AGENT_INDEX {
+            // Entered rather than passed on: the self-update runs here, in this task, so the
+            // staging and the probe it does become children of the install by being inside it
+            // (ADR-0090). Nothing is awaited under this guard.
+            let _install = span.enter();
             self.apply_self_update(&staged, version, hash);
             return;
         }
@@ -311,20 +323,19 @@ impl Engine {
                     staged,
                     version,
                     hash: hash.clone(),
+                    span: span.clone(),
                 }) {
+                    let error = "the supervisor is not accepting commands";
                     warn!(error = %e, "cannot hand the package to the supervisor");
-                    agent.state.package_applied(
-                        hash,
-                        Err("the supervisor is not accepting commands".to_string()),
-                    );
+                    crate::telemetry::failed(span, error);
+                    agent.state.package_applied(hash, Err(error.to_string()));
                     agent.owes_report = true;
                 }
             }
             None => {
-                agent.state.package_applied(
-                    hash,
-                    Err("this agent has no process to install a package into".to_string()),
-                );
+                let error = "this agent has no process to install a package into";
+                crate::telemetry::failed(span, error);
+                agent.state.package_applied(hash, Err(error.to_string()));
                 agent.owes_report = true;
             }
         }
@@ -522,17 +533,36 @@ impl Engine {
             } else {
                 match &agent.commands {
                     Some(commands) => {
-                        if let Err(e) = commands.try_send(ProcessCommand::ApplyConfig { config }) {
+                        // The apply's trace (ADR-0090). It opens where the configuration is handed
+                        // over and closes in the adapter, once the Managed Process is back up: the
+                        // hand-over is the start of the operation, not the whole of it, and the
+                        // phases worth timing — the stop, the restart, the health gate — all happen
+                        // on the other side of this channel.
+                        let span = tracing::info_span!(
+                            "config.apply",
+                            agent = %uid,
+                            hash = %hex::encode(&config.config_hash),
+                            otel.status_code = tracing::field::Empty,
+                            otel.status_description = tracing::field::Empty,
+                        );
+                        if let Err(e) = commands.try_send(ProcessCommand::ApplyConfig {
+                            config,
+                            span: span.clone(),
+                        }) {
+                            let error = "the supervisor is not accepting commands";
                             warn!(agent = %uid, error = %e, "cannot hand the configuration to the supervisor");
+                            crate::telemetry::failed(&span, error);
                             agent.state.config_applied(
                                 match e.into_inner() {
-                                    ProcessCommand::ApplyConfig { config } => config.config_hash,
+                                    ProcessCommand::ApplyConfig { config, .. } => {
+                                        config.config_hash
+                                    }
                                     ProcessCommand::ApplyPackage { .. }
                                     | ProcessCommand::Restart
                                     | ProcessCommand::Shutdown
                                     | ProcessCommand::Uninstall => Vec::new(),
                                 },
-                                Err("the supervisor is not accepting commands".to_string()),
+                                Err(error.to_string()),
                             );
                             agent.owes_report = true;
                         }

@@ -72,6 +72,39 @@ async fn every_declared_signal_is_offered_a_destination() {
     assert!(settings.opamp.is_none());
 }
 
+/// A withdrawal reaches the Agent (ADR-0089 rule 3): an endpoint configured empty is sent as an
+/// empty `destination_endpoint`, which is what stops that signal. It travels without the backend's
+/// credential — nobody is going to open that connection — and the offer is still an offer, so the
+/// Server declares `OffersConnectionSettings` and the hash gate closes on the acknowledgement like
+/// any other.
+#[tokio::test]
+async fn a_withdrawn_signal_is_offered_as_an_empty_destination() {
+    let withdrawal = server::fleet::TelemetryOffer::from_config(
+        &toml::from_str::<server::config::TelemetryOfferConfig>(
+            r#"
+            metrics_endpoint = ""
+            [headers]
+            Authorization = "Bearer telemetry-token"
+            "#,
+        )
+        .expect("a withdrawal is a valid [telemetry_offer]"),
+    );
+    let server = support::spawn_with_telemetry(withdrawal).await;
+    let reply = exchange(&server, report(AgentCapabilities::ReportsOwnMetrics as u64)).await;
+
+    let settings = reply.connection_settings.expect("an offer");
+    let metrics = settings.own_metrics.expect("a withdrawal is still offered");
+    assert_eq!(metrics.destination_endpoint, "");
+    assert!(
+        metrics.headers.is_none(),
+        "a withdrawal carries no credential"
+    );
+    assert!(
+        reply.capabilities & opamp::proto::ServerCapabilities::OffersConnectionSettings as u64 != 0,
+        "a Server with a withdrawal to make has something to offer"
+    );
+}
+
 /// Capability negotiation is binding: a signal the Agent never declared is not offered, because an
 /// offer nobody can act on is one that would be re-sent forever.
 #[tokio::test]
@@ -83,6 +116,22 @@ async fn an_undeclared_signal_gets_no_destination() {
     assert!(settings.own_logs.is_some(), "the one it declared");
     assert!(settings.own_metrics.is_none());
     assert!(settings.own_traces.is_none());
+}
+
+/// ADR-0086 clause 5: a Server that can offer *anything* declares `OffersConnectionSettings`.
+/// Keying the bit on `[connection_offer]` alone left this Server exercising a capability it had not
+/// declared — and a Client that took the bitmask literally would then have withheld the
+/// acknowledgement, leaving the hash gate open and this offer repeating for ever.
+#[tokio::test]
+async fn a_telemetry_only_server_declares_that_it_offers_connection_settings() {
+    let server = support::spawn_with_telemetry(offer()).await;
+    let reply = exchange(&server, report(AgentCapabilities::ReportsOwnMetrics as u64)).await;
+
+    assert!(
+        reply.capabilities & opamp::proto::ServerCapabilities::OffersConnectionSettings as u64 != 0,
+        "the offer below is exactly the capability being exercised"
+    );
+    assert!(reply.connection_settings.is_some());
 }
 
 /// An Agent declaring none of the three is offered nothing at all — not an empty offer it would

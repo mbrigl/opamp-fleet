@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use opamp::proto::{AgentDescription, ComponentHealth};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn, Instrument as _};
 
 use crate::install;
 use crate::service::runtime::Shutdown;
@@ -331,14 +331,19 @@ impl Runner {
             tokio::select! {
                 _ = sweep.tick() => self.sweep_backup(),
                 command = self.commands.recv() => match command {
-                    Some(ProcessCommand::ApplyConfig { config }) => {
+                    Some(ProcessCommand::ApplyConfig { config, span }) => {
                         backoff.reset();
                         streak = 0; // a new configuration is a fresh chance (ADR-0058)
                         // In place first (ADR-0060): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
-                        match self.try_reload(&mut child, &mut shutdown).await {
+                        match self
+                            .try_reload(&mut child, &mut shutdown)
+                            .instrument(span.clone())
+                            .await
+                        {
                             Reloaded::Applied => {
+                                crate::telemetry::succeeded(&span);
                                 self.events
                                     .send(ProcessEvent::ConfigApplied {
                                         hash: config.config_hash,
@@ -350,13 +355,21 @@ impl Runner {
                             Reloaded::ShuttingDown => break,
                             Reloaded::NotApplied => {}
                         }
+                        // The restart phase. Created and dropped around the two awaits rather than
+                        // entered across them: a guard held over an `.await` stays current on the
+                        // thread while this task is parked, which would attribute another task's
+                        // work to this apply. An unentered span still carries the phase's duration,
+                        // which is what this one is here for.
+                        let restart = tracing::info_span!(parent: &span, "restart");
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         child = self.spawn_if_due().await;
+                        drop(restart);
                         last_start = Instant::now();
                         // Applying means running on the new files — and surviving the apply
                         // grace (ADR-0011's health-gated acknowledgement): a process that exits
                         // right away has rejected its configuration the only way a process can.
                         let mut exited_in_grace = false;
+                        let gate = tracing::info_span!(parent: &span, "gate");
                         let result = match (child.take(), (self.build)().is_some()) {
                             (Some(mut started), _) if !self.apply_grace.is_zero() => {
                                 tokio::select! {
@@ -393,6 +406,11 @@ impl Runner {
                             (None, false) => Ok(()), // nothing should run; that is the config
                             (None, true) => Err("the process did not start".to_string()),
                         };
+                        drop(gate);
+                        match &result {
+                            Ok(()) => crate::telemetry::succeeded(&span),
+                            Err(e) => crate::telemetry::failed(&span, e),
+                        }
                         self.events
                             .send(ProcessEvent::ConfigApplied { hash: config.config_hash, result })
                             .await;
@@ -414,16 +432,21 @@ impl Runner {
                             }
                         }
                     }
-                    Some(ProcessCommand::ApplyPackage { staged, version, hash }) => {
+                    Some(ProcessCommand::ApplyPackage { staged, version, hash, span }) => {
                         // Unpack beside what runs and prove it starts, *before* anything is
                         // stopped (ADR-0068): a package that could never have run costs no
                         // downtime, and the reason it could not is the linker's own.
-                        let prepared = self.stage_and_check(&staged).await;
+                        //
+                        // The install's trace came with the command (ADR-0090): every phase below
+                        // runs inside it, so the download that started it and the rollback that may
+                        // end it are one trace across two tasks.
+                        let prepared = self.stage_and_check(&staged).instrument(span.clone()).await;
                         let _ = std::fs::remove_file(&staged);
                         let prepared = match prepared {
                             Ok(prepared) => prepared,
                             Err(e) => {
                                 warn!(supervisor = %self.name, version = %version, error = %e, "refusing a package that will not run here");
+                                crate::telemetry::failed(&span, &e);
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Err(e) })
                                     .await;
@@ -435,7 +458,10 @@ impl Runner {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         backoff.reset();
                         streak = 0; // a new package is a fresh chance (ADR-0058)
-                        let result = self.swap_and_gate(prepared, &version, &mut child, &mut shutdown).await;
+                        let result = self
+                            .swap_and_gate(prepared, &version, &mut child, &mut shutdown)
+                            .instrument(span.clone())
+                            .await;
                         if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
                             child = self.spawn_if_due().await;
                             last_start = Instant::now();
@@ -448,11 +474,13 @@ impl Runner {
                                 // this the swap is reported as installed while the Agent goes on
                                 // describing the version it replaced, until the Client restarts.
                                 self.probe_version();
+                                crate::telemetry::succeeded(&span);
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Ok(version) })
                                     .await;
                             }
                             GraceOutcome::Failed(error) => {
+                                crate::telemetry::failed(&span, &error);
                                 self.events
                                     .send(ProcessEvent::PackageApplied { hash, result: Err(error) })
                                     .await;
@@ -543,6 +571,8 @@ impl Runner {
     /// [`install_executable`] moves it when it can — so every removal of it is best-effort.
     /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
     /// program starts. Nothing that runs is touched here; that is the whole point (ADR-0068).
+    /// The `stage` phase of an install's trace (ADR-0090); the preflight below is its own child.
+    #[instrument(name = "stage", skip_all, fields(supervisor = %self.name))]
     async fn stage_and_check(&self, artifact: &std::path::Path) -> Result<Staged, String> {
         let target = self
             .install
@@ -558,6 +588,8 @@ impl Runner {
         Ok(staged)
     }
 
+    /// The `swap` phase, with `gate` and — where it comes to that — `rollback` beneath it.
+    #[instrument(name = "swap", skip_all, fields(supervisor = %self.name, version = %version))]
     async fn swap_and_gate(
         &self,
         staged: Staged,
@@ -613,6 +645,10 @@ impl Runner {
         match (&outcome, has_backup) {
             // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
+                // A phase of its own in the trace (ADR-0090): a rollback is the part of a failed
+                // install an operator most wants timed, and its own failure is the one that leaves
+                // a host with no program at all.
+                let _rollback = tracing::info_span!("rollback").entered();
                 if let Err(e) = target.restore() {
                     warn!(supervisor = %self.name, error = %e, "cannot roll the program back");
                 } else {
@@ -702,6 +738,8 @@ impl Runner {
     /// The apply-grace health gate shared by a package swap: a freshly started process must
     /// survive `apply_grace` to count as applied; exiting within it fails. `child` is left holding
     /// the running process on success.
+    /// The `gate` phase: the apply grace a freshly started process must survive (ADR-0011).
+    #[instrument(name = "gate", skip_all, fields(supervisor = %self.name))]
     async fn gate(
         &self,
         started: Option<Child>,
@@ -748,6 +786,7 @@ impl Runner {
     /// short of that is `NotApplied`, and the caller restarts on the new files instead
     /// (`reload-or-restart`): no mechanism declared, nothing running to signal, a failed
     /// signal, or a death within the grace.
+    #[instrument(name = "reload", skip_all, fields(supervisor = %self.name))]
     async fn try_reload(&self, child: &mut Option<Child>, shutdown: &mut Shutdown) -> Reloaded {
         let Some(signal) = self.reload_signal else {
             return Reloaded::NotApplied;
@@ -1039,6 +1078,7 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
 /// nobody has run yet. The message on failure is the program's own — a linker error names the
 /// library or the symbol version, which is exactly what an operator needs and what an exit status
 /// alone destroys.
+#[instrument(name = "preflight", skip_all)]
 async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), String> {
     let mut command = Command::new(&staged.program);
     command.args(&preflight.args).kill_on_drop(true);

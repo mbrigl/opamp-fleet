@@ -15,7 +15,64 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.4.1]
+## [0.4.3] - 2026-08-21
+
+### Added
+
+- **An Agent reports its own traces.** The `own_traces` destination has been offered, persisted and
+  exported to since 0.4.x, with nothing to export: no code created a span, and the bridge in force
+  converts `tracing` events rather than spans. Five fleet operations are now traces
+  ([ADR-0090](docs/adr/0090-own-traces-come-from-the-clients-own-tracing-spans.md)) — installing a
+  package, applying a configuration (a Managed Process's, and the Supervisor set), applying offered
+  connection settings, and the Client's own self-update — each with its phases as child spans and
+  the outcome the Server is told as the span's status. A failed rollout is one trace naming the
+  phase that failed, instead of a hunt through a day of log lines. A self-update stays **one** trace
+  across its restart: the trace it belongs to rides in the update marker, so the commit or the
+  rollback that a later process performs continues what an earlier one began.
+
+  Two consequences worth knowing before an upgrade. **Exported log records now carry a `TraceId`**
+  where they were written inside one of those operations, which is what makes the cross-signal join
+  in the development stack answerable. And **stderr and the log file gain a span prefix** on those
+  lines — `config.apply{hash=…}: supervisor set applied` — so anything parsing that output by
+  column will see a shape it has not seen before. **What to do:** nothing. With no `own_traces`
+  destination offered the spans are inert, and the transport's own message handling is deliberately
+  *not* traced, so no fleet-wide volume appears where none was asked for.
+
+### Changed
+
+- **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
+  carried the Agent's `service.instance.id` and the operator's name for it; it now also carries
+  `service.name` — the Agent *type*
+  ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)), which
+  differs per Agent within one Client and therefore belongs on the sample rather than on the
+  Resource — while the OTLP Resource carries `os.type`, `host.arch` and `os.description` beside
+  what identifies the Client. A series can be read as "this Agent, of this type, on this platform"
+  without a lookup elsewhere. Nothing else from the Agent description is sent: not the host's
+  addresses, not the operator's own `[attributes]`. **What to do:** nothing — the attributes that
+  were there are unchanged, these are additional.
+
+- **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
+  the running version, the configuration file, the state directory, the endpoint and the number of
+  Supervisors — the version appeared in no log line until now, so a file a self-update left behind
+  ([ADR-0020](docs/adr/0020-client-self-update.md),
+  [ADR-0041](docs/adr/0041-the-client-logs-to-a-file-in-service-mode.md)) could not be attributed to
+  the version that wrote it — and then the trust and the client certificate actually in force,
+  which is a Server-issued one no `supervisor.toml` mentions when there is one
+  ([ADR-0035](docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)). A
+  configuration file that is not there is now said out loud as well, because a mistyped `--config`
+  otherwise starts cleanly on defaults and supervises nothing. **What to do:** nothing; anything
+  parsing the log gains lines, and loses none.
+
+- **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
+  unpacked because it sits outside the program's own directory
+  ([ADR-0023](docs/adr/0023-multi-file-packages.md)) is now named, not only counted; the Collector
+  Supervisor states which config-map entries it hands the Collector on every (re)start; and the
+  `command` Supervisor states the fully expanded invocation of its Foreign Agent
+  ([ADR-0022](docs/adr/0022-supervisor-path-placeholders-in-process-arguments.md)) — its
+  environment by variable name only, never by value. **What to do:** nothing, unless you are
+  chasing one of those, in which case `RUST_LOG=debug` now answers it.
+
+## [0.4.2] - 2026-08-21
 
 ### Added
 
@@ -49,6 +106,71 @@ carries a date once its tag exists.
   **What to do:** nothing. The manual procedure still works.
 
 ### Changed
+
+- **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
+  ([ADR-0089](docs/adr/0089-an-own-telemetry-offer-states-all-three-destinations.md)). Own telemetry
+  could be switched on and moved from the Server, and never switched off: a destination once in
+  force survived reconnects and restarts, and every message that would have ended it was read as
+  "unchanged". An offer that names any of the three signals is now the whole truth about own
+  telemetry — a signal it leaves out is **stopped** rather than carried forward — and an endpoint set
+  to the empty string is an explicit withdrawal, honoured and acknowledged like any other offer. An
+  offer that says nothing about telemetry (an endpoint move, a credential rotation, a certificate)
+  still leaves all three alone. **What to do:** if you offer fewer than three signals, check what
+  your Agents are reporting before upgrading the Server — under the old reading an Agent could still
+  be exporting a signal you removed from the file long ago, and after it that signal stops. To stop
+  a fleet entirely, set the endpoints to `""`, restart the Server, and let the Agents acknowledge
+  before removing the section: deleting it withdraws nothing, deliberately, so that a Server with no
+  telemetry of its own cannot tear down a fleet another Server configured. This departs from the
+  Baseline's own wording twice over and is recorded, with the reasoning, in
+  [`CONFORMANCE.md`](docs/CONFORMANCE.md#deviations) — it follows the reference implementation
+  rather than the schema comment, because the two disagree and only one of them can turn telemetry
+  off.
+
+- **Own telemetry now carries the operator's name for the Agent it came from.** `service.instance.name`
+  ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)) is
+  non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled with
+  a `service.instance.id` uuid and nothing an operator could place against the fleet view they had
+  searched by. The Resource now carries it beside the identifying attributes, and each process-metric
+  data point carries the *sampled* Agent's uid and name — so a Supervisor's Managed Process is no
+  longer labelled with the Client's identity. **What to do:** nothing on the Agent side. Dashboards
+  and alerts keyed on `service.instance.id` keep working unchanged; queries can now group by
+  `service.instance.name` instead.
+
+- **The version an Agent reports *running* now decides which packages reach it, and the version its
+  package status claims is no longer read beside it**
+  ([ADR-0083](docs/adr/0083-what-reaches-an-agent.md)). A Set had to be greater than the lower of the
+  two versions an Agent reports *and* never lower than the one its package status claimed. That
+  second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
+  named `supervisor 0.4.2` after a self-update that staged and did not take, while its program
+  reported 0.4.0, was refused a rollout of 0.4.1 as a downgrade — for good. A package status is
+  derived from what an install once wrote and outlives the binary it describes; `service.version` is
+  the running program's own word. The running one now decides in both directions, and the claim is
+  consulted only where no running version can be ordered. **What to do:** nothing, unless you run an
+  Agent that reports a `service.version` numbered in a different space than the Set that carries it
+  — which means the Client itself, or an OpAMP-aware Managed Process such as a Collector carrying
+  `opampextension`; an Icinga 2 or GLPI Agent reports none and is unaffected. For those, a Set
+  numbered *below* the program no longer reaches it at all, and one *between* the program's number
+  and the claim can now move the package backwards. Number a Set the way the program it carries
+  numbers itself and neither arises. A refusal names the version that decided and says whether the
+  claim was consulted.
+
+- **An Agent now accepts a cleartext OTLP destination anywhere in the private address space, not
+  only on loopback.** `http://` was refused beyond the loopback interface, which meant a Collector
+  one hop away on the LAN needed TLS and a certificate in front of it before any Agent would report
+  to it. `http://` is now accepted to loopback and to `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16` and `fc00::/7`, and refused everywhere else — reported back with the reason, as
+  before, never warned about and never downgraded
+  ([ADR-0088](docs/adr/0088-cleartext-own-telemetry-reaches-the-private-address-space.md)). The
+  judgement is made on the **address**, so a cleartext *host name* is still refused whatever it
+  resolves to: an admission test a later DNS change can flip is not one an offer can be trusted
+  against. Link-local and carrier-grade NAT are private but not the operator's, and stay refused.
+  Bracketed IPv6 loopback (`http://[::1]:4318/…`) was refused by a string comparison that could
+  never match it, and now works as it was always documented to.
+  **What to do:** a `[telemetry_offer]` may now name the Collector's LAN address directly — for
+  example `metrics_endpoint = "http://192.168.10.5:4318/v1/metrics"` — and the TLS terminator put in
+  front of it only to satisfy the old rule can go. Name it by address, not by name; a
+  `http://collector.lan:4318/…` that worked nowhere before still works nowhere. Nothing already
+  configured changes meaning: every destination accepted before is accepted now.
 
 - **A fresh Client calls itself `Supervisor Agent`.** The top-level `name` — your name for *this*
   Client, reported as `service.instance.name` — defaulted to the program's own name, which since
@@ -314,6 +436,109 @@ carries a date once its tag exists.
   absolute path will stop the Client at startup rather than starting without it.
 
 ### Fixed
+
+- **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
+  a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
+  a private source ([ADR-0018](docs/adr/0018-packages-imported-from-a-url.md)) — and the Client
+  dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
+  The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
+  for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
+  them only while scheme, host and port are unchanged: HTTP clients strip only `Authorization`,
+  `Cookie` and `Proxy-Authorization` across origins, so a custom token would otherwise have been
+  handed to wherever a mirror redirected. Values are never logged, and a header that is not a valid
+  HTTP header now fails the download naming its key.
+  **What to do:** nothing, unless a referenced entry's download was failing — upgrade the Client and
+  retry the rollout. Ordinary uploaded packages are unaffected; a CDN mirror that redirects to signed
+  storage keeps working, since a download with no headers follows redirects exactly as before.
+
+- **Own telemetry crashed its exporter thread instead of exporting.** The first export panicked with
+  `there is no reactor running, must be called from the context of a Tokio 1.x runtime`, and the
+  signal died with the thread. The SDK does not export on the async runtime: each batch processor
+  and the metrics reader run on a **dedicated OS thread** and block on the export there, so the
+  asynchronous HTTP client the exporters were given had no reactor to work with. That was true from
+  the day own telemetry landed — it simply could not be reached until a destination was actually
+  offered. The exporters now dispatch each request onto this process's runtime and await the
+  result, so the socket work happens where the reactor is.
+  **What to do:** nothing. If own telemetry appeared to do nothing before, it should now arrive —
+  verified end to end against a local OTLP receiver: logs and metrics both, metrics on their 10 s
+  interval, no panic.
+
+- **Own telemetry stopped for good when a destination went silent.** Nothing on the export path
+  bounded a request. The SDK's periodic reader documents that it enforces no export timeout and
+  stops exporting new metrics if one never returns; the batch processors behind traces and logs
+  block on their export the same way and then drop records once their queue fills; and
+  `opentelemetry-otlp` applies the timeout it resolves only to an HTTP client it builds itself, not
+  to the one this Client hands it. A destination that *refused* always recovered by itself, since
+  OTLP/HTTP is a fresh request per interval and the next one simply succeeds. One that accepted the
+  connection and then said nothing — a host asleep, a NAT that dropped its mapping, a network gone
+  dark — held the exporter thread on a socket that never closed, and that signal stayed dead until
+  the Client was restarted. An export now gives up after five seconds, half the reporting interval,
+  in time for the next one to be tried on schedule.
+  **What to do:** nothing. Telemetry that disappears during a network interruption now comes back by
+  itself once the destination answers again. What the outage produced is still lost — there is no
+  retry buffer, so expect a gap rather than a backfill.
+
+- **A Server offering only telemetry destinations was ignored, and re-offered for ever.** With a
+  `[telemetry_offer]` and no `[connection_offer]`, the Server sends a connection-settings message
+  carrying no OpAMP settings — which is what the protocol asks it to do, and what its own test
+  asserts. The Client required OpAMP settings to be present and dropped the message whole: no
+  acknowledgement, so the Server's hash gate never closed and it re-sent the offer on every
+  exchange, while own metrics, traces and logs never started. Such an offer is now applied in place
+  and acknowledged, without a verification connection and without a reconnect — the protocol names
+  three classes of destination with deliberately different sequences, and scopes its
+  verify-by-connecting requirement to the OpAMP settings alone
+  ([ADR-0086](docs/adr/0086-a-telemetry-destination-is-an-offer-of-its-own-class.md)). A telemetry
+  endpoint change no longer disconnects the fleet either.
+  **What to do:** `[telemetry_offer]` alone is now enough; a `[connection_offer]` added only to work
+  around this can be removed. A Server that can offer anything at all — settings, telemetry, or a
+  `[client_ca]` — now declares `OffersConnectionSettings`, where before it declared the bit only for
+  `[connection_offer]` and exercised the capability undeclared for the other two.
+
+- **The Client kept reporting what a Server said it could not accept.** Capability negotiation is a
+  MUST in both directions, and only two of the seven Server bits changed any behaviour here: package
+  status went to Servers without `AcceptsPackagesStatus`, connection-settings status to Servers
+  without `OffersConnectionSettings`. Both are now gated by one stated rule — optimistic until the
+  Server has declared anything, binding once it has
+  ([ADR-0087](docs/adr/0087-a-servers-capabilities-bind-what-the-client-reports.md)). A Server that
+  has actually *sent* an offer still gets its acknowledgement whatever its bitmask says, because
+  withholding it would leave that Server re-offering for ever. `remote_config_status` is
+  deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
+  the non-gate is not mistaken for an omission.
+  **What to do:** nothing against this project's Server, which declares what it exercises. This
+  matters for third-party Servers (ADR-0040): one implementing only the two mandatory bits now sees
+  a Client that respects that.
+
+- **A refused own-telemetry destination was acknowledged as applied.** A destination the Client would
+  not use — cleartext beyond loopback, or one carrying `tls`/`proxy` settings — was written to the
+  log and the offer was still reported `APPLIED`, so the fleet showed telemetry flowing that was not.
+  The refusal now reaches the Server as a `FAILED` status naming what was dropped, including one
+  found at startup when persisted settings are put back in force. An offered client `certificate` is
+  now honoured rather than ignored ([ADR-0036](docs/adr/0036-agents-report-their-own-telemetry.md)):
+  the exporter presents it, paired with the key this Client generated for its signing request. A
+  `private_key` *in the offer* is refused by name — this Client's private key never leaves its host
+  and is never accepted from the Server.
+  **What to do:** check the fleet view after upgrading. A destination that was quietly refused will
+  now show as `FAILED` with the reason; that is the gap becoming visible, not a new failure.
+
+- **Own metrics were reported six times more slowly than the protocol recommends.** The Baseline's
+  recommended reporting interval for own metrics is 10 seconds; this Client sampled every 30 s and
+  left the OpenTelemetry SDK's periodic reader at its 60 s default, so a backend saw a value once a
+  minute. Both are now 10 s, driven by one constant — exporting more often than sampling would only
+  ship each value repeatedly.
+  **What to do:** expect roughly six times the metric volume per Agent from a fleet that has an
+  `own_metrics` destination offered. Traces and logs are unaffected; neither is on an interval.
+
+- **Buffered spans and log records were lost on every stop.** The daemon returned without flushing
+  its OTLP exporters, so the records explaining a shutdown — the ones that matter after a crash and
+  restart — never left the host. Both exit paths now flush first.
+
+- **Throttling and backoff follow the protocol.** A `503` or `429` on plain HTTP was treated as a
+  generic error and the next poll went out on the ordinary interval; `Retry-After` is now waited out
+  (30 s when the Server names no interval). A `413` no longer arms a full state report, which had
+  made the *next* request larger than the one just refused. And the reconnect backoff now carries
+  jitter, so a fleet coming back after a Server restart spreads over each interval instead of
+  arriving on the same instants.
+  **What to do:** nothing. A Server that never throttles sees no change.
 
 - **An agent that claims a package version it is not running is offered that version again.** Until
   now the version an Agent reported *installed* for a package settled the matter, so a host whose

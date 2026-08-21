@@ -326,8 +326,9 @@ per-Agent act answers `409`. An Agent that reports no version for the package is
 version it reports *running* instead
 ([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)),
 so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
-the Set is held against the lower of the two and never reaches it below what its package status
-claims ([ADR-0081](../adr/0081-what-an-agent-runs-is-what-it-has.md)).
+the version it reports *running* decides and the package status is not read beside it
+([ADR-0083](../adr/0083-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
+install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for
 `retain_previous_secs`, and a binary that will not stay up past `apply_grace_secs` is put back

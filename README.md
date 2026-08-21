@@ -373,7 +373,7 @@ crates/               # Cargo workspace: opamp (shared) · server · client · p
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
-.devcontainer/        # Dev Container definition (base image + Features)
+.devcontainer/        # Dev Container definition (base image + Features + observability stack)
 .vscode/              # shared editor settings
 .claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md
 .claude/settings.json # Claude Code permissions: prompt before git/gh writes
@@ -381,10 +381,32 @@ rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 
 ## Dev Container
 
-The environment is defined entirely in [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json):
-it starts from a prebuilt base image and layers Dev Container Features and VS Code extensions on top —
-no Dockerfile or Compose file required. Customise the environment by adding Features, switching the
-base image, or adding extensions.
+The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)
+and [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml): a prebuilt base image
+with Dev Container Features and VS Code extensions layered on top — no Dockerfile. Customise it by
+adding Features, switching the base image, or adding extensions.
+
+### The observability stack comes with it
+
+The workspace container is one service in a Compose project; the other three are the development
+observability stack — Collector, ClickHouse and Grafana — declared in the same file and documented
+in [`.devcontainer/OBSERVABILITY.md`](.devcontainer/OBSERVABILITY.md). They start and stop with the
+container, and from inside it:
+
+| Reach                | at                            |
+| -------------------- | ----------------------------- |
+| Collector (OTLP/HTTP)| `http://localhost:4318`       |
+| Grafana              | `http://grafana:3000`         |
+| ClickHouse           | `clickhouse:9000` / `:8123`   |
+
+The Collector answers on `localhost` because it shares the workspace container's network namespace:
+the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0088](docs/adr/0088-cleartext-own-telemetry-reaches-the-private-address-space.md)),
+so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
+container as on the host. Grafana stays on <http://localhost:3000> from the host's browser.
+
+To run without the stack — it wants roughly 2 GB — remove the services from `runServices` in
+[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json); there is no daemon inside the
+container to start them by hand.
 
 ### Host container management
 

@@ -188,6 +188,9 @@ async fn apply(harness: &Harness, hash: &[u8]) {
                 config_hash: hash.to_vec(),
                 ..Default::default()
             },
+            // The apply's span (ADR-0090). The core opens a real one; a test drives the Runner
+            // directly, so what it hands over is the span it is already running in.
+            span: tracing::Span::current(),
         })
         .await
         .expect("send the command");
@@ -204,6 +207,7 @@ async fn apply_package(
             staged: staged.to_path_buf(),
             version: version.to_string(),
             hash: version.as_bytes().to_vec(),
+            span: tracing::Span::current(),
         })
         .await
         .expect("send");
@@ -1163,6 +1167,119 @@ async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() 
         "the tree that was running is untouched"
     );
     assert!(!root.join(".staging").exists(), "staging does not survive");
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+
+// ── The trace an install leaves (ADR-0090) ───────────────────────────────────
+
+/// Every span this test binary's subscriber saw: its id, the parent the registry gave it, and its
+/// name. Enough to answer the one question worth asking of the instrumentation — *what hangs off
+/// what* — and nothing more, so no exporter and no OTLP is involved.
+#[derive(Default)]
+struct Recorded(std::sync::Mutex<Vec<(tracing::span::Id, Option<tracing::span::Id>, String)>>);
+
+struct RecordingLayer(std::sync::Arc<Recorded>);
+
+impl<S> tracing_subscriber::Layer<S> for RecordingLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // The registry's parent — the same one `tracing-opentelemetry` reads to build a trace, so
+        // asserting on it asserts on what would be exported.
+        let parent = ctx.span(id).and_then(|span| span.parent().map(|p| p.id()));
+        self.0 .0.lock().expect("the recorder").push((
+            id.clone(),
+            parent,
+            attrs.metadata().name().to_string(),
+        ));
+    }
+}
+
+/// The subscriber, installed once for this binary. Global rather than scoped on purpose: the
+/// Runner drives the install in a **task of its own**, and a thread-local subscriber would not
+/// reach it — which is exactly the boundary this test exists to cross.
+fn recorder() -> std::sync::Arc<Recorded> {
+    static RECORDER: std::sync::OnceLock<std::sync::Arc<Recorded>> = std::sync::OnceLock::new();
+    RECORDER
+        .get_or_init(|| {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            let recorded = std::sync::Arc::new(Recorded::default());
+            let subscriber = tracing_subscriber::registry().with(RecordingLayer(recorded.clone()));
+            // A second call would fail; the `OnceLock` means there is none.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            recorded
+        })
+        .clone()
+}
+
+/// The names of every span descending from `root`, however deep.
+fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> {
+    let spans = recorded.0.lock().expect("the recorder").clone();
+    let mut family = vec![root.clone()];
+    let mut names = Vec::new();
+    // The list is in creation order, so one pass reaches every generation: a child is always
+    // recorded after its parent.
+    for (id, parent, name) in spans {
+        if parent.is_some_and(|parent| family.contains(&parent)) {
+            family.push(id);
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// ADR-0090's central mechanical claim: an install is **one** trace, although it is begun by the
+/// task that downloaded the artifact and finished by the Supervisor's own.
+///
+/// The span travels with the command through the Port; if it did not, each phase would open a trace
+/// of its own and "which phase failed" — the question the dashboard is built around — would have no
+/// span to answer with. Asserted against the real Runner swapping a real program, because the hand
+/// -over is the thing under test and a mock of it would test the mock.
+#[tokio::test]
+async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
+    let recorded = recorder();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
+    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+    let _ = next_health(&mut harness.events).await; // initial spawn
+
+    let staged = dir.path().join("downloaded.staged");
+    std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
+
+    // The span the transport would open around the download, handed over exactly as it is there.
+    let operation = tracing::info_span!("package.install");
+    let root = operation
+        .id()
+        .expect("the recording subscriber is in force");
+    harness
+        .commands
+        .send(ProcessCommand::ApplyPackage {
+            staged: staged.clone(),
+            version: "2.0.0".to_string(),
+            hash: b"2.0.0".to_vec(),
+            span: operation,
+        })
+        .await
+        .expect("send");
+    let (_, result) = next_package_ack(&mut harness.events).await;
+    assert_eq!(result, Ok("2.0.0".to_string()));
+
+    let phases = descendants_of(&recorded, &root);
+    for phase in ["stage", "swap", "gate"] {
+        assert!(
+            phases.iter().any(|name| name == phase),
+            "the {phase} phase belongs to the install that was handed over, got {phases:?}"
+        );
+    }
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;

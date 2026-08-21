@@ -272,6 +272,11 @@ pub struct ConnectionOffer {
 /// The own-telemetry destinations this Server offers (ADR-0036), precompiled from
 /// `[telemetry_offer]`. Part of the same `ConnectionSettingsOffers` message the OpAMP settings
 /// ride, and hashed with them: one offer, one hash, one acknowledgement.
+///
+/// A field here is `Some` for every signal the section mentions, **including one it withdraws** —
+/// a destination whose endpoint is empty (ADR-0089). That is why a withdrawal counts as something
+/// to offer in [`is_empty`](Self::is_empty): it has to reach the Agent to take effect, and a
+/// Server that has it to say declares `OffersConnectionSettings` for it like any other offer.
 #[derive(Default, Clone)]
 pub struct TelemetryOffer {
     pub own_metrics: Option<TelemetryConnectionSettings>,
@@ -296,7 +301,10 @@ impl TelemetryOffer {
                 .as_ref()
                 .map(|endpoint| TelemetryConnectionSettings {
                     destination_endpoint: endpoint.clone(),
-                    headers: headers.clone(),
+                    // A withdrawal names nothing else (ADR-0089): an empty endpoint stops that
+                    // signal, and the backend's credential travelling with it would be a token
+                    // handed out for a connection nobody is going to open.
+                    headers: headers.clone().filter(|_| !endpoint.is_empty()),
                     ..Default::default()
                 })
         };
@@ -628,12 +636,20 @@ impl AppState {
     }
 
     /// The Capability Set this Server declares: the base set, plus `OffersConnectionSettings`
-    /// while a connection offer is configured and `OffersPackages` / `AcceptsPackagesStatus`
+    /// while there is anything to offer and `OffersPackages` / `AcceptsPackagesStatus`
     /// while a non-empty package store is armed — an undeclared capability is never exercised, a
     /// declared one never hollow.
     fn capabilities(&self) -> u64 {
         let mut caps = SERVER_CAPABILITIES;
-        if self.connection_offer.is_some() {
+        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0086 clause 5): the
+        // standing `[connection_offer]`, the own-telemetry destinations of `[telemetry_offer]`, and
+        // the certificate a `[client_ca]` issues in answer to a CSR — which travels as an ordinary
+        // offer. Keying the bit on the first alone left the other two exercising a capability this
+        // Server had not declared, which is exactly what the sentence above promises never happens.
+        if self.connection_offer.is_some()
+            || !self.telemetry_offer.is_empty()
+            || self.client_ca.is_some()
+        {
             caps |= ServerCapabilities::OffersConnectionSettings as u64;
         }
         if self.packages.as_ref().is_some_and(|p| !p.store.is_empty()) {

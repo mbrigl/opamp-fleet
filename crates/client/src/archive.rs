@@ -22,6 +22,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use tracing::debug;
+
 /// The largest member this Client will write out of an archive. An agent binary is hundreds of
 /// megabytes; anything past this is not a program but a way to fill a disk.
 const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -394,6 +396,23 @@ pub struct TreeSummary {
     pub skipped: usize,
 }
 
+/// Counts one member that is not written, and names it.
+///
+/// The count alone is what the install line reports, and a count answers "how many files did this
+/// archive have that the tree does not" — not "which one is missing", which is the question asked
+/// when the program runs and cannot find its plugin. The name goes to `debug!` rather than to the
+/// summary: an archive may hold thousands of members outside the prefix, and a level nobody has
+/// turned on costs nothing while an operator chasing a missing file can turn it on for one install.
+///
+/// The reason is not carried because there is exactly one: the member does not sit under the
+/// directory the program was found in (ADR-0023). Every other refusal — a traversing path, a
+/// member past the size or count ceiling, an encrypted entry — fails the whole archive with an
+/// error that reaches the Server, and none of them reaches here.
+fn skipped(member: &Path, summary: &mut TreeSummary) {
+    summary.skipped += 1;
+    debug!(member = %as_member(member), "member outside the program's directory; not unpacked");
+}
+
 /// Extracts a `.tar.gz` **whole** into `dest` (ADR-0023), keeping each member's relative path and
 /// dropping the directory prefix that `program_path`'s match sits under — so
 /// `fluent-bit-3.1.0/bin/fluent-bit` with `program_path = bin/fluent-bit` lands at
@@ -444,7 +463,7 @@ fn extract_tree_tar_gz_within(
             .into_owned();
         let member = safe_member_path(&raw)?;
         let Ok(relative) = member.strip_prefix(&prefix) else {
-            summary.skipped += 1;
+            skipped(&member, &mut summary);
             continue;
         };
         if relative.as_os_str().is_empty() {
@@ -556,7 +575,7 @@ pub fn extract_tree_7z(
                 }
             };
             let Ok(relative) = member.strip_prefix(&prefix) else {
-                summary.skipped += 1;
+                skipped(&member, &mut summary);
                 return Ok(true);
             };
             if relative.as_os_str().is_empty() {
@@ -747,7 +766,7 @@ fn extract_tree_zip_within(
         let mut entry = zip.by_index(index).map_err(zip_error)?;
         let member = safe_member_path(Path::new(&entry.name().to_owned()))?;
         let Ok(relative) = member.strip_prefix(&prefix) else {
-            summary.skipped += 1;
+            skipped(&member, &mut summary);
             continue;
         };
         if relative.as_os_str().is_empty() {

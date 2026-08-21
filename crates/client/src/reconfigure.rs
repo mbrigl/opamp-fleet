@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use opamp::proto::{AgentRemoteConfig, AgentToServer};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn, Instrument as _};
 
 use crate::config::{redact_secrets, ClientConfig, SupervisorBlock};
 use crate::engine::Engine;
@@ -25,6 +25,15 @@ use crate::service::runtime::Shutdown;
 /// A failure before anything is stopped (parse, validation, a Client running without a
 /// configuration path) applies nothing: the offer is reported `FAILED` and the running set stays
 /// in force.
+#[instrument(
+    name = "config.apply",
+    skip_all,
+    fields(
+        hash = %hex::encode(&offer.config_hash),
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+    )
+)]
 pub async fn apply(
     engine: &mut Engine,
     config: &mut ClientConfig,
@@ -32,19 +41,25 @@ pub async fn apply(
     shutdown: &Shutdown,
 ) -> Vec<AgentToServer> {
     let hash = offer.config_hash.clone();
+    // The outcome the Server is told is the outcome the trace carries (ADR-0090), including the
+    // distinction this module exists to keep: a refusal touched nothing, a failure did.
+    let span = tracing::Span::current();
     match apply_inner(engine, config, &offer, shutdown).await {
         Ok(goodbyes) => {
             info!("supervisor set applied");
+            crate::telemetry::succeeded(&span);
             engine.self_config_applied(hash, Ok(()));
             goodbyes
         }
         Err(Refused(error)) => {
             warn!(error = %error, "refusing the offered supervisor set");
+            crate::telemetry::failed(&span, &error);
             engine.self_config_applied(hash, Err(error));
             Vec::new()
         }
         Err(Failed(error, goodbyes)) => {
             warn!(error = %error, "the offered supervisor set failed to apply");
+            crate::telemetry::failed(&span, &error);
             engine.self_config_applied(hash, Err(error));
             goodbyes
         }
@@ -71,6 +86,7 @@ async fn apply_inner(
         .path
         .clone()
         .ok_or_else(|| Refused("this Client runs without a configuration file".to_string()))?;
+    let validate = tracing::info_span!("validate").entered();
     let (blocks, tables) = offered_blocks(offer).map_err(Refused)?;
 
     // The merge is: local globals, offered Supervisors. Validate the offered blocks against the
@@ -80,6 +96,7 @@ async fn apply_inner(
     for block in &blocks {
         validate_offered_block(&candidate, block).map_err(Refused)?;
     }
+    drop(validate);
 
     // The apply is a diff, keyed by Supervisor name: removed and changed stop, changed and added
     // start, unchanged ride through (the point of managing the set from the Server).
@@ -98,10 +115,18 @@ async fn apply_inner(
 
     // A removed Supervisor is uninstalled (ADR-0060) — its adapter answers before the purge
     // below — while a changed one is only stopped and restarts under its name.
-    let goodbyes = engine.retire_supervisors(&stopping, &removed).await;
+    let goodbyes = engine
+        .retire_supervisors(&stopping, &removed)
+        .instrument(tracing::info_span!(
+            "stop",
+            stopping = stopping.len(),
+            removed = removed.len()
+        ))
+        .await;
 
     // Stopped, so the write comes next: a crash between the two restarts into the old file, one
     // after it into the new one — both build exactly what the file says, so both converge.
+    let write = tracing::info_span!("write", path = %path.display()).entered();
     let source = match write_supervisors(&path, tables) {
         Ok(source) => source,
         Err(e) => {
@@ -117,7 +142,11 @@ async fn apply_inner(
     // Written: the file no longer names the removed Supervisors, so their directories go with
     // them (ADR-0059) — program, packages, configuration, identity. The changed blocks in
     // `stopping` restart under their names and keep theirs.
-    purge_removed(config, &removed);
+    drop(write);
+    {
+        let _purge = tracing::info_span!("purge", removed = removed.len()).entered();
+        purge_removed(config, &removed);
+    }
 
     config.supervisors = blocks;
     let redacted = redact_secrets(&source);
@@ -125,6 +154,7 @@ async fn apply_inner(
     engine.set_self_effective_config(redacted);
 
     let mut errors = Vec::new();
+    let _start = tracing::info_span!("start", starting = starting.len()).entered();
     for name in starting {
         let Some(block) = config.supervisors.iter().find(|block| block.name == name) else {
             continue;

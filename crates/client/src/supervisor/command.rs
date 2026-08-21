@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use crate::supervisor::ports::{Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
@@ -134,6 +135,23 @@ impl Plugin for CommandPlugin {
             args,
             env: Vec::new(),
         });
+        // What this Foreign Agent will actually be invoked with, after the placeholders were
+        // expanded (ADR-0022). The spawn line names the program; the arguments are where a
+        // placeholder that did not resolve — or a working directory that is not the one the
+        // operator meant — becomes visible, and the process itself usually reports neither.
+        //
+        // **The environment is logged by key, never by value.** Both are the operator's, and a
+        // Foreign Agent's environment is exactly where a token or a password is handed to it
+        // (ADR-0013's reasoning, applied to a Managed Process). Which variables are set answers
+        // "did my configuration reach it"; their contents answer nothing this line is for.
+        debug!(
+            supervisor = %ctx.name,
+            program = %command.display(),
+            args = ?args,
+            working_dir = ?working_dir,
+            env = ?env.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            "foreign agent invocation"
+        );
         let runner = Runner {
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,

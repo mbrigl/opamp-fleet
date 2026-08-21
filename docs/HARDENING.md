@@ -224,6 +224,10 @@ whichever shape wins.
 nothing in the Server rate-limits anything today, and `max_agents` bounds the fleet but not the
 attempt rate. This bounds enrolment flooding and credential guessing — and it bounds the reconnect
 storm H1 can itself cause, which is why it is part of that decision rather than a separate one.
+**The receiving half now stands**: the Client honours both forms of throttling the Baseline defines
+— the protocol's `UNAVAILABLE` with `retry_info`, and a plain-HTTP `503`/`429` with `Retry-After`,
+falling back to the recommended 30 s minimum. So this measure is now purely about the Server
+choosing to *send* it, and whatever it sends will be obeyed.
 
 🔴 **H11 — Pin the TLS version floor.**
 Neither end sets `min_version`, so both inherit the rustls default (TLS 1.2 and 1.3, safe suites
@@ -236,7 +240,10 @@ ADR-0073 made each connection cheap and short-lived while it is still unproven, 
 nothing bounds how many a peer may hold open at once, and `max_agents` bounds the fleet, not the
 sockets. The cap belongs at the accept loop, where refusing costs one `accept` and a close — and it
 has to be a number an operator can raise, since a legitimate fleet reconnecting after a Server
-restart arrives all at once. Related to H10 and separate from it: H10 bounds the *rate* of attempts
+restart arrives all at once — though **less all at once than it used to**: the Client's reconnect
+backoff now carries jitter (the Baseline asks for it by name), so a fleet spreads over each interval
+instead of landing on the same instants. That thins the burst; it does not bound it, which is what
+this measure is for. Related to H10 and separate from it: H10 bounds the *rate* of attempts
 with the Baseline's own answer (`retry_info`), this bounds the *number* held simultaneously, which
 no protocol message expresses.
 
@@ -272,7 +279,26 @@ manage a key before it can distribute anything.
 🔴 **H13 — Allow-list the sources of referenced packages.**
 A referenced package (ADR-0018) is fetched from an operator-supplied URL. The hash and TLS
 verification already apply, so this is not an open hole — but the set of hosts a Client will fetch
-from is currently unbounded, and bounding it is cheap.
+from is currently unbounded, and bounding it is cheap. **H19 raises the stakes**: since the download
+now carries the credential the offer names, an unbounded source set is an unbounded set of hosts an
+operator's token can be presented to.
+
+🟡 **H19 — An offered download header is a credential on someone else's host.** *(half taken)*
+`DownloadableFile.headers` now travels to the source, which is what makes an authenticated mirror
+usable at all. Two halves follow from that, and only one is done.
+
+**Taken:** the header does not follow a redirect off its origin. A download carrying headers walks
+its own redirect chain and re-attaches them only while scheme, host and port are unchanged —
+`reqwest` strips just `Authorization`, `Cookie` and `Proxy-Authorization` across origins, so a
+custom token (`X-JFrog-Art-Api`, `PRIVATE-TOKEN`) would otherwise be handed to whatever address a
+mirror bounces the download to, which is a one-line way for a mirror to harvest it. The value is
+also marked sensitive and never logged: the download line carries a *count*, and a malformed header
+is refused by key.
+
+**To work out:** where the address itself comes from. The credential is only as bounded as the host
+set it may be presented to, which is H13 — and the two should be decided together. Also open:
+nothing scopes a header to a *path*, so a source that serves several tenants from one origin sees
+the token on every artifact fetched from it.
 
 ⚪ **H14 — Establish how far remote configuration is already constrained.** *(verify first)*
 The Baseline asks that the Server restrict what configuration can be set remotely and what the Agent
