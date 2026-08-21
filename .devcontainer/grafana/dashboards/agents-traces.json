@@ -79,7 +79,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**These panels are empty until the Client creates spans.** ADR-0036 specifies one span per control-loop operation that has a lifecycle \u2014 a configuration applied, a package installed, a self-update \u2014 with the phases as child spans and the outcome as the span status. The exporter and tracer provider are built and registered, but no code opens a span yet.\n\n`send-test-telemetry.py` sends traces in exactly that shape, so the panels can be seen working before the instrumentation exists."
+        "content": "**Every trace here is one fleet operation.** A Client opens a span for installing a package, applying a configuration \u2014 a Managed Process's, and its own Supervisor set \u2014 applying offered connection settings, and updating itself (ADR-0090). Its phases are the child spans, and the outcome it reported to the Server is the span status, so *which phase failed* is a question these panels answer.\n\nMessage handling is deliberately not traced, so the rate below is operations and not traffic. A self-update spans a restart and still arrives as one trace."
       },
       "id": 1
     },

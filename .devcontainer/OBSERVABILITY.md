@@ -190,9 +190,6 @@ Two things follow, and both are visible here:
   missing and every operation after it is there. A Client that already holds persisted settings puts
   the exporter in force at startup and does not have the gap.
 
-`send-test-telemetry.py` below still sends traces in that shape, for looking at the dashboard
-without running a fleet.
-
 Drop any further dashboard JSON into `grafana/dashboards/` — it is picked up within 30 s, no restart.
 
 ### Why the line panels set an interval and a null threshold
@@ -223,24 +220,14 @@ Hence:
   still holds; what it no longer reports is the join's own nulls.
 - **`"showPoints": "auto"`** — a sample with no neighbour is drawn as a point instead of vanishing.
 
-## Seeding test data
+## Starting from an empty store
 
-`send-test-telemetry.py` fills the dashboards without a Client, which is also how you tell a broken
-pipeline apart from an idle one:
+There is no seeder here: what fills these dashboards is a Client, which is also the only thing that
+proves the pipeline end to end. Traces need one operation to happen — roll a configuration out, or
+offer a package — since the Client traces operations and not traffic.
 
-```sh
-python3 .devcontainer/send-test-telemetry.py            # defaults to http://localhost:4318
-```
-
-It backfills half an hour: three agents' process metrics (one of them restarting mid-window), 120
-log records across the severities, and 24 traces in the shape ADR-0036 specifies, a fifth of the log
-records carrying the trace id of one of them. Standard library only, no dependencies.
-`--dump-dir` writes the request bodies instead of sending them, which is the fastest way to see
-exactly what the Client's own exporters would put on the wire.
-
-Re-running describes the same three Agents rather than inventing new ones — the identities and the
-RNG seed are fixed. It does insert the rows a second time, though: ClickHouse deduplicates nothing,
-so gauges and quantiles read the same but anything counted doubles. To start clean:
+ClickHouse deduplicates nothing, so a run repeated against the same window adds its rows again:
+gauges and quantiles read the same, anything counted doubles. To start clean:
 
 ```sh
 curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary \
