@@ -281,13 +281,18 @@ impl AuthConfig {
     }
 }
 
-/// The `[telemetry_offer]` section (ADR-0036): where Agents send their own telemetry. Each signal
-/// is independent — offering only metrics leaves traces and logs unconfigured, and an Agent that
-/// receives no destination for a signal reports none.
+/// The `[telemetry_offer]` section (ADR-0036): where Agents send their own telemetry.
 ///
 /// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
 /// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
 /// telemetry disappears into a 404 nobody looks at.
+///
+/// **What this section says, it says about all three signals** (ADR-0089). A signal left out is
+/// offered no destination and is *stopped* on an Agent that was reporting it, and an endpoint set
+/// to the empty string is an explicit withdrawal — the one way to say "stop all three", since a
+/// Server that offers nothing at all is a Server that says nothing at all. Removing the section
+/// keeps that second meaning: it withdraws nothing, so a Server without telemetry of its own does
+/// not tear down a fleet another Server pointed at a collector.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryOfferConfig {
@@ -302,6 +307,9 @@ pub struct TelemetryOfferConfig {
 impl TelemetryOfferConfig {
     /// Loud validation (ADR-0008): an empty section offers nothing and is never what an operator
     /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
+    ///
+    /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
+    /// (ADR-0089), which is a thing to be said rather than a URL to be checked.
     fn check(&self) -> Result<(), String> {
         let endpoints = [
             ("metrics_endpoint", &self.metrics_endpoint),
@@ -315,7 +323,7 @@ impl TelemetryOfferConfig {
             );
         }
         for (key, value) in endpoints {
-            if let Some(endpoint) = value {
+            if let Some(endpoint) = value.as_ref().filter(|endpoint| !endpoint.is_empty()) {
                 if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
                     return Err(format!(
                         "[telemetry_offer] {key} must be a full OTLP/HTTP URL with path, e.g.                          https://collector.example:4318/v1/metrics"
@@ -697,6 +705,31 @@ mod tests {
         std::fs::write(&path, "max_agents = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_agents"), "{err}");
+    }
+
+    /// The three shapes `[telemetry_offer]` admits: a destination, a withdrawal, and a mistake.
+    /// The withdrawal is the one ADR-0089 adds — an empty endpoint is a thing to say, not a URL to
+    /// check — and it must not be waved through for a value that is merely wrong.
+    #[test]
+    fn an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error() {
+        let section = |body: &str| {
+            toml::from_str::<TelemetryOfferConfig>(body)
+                .expect("parse")
+                .check()
+        };
+
+        assert!(section("metrics_endpoint = \"https://otlp.example/v1/metrics\"").is_ok());
+        assert!(
+            section("metrics_endpoint = \"\"").is_ok(),
+            "an empty endpoint withdraws the signal"
+        );
+
+        let err = section("metrics_endpoint = \"collector:4318\"")
+            .expect_err("a bare host is not an OTLP/HTTP URL");
+        assert!(err.contains("metrics_endpoint"), "{err}");
+
+        let err = section("").expect_err("an empty section offers nothing");
+        assert!(err.contains("at least one"), "{err}");
     }
 
     #[test]

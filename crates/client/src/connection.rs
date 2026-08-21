@@ -67,8 +67,12 @@ pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::
     }
 }
 
-/// Folds a verified offer over what was already in force. An offer carries only what changes —
-/// a headers-only rotation must not erase a previously offered endpoint, and vice versa.
+/// Folds a verified offer over what was already in force.
+///
+/// The **OpAMP** settings carry only what changes — a headers-only rotation must not erase a
+/// previously offered endpoint, and vice versa. The **own-telemetry** destinations do not: an offer
+/// that names any of them states all three (ADR-0089). The two rules live in one function because
+/// one message carries both, and the difference between them is the whole of what this fold does.
 pub fn merge(
     stored: Option<&ConnectionSettingsOffers>,
     offer: &ConnectionSettingsOffers,
@@ -78,14 +82,27 @@ pub fn merge(
     let pick = |field: fn(&OpAmpConnectionSettings) -> bool| -> Option<OpAmpConnectionSettings> {
         offered.filter(|s| field(s)).or(previous).cloned()
     };
-    // The own-telemetry destinations fold per signal (ADR-0036): an offer naming only a metrics
-    // endpoint leaves an already-offered traces endpoint alone, exactly as the OpAMP settings do.
+    // The own-telemetry destinations do not fold per signal (ADR-0089). An offer that names any of
+    // the three states all three: a signal it leaves out is *stopped*, and a signal whose endpoint
+    // it offers empty is withdrawn. An offer that names none of them says nothing about telemetry
+    // — an OpAMP endpoint move, a credential rotation, a certificate — and leaves all three alone.
+    //
+    // The line is between messages, not between fields, and that is what keeps it compatible with
+    // the schema's per-field "if this field is not set … the settings are unchanged": unchanged
+    // holds for an offer that is silent about telemetry. For one that speaks about it, the message
+    // is the whole state — the reading the reference implementation has, and the only one in which
+    // a destination can ever be taken away.
+    let states_telemetry =
+        offer.own_metrics.is_some() || offer.own_traces.is_some() || offer.own_logs.is_some();
     let telemetry = |offered: Option<&TelemetryConnectionSettings>,
                      previous: Option<&TelemetryConnectionSettings>| {
-        offered
-            .filter(|s| !s.destination_endpoint.is_empty())
-            .or(previous)
-            .cloned()
+        if states_telemetry {
+            offered
+                .filter(|s| !s.destination_endpoint.is_empty())
+                .cloned()
+        } else {
+            previous.cloned()
+        }
     };
     ConnectionSettingsOffers {
         hash: offer.hash.clone(),
@@ -352,6 +369,72 @@ mod tests {
         assert!(merged.opamp.is_none());
         assert!(merged.own_metrics.is_some());
         assert_eq!(merged.hash, b"t1");
+    }
+
+    /// ADR-0089 rule 1: an offer that names any telemetry destination states all three. The
+    /// traces endpoint in force is *stopped* by a metrics-only offer, not carried forward — which
+    /// is the whole difference between a fleet that can turn a signal off and one that cannot.
+    #[test]
+    fn an_offer_naming_one_signal_stops_the_others() {
+        let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
+        stored.own_traces = Some(TelemetryConnectionSettings {
+            destination_endpoint: "https://x/v1/traces".to_string(),
+            ..Default::default()
+        });
+
+        let merged = merge(
+            Some(&stored),
+            &telemetry_only(b"t2", "https://y/v1/metrics"),
+        );
+
+        assert_eq!(
+            merged.own_metrics.expect("metrics").destination_endpoint,
+            "https://y/v1/metrics",
+            "the offered destination replaces the one in force"
+        );
+        assert!(
+            merged.own_traces.is_none(),
+            "a signal the offer does not name is stopped"
+        );
+    }
+
+    /// Rule 2: an offer that names none of the three says nothing about telemetry. A credential
+    /// rotation must not take the exporters down with it — that is what keeps the classes of
+    /// ADR-0086 independent, and it is the schema's own "not set means unchanged", held at the
+    /// level it still holds at.
+    #[test]
+    fn an_offer_silent_about_telemetry_leaves_all_three_alone() {
+        let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
+        stored.own_logs = Some(TelemetryConnectionSettings {
+            destination_endpoint: "https://x/v1/logs".to_string(),
+            ..Default::default()
+        });
+
+        let merged = merge(Some(&stored), &offer_with(b"h2", "", Some("Bearer new"), 0));
+
+        assert_eq!(
+            merged.own_metrics.expect("metrics").destination_endpoint,
+            "https://x/v1/metrics"
+        );
+        assert_eq!(
+            merged.own_logs.expect("logs").destination_endpoint,
+            "https://x/v1/logs"
+        );
+    }
+
+    /// Rule 3: an endpoint offered empty withdraws that signal — the only way to say "all three
+    /// off", since by rule 2 an offer that names nothing means "unchanged". The withdrawal leaves
+    /// the persisted state, so a restart does not bring the destination back.
+    #[test]
+    fn an_empty_endpoint_withdraws_the_signal() {
+        let stored = telemetry_only(b"t1", "https://x/v1/metrics");
+        let merged = merge(Some(&stored), &telemetry_only(b"t2", ""));
+
+        assert!(
+            merged.own_metrics.is_none(),
+            "an empty endpoint is a withdrawal, not a destination"
+        );
+        assert_eq!(merged.hash, b"t2", "and it is acknowledged like any offer");
     }
 
     /// And the fold still works the other way: a telemetry-only offer arriving over settings

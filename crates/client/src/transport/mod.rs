@@ -152,9 +152,11 @@ pub enum OfferOutcome {
 ///    telemetry destination cannot be proved that way and is not: a receiver that is momentarily
 ///    down is not an offer that is wrong.
 /// 2. **Persist, then apply telemetry from what was persisted** — never from the raw offer. An
-///    offer carries only what changed, so applying `own_metrics` alone from the raw message would
-///    compare against `traces: None, logs: None` and tear down exporters the Server never asked to
-///    stop. `merge` is what puts the unchanged ones back.
+///    offer that says nothing about telemetry — an endpoint move, a credential rotation, a
+///    certificate — would otherwise compare against `metrics: None, traces: None, logs: None` and
+///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
+///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
+///    ADR-0089 is where the difference is decided.
 /// 3. **One acknowledgement for the whole message** (ADR-0086 clause 3). The Baseline hashes all
 ///    settings together, so the Agent answers the message, not its parts: a single status whose
 ///    `error_message` names everything dropped across both halves.

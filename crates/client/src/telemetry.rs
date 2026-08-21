@@ -192,7 +192,7 @@ impl Telemetry {
         let resource = resource(description);
         this.stop();
 
-        if let Some(settings) = settings.own_metrics.as_ref() {
+        if let Some(settings) = offered(settings.own_metrics.as_ref()) {
             match check(settings, "own_metrics")
                 .and_then(|()| metric_provider(settings, resource.clone(), config))
             {
@@ -200,7 +200,7 @@ impl Telemetry {
                 Err(e) => refused.push(e),
             }
         }
-        if let Some(settings) = settings.own_traces.as_ref() {
+        if let Some(settings) = offered(settings.own_traces.as_ref()) {
             match check(settings, "own_traces")
                 .and_then(|()| trace_provider(settings, resource.clone(), config))
             {
@@ -211,7 +211,7 @@ impl Telemetry {
                 Err(e) => refused.push(e),
             }
         }
-        if let Some(settings) = settings.own_logs.as_ref() {
+        if let Some(settings) = offered(settings.own_logs.as_ref()) {
             match check(settings, "own_logs")
                 .and_then(|()| log_provider(settings, resource, config))
             {
@@ -226,6 +226,11 @@ impl Telemetry {
         this.in_force = wanted;
         if this.meters.is_some() || this.tracers.is_some() || this.loggers.is_some() {
             info!("reporting own telemetry to the destinations the Server offered");
+        } else if refused.is_empty() {
+            // Only a withdrawal reaches here (ADR-0089): an offer that changes nothing returned
+            // above, and one whose destinations were refused has something in `refused` to report.
+            // An operator switching telemetry off from the fleet should see it land on the host.
+            info!("the Server withdrew every own-telemetry destination; no longer reporting");
         }
         refused
     }
@@ -316,10 +321,17 @@ impl Providers {
     }
 }
 
+/// The destination a field offers, if it offers one.
+///
+/// An endpoint offered **empty** is a withdrawal (ADR-0089), not a malformed URL: the exporter for
+/// that signal is shut down, nothing is built in its place, and nothing is reported about it. The
+/// Server is saying stop, and stopping is not a failure to be handed back as one.
+fn offered(settings: Option<&TelemetryConnectionSettings>) -> Option<&TelemetryConnectionSettings> {
+    settings.filter(|s| !s.destination_endpoint.is_empty())
+}
+
 fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String> {
-    settings
-        .map(|s| s.destination_endpoint.clone())
-        .filter(|endpoint| !endpoint.is_empty())
+    offered(settings).map(|s| s.destination_endpoint.clone())
 }
 
 /// The Baseline's "MAY refuse to send the telemetry if the URL begins with `http://`", taken.
@@ -739,6 +751,34 @@ mod tests {
         assert!(refused.is_empty(), "{refused:?}");
         assert!(telemetry.reporting());
         telemetry.shutdown();
+    }
+
+    /// A destination offered with an empty endpoint is a withdrawal (ADR-0089 rule 3): the
+    /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
+    /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
+    #[tokio::test]
+    async fn an_empty_endpoint_stops_reporting_and_refuses_nothing() {
+        crate::tls::install_ring_provider();
+        let telemetry = Telemetry::new();
+        let running = ConnectionSettingsOffers {
+            own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
+            ..Default::default()
+        };
+        let refused = telemetry.apply(&running, &description(), &ClientConfig::default());
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(telemetry.reporting());
+
+        let withdrawal = ConnectionSettingsOffers {
+            own_metrics: Some(destination("")),
+            ..Default::default()
+        };
+        let refused = telemetry.apply(&withdrawal, &description(), &ClientConfig::default());
+
+        assert!(
+            refused.is_empty(),
+            "a withdrawal is not a refusal: {refused:?}"
+        );
+        assert!(!telemetry.reporting(), "the exporter is shut down");
     }
 
     /// The same two fields refused on the OpAMP settings are refused here, and for the same

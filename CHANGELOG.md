@@ -50,6 +50,25 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
+  ([ADR-0089](docs/adr/0089-an-own-telemetry-offer-states-all-three-destinations.md)). Own telemetry
+  could be switched on and moved from the Server, and never switched off: a destination once in
+  force survived reconnects and restarts, and every message that would have ended it was read as
+  "unchanged". An offer that names any of the three signals is now the whole truth about own
+  telemetry — a signal it leaves out is **stopped** rather than carried forward — and an endpoint set
+  to the empty string is an explicit withdrawal, honoured and acknowledged like any other offer. An
+  offer that says nothing about telemetry (an endpoint move, a credential rotation, a certificate)
+  still leaves all three alone. **What to do:** if you offer fewer than three signals, check what
+  your Agents are reporting before upgrading the Server — under the old reading an Agent could still
+  be exporting a signal you removed from the file long ago, and after it that signal stops. To stop
+  a fleet entirely, set the endpoints to `""`, restart the Server, and let the Agents acknowledge
+  before removing the section: deleting it withdraws nothing, deliberately, so that a Server with no
+  telemetry of its own cannot tear down a fleet another Server configured. This departs from the
+  Baseline's own wording twice over and is recorded, with the reasoning, in
+  [`CONFORMANCE.md`](docs/CONFORMANCE.md#deviations) — it follows the reference implementation
+  rather than the schema comment, because the two disagree and only one of them can turn telemetry
+  off.
+
 - **Own telemetry now carries the operator's name for the Agent it came from.** `service.instance.name`
   ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)) is
   non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled with

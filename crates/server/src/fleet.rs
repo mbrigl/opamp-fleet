@@ -272,6 +272,11 @@ pub struct ConnectionOffer {
 /// The own-telemetry destinations this Server offers (ADR-0036), precompiled from
 /// `[telemetry_offer]`. Part of the same `ConnectionSettingsOffers` message the OpAMP settings
 /// ride, and hashed with them: one offer, one hash, one acknowledgement.
+///
+/// A field here is `Some` for every signal the section mentions, **including one it withdraws** —
+/// a destination whose endpoint is empty (ADR-0089). That is why a withdrawal counts as something
+/// to offer in [`is_empty`](Self::is_empty): it has to reach the Agent to take effect, and a
+/// Server that has it to say declares `OffersConnectionSettings` for it like any other offer.
 #[derive(Default, Clone)]
 pub struct TelemetryOffer {
     pub own_metrics: Option<TelemetryConnectionSettings>,
@@ -296,7 +301,10 @@ impl TelemetryOffer {
                 .as_ref()
                 .map(|endpoint| TelemetryConnectionSettings {
                     destination_endpoint: endpoint.clone(),
-                    headers: headers.clone(),
+                    // A withdrawal names nothing else (ADR-0089): an empty endpoint stops that
+                    // signal, and the backend's credential travelling with it would be a token
+                    // handed out for a connection nobody is going to open.
+                    headers: headers.clone().filter(|_| !endpoint.is_empty()),
                     ..Default::default()
                 })
         };

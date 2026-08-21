@@ -171,6 +171,22 @@ max_package_size_bytes = 1073741824
 #    of them — each carrying process metrics for the Agent and for every process it supervises.
 #  - Offer only what you can receive. A signal you leave unset is simply not offered, and the Agent
 #    reports nothing for it — which costs less than a destination that answers 404 forever.
+#  - What this section says, it says about ALL THREE signals (ADR-0089). An Agent already reporting
+#    traces STOPS when you remove traces_endpoint from here: the offer is the whole truth about own
+#    telemetry, not a list of changes. Which is what makes a destination removable at all.
+#
+# TURNING IT OFF. An endpoint set to the empty string is an explicit withdrawal — the Agent shuts
+# that exporter down, forgets the destination, and acknowledges it like any other offer:
+#
+#     [telemetry_offer]
+#     metrics_endpoint = ""      # stop reporting metrics
+#
+# That is the only way to say "stop all three", because a Server that offers nothing says nothing:
+# DELETING this section does not switch anything off. It withdraws nothing, so that a Server with no
+# telemetry of its own cannot tear down a fleet another Server pointed at a collector — and so an
+# Agent keeps reporting across restarts, which is the point of the destination being persisted.
+# To stop a fleet: set the endpoints empty, restart the Server, let the Agents acknowledge, then
+# remove the section.
 #
 # Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
 # them leaves the file with a duplicated table header, which is an error rather than a merge.
