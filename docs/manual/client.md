@@ -910,9 +910,12 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Two plugin types ship today: `collector` for an OpenTelemetry Collector, and `command`
-for any other process — a **Foreign Agent** that speaks no OpAMP. A new kind of process means a new
-plugin, not a change to the core.
+Three plugin types ship today: `collector` for an OpenTelemetry Collector, `command` for any other
+process — a **Foreign Agent** that speaks no OpAMP — and `icinga2` for the one case those two cannot
+express: a daemon that takes its directories as `-D` constants rather than flags, validates a
+configuration before applying it, and needs a certificate from a master before it can do anything
+([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)). A new kind of process
+means a new plugin, not a change to the core — which is what the third one demonstrates.
 
 ### The Server can manage the set
 
@@ -951,7 +954,7 @@ edit to the blocks stands only until the next rollout act overwrites it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"` or `"command"`. Required. |
+| `type` | — | `"collector"`, `"command"`, or `"icinga2"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
