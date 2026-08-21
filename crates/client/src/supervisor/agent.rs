@@ -405,6 +405,13 @@ impl AgentState {
         self.uid
     }
 
+    /// The operator's name for this Agent (ADR-0023). The Supervisor's own value, never the
+    /// Managed Process's: a process reporting under that key is ignored in `describe`, so this is
+    /// the one answer to "which Agent is this" that a human can read.
+    pub fn instance_name(&self) -> &str {
+        &self.instance_name
+    }
+
     /// A configuration stored `APPLYING` and not yet handed to the process adapter, if any.
     pub fn take_pending_apply(&mut self) -> Option<AgentRemoteConfig> {
         self.pending_apply.take()
@@ -2288,7 +2295,7 @@ mod tests {
         );
     }
 
-    /// ADR-0034 point 6: for the package that carries this Client, *already installed* is what this
+    /// ADR-0034 point 7: for the package that carries this Client, *already installed* is what this
     /// process runs — never a hash in a record. The same bytes can be published under a new version,
     /// and a record about a binary that is gone must not swallow the offer that would replace it:
     /// the Server offers because the Agent reports running something older, and a Client that

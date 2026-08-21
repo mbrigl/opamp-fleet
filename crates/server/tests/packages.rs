@@ -908,7 +908,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
         report
     }
 
-    /// The two counts the Set view carries (ADR-0034 point 11): whom it aims at, and whom it
+    /// The two counts the Set view carries (ADR-0034 point 12): whom it aims at, and whom it
     /// would actually reach.
     async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
         let list: serde_json::Value = reqwest::Client::new()
@@ -979,7 +979,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     assert_eq!(offer.packages["otelcol"].version, "2.0.0");
 
     // And once the Agent reports it installed, the assignment keeps composing the offer — the
-    // Set the Agent runs must not vanish from its desired state (ADR-0034 point 8).
+    // Set the Agent runs must not vanish from its desired state (ADR-0034 point 9).
     let offer = exchange(&server, &running(&uid, 3, "2.0.0"))
         .await
         .packages_available

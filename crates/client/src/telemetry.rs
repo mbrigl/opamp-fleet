@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
+use opamp::attributes::{string_value, SERVICE_INSTANCE_NAME};
 use opamp::proto::{AgentDescription, ConnectionSettingsOffers, TelemetryConnectionSettings};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::KeyValue;
@@ -46,6 +47,25 @@ use crate::config::ClientConfig;
 /// reader defaults to 60 s and must therefore be told this explicitly; leaving it at the default is
 /// how the interval silently became six times the recommendation.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long one export may take before it is abandoned.
+///
+/// Nothing else on the export path bounds it. The SDK's `PeriodicReader` says so in its own
+/// documentation — *"does **not** enforce a timeout for exports … If an export operation never
+/// returns, `PeriodicReader` will **stop exporting new metrics**"* — and the batch processors
+/// behind traces and logs block on their export the same way, then drop records once their queue
+/// fills. `opentelemetry-otlp` resolves a timeout but applies it only to the HTTP client it builds
+/// itself; the one handed to it through `with_http_client` keeps whatever bound it was built with,
+/// and `reqwest`'s default is none. A destination that stops answering rather than refusing — a
+/// host asleep, a NAT that dropped the mapping, a network gone dark — therefore left the exporter
+/// thread blocked on a socket that never closes, and own telemetry stayed dead until this Client
+/// was restarted. That is the failure this bound exists for: refusal already recovers by itself,
+/// since OTLP/HTTP is a fresh request per interval and the next one simply succeeds.
+///
+/// Half the reporting interval, so a stalled export gives up in time for the next one to be tried
+/// on schedule. A bound at the interval would have every cycle finish late, and the reader answers
+/// a late export by running the next one immediately — the stall would turn into a queue.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(SAMPLE_INTERVAL.as_secs() / 2);
 
 /// The instrumentation scope every signal this Client emits is attributed to.
 const SCOPE: &str = "opamp-fleet-client";
@@ -83,6 +103,22 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
     if let Err(e) = handle.modify(|slot| *slot = layer) {
         warn!(error = %e, "cannot install the OTLP log bridge");
     }
+}
+
+/// One Agent's own metrics: which Agent a series belongs to, and the process to read it from.
+///
+/// Both names travel together because neither answers on its own. The uid is the identity the
+/// protocol keys everything by, and the instance name is the only part of it an operator recognises
+/// (ADR-0023) — a series labelled with one and not the other is either unreadable or ambiguous.
+#[derive(Clone)]
+pub struct SamplingTarget {
+    /// The Agent's `service.instance.id`.
+    pub uid: String,
+    /// The operator's name for it.
+    pub instance_name: String,
+    /// The process to sample: this one for the Client's own Agent, the Managed Process for a
+    /// Supervisor-backed one.
+    pub pid: u32,
 }
 
 /// The providers currently in force, if any.
@@ -156,7 +192,7 @@ impl Telemetry {
         let resource = resource(description);
         this.stop();
 
-        if let Some(settings) = settings.own_metrics.as_ref() {
+        if let Some(settings) = offered(settings.own_metrics.as_ref()) {
             match check(settings, "own_metrics")
                 .and_then(|()| metric_provider(settings, resource.clone(), config))
             {
@@ -164,7 +200,7 @@ impl Telemetry {
                 Err(e) => refused.push(e),
             }
         }
-        if let Some(settings) = settings.own_traces.as_ref() {
+        if let Some(settings) = offered(settings.own_traces.as_ref()) {
             match check(settings, "own_traces")
                 .and_then(|()| trace_provider(settings, resource.clone(), config))
             {
@@ -175,7 +211,7 @@ impl Telemetry {
                 Err(e) => refused.push(e),
             }
         }
-        if let Some(settings) = settings.own_logs.as_ref() {
+        if let Some(settings) = offered(settings.own_logs.as_ref()) {
             match check(settings, "own_logs")
                 .and_then(|()| log_provider(settings, resource, config))
             {
@@ -190,28 +226,40 @@ impl Telemetry {
         this.in_force = wanted;
         if this.meters.is_some() || this.tracers.is_some() || this.loggers.is_some() {
             info!("reporting own telemetry to the destinations the Server offered");
+        } else if refused.is_empty() {
+            // Only a withdrawal reaches here (ADR-0024): an offer that changes nothing returned
+            // above, and one whose destinations were refused has something in `refused` to report.
+            // An operator switching telemetry off from the fleet should see it land on the host.
+            info!("the Server withdrew every own-telemetry destination; no longer reporting");
         }
         refused
     }
 
-    /// Samples the process behind `pid` and records it against this Agent's meter. A pid that has
-    /// gone away records nothing — a Managed Process between restarts is not an error.
-    pub fn sample(&self, system: &mut sysinfo::System, pid: u32, agent: &str) {
+    /// Samples the process behind `target`'s pid and records it against that Agent's meter. A pid
+    /// that has gone away records nothing — a Managed Process between restarts is not an error.
+    pub fn sample(&self, system: &mut sysinfo::System, target: &SamplingTarget) {
         let this = self.providers();
         let Some(meters) = &this.meters else {
             return;
         };
-        let pid = sysinfo::Pid::from_u32(pid);
+        let pid = sysinfo::Pid::from_u32(target.pid);
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         let Some(process) = system.process(pid) else {
             return;
         };
 
         let meter = meters.meter(SCOPE);
-        let attributes = [KeyValue::new(
-            opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
-            agent.to_string(),
-        )];
+        // Per Agent rather than left to the Resource: the Resource is the *Client's* identity
+        // (`apply` is handed the self-Agent's description), so a Managed Process's series would
+        // otherwise carry the Supervisor's uid and the Supervisor's name. Both keys are restated
+        // here for the same reason — one identifies the series, the other makes it readable.
+        let attributes = [
+            KeyValue::new(
+                opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
+                target.uid.clone(),
+            ),
+            KeyValue::new(SERVICE_INSTANCE_NAME, target.instance_name.clone()),
+        ];
         // Gauges rather than counters: what is sampled is a level, and the exporter's periodic
         // reader is what turns a series of levels into a time series.
         meter
@@ -273,10 +321,17 @@ impl Providers {
     }
 }
 
+/// The destination a field offers, if it offers one.
+///
+/// An endpoint offered **empty** is a withdrawal (ADR-0024), not a malformed URL: the exporter for
+/// that signal is shut down, nothing is built in its place, and nothing is reported about it. The
+/// Server is saying stop, and stopping is not a failure to be handed back as one.
+fn offered(settings: Option<&TelemetryConnectionSettings>) -> Option<&TelemetryConnectionSettings> {
+    settings.filter(|s| !s.destination_endpoint.is_empty())
+}
+
 fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String> {
-    settings
-        .map(|s| s.destination_endpoint.clone())
-        .filter(|endpoint| !endpoint.is_empty())
+    offered(settings).map(|s| s.destination_endpoint.clone())
 }
 
 /// The Baseline's "MAY refuse to send the telemetry if the URL begins with `http://`", taken.
@@ -411,7 +466,11 @@ fn exporter_client(
         .map(|certificate| certificate.cert.as_slice())
         .filter(|cert| !cert.is_empty());
     let builder = crate::tls::trust_and_identity_for(
-        reqwest::Client::builder().use_rustls_tls(),
+        // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps its own
+        // for the client it would have built, and never applies it to this one.
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .timeout(EXPORT_TIMEOUT),
         config,
         offered,
     )
@@ -469,7 +528,8 @@ fn is_unique_local(addr: Ipv6Addr) -> bool {
 }
 
 /// The OTLP Resource: the Agent's identifying attributes, as the Baseline asks — "the combination
-/// of identifying attributes SHOULD be sufficient to uniquely identify the Agent's own telemetry".
+/// of identifying attributes SHOULD be sufficient to uniquely identify the Agent's own telemetry"
+/// — plus the one name that makes the result readable.
 fn resource(description: &AgentDescription) -> Resource {
     let attributes = description.identifying_attributes.iter().filter_map(|kv| {
         let value = match kv.value.as_ref()?.value.as_ref()? {
@@ -478,8 +538,17 @@ fn resource(description: &AgentDescription) -> Resource {
         };
         Some(KeyValue::new(kv.key.clone(), value))
     });
+    // `service.instance.name` is non-identifying only because the Baseline has no key for a human
+    // instance name and identity stays `service.instance.id` (ADR-0023) — that is a statement about
+    // *identity*, not about what the telemetry is worth carrying. Without it every series at the
+    // receiving end is a uuid the operator cannot place against the fleet view they searched by.
+    let name = string_value(
+        &description.non_identifying_attributes,
+        SERVICE_INSTANCE_NAME,
+    )
+    .map(|name| KeyValue::new(SERVICE_INSTANCE_NAME, name.to_string()));
     Resource::builder_empty()
-        .with_attributes(attributes)
+        .with_attributes(attributes.chain(name))
         .build()
 }
 
@@ -573,7 +642,12 @@ mod tests {
                     )),
                 }),
             }],
-            non_identifying_attributes: vec![],
+            non_identifying_attributes: vec![ProtoKeyValue {
+                key: "service.instance.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("edge-01".to_string())),
+                }),
+            }],
         }
     }
 
@@ -677,6 +751,34 @@ mod tests {
         assert!(refused.is_empty(), "{refused:?}");
         assert!(telemetry.reporting());
         telemetry.shutdown();
+    }
+
+    /// A destination offered with an empty endpoint is a withdrawal (ADR-0024 rule 3): the
+    /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
+    /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
+    #[tokio::test]
+    async fn an_empty_endpoint_stops_reporting_and_refuses_nothing() {
+        crate::tls::install_ring_provider();
+        let telemetry = Telemetry::new();
+        let running = ConnectionSettingsOffers {
+            own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
+            ..Default::default()
+        };
+        let refused = telemetry.apply(&running, &description(), &ClientConfig::default());
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(telemetry.reporting());
+
+        let withdrawal = ConnectionSettingsOffers {
+            own_metrics: Some(destination("")),
+            ..Default::default()
+        };
+        let refused = telemetry.apply(&withdrawal, &description(), &ClientConfig::default());
+
+        assert!(
+            refused.is_empty(),
+            "a withdrawal is not a refusal: {refused:?}"
+        );
+        assert!(!telemetry.reporting(), "the exporter is shut down");
     }
 
     /// The same two fields refused on the OpAMP settings are refused here, and for the same
@@ -816,14 +918,74 @@ mod tests {
     }
 
     /// The Resource carries what identifies the Agent, which is what makes one host's several
-    /// Agents distinguishable at the receiving end.
+    /// Agents distinguishable at the receiving end — and the operator's name for it beside them,
+    /// which is what makes the result placeable against the fleet view.
     #[test]
     fn the_resource_carries_the_agents_identifying_attributes() {
         let resource = resource(&description());
-        let name = resource
+        let attribute = |key: &str| {
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(
+            attribute("service.name").as_deref(),
+            Some("opamp-fleet-client")
+        );
+        assert_eq!(
+            attribute("service.instance.name").as_deref(),
+            Some("edge-01")
+        );
+    }
+
+    /// The instance name is non-identifying, so it is reported where an Agent has one and left out
+    /// where it does not — an absent attribute says "unknown" where an empty one says nothing true.
+    #[test]
+    fn an_agent_without_an_instance_name_reports_none() {
+        let mut description = description();
+        description.non_identifying_attributes.clear();
+        assert!(resource(&description)
             .iter()
-            .find(|(key, _)| key.as_str() == "service.name")
-            .map(|(_, value)| value.to_string());
-        assert_eq!(name.as_deref(), Some("opamp-fleet-client"));
+            .all(|(key, _)| key.as_str() != "service.instance.name"));
+    }
+
+    /// The bound nothing else on the path supplies. A destination that *refuses* recovers by
+    /// itself — the next interval is a fresh request — so what is worth a test is the one that
+    /// does not: a socket accepted and then left silent, which without this holds the exporter
+    /// thread for good and takes own telemetry down until the process restarts.
+    #[tokio::test]
+    async fn an_export_to_a_destination_that_never_answers_gives_up() {
+        crate::tls::install_ring_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/metrics", listener.local_addr().unwrap());
+        let _silent = tokio::spawn(async move {
+            // Accepted and held: closing the socket would be an answer, and an answer is the case
+            // that was never broken.
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                connections.push(connection);
+            }
+        });
+
+        let client = exporter_client(
+            &destination(&endpoint),
+            "own_metrics",
+            &ClientConfig::default(),
+        )
+        .expect("the client builds");
+        // Bounded from the outside as well: without the client's own timeout this send never
+        // returns, and a regression should fail the test rather than hang it.
+        let outcome = tokio::time::timeout(SAMPLE_INTERVAL, client.client.post(&endpoint).send())
+            .await
+            .expect("the export gives up within the interval that drives it");
+
+        assert!(
+            outcome
+                .as_ref()
+                .err()
+                .is_some_and(reqwest::Error::is_timeout),
+            "a silent destination must time out, got {outcome:?}"
+        );
     }
 }

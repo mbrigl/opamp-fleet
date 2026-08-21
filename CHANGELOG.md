@@ -15,7 +15,7 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.4.1]
+## [0.4.2]
 
 ### Added
 
@@ -49,6 +49,53 @@ carries a date once its tag exists.
   **What to do:** nothing. The manual procedure still works.
 
 ### Changed
+
+- **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
+  ([ADR-0024](docs/adr/0024-agents-report-their-own-telemetry.md)). Own telemetry
+  could be switched on and moved from the Server, and never switched off: a destination once in
+  force survived reconnects and restarts, and every message that would have ended it was read as
+  "unchanged". An offer that names any of the three signals is now the whole truth about own
+  telemetry — a signal it leaves out is **stopped** rather than carried forward — and an endpoint set
+  to the empty string is an explicit withdrawal, honoured and acknowledged like any other offer. An
+  offer that says nothing about telemetry (an endpoint move, a credential rotation, a certificate)
+  still leaves all three alone. **What to do:** if you offer fewer than three signals, check what
+  your Agents are reporting before upgrading the Server — under the old reading an Agent could still
+  be exporting a signal you removed from the file long ago, and after it that signal stops. To stop
+  a fleet entirely, set the endpoints to `""`, restart the Server, and let the Agents acknowledge
+  before removing the section: deleting it withdraws nothing, deliberately, so that a Server with no
+  telemetry of its own cannot tear down a fleet another Server configured. This departs from the
+  Baseline's own wording twice over and is recorded, with the reasoning, in
+  [`CONFORMANCE.md`](docs/CONFORMANCE.md#deviations) — it follows the reference implementation
+  rather than the schema comment, because the two disagree and only one of them can turn telemetry
+  off.
+
+- **Own telemetry now carries the operator's name for the Agent it came from.** `service.instance.name`
+  ([ADR-0023](docs/adr/0023-what-describes-an-agent.md)) is
+  non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled with
+  a `service.instance.id` uuid and nothing an operator could place against the fleet view they had
+  searched by. The Resource now carries it beside the identifying attributes, and each process-metric
+  data point carries the *sampled* Agent's uid and name — so a Supervisor's Managed Process is no
+  longer labelled with the Client's identity. **What to do:** nothing on the Agent side. Dashboards
+  and alerts keyed on `service.instance.id` keep working unchanged; queries can now group by
+  `service.instance.name` instead.
+
+- **The version an Agent reports *running* now decides which packages reach it, and the version its
+  package status claims is no longer read beside it**
+  ([ADR-0034](docs/adr/0034-what-reaches-an-agent.md)). A Set had to be greater than the lower of the
+  two versions an Agent reports *and* never lower than the one its package status claimed. That
+  second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
+  named `supervisor 0.4.2` after a self-update that staged and did not take, while its program
+  reported 0.4.0, was refused a rollout of 0.4.1 as a downgrade — for good. A package status is
+  derived from what an install once wrote and outlives the binary it describes; `service.version` is
+  the running program's own word. The running one now decides in both directions, and the claim is
+  consulted only where no running version can be ordered. **What to do:** nothing, unless you run an
+  Agent that reports a `service.version` numbered in a different space than the Set that carries it
+  — which means the Client itself, or an OpAMP-aware Managed Process such as a Collector carrying
+  `opampextension`; an Icinga 2 or GLPI Agent reports none and is unaffected. For those, a Set
+  numbered *below* the program no longer reaches it at all, and one *between* the program's number
+  and the claim can now move the package backwards. Number a Set the way the program it carries
+  numbers itself and neither arises. A refusal names the version that decided and says whether the
+  claim was consulted.
 
 - **An Agent now accepts a cleartext OTLP destination anywhere in the private address space, not
   only on loopback.** `http://` was refused beyond the loopback interface, which meant a Collector
@@ -354,6 +401,21 @@ carries a date once its tag exists.
   **What to do:** nothing. If own telemetry appeared to do nothing before, it should now arrive —
   verified end to end against a local OTLP receiver: logs and metrics both, metrics on their 10 s
   interval, no panic.
+
+- **Own telemetry stopped for good when a destination went silent.** Nothing on the export path
+  bounded a request. The SDK's periodic reader documents that it enforces no export timeout and
+  stops exporting new metrics if one never returns; the batch processors behind traces and logs
+  block on their export the same way and then drop records once their queue fills; and
+  `opentelemetry-otlp` applies the timeout it resolves only to an HTTP client it builds itself, not
+  to the one this Client hands it. A destination that *refused* always recovered by itself, since
+  OTLP/HTTP is a fresh request per interval and the next one simply succeeds. One that accepted the
+  connection and then said nothing — a host asleep, a NAT that dropped its mapping, a network gone
+  dark — held the exporter thread on a socket that never closed, and that signal stayed dead until
+  the Client was restarted. An export now gives up after five seconds, half the reporting interval,
+  in time for the next one to be tried on schedule.
+  **What to do:** nothing. Telemetry that disappears during a network interruption now comes back by
+  itself once the destination answers again. What the outage produced is still lost — there is no
+  retry buffer, so expect a gap rather than a backfill.
 
 - **A Server offering only telemetry destinations was ignored, and re-offered for ever.** With a
   `[telemetry_offer]` and no `[connection_offer]`, the Server sends a connection-settings message
