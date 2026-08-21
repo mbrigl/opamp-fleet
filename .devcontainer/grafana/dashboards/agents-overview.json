@@ -83,6 +83,39 @@
         "options": [],
         "sort": 1,
         "hide": 0
+      },
+      {
+        "name": "platform",
+        "label": "Platform",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
+        "description": "The host an Agent runs on, as os.type/host.arch \u2014 the two halves ADR-0031 selects a package variant by.",
+        "query": {
+          "refId": "tempvar",
+          "editorType": "sql",
+          "format": 1,
+          "pluginVersion": "4.20.0",
+          "rawSql": "SELECT DISTINCT concat(ResourceAttributes['os.type'], '/', ResourceAttributes['host.arch']) FROM otel.otel_metrics_gauge ORDER BY 1"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "sort": 1,
+        "hide": 0
       }
     ]
   },
@@ -421,6 +454,7 @@
     {
       "type": "timeseries",
       "title": "Process memory",
+      "interval": "30s",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
@@ -440,10 +474,11 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
+          "displayName": "${__field.labels.label}",
           "unit": "bytes"
         },
         "overrides": []
@@ -470,7 +505,7 @@
           "format": 0,
           "queryType": "timeseries",
           "pluginVersion": "4.20.0",
-          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       avg(Value) AS memory\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.memory.usage' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\nGROUP BY time, agent\nORDER BY time"
+          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       arrayStringConcat(arrayFilter(x -> x != '', [\n           Attributes['service.instance.name'],\n           Attributes['service.name'],\n           ResourceAttributes['os.type']]), ' \u00b7 ') AS label,\n       avg(Value) AS memory\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.memory.usage' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\n  AND match(concat(ResourceAttributes['os.type'], '/', ResourceAttributes['host.arch']), '${platform:regex}')\nGROUP BY time, agent, label\nORDER BY time"
         }
       ],
       "id": 8
@@ -478,6 +513,7 @@
     {
       "type": "timeseries",
       "title": "Process CPU",
+      "interval": "30s",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
@@ -497,10 +533,11 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
+          "displayName": "${__field.labels.label}",
           "unit": "percentunit"
         },
         "overrides": []
@@ -527,7 +564,7 @@
           "format": 0,
           "queryType": "timeseries",
           "pluginVersion": "4.20.0",
-          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       avg(Value) AS cpu\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.cpu.utilization' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\nGROUP BY time, agent\nORDER BY time"
+          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       arrayStringConcat(arrayFilter(x -> x != '', [\n           Attributes['service.instance.name'],\n           Attributes['service.name'],\n           ResourceAttributes['os.type']]), ' \u00b7 ') AS label,\n       avg(Value) AS cpu\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.cpu.utilization' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\n  AND match(concat(ResourceAttributes['os.type'], '/', ResourceAttributes['host.arch']), '${platform:regex}')\nGROUP BY time, agent, label\nORDER BY time"
         }
       ],
       "id": 9
@@ -535,6 +572,7 @@
     {
       "type": "timeseries",
       "title": "Process uptime",
+      "interval": "30s",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "clickhouse"
@@ -554,10 +592,11 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
+          "displayName": "${__field.labels.label}",
           "unit": "s"
         },
         "overrides": []
@@ -584,7 +623,7 @@
           "format": 0,
           "queryType": "timeseries",
           "pluginVersion": "4.20.0",
-          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       avg(Value) AS uptime\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.uptime' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\nGROUP BY time, agent\nORDER BY time"
+          "rawSql": "SELECT $__timeInterval(TimeUnix) AS time,\n       Attributes['service.instance.id'] AS agent,\n       arrayStringConcat(arrayFilter(x -> x != '', [\n           Attributes['service.instance.name'],\n           Attributes['service.name'],\n           ResourceAttributes['os.type']]), ' \u00b7 ') AS label,\n       avg(Value) AS uptime\nFROM otel.otel_metrics_gauge\nWHERE MetricName = 'process.uptime' AND $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\n  AND match(concat(ResourceAttributes['os.type'], '/', ResourceAttributes['host.arch']), '${platform:regex}')\nGROUP BY time, agent, label\nORDER BY time"
         }
       ],
       "description": "A step back to zero is a restart. A gap is a process that was not running when the sample was taken \u2014 not an error.",
@@ -672,10 +711,10 @@
           "format": 1,
           "queryType": "table",
           "pluginVersion": "4.20.0",
-          "rawSql": "SELECT Attributes['service.instance.id'] AS \"Agent\",\n       any(ResourceAttributes['service.instance.name']) AS \"Client\",\n       any(ResourceAttributes['service.version']) AS \"Version\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.memory.usage') AS \"Memory\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.cpu.utilization') AS \"CPU\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.uptime') AS \"Uptime\",\n       max(TimeUnix) AS \"Last sample\"\nFROM otel.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\nGROUP BY \"Agent\"\nORDER BY \"Agent\""
+          "rawSql": "SELECT Attributes['service.instance.id'] AS \"Agent\",\n       any(Attributes['service.instance.name']) AS \"Name\",\n       any(Attributes['service.name']) AS \"Type\",\n       any(ResourceAttributes['service.instance.name']) AS \"Client\",\n       any(ResourceAttributes['service.version']) AS \"Client version\",\n       any(ResourceAttributes['os.type']) AS \"OS\",\n       any(ResourceAttributes['host.arch']) AS \"Arch\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.memory.usage') AS \"Memory\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.cpu.utilization') AS \"CPU\",\n       argMaxIf(Value, TimeUnix, MetricName = 'process.uptime') AS \"Uptime\",\n       max(TimeUnix) AS \"Last sample\"\nFROM otel.otel_metrics_gauge\nWHERE $__timeFilter(TimeUnix)\n  AND match(ResourceAttributes['service.name'], '${client:regex}')\n  AND match(Attributes['service.instance.id'], '${instance:regex}')\n  AND match(concat(ResourceAttributes['os.type'], '/', ResourceAttributes['host.arch']), '${platform:regex}')\nGROUP BY \"Agent\"\nORDER BY \"Agent\""
         }
       ],
-      "description": "All three metrics per Agent in one row, from the newest sample of each.",
+      "description": "All three metrics per Agent in one row, from the newest sample of each. Name and Type are the Agent's own; Client, Client version, OS and Arch describe the Client that sampled it and the host both run on.",
       "id": 11
     },
     {
@@ -889,8 +928,8 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "showPoints": "auto",
+            "spanNulls": 60000
           },
           "mappings": [],
           "unit": "ms"

@@ -15,6 +15,21 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.4.3]
+
+### Changed
+
+- **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
+  carried the Agent's `service.instance.id` and the operator's name for it; it now also carries
+  `service.name` — the Agent *type*
+  ([ADR-0033](docs/adr/0033-an-agents-type-and-its-instance-name-are-two-attributes.md)), which
+  differs per Agent within one Client and therefore belongs on the sample rather than on the
+  Resource — while the OTLP Resource carries `os.type`, `host.arch` and `os.description` beside
+  what identifies the Client. A series can be read as "this Agent, of this type, on this platform"
+  without a lookup elsewhere. Nothing else from the Agent description is sent: not the host's
+  addresses, not the operator's own `[attributes]`. **What to do:** nothing — the attributes that
+  were there are unchanged, these are additional.
+
 ## [0.4.2] - 2026-08-21
 
 ### Added

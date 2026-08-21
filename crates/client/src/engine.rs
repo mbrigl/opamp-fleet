@@ -202,8 +202,8 @@ impl Engine {
         }
     }
 
-    /// What own metrics are sampled from (ADR-0036): every Agent, named as the protocol keys it and
-    /// as the operator calls it, paired with the pid to sample for it — this process for the
+    /// What own metrics are sampled from (ADR-0036): every Agent, named as the protocol keys it, as
+    /// the operator calls it and as its type is reported, paired with the pid to sample for it — this process for the
     /// Client's own Agent, the Managed Process for a Supervisor-backed one, and nothing while that
     /// process is not running.
     pub fn sampling_targets(&self) -> Vec<SamplingTarget> {
@@ -217,6 +217,7 @@ impl Engine {
                 Some(SamplingTarget {
                     uid: agent.state.uid().to_string(),
                     instance_name: agent.state.instance_name().to_string(),
+                    service_name: agent.state.service_name().to_string(),
                     pid,
                 })
             })

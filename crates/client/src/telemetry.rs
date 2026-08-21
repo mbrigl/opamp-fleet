@@ -20,7 +20,9 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use opamp::attributes::{string_value, SERVICE_INSTANCE_NAME};
+use opamp::attributes::{
+    string_value, HOST_ARCH, OS_DESCRIPTION, OS_TYPE, SERVICE_INSTANCE_NAME, SERVICE_NAME,
+};
 use opamp::proto::{AgentDescription, ConnectionSettingsOffers, TelemetryConnectionSettings};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::KeyValue;
@@ -70,6 +72,30 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(SAMPLE_INTERVAL.as_secs() /
 /// The instrumentation scope every signal this Client emits is attributed to.
 const SCOPE: &str = "opamp-fleet-client";
 
+/// The non-identifying attributes the Resource carries beside what identifies the Agent — named
+/// one by one rather than taken as a bag.
+///
+/// **Why a list and not "everything non-identifying".** That bag also holds `host.ip`, `host.mac`
+/// and whatever the operator wrote under `[attributes]` in `supervisor.toml`. ADR-0036 says out loud
+/// that the Resource is what leaves the host for a destination the *Server* named, so widening this
+/// to the whole bag is a decision about what gets sent somewhere else — naming what describes the
+/// platform is not.
+///
+/// - `service.instance.name` is non-identifying only because the Baseline has no key for a human
+///   instance name and identity stays `service.instance.id` (ADR-0033) — that is a statement about
+///   *identity*, not about what the telemetry is worth carrying. Without it every series at the
+///   receiving end is a uuid the operator cannot place against the fleet view they searched by.
+/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0031), and
+///   `os.description` is the readable form of the first. They sit on the Resource rather than on
+///   each sample because they are a property of the *host*: this Client samples its own process and
+///   the Managed Processes it holds the pids of, so every Agent in one export runs on the machine
+///   this Resource describes. Per-sample they would be a constant repeated on every data point.
+///
+/// Each is reported only where the description carries it — an absent attribute says "unknown",
+/// where one carrying a placeholder would say something false.
+const DESCRIPTIVE_ATTRIBUTES: [&str; 4] =
+    [SERVICE_INSTANCE_NAME, OS_TYPE, HOST_ARCH, OS_DESCRIPTION];
+
 /// The layer the `tracing` subscriber reserves for the OTLP bridge, so a destination that arrives
 /// at runtime has somewhere to go (ADR-0036).
 ///
@@ -107,15 +133,20 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
 
 /// One Agent's own metrics: which Agent a series belongs to, and the process to read it from.
 ///
-/// Both names travel together because neither answers on its own. The uid is the identity the
-/// protocol keys everything by, and the instance name is the only part of it an operator recognises
-/// (ADR-0033) — a series labelled with one and not the other is either unreadable or ambiguous.
+/// All three names travel together because none answers on its own. The uid is the identity the
+/// protocol keys everything by, the instance name is the only part of it an operator recognises,
+/// and the type says what the thing *is* (ADR-0033) — a series labelled with one and not the others
+/// is either unreadable or ambiguous.
 #[derive(Clone)]
 pub struct SamplingTarget {
     /// The Agent's `service.instance.id`.
     pub uid: String,
     /// The operator's name for it.
     pub instance_name: String,
+    /// The Agent *type* it is reported under — `service.name` (ADR-0033). Per Agent rather than on
+    /// the Resource: one Client reports its own `supervisor` beside an `otelcol` and an `icinga2`,
+    /// so unlike the platform this differs *within* a single export.
+    pub service_name: String,
     /// The process to sample: this one for the Client's own Agent, the Managed Process for a
     /// Supervisor-backed one.
     pub pid: u32,
@@ -251,14 +282,17 @@ impl Telemetry {
         let meter = meters.meter(SCOPE);
         // Per Agent rather than left to the Resource: the Resource is the *Client's* identity
         // (`apply` is handed the self-Agent's description), so a Managed Process's series would
-        // otherwise carry the Supervisor's uid and the Supervisor's name. Both keys are restated
-        // here for the same reason — one identifies the series, the other makes it readable.
+        // otherwise carry the Supervisor's uid, name and type. All three keys are restated here for
+        // the same reason — one identifies the series, one makes it readable, and one says what the
+        // Agent is. `service.name` in particular means two different things on the two levels: on
+        // the Resource it is the Client's type (`supervisor`), here it is the sampled Agent's.
         let attributes = [
             KeyValue::new(
                 opentelemetry_semantic_conventions::attribute::SERVICE_INSTANCE_ID,
                 target.uid.clone(),
             ),
             KeyValue::new(SERVICE_INSTANCE_NAME, target.instance_name.clone()),
+            KeyValue::new(SERVICE_NAME, target.service_name.clone()),
         ];
         // Gauges rather than counters: what is sampled is a level, and the exporter's periodic
         // reader is what turns a series of levels into a time series.
@@ -538,17 +572,12 @@ fn resource(description: &AgentDescription) -> Resource {
         };
         Some(KeyValue::new(kv.key.clone(), value))
     });
-    // `service.instance.name` is non-identifying only because the Baseline has no key for a human
-    // instance name and identity stays `service.instance.id` (ADR-0033) — that is a statement about
-    // *identity*, not about what the telemetry is worth carrying. Without it every series at the
-    // receiving end is a uuid the operator cannot place against the fleet view they searched by.
-    let name = string_value(
-        &description.non_identifying_attributes,
-        SERVICE_INSTANCE_NAME,
-    )
-    .map(|name| KeyValue::new(SERVICE_INSTANCE_NAME, name.to_string()));
+    let descriptive = DESCRIPTIVE_ATTRIBUTES.iter().filter_map(|key| {
+        string_value(&description.non_identifying_attributes, key)
+            .map(|value| KeyValue::new(*key, value.to_string()))
+    });
     Resource::builder_empty()
-        .with_attributes(attributes.chain(name))
+        .with_attributes(attributes.chain(descriptive))
         .build()
 }
 
@@ -937,6 +966,50 @@ mod tests {
             attribute("service.instance.name").as_deref(),
             Some("edge-01")
         );
+    }
+
+    /// The platform travels with the telemetry, because a series that cannot be placed on an
+    /// operating system and an architecture (ADR-0031) cannot be read against a fleet whose Agents
+    /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
+    /// host this Resource describes, so per-sample it would be a constant repeated on every point.
+    #[test]
+    fn the_resource_carries_the_platform() {
+        let mut description = description();
+        for (key, value) in [("os.type", "linux"), ("host.arch", "amd64")] {
+            description
+                .non_identifying_attributes
+                .push(opamp::attributes::string_attr(key, value));
+        }
+        let resource = resource(&description);
+        let attribute = |key: &str| {
+            resource
+                .iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, value)| value.to_string())
+        };
+        assert_eq!(attribute("os.type").as_deref(), Some("linux"));
+        assert_eq!(attribute("host.arch").as_deref(), Some("amd64"));
+    }
+
+    /// And nothing else does. The non-identifying attributes are a bag that also holds the host's
+    /// addresses and whatever the operator tagged this Agent with (ADR-0012) — the Resource is what
+    /// leaves the host for a destination the *Server* named, so what goes in it is a named list,
+    /// not the bag. This is the test that fails if that list is ever replaced by a filter.
+    #[test]
+    fn the_resource_carries_no_other_non_identifying_attribute() {
+        let mut description = description();
+        for (key, value) in [("host.name", "edge-01.example"), ("team", "platform")] {
+            description
+                .non_identifying_attributes
+                .push(opamp::attributes::string_attr(key, value));
+        }
+        let resource = resource(&description);
+        for key in ["host.name", "team"] {
+            assert!(
+                resource.iter().all(|(k, _)| k.as_str() != key),
+                "{key} reached the Resource"
+            );
+        }
     }
 
     /// The instance name is non-identifying, so it is reported where an Agent has one and left out

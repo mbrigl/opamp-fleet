@@ -412,6 +412,31 @@ impl AgentState {
         &self.instance_name
     }
 
+    /// The Agent *type* this Agent is reported under — `service.name` (ADR-0033).
+    ///
+    /// The Managed Process's own word where it gives one, the Supervisor's configured type
+    /// otherwise — the fold [`describe`](Self::describe) performs, mirrored here rather than
+    /// repeated: what the fleet view shows for an Agent and what its telemetry is labelled with
+    /// must be the one answer, and `describe` is too expensive to call per sample, since it reads
+    /// the host's addresses live.
+    ///
+    /// The two answers differ in exactly one case, deliberately. A process reporting
+    /// `service.name = ""` blanks the type in `describe`, because the fold replaces by key without
+    /// judging the value; here the empty string is not a value (ADR-0034), so the configured type
+    /// stands. A label nobody can read is worse than a stale one, and the Selector consequences of
+    /// the other reading are ADR-0034's own subject rather than this accessor's.
+    pub fn service_name(&self) -> &str {
+        self.process_description
+            .as_ref()
+            .and_then(|reported| {
+                opamp::attributes::string_value(
+                    &reported.identifying_attributes,
+                    attributes::SERVICE_NAME,
+                )
+            })
+            .unwrap_or(&self.service_name)
+    }
+
     /// A configuration stored `APPLYING` and not yet handed to the process adapter, if any.
     pub fn take_pending_apply(&mut self) -> Option<AgentRemoteConfig> {
         self.pending_apply.take()
@@ -1998,6 +2023,44 @@ mod tests {
     /// `service.version` alone after every package swap, and the opampextension, which reports
     /// everything else. Replacing rather than merging would make each new probe erase the
     /// extension's self-report, and each self-report erase the probed version.
+    /// The type the metrics are labelled with is the type the fleet view shows — the process's own
+    /// word where it gives one, the configured type otherwise. Two answers to "what is this Agent"
+    /// would be worse than none: a series labelled `otelcol` beside a fleet row reading
+    /// `otelcol-contrib` is a question, not a fact.
+    #[test]
+    fn the_reported_type_is_the_processs_own_word_where_it_gives_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("supervised")).expect("storage");
+        let mut agent =
+            AgentState::supervised("edge-01".to_string(), "otelcol".to_string(), storage)
+                .expect("agent");
+        assert_eq!(agent.service_name(), "otelcol");
+
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+            non_identifying_attributes: vec![],
+        });
+        assert_eq!(agent.service_name(), "otelcol-contrib");
+        assert_eq!(
+            reported(&agent.describe()).get("service.name").cloned(),
+            Some("otelcol-contrib".to_string()),
+            "the accessor mirrors the fold rather than diverging from it"
+        );
+
+        // The one case where the two part company, asserted so that it is a decision rather than a
+        // surprise: an empty string is not a value here (ADR-0034), while the fold replaces by key
+        // without judging the value.
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![string_attr("service.name", "")],
+            non_identifying_attributes: vec![],
+        });
+        assert_eq!(agent.service_name(), "otelcol");
+        assert_eq!(
+            reported(&agent.describe()).get("service.name").cloned(),
+            Some(String::new())
+        );
+    }
+
     #[test]
     fn what_the_process_reports_about_itself_accumulates_across_sources() {
         let dir = tempfile::tempdir().expect("tempdir");
