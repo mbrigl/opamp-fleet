@@ -1,6 +1,6 @@
 # ADR-0090: Own traces come from the Client's own `tracing` spans, and a span is a fleet operation
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 

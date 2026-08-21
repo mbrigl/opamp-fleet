@@ -224,7 +224,10 @@ Knowing the edges is half of knowing the design.
 - **It does not run programs it did not install.** See above — this is a deliberate narrowing.
 - **It does not restart itself**, on any platform.
 - **It does not invent telemetry semantics.** Its own metrics and logs go out over OTLP as the
-  OpenTelemetry conventions define them, and nothing beyond.
+  OpenTelemetry conventions define them, and nothing beyond. Its traces are the one place with no
+  convention to follow — the standard names none for an agent's own lifecycle — so the spans are
+  named after the operations this project already has a vocabulary for, and their status is the
+  standard's, not one of ours.
 - **It does not keep state keyed to a connection**, which is what makes reconnection and gateways
   uneventful.
 - **It does not silently accept a configuration it does not understand** — an unknown key stops the
