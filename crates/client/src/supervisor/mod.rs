@@ -12,6 +12,7 @@ pub mod endpoint;
 pub mod icinga2;
 pub mod ports;
 pub mod process;
+pub mod telegraf;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -43,6 +44,7 @@ fn registry() -> Vec<Box<dyn Plugin>> {
         Box::new(collector::CollectorPlugin),
         Box::new(command::CommandPlugin),
         Box::new(icinga2::Icinga2Plugin),
+        Box::new(telegraf::TelegrafPlugin),
     ]
 }
 
@@ -545,6 +547,8 @@ mod tests {
 
         // An operator's own value under the same key is left alone: a configured attribute is the
         // host's statement about itself, and this only fills in what nothing else said.
+        assert!(reported.contains_key("supervisor.kind.telegraf"));
+
         let stated = kind_attributes(
             [("supervisor.kind.command".to_string(), "no".to_string())]
                 .into_iter()

@@ -313,20 +313,18 @@ state_dir = "client-state"
 # [attributes] table at the top of this file still describes the *host*, and every Agent on it
 # carries those.
 
-# 4. A concrete Foreign Agent: Telegraf, under the same generic "command" Supervisor. Named by
-# a bare file name, so it lives in this Supervisor's program/ directory and takes binary updates
-# from the Server — upload the .tar.gz InfluxData publishes exactly as published, and the member
-# whose file name matches `telegraf` is what gets installed. Name the Configuration `telegraf-conf`,
-# matching args below; a Configuration name carries no extension — like every name here it is
-# lowercase letters, digits and `-`. Telegraf re-reads its configuration on SIGHUP, but that is
-# Telegraf's own convention and no longer a key here (see block 3): a change restarts it, until
-# Telegraf gets a kind that knows the signal.
+# 4. Telegraf, under a kind of its own. Two lines: everything else about Telegraf — the program's
+# name per platform, --config against the Configuration named `telegraf-conf`, how it states its
+# version, and the SIGHUP it re-reads its configuration on — is Telegraf's property, so the kind
+# holds it. That last one is why the kind exists: as a block key the signal was refused on Windows
+# at parse time, so one Supervisor set could not serve a mixed fleet. The kind sends the signal
+# where signals exist and restarts where they do not.
+#
+# Upload the .tar.gz InfluxData publishes exactly as published; the member whose file name matches
+# is what gets installed. See docs/artifacts/telegraf.md.
 # [[supervisor]]
-# type = "command"
+# type = "telegraf"
 # name = "telegraf"
-# command = "telegraf"
-# args = ["--config", "${config_dir}/telegraf-conf"]
-# version_args = ["--version"]          # Telegraf prints a Semantic Versioning version
 
 # 5. The GLPI Agent, delivered as a package rather than installed — the same generic "command"
 # Supervisor, and the first block here whose package is a whole *tree* rather than one file.

@@ -19,6 +19,19 @@ carries a date once its tag exists.
 
 ### Changed
 
+- **Telegraf gets a kind of its own, and its block is two lines.** Everything the recipe used to
+  spell out — the program's name per platform, `--config` against `telegraf-conf`, how it states
+  its version, and the `SIGHUP` it re-reads its configuration on — is Telegraf's property, so the
+  kind holds it ([ADR-0094](docs/adr/0094-telegraf-gets-a-kind-of-its-own.md)). The reload is why
+  the kind exists: as a block key the signal was refused on Windows at parse time, so one Supervisor
+  set could not serve a mixed fleet.
+
+  **What to do:** replace the `command` recipe with the kind.
+
+  | Was | Is |
+  |---|---|
+  | `type = "command"` with `command`, `args`, `version_args`, `reload_signal` | `type = "telegraf"`, `name = "telegraf"` |
+
 - **`working_dir` and `reload_signal` are gone from every block.** A Managed Process now starts in
   the directory its program lives in — this Supervisor's `program/`, or the tree root — instead of
   inheriting whatever directory the service manager left the Client in, usually `/`. And whether a
@@ -48,6 +61,12 @@ carries a date once its tag exists.
   describe the host, and every Agent on it still carries them.
 
 ### Added
+
+- **An artifact document for Telegraf**, [`docs/artifacts/telegraf.md`](docs/artifacts/telegraf.md):
+  what the artifact is — source, assets, integrity, treatment, the delivered form, what the Client
+  derives from it, the Configurations, and what an upstream change would break. Two tests hold it to
+  the code, one on the packing side and one in the kind, so a release that moves a path turns a test
+  red instead of a rollout.
 
 - **A Client reports the Supervisor kinds it carries**, one non-identifying attribute per kind
   (`supervisor.kind.telegraf = "true"`), so a Supervisor set can be aimed with a Selector at the

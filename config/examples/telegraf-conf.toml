@@ -11,11 +11,11 @@
 #
 # Roll it out before the supervisor block reaches the host: Telegraf exits on a `--config` that
 # names no file, so the Supervisor tries three times and then holds until the first apply. Once
-# it runs, a changed Configuration is applied in place — the block's reload_signal = "HUP" makes
-# Telegraf re-read this file instead of being restarted (unix only).
+# it runs, a changed Configuration is applied in place: the `telegraf` kind sends SIGHUP where
+# signals exist, so Telegraf re-reads this file instead of being restarted, and restarts on Windows.
 #
-# ${config_dir} and ${supervisor_dir} are NOT expanded here: they are placeholders for the
-# block's args, working_dir and env (ADR-0022). Paths in a Configuration body are written out.
+# ${config_dir} and ${supervisor_dir} are NOT expanded here: they are placeholders for a block's
+# own strings (ADR-0022). Paths in a Configuration body are written out.
 
 [agent]
   interval = "10s"
