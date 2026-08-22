@@ -496,9 +496,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("supervisor.toml");
         let named = dir.path().join("from-the-file");
+        // Serialised as TOML rather than interpolated: a Windows path is full of backslashes, and
+        // in a basic string `\U` is an invalid escape — the file was unparseable there, so the
+        // lenient read fell back to the default and the test failed on Windows alone.
         std::fs::write(
             &config_path,
-            format!("state_dir = \"{}\"\n", named.display()),
+            format!(
+                "state_dir = {}\n",
+                toml::Value::from(named.to_string_lossy().into_owned())
+            ),
         )
         .expect("write");
 
