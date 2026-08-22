@@ -75,6 +75,10 @@ pub struct ClientConfig {
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// The fleet's timing policy for every Managed Process (ADR-0091): the graceful-stop budget
+    /// and the apply grace. Absent takes the defaults.
+    #[serde(default, rename = "supervisors")]
+    pub supervisor_defaults: SupervisorsConfig,
     /// How Managed-Process package updates behave once applied (ADR-0058) — the retention of a
     /// superseded version. Absent takes the defaults: one day.
     #[serde(default)]
@@ -142,18 +146,24 @@ pub struct SupervisorBlock {
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.
     pub endpoint_port: u16,
-    /// How long a graceful stop may take before the Managed Process is killed.
-    pub stop_timeout_secs: u64,
-    /// How long a freshly (re)started Managed Process must survive before a received
-    /// configuration is acknowledged `APPLIED`; exiting within the grace reports `FAILED`
-    /// (the health-gated acknowledgement ADR-0011 names). `0` acknowledges on start, as before.
-    pub apply_grace_secs: u64,
+    /// Overrides the global `[supervisors] stop_timeout_secs` for this Supervisor: how long a
+    /// graceful stop may take before the Managed Process is killed. `None` — the default — takes
+    /// the global value.
+    ///
+    /// Only a kind that knows nothing about its agent may state it (ADR-0091): how long an agent
+    /// needs to shut down is a property of that agent, so a wrapped kind holds the value and the
+    /// key is refused in its block.
+    pub stop_timeout_secs: Option<u64>,
+    /// Overrides the global `[supervisors] apply_grace_secs` for this Supervisor: how long a
+    /// freshly (re)started Managed Process must survive before a received configuration is
+    /// acknowledged `APPLIED`; exiting within the grace reports `FAILED` (the health-gated
+    /// acknowledgement ADR-0011 names). `0` acknowledges on start. `None` takes the global value,
+    /// and a wrapped kind refuses the key for the reason above.
+    pub apply_grace_secs: Option<u64>,
     /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0058): how
     /// long the version a successful update supersedes is kept before deletion. `None` — the
     /// default — takes the global value.
     pub retain_previous_secs: Option<u64>,
-    /// This Supervisor's operator-defined attributes (ADR-0012), merged over the top-level ones.
-    pub attributes: BTreeMap<String, String>,
     /// Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g.
     /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0015: one
     /// member, one file. Setting it is what asks for the tree to be unpacked whole.
@@ -286,16 +296,16 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 .map_err(|_| format!("supervisor {name:?}: endpoint_port {port} is not a port"))?,
         };
         let stop_timeout_secs = match take_integer(&mut table, "stop_timeout_secs")? {
-            None => default_stop_timeout_secs(),
-            Some(secs) => u64::try_from(secs).map_err(|_| {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
                 format!("supervisor {name:?}: stop_timeout_secs must not be negative")
-            })?,
+            })?),
         };
         let apply_grace_secs = match take_integer(&mut table, "apply_grace_secs")? {
-            None => default_apply_grace_secs(),
-            Some(secs) => u64::try_from(secs).map_err(|_| {
+            None => None,
+            Some(secs) => Some(u64::try_from(secs).map_err(|_| {
                 format!("supervisor {name:?}: apply_grace_secs must not be negative")
-            })?,
+            })?),
         };
         let retain_previous_secs = match take_integer(&mut table, "retain_previous_secs")? {
             None => None,
@@ -303,8 +313,17 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: retain_previous_secs must not be negative")
             })?),
         };
-        let attributes = take_string_table(&mut table, "attributes")
-            .map_err(|e| format!("supervisor {name:?}: {e}"))?;
+        // Retired by ADR-0091, and refused by name rather than left to the plugin's strict parse:
+        // a block carrying it was written against a Client that took it, and what replaces it is
+        // not another key but a different place entirely.
+        if table.contains_key("attributes") {
+            return Err(format!(
+                "supervisor {name:?}: `[supervisor.attributes]` is no longer a supervisor key — a \
+                 Server label tags this Agent from the fleet (ADR-0042), keyed by its \
+                 `instance_uid` and matched by the same Selectors; the Client-wide `[attributes]` \
+                 still describe the host. Remove the table"
+            ));
+        }
         let program_path = match take_string(&mut table, "program_path")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?
         {
@@ -343,7 +362,6 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             stop_timeout_secs,
             apply_grace_secs,
             retain_previous_secs,
-            attributes,
             program_path,
             settings: table,
         })
@@ -401,29 +419,6 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
         Some(toml::Value::Integer(i)) => Ok(Some(i)),
         Some(other) => Err(format!(
             "`{key}` must be an integer, not {}",
-            other.type_str()
-        )),
-    }
-}
-
-fn take_string_table(
-    table: &mut toml::Table,
-    key: &str,
-) -> Result<BTreeMap<String, String>, String> {
-    match table.remove(key) {
-        None => Ok(BTreeMap::new()),
-        Some(toml::Value::Table(entries)) => entries
-            .into_iter()
-            .map(|(k, v)| match v {
-                toml::Value::String(s) => Ok((k, s)),
-                other => Err(format!(
-                    "`{key}.{k}` must be a string, not {}",
-                    other.type_str()
-                )),
-            })
-            .collect(),
-        Some(other) => Err(format!(
-            "`{key}` must be a table of strings, not {}",
             other.type_str()
         )),
     }
@@ -646,6 +641,34 @@ impl Default for LoggingConfig {
     }
 }
 
+/// The `[supervisors]` section (ADR-0091): the fleet's timing policy for every Managed Process.
+///
+/// Global here, because these are decisions about *this deployment* — how long an operator is
+/// willing to wait for a stop, how long a restart must hold before it counts as applied — and not
+/// about one host. A wrapped kind overrides them where its agent's own behaviour demands it, and
+/// nothing below that states them: a block of an unwrapped kind may, because there no kind exists
+/// to hold the value.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorsConfig {
+    /// How long a graceful stop may take before the Managed Process is killed.
+    #[serde(default = "default_stop_timeout_secs")]
+    pub stop_timeout_secs: u64,
+    /// How long a freshly (re)started Managed Process must survive before a received
+    /// configuration is acknowledged `APPLIED`; `0` acknowledges on start.
+    #[serde(default = "default_apply_grace_secs")]
+    pub apply_grace_secs: u64,
+}
+
+impl Default for SupervisorsConfig {
+    fn default() -> Self {
+        SupervisorsConfig {
+            stop_timeout_secs: default_stop_timeout_secs(),
+            apply_grace_secs: default_apply_grace_secs(),
+        }
+    }
+}
+
 /// The `[updates]` section (ADR-0058): how a Managed Process's package updates behave once applied.
 /// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
 #[derive(Debug, Clone, Deserialize)]
@@ -833,6 +856,7 @@ fn default_apply_grace_secs() -> u64 {
 impl Default for ClientConfig {
     fn default() -> Self {
         ClientConfig {
+            supervisor_defaults: SupervisorsConfig::default(),
             endpoint: default_endpoint(),
             name: default_name(),
             logging: LoggingConfig::default(),
@@ -1031,11 +1055,12 @@ impl ClientConfig {
     /// The operator-defined attributes one Agent reports (ADR-0012): the machine-level table,
     /// with a Supervisor's own entries merged over it per key.
     pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
-        let mut merged = self.attributes.clone();
-        if let Some(block) = block {
-            merged.extend(block.attributes.clone());
-        }
-        merged
+        // The block half is gone (ADR-0091): tagging one Agent among several is a Server label's
+        // job, which does it from the fleet and takes effect at once. The parameter stays because
+        // the two call sites still differ in nothing else, and a future per-block statement would
+        // land here.
+        let _ = block;
+        self.attributes.clone()
     }
 
     /// The `Authorization` value this Client sends, if any: a Server-rotated credential
@@ -1582,8 +1607,11 @@ mod tests {
         assert_eq!(collector.kind, "collector");
         assert_eq!(collector.name, "otelcol");
         assert_eq!(collector.endpoint_port, 4321);
-        assert_eq!(collector.stop_timeout_secs, 10);
-        assert_eq!(collector.apply_grace_secs, 3, "the default grace");
+        // Neither is stated in this block, and unstated now stays unstated: what a Supervisor runs
+        // with is resolved against the fleet's `[supervisors]` policy and its kind (ADR-0091),
+        // rather than being filled in with a compiled-in number here.
+        assert_eq!(collector.stop_timeout_secs, None);
+        assert_eq!(collector.apply_grace_secs, None);
         assert_eq!(
             collector.settings.get("binary").and_then(|v| v.as_str()),
             Some("/usr/local/bin/otelcol")
@@ -1678,7 +1706,7 @@ mod tests {
             "[[supervisor]]\ntype = \"command\"\nname = \"x\"\napply_grace_secs = 0\n",
         )
         .expect("parse");
-        assert_eq!(zero_grace.supervisors[0].apply_grace_secs, 0);
+        assert_eq!(zero_grace.supervisors[0].apply_grace_secs, Some(0));
     }
 
     /// The Agent type is a common key like `name`, and — unlike `name` — is not bound by the
@@ -1733,8 +1761,11 @@ mod tests {
         assert_eq!(absent.supervisors[0].service_name, None);
     }
 
+    /// The Client-wide table stays — it describes the *host*, and it is what a fresh Agent carries
+    /// into its first message, before there is anything for a Server to label. The block's own
+    /// table is gone, and refused by name (ADR-0091).
     #[test]
-    fn attributes_parse_at_both_levels_and_merge_per_agent() {
+    fn attributes_describe_the_host_and_a_block_no_longer_tags_one_agent() {
         let cfg: ClientConfig = toml::from_str(
             r#"
             [attributes]
@@ -1745,32 +1776,24 @@ mod tests {
             type = "command"
             name = "stub"
             command = "/bin/true"
-            [supervisor.attributes]
-            role = "edge"
             "#,
         )
         .expect("parse");
+        for agent in [None, Some(&cfg.supervisors[0])] {
+            let attributes = cfg.agent_attributes(agent);
+            assert_eq!(attributes.get("env").map(String::as_str), Some("prod"));
+            assert_eq!(attributes.get("role").map(String::as_str), Some("machine"));
+        }
 
-        // The self-Agent case: the machine-level table alone.
-        assert_eq!(
-            cfg.agent_attributes(None).get("env").map(String::as_str),
-            Some("prod")
-        );
-
-        // A Supervisor's own entries override the machine-level ones per key.
-        let merged = cfg.agent_attributes(Some(&cfg.supervisors[0]));
-        assert_eq!(merged.get("env").map(String::as_str), Some("prod"));
-        assert_eq!(merged.get("role").map(String::as_str), Some("edge"));
-
-        // `attributes` is a common key, never plugin settings.
-        assert!(!cfg.supervisors[0].settings.contains_key("attributes"));
+        let tagged = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"/bin/true\"\n\
+                      [supervisor.attributes]\nrole = \"edge\"\n";
+        let error = toml::from_str::<ClientConfig>(tagged).expect_err("refused");
+        assert!(error.to_string().contains("Server label"), "{error}");
     }
 
     #[test]
     fn non_string_attributes_are_rejected() {
         assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
-        let block = "[[supervisor]]\ntype = \"command\"\nname = \"x\"\n[supervisor.attributes]\nflag = true\n";
-        assert!(toml::from_str::<ClientConfig>(block).is_err());
     }
 
     #[test]

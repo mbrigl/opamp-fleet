@@ -698,6 +698,13 @@ impl Plugin for Icinga2Plugin {
         "binary"
     }
 
+    /// Nothing yet. This kind knows its agent well enough to build its command line, but its block
+    /// still names the program, the tree path and the Agent type — the artifact's shape has not
+    /// moved into the kind (ADR-0092).
+    fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
+        crate::supervisor::ports::KindDefaults::none()
+    }
+
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
         let settings: Icinga2Settings = std::mem::take(&mut ctx.settings)
             .try_into()
@@ -753,6 +760,8 @@ impl Plugin for Icinga2Plugin {
                         working_dir: None,
                         // Its worker must not survive the stop (ADR-0068).
                         own_process_group: true,
+                        // This kind still makes its own directories, in `prepare_dirs` above.
+                        ensure_dirs: Vec::new(),
                     }),
                     Err(e) => {
                         tracing::warn!(supervisor = %name, error = %e, "cannot prepare Icinga 2's directories");

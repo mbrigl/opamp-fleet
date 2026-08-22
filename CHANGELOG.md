@@ -17,6 +17,52 @@ carries a date once its tag exists.
 
 ## [0.4.4]
 
+### Changed
+
+- **`working_dir` and `reload_signal` are gone from every block.** A Managed Process now starts in
+  the directory its program lives in — this Supervisor's `program/`, or the tree root — instead of
+  inheriting whatever directory the service manager left the Client in, usually `/`. And whether a
+  program re-reads its configuration on a signal is the program's own convention, which a kind
+  holds: it is the one setting whose wrong value stays invisible, because a signal the process
+  ignores looks exactly like an apply that worked. **What to do:** delete both lines. An agent
+  under `command` now applies a configuration by restarting; if its in-place reload matters, it
+  wants a kind of its own.
+
+- **Timing is the fleet's policy, then the agent's correction of it.** `stop_timeout_secs` and
+  `apply_grace_secs` join `retain_previous_secs` as fleet-wide settings, in a new `[supervisors]`
+  section; a wrapped kind overrides them where its agent demands it (Icinga 2 needs sixty seconds
+  to shut down), and only a block of an unwrapped kind may state its own. **What to do:** move a
+  value you set on several blocks into `[supervisors]`; delete it from a wrapped block, where the
+  kind now holds it.
+
+  ```toml
+  [supervisors]
+  stop_timeout_secs = 10
+  apply_grace_secs = 3
+  ```
+
+- **`[supervisor.attributes]` is gone.** Tagging one Agent among several on a host is a Server
+  **label**: keyed by that Agent's `instance_uid`, matched by the same Selectors, set with one API
+  call and effective at once. **What to do:** delete the table and
+  `PUT /api/v1/agents/<uid>/labels` instead. The Client-wide `[attributes]` are unchanged — they
+  describe the host, and every Agent on it still carries them.
+
+### Added
+
+- **A Client reports the Supervisor kinds it carries**, one non-identifying attribute per kind
+  (`supervisor.kind.telegraf = "true"`), so a Supervisor set can be aimed with a Selector at the
+  Clients that can actually run it — rather than a Server learning from a `FAILED` that it aimed at
+  a Client too old to have the plugin.
+
+- **The Client makes the directories a delivered agent writes into.** An agent the fleet installs
+  arrives on a host nobody prepared, and several create nothing themselves — Icinga 2 exits when
+  `DataDir` is absent, the GLPI Agent exits when `--vardir` is. A kind now names those directories
+  and the Client makes them **before every spawn**, owner-only, so an installation cannot end in a
+  crash loop over a missing directory and one removed under a running fleet comes back on the next
+  restart. **What to do:** nothing — and on a GLPI host you no longer create `agent-state` by hand
+  before the first start. An `agent-state` an earlier release had you create as another user still
+  needs to belong to the Client's service account.
+
 ### Fixed
 
 - **A Client that updates itself into a configuration it cannot read now rolls back.** The

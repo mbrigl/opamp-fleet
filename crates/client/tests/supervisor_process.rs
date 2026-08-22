@@ -55,6 +55,7 @@ fn spec(program: &Path) -> ProcessSpec {
         env: Vec::new(),
         working_dir: None,
         own_process_group: false,
+        ensure_dirs: Vec::new(),
     }
 }
 
@@ -212,6 +213,57 @@ async fn apply_package(
         .await
         .expect("send");
     next_package_ack(&mut harness.events).await
+}
+
+// ── The directories an agent writes into ─────────────────────────────────────
+
+/// An agent the fleet delivers arrives on a host nobody prepared, and several of the agents this
+/// project wraps create nothing themselves: Icinga 2 exits when `DataDir` is absent, the GLPI Agent
+/// exits when `--vardir` is. So the kind names what its agent writes into and the spawn makes it —
+/// otherwise a correct installation ends in a crash loop over a missing directory.
+#[tokio::test]
+async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Two levels deep and nested under a parent that does not exist either, because the failure
+    // this prevents is exactly the one nobody created a parent for.
+    let state = dir.path().join("agent-state").join("inventory");
+    let program = PathBuf::from(env!("CARGO_BIN_EXE_stub_agent"));
+    let marker = dir.path().join("started");
+    assert!(!state.exists());
+
+    let mut harness = start({
+        let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
+        move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker.display().to_string()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: vec![state.clone()],
+            })
+        }
+    });
+    let _ = next_health(&mut harness.events).await;
+    wait_until_started(&marker).await;
+    assert!(
+        state.is_dir(),
+        "the agent's own directory was not made for it"
+    );
+
+    // And made again on the next spawn, so one an operator removed under a running fleet comes
+    // back instead of taking the Supervisor down.
+    std::fs::remove_dir_all(&state).expect("remove it under the running process");
+    std::fs::remove_file(&marker).expect("clear the marker");
+    apply(&harness, b"hash").await;
+    wait_until_started(&marker).await;
+    assert!(
+        state.is_dir(),
+        "a removed directory did not come back on the restart"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    harness.task.await.expect("join");
 }
 
 // ── The version probe ────────────────────────────────────────────────────────
@@ -705,6 +757,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
                 env: Vec::new(),
                 working_dir: None,
                 own_process_group: false,
+                ensure_dirs: Vec::new(),
             })
         },
     );

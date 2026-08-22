@@ -53,9 +53,13 @@ state_dir = "client-state"
 # noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
 # supervisor_dir = "/opt/opamp-fleet/supervisors"
 
-# Operator-defined attributes, reported by every Agent this Client presents so the
-# Server's Selectors can target them. A [[supervisor]] block may add its own [supervisor.attributes]
-# table, which overrides these per key.
+# Operator-defined attributes describing this *host*, reported by every Agent this Client presents
+# so the Server's Selectors can target them. They are what a fresh Agent carries into its very
+# first message, before the Server has ever seen it.
+#
+# To tag one Agent among several on this host, use a Server label instead (PUT
+# /api/v1/agents/<uid>/labels): it is keyed by that Agent's uid, matched by the same Selectors, and
+# takes effect without editing a file here.
 # [attributes]
 # env = "prod"
 
@@ -152,10 +156,26 @@ state_dir = "client-state"
 # ── Supervisor Mode ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
-# Client presents itself as a single Agent, as above. There are three kinds of Supervisor —
-# `collector`, `command`, and `icinga2` — and the blocks below work through all of them: the two
-# shapes a Collector comes in, the generic Foreign Agent and two concrete ones, and Icinga 2,
-# which has a kind of its own because it needs one.
+# Client presents itself as a single Agent, as above.
+#
+# There are five kinds of Supervisor, and they fall into two groups. `collector` and `command`
+# know nothing about the agent they run, so their blocks say everything. `icinga2`, `glpi` and
+# `telegraf` are **wrappers**: each knows its agent, so its block says which host runs it and
+# little else — a wrapped block is two lines, four for an Icinga node that enrols. A key that a
+# wrapper supplies is refused by name rather than silently overridden, and the message says what
+# supplies the value now.
+#
+# This Client reports the kinds it carries as attributes of its own Agent
+# (supervisor.kind.telegraf = "true", one key per kind), so a Supervisor set the Server rolls out
+# can be aimed at the Clients that can actually run it.
+#
+# Timing is the fleet's policy first. These two apply to every Managed Process; a wrapped kind
+# corrects them where its agent demands it (Icinga 2 needs sixty seconds to shut down), and only
+# an unwrapped block may state its own.
+# [supervisors]
+# stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+# apply_grace_secs = 3     # how long a restarted process must survive before a received
+#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory
@@ -219,9 +239,10 @@ state_dir = "client-state"
 #                          # Put the first copy there yourself; every later one arrives by package.
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
-# stop_timeout_secs = 10   # graceful-stop budget before the process is killed
-# apply_grace_secs = 3     # how long a restarted process must survive before a received
-#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
+# stop_timeout_secs = 10   # optional: overrides [supervisors] for this block. Only a kind that
+# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper holds the
+#                          # value instead, because how long an agent needs is the agent's
+#                          # property, not this host's.
 # [supervisor.env]         # optional environment for the process
 # OTLP_HTTP_ENDPOINT = "127.0.0.1:4318"
 
@@ -252,8 +273,8 @@ state_dir = "client-state"
 # never by the Server. A bare file name instead would put it in this Supervisor's own
 # program/ directory and consent to package delivery, like `binary` above.
 #
-# args, working_dir and env values may use two placeholders naming this Supervisor's own
-# directories, so nothing has to be kept in sync with state_dir or supervisor_dir:
+# args and env values may use two placeholders naming this Supervisor's own directories, so
+# nothing has to be kept in sync with state_dir or supervisor_dir:
 #
 #   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
 #   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
@@ -272,28 +293,40 @@ state_dir = "client-state"
 # name = "my-agent"
 # command = "my-agent"
 # args = ["--config", "${config_dir}/my-agent-conf"]
-# working_dir = "/var/lib/my-agent"     # optional
-# version_args = ["--version"]          # what it reports as service.version
-# [supervisor.attributes]               # optional attributes for this Agent
-# role = "edge"
+# version_args = ["--version"]          # what it reports as service.version — and, for this kind,
+#                                       # the check run against a staged package before the
+#                                       # running program is stopped
 # [supervisor.env]                      # optional environment for the process
 # LOG_LEVEL = "info"
+#
+# The process starts in the directory its program lives in. There is no working_dir key: the
+# answer is always this Supervisor's own program/ (or its tree root), and the old default — the
+# directory the service manager happened to leave the Client in, usually / — was one nobody chose.
+#
+# There is no reload_signal key either. Whether a program re-reads its configuration on a signal
+# is the program's own convention, and a wrong one is invisible: a signal the process ignores
+# looks exactly like an apply that worked. An agent under this kind applies by restarting; an
+# agent whose in-place reload is worth having is an agent worth a kind of its own — see 4 and 6.
+#
+# To tag ONE Agent among several on this host, use a Server label (PUT /api/v1/agents/<uid>/
+# labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
+# [attributes] table at the top of this file still describes the *host*, and every Agent on it
+# carries those.
 
 # 4. A concrete Foreign Agent: Telegraf, under the same generic "command" Supervisor. Named by
 # a bare file name, so it lives in this Supervisor's program/ directory and takes binary updates
 # from the Server — upload the .tar.gz InfluxData publishes exactly as published, and the member
-# whose file name matches `telegraf` is what gets installed. Telegraf re-reads its configuration
-# on SIGHUP, so declaring it as reload_signal applies a received Configuration (name it
-# `telegraf-conf`, matching args below) with an in-place reload instead of a restart; a reload
-# that fails still falls back to the restart. reload_signal is unix-only. A Configuration name
-# carries no extension — like every name here it is lowercase letters, digits and `-`.
+# whose file name matches `telegraf` is what gets installed. Name the Configuration `telegraf-conf`,
+# matching args below; a Configuration name carries no extension — like every name here it is
+# lowercase letters, digits and `-`. Telegraf re-reads its configuration on SIGHUP, but that is
+# Telegraf's own convention and no longer a key here (see block 3): a change restarts it, until
+# Telegraf gets a kind that knows the signal.
 # [[supervisor]]
 # type = "command"
 # name = "telegraf"
 # command = "telegraf"
 # args = ["--config", "${config_dir}/telegraf-conf"]
 # version_args = ["--version"]          # Telegraf prints a Semantic Versioning version
-# reload_signal = "HUP"
 
 # 5. The GLPI Agent, delivered as a package rather than installed — the same generic "command"
 # Supervisor, and the first block here whose package is a whole *tree* rather than one file.

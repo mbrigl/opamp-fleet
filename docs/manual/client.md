@@ -739,8 +739,14 @@ env = "prod"
 region = "eu-central"
 ```
 
-A `[[supervisor]]` block may add its own `[supervisor.attributes]` table, which overrides these per
-key for that Agent alone.
+These describe the **host**, and every Agent this Client presents carries them — including a fresh
+one, in its very first message, before the Server has ever seen it.
+
+To tag **one** Agent among several on a host, use a Server **label** instead
+(`PUT /api/v1/agents/<uid>/labels`): it is keyed by that Agent's `instance_uid`, matched by the
+same Selectors, and takes effect at once without editing a file on the host. A block's own
+`[supervisor.attributes]` table used to do this and no longer exists; a block carrying one fails at
+startup with that sentence.
 
 Every Agent additionally reports, without configuration, everything the protocol names to describe
 an Agent and where it runs: `service.name`, `service.instance.name`, `service.instance.id`,
@@ -958,15 +964,56 @@ edit to the blocks stands only until the next rollout act overwrites it.
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
-| `stop_timeout_secs` | `10` | Graceful-stop budget before the process is killed. |
-| `apply_grace_secs` | `3` | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. |
-| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion, overriding the global default for this Supervisor. `0` deletes it on success. See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
-| `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree, e.g. `bin/fluent-bit`. Unset means the package is a single file. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
-| `[supervisor.attributes]` | none | Attributes for this Agent alone, overriding the Client's `[attributes]` per key. |
+| `stop_timeout_secs` | global `[supervisors]` value | Graceful-stop budget before the process is killed. **Unwrapped kinds only.** |
+| `apply_grace_secs` | global `[supervisors]` value | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. **Unwrapped kinds only.** |
+| `retain_previous_secs` | global `[updates]` value | How long the version a successful update supersedes is kept before deletion. `0` deletes it on success. **Unwrapped kinds only.** See [Package updates: rollback and retention](#package-updates-rollback-and-retention). |
+| `program_path` | unset | Where the program sits *inside* a package that is a whole directory tree, e.g. `bin/fluent-bit`. Unset means the package is a single file. **Unwrapped kinds only** — a wrapper knows its own tree. See [Agents that are more than one file](#agents-that-are-more-than-one-file). |
 
-Two keys were **removed** and now fail at startup with a message saying what to do instead:
-`package` (the Server aims packages by Selector now) and `accepts_packages` (every Agent's
-path decides).
+#### Wrapped and unwrapped kinds
+
+Kinds fall into two groups. `collector` and `command` know nothing about the agent they run, so
+their blocks say everything. A **wrapper** knows its agent's program, its layout on each platform
+and its invocation, so its block says which host runs it and little else. Every kind states which
+it is, and the sections below say so for each.
+
+A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
+says what supplies the value now. The same check runs on a Supervisor set the Server offers, so a
+block that would not work is refused *before* any running process is touched.
+
+This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
+kind, `supervisor.kind.command = "true"` — so a Supervisor set can be aimed with a Selector at the
+Clients that can actually run it.
+
+#### Timing is the fleet's, then the agent's
+
+Three keys describe *time*, and all three are the deployment's policy first:
+
+```toml
+[supervisors]
+stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+apply_grace_secs = 3     # how long a restart must hold before an apply is acknowledged
+
+[updates]
+retain_previous_secs = 86400
+```
+
+A **wrapped kind corrects them** where its agent's own behaviour demands it — Icinga 2 needs sixty
+seconds to drain its checks and close its cluster connections, which is a property of Icinga and
+not of any host. Only a block of an **unwrapped** kind may state its own, because there no kind
+exists to hold the value.
+
+#### Keys that were removed
+
+Each fails at startup with a message saying what to do instead, and each is refused the same way in
+a set the Server offers:
+
+| Key | What answers it now |
+|---|---|
+| `package` | the Server aims packages by Selector |
+| `accepts_packages` | every Agent's program path decides |
+| `working_dir` | the process starts in the directory its program lives in |
+| `reload_signal` | a kind that knows the agent holds it; an unwrapped agent applies by restarting |
+| `[supervisor.attributes]` | a Server label, keyed by the Agent's `instance_uid` |
 
 ### `type = "collector"`
 
@@ -1034,15 +1081,23 @@ lifecycle into the protocol.
 |---|---|
 | `command` | The program, named by a bare file name. See [How a block names its program](#how-a-block-names-its-program). |
 | `args` | Its arguments, verbatim — apart from [placeholder expansion](#path-placeholders). |
-| `working_dir` | The directory to start in. Optional. |
 | `[supervisor.env]` | Additional environment for the process. |
 | `version_args` | Arguments that make the program print its version, e.g. `["--version"]`. The program is invoked once with exactly these, and the first SemVer 2.0.0 version in its output becomes the Agent's `service.version`. Opt-in, because a Foreign Agent's version flag is its own convention. **They are also the preflight**: a package's staged program is run with them before what runs is stopped, and a non-zero exit refuses the package with the program's own message — so a build this host cannot run costs a refusal instead of a stop, a swap, a failed start and a rollback. |
-| `reload_signal` | The signal that makes the program re-read its configuration in place: `"HUP"`, `"USR1"`, or `"USR2"` (a `SIG` prefix is accepted). When set, a configuration change is applied by sending this signal instead of restarting, and the process keeps its in-flight state; if the signal cannot be delivered or the process dies on it, the Supervisor falls back to the restart. Opt-in, because whether a daemon reloads on a signal is its own convention — and Linux/macOS only: on Windows the key is refused at startup. |
+
+The process starts in **the directory its program lives in** — this Supervisor's own `program/`, or
+the tree root for a tree package. There is no `working_dir` key: the old default was whatever
+directory the service manager left this Client in, usually `/`, which nobody chose.
+
+There is no `reload_signal` key either. Whether a program re-reads its configuration on a signal is
+the program's own convention, and a wrong value here is the one that stays invisible — a signal the
+process ignores looks exactly like an apply that worked. An agent under this kind therefore applies
+a configuration **by restarting**; an agent whose in-place reload is worth having is an agent worth
+a kind of its own.
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
 cannot know what to do with them — a Foreign Agent reads its own configuration file. So you point it
 at the written entry with its own flag, and the Supervisor restarts the process on a change so it
-re-reads it — or, with `reload_signal` set, signals it to re-read in place:
+re-reads it:
 
 ```toml
 [[supervisor]]
@@ -1050,10 +1105,7 @@ type = "command"
 name = "fluent-bit"
 command = "fluent-bit"
 args = ["-c", "${config_dir}/fluent-bit-conf"]
-working_dir = "${supervisor_dir}"
 version_args = ["--version"]
-[supervisor.attributes]
-role = "edge"
 [supervisor.env]
 FLB_LOG_LEVEL = "info"
 ```
@@ -1111,8 +1163,9 @@ The startup log states, per Supervisor, which program it resolved to.
 A Foreign Agent is told where its configuration is *through its own command line*, and an absolute
 path written there drifts the moment `supervisor_dir` moves or the Supervisor is renamed —
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
-close that, in a Supervisor's operator-written strings — a `command`'s `args`,
-`working_dir`, and `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`:
+close that, in a Supervisor's operator-written strings — a `command`'s `args` and
+`[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`. A wrapped kind builds its own
+paths and needs no placeholder, except in the four Icinga keys, which take them too:
 
 | Placeholder | Expands to |
 |---|---|
@@ -1173,8 +1226,9 @@ What happens when step 4's health gate is *not* passed:
   (`not restarting: the program keeps failing to start`).
 - **A successful update keeps the version it superseded for a window, then deletes it**, so an
   operator has a fallback if the new version proves subtly wrong. The window is
-  `retain_previous_secs`: global in `[updates]`, overridable per `[[supervisor]]` block, **one day**
-  by default. `0` deletes on success. Each Supervisor keeps at most the immediately previous version.
+  `retain_previous_secs`: global in `[updates]`, **one day** by default, overridable in a block of
+  an unwrapped kind and by a wrapper that has a reason to. `0` deletes on success. Each Supervisor
+  keeps at most the immediately previous version.
 
 ```toml
 # Global default for every Supervisor (one day shown; the built-in default):

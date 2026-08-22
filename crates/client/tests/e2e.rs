@@ -139,8 +139,6 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "command = {program:?}\n",
             "args = [\"--touch\", {stub_marker:?}]\n",
             "version_args = [\"--version\"]\n",
-            "[supervisor.attributes]\n",
-            "role = \"edge\"\n",
         ),
         program = program,
         stub_marker = stub_marker.to_string_lossy(),
@@ -290,31 +288,49 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         "the Client reports its own baked version"
     );
 
-    // The operator-defined attributes arrived and Selectors act on them: a Configuration
-    // targeting `role = edge` matches only the stub Supervisor (ADR-0012).
+    // The Client-wide attributes arrived — they describe the *host*, so both Agents carry them
+    // (ADR-0012).
     let agents = state.snapshot();
     let stub = view(&agents, "stub").expect("stub view");
+    let otelcol = view(&agents, "otelcol").expect("otelcol view");
+    for agent in [stub, otelcol] {
+        assert_eq!(
+            agent
+                .non_identifying_attributes
+                .get("env")
+                .map(String::as_str),
+            Some("prod"),
+            "the host's own tag reaches every Agent on it"
+        );
+        assert!(
+            !agent.non_identifying_attributes.contains_key("role"),
+            "no block tags one Agent any more (ADR-0091)"
+        );
+    }
+
+    // Tagging *one* Agent among several is the fleet's job now: one label, keyed by the Agent's
+    // uid, matched by the same Selectors — and it takes effect without touching the host's file
+    // (ADR-0042, ADR-0091).
+    let uid = opamp::uid::InstanceUid::parse(&stub.instance_uid).expect("the uid the Server holds");
+    assert!(state
+        .set_labels(&uid, [("role".to_string(), "edge".to_string())].into())
+        .is_ok());
+    let agents = state.snapshot();
     assert_eq!(
-        stub.non_identifying_attributes
-            .get("env")
-            .map(String::as_str),
-        Some("prod")
-    );
-    assert_eq!(
-        stub.non_identifying_attributes
+        view(&agents, "stub")
+            .expect("stub view")
+            .labels
             .get("role")
             .map(String::as_str),
         Some("edge")
     );
-    let otelcol = view(&agents, "otelcol").expect("otelcol view");
-    assert_eq!(
-        otelcol
-            .non_identifying_attributes
-            .get("env")
-            .map(String::as_str),
-        Some("prod")
-    );
-    assert!(!otelcol.non_identifying_attributes.contains_key("role"));
+    assert!(view(&agents, "otelcol")
+        .expect("otelcol view")
+        .labels
+        .is_empty());
+
+    // …and a Selector aimed at it reaches that Agent and no other — which is the whole claim the
+    // retired block table used to carry.
 
     state
         .save_configuration(

@@ -74,6 +74,9 @@ fn collector_spec(
         working_dir: None,
         // One process, no worker of its own — signalling a group would gain nothing (ADR-0068).
         own_process_group: false,
+        // A Collector writes nothing outside what the install and the config
+        // directory already provide.
+        ensure_dirs: Vec::new(),
     })
 }
 
@@ -86,6 +89,17 @@ impl Plugin for CollectorPlugin {
 
     fn program_key(&self) -> &'static str {
         "binary"
+    }
+
+    /// Nothing: a Collector's distribution is a decision the block states (ADR-0091), and a
+    /// Foreign Agent is by definition one nobody has written a wrapper for.
+    fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
+        crate::supervisor::ports::KindDefaults {
+            // The one exception to "knows nothing": something *does* connect to a Collector's
+            // Endpoint — the `opampextension` — so pinning its port is a decision that has a place.
+            endpoint_port: true,
+            ..crate::supervisor::ports::KindDefaults::none()
+        }
     }
 
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
