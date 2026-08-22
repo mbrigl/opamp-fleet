@@ -1252,8 +1252,7 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
             }],
             action: Action::AsPublished,
             out_name: name.clone(),
-            block_hint: "command = \"glpi-agent.exe\", program_path = \"perl/bin/glpi-agent.exe\""
-                .to_string(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
         });
     }
 
@@ -1274,8 +1273,7 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
                 wrapper: format!("glpi-agent-{version}"),
             },
             out_name: format!("glpi-agent_{version}_linux_amd64.tar.gz"),
-            block_hint: "command = \"AppRun\", program_path = \"AppRun\", args = [\"--script=glpi-agent\", …]"
-                .to_string(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
         });
     }
     plans
@@ -2965,6 +2963,10 @@ SHA256: cccc
 
     /// GLPI renamed its zip's case at 1.9, so both spellings have to be found — and the Linux
     /// artifact is the one that gets repacked.
+    ///
+    /// The packing half of `docs/artifacts/glpi-agent.md`; its client half is in
+    /// `crates/client/src/supervisor/glpi.rs`. An upstream that renames an asset should turn this
+    /// red rather than produce a run that quietly packs one platform.
     #[test]
     fn glpi_finds_both_zip_spellings_and_repacks_only_linux() {
         for zip in ["GLPI-Agent-1.19-x64.zip", "glpi-agent-1.19-x64.zip"] {

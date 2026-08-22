@@ -1,5 +1,6 @@
-//! A kind whose whole block is `type` and `name` (ADR-0091), driven through `Plugin::start`
-//! the way the core drives them — [`telegraf`](ADR-0094) to begin with.
+//! The two kinds whose whole block is `type` and `name` (ADR-0091), driven through
+//! `Plugin::start` the way the core drives them: [`glpi`](ADR-0093) and
+//! [`telegraf`](ADR-0094).
 //!
 //! The unit tests in each module check what the kind *builds* — the program's name per platform,
 //! the arguments, the refusals. What no unit test can show is that a two-line block is actually
@@ -8,7 +9,7 @@
 //! that the directories the agent writes into exist by the time it runs. That is what an operator
 //! finds out on the first host, and it is what this file asserts.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use client::service::runtime::shutdown_channel;
@@ -181,4 +182,46 @@ async fn a_two_line_telegraf_block_runs_reports_and_applies() {
     std::fs::write(harness.config_dir().join("telegraf-conf"), "[agent]\n").expect("the entry");
     assert_eq!(apply_config(&mut harness).await, Ok(()));
     stop(harness).await;
+}
+
+/// The GLPI Agent's whole block, likewise — and on both platforms, with the program found at the
+/// place inside the tree that this platform's constant names.
+#[tokio::test]
+async fn a_two_line_glpi_block_runs_reports_and_applies() {
+    let program_path = client::supervisor::glpi::GlpiPlugin
+        .defaults()
+        .program_path
+        .expect("the GLPI Agent is a tree package on both platforms");
+    let mut harness = start(
+        &client::supervisor::glpi::GlpiPlugin,
+        "glpi",
+        Some(program_path),
+    );
+    assert_eq!(wait_for_running_version(&mut harness).await, "9.9.9");
+
+    // What the agent writes into, which it does not create itself and exits without: the block
+    // says nothing about it, and the host was not prepared for it.
+    let state = harness.dir.path().join("agent-state");
+    wait_for(&state, "the agent's own state directory").await;
+    assert!(state.is_dir());
+
+    std::fs::write(
+        harness.config_dir().join("glpi-agent-conf"),
+        "tag = fleet\n",
+    )
+    .expect("the entry");
+    assert_eq!(apply_config(&mut harness).await, Ok(()));
+    stop(harness).await;
+}
+
+async fn wait_for(path: &Path, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what} at {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

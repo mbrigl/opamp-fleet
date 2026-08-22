@@ -916,9 +916,9 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Four plugin types ship today: `collector` for an OpenTelemetry Collector, `command` for any other
-process — a **Foreign Agent** that speaks no OpAMP — `telegraf`, the first **wrapper**, which knows
-its agent's program and invocation so its block need not — and `icinga2` for the one case the first
+Five plugin types ship today: `collector` for an OpenTelemetry Collector, `command` for any other
+process — a **Foreign Agent** that speaks no OpAMP — `telegraf` and `glpi`, **wrappers** that know
+their agent's program and invocation so a block need not — and `icinga2` for the one case the first
 two cannot
 express: a daemon that takes its directories as `-D` constants rather than flags, validates a
 configuration before applying it, and needs a certificate from a master before it can do anything
@@ -962,7 +962,7 @@ edit to the blocks stands only until the next rollout act overwrites it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"`, `"command"`, `"icinga2"`, or `"telegraf"` — one section each below. Required. |
+| `type` | — | `"collector"`, `"command"`, `"icinga2"`, `"glpi"`, or `"telegraf"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
@@ -1142,6 +1142,27 @@ what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md)
 A complete worked example — a third party's release repacked and delivered, run as a foreground
 daemon, with the Windows interpreter invocation and the bootstrap of its configuration — is the
 [GLPI Agent recipe](glpi-agent.md).
+
+### `type = "glpi"`
+
+For the GLPI inventory agent. The block is two lines on **both** platforms, which is the whole
+point: its Linux and Windows invocations differ in the program's name and place in the tree, in
+four Perl `-I` paths, and in whether the script is named by `--script` or by path — and not one of
+those differences is a decision anybody makes.
+
+```toml
+[[supervisor]]
+type = "glpi"
+name = "glpi"
+```
+
+The kind also holds `--daemon --no-fork`, which are supervision requirements rather than
+preferences: without the first the agent runs its tasks once and exits into a restart loop, without
+the second it detaches and leaves the Supervisor holding a pid that ends immediately. Its state
+goes beside the tree rather than inside `program/`, which a package swap replaces whole.
+
+The recipe is [Delivering and supervising the GLPI Agent](glpi-agent.md); the artifact is
+[`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md).
 
 ### `type = "telegraf"`
 

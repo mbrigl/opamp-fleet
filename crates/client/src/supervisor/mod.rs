@@ -9,6 +9,7 @@ pub mod agent;
 pub mod collector;
 pub mod command;
 pub mod endpoint;
+pub mod glpi;
 pub mod icinga2;
 pub mod ports;
 pub mod process;
@@ -44,6 +45,7 @@ fn registry() -> Vec<Box<dyn Plugin>> {
         Box::new(collector::CollectorPlugin),
         Box::new(command::CommandPlugin),
         Box::new(icinga2::Icinga2Plugin),
+        Box::new(glpi::GlpiPlugin),
         Box::new(telegraf::TelegrafPlugin),
     ]
 }
@@ -547,15 +549,18 @@ mod tests {
 
         // An operator's own value under the same key is left alone: a configured attribute is the
         // host's statement about itself, and this only fills in what nothing else said.
+        assert!(reported.contains_key("supervisor.kind.glpi"));
         assert!(reported.contains_key("supervisor.kind.telegraf"));
 
+        // An operator's own value under the same key is left alone: a configured attribute is the
+        // host's statement about itself, and this only fills in what nothing else said.
         let stated = kind_attributes(
-            [("supervisor.kind.command".to_string(), "no".to_string())]
+            [("supervisor.kind.glpi".to_string(), "no".to_string())]
                 .into_iter()
                 .collect(),
         );
         assert_eq!(
-            stated.get("supervisor.kind.command").map(String::as_str),
+            stated.get("supervisor.kind.glpi").map(String::as_str),
             Some("no")
         );
     }

@@ -326,27 +326,19 @@ state_dir = "client-state"
 # type = "telegraf"
 # name = "telegraf"
 
-# 5. The GLPI Agent, delivered as a package rather than installed — the same generic "command"
-# Supervisor, and the first block here whose package is a whole *tree* rather than one file.
-# `command` is a bare name, so the Client owns and updates it; `program_path` says where inside
-# the delivered tree the program sits, and everything else in the tree travels with it. On Linux
-# the artifact is repacked from upstream's AppImage, whose `AppRun` is the tree's entry point and
-# bundles several programs — `--script=glpi-agent` picks this one. `--vardir` must point *outside*
-# `program/`, because a package swap replaces that directory whole and would take the agent's
-# `deviceid` with it. The full recipe, the Windows block, and what the agent needs before it
-# reports anything are in docs/manual/glpi-agent.md.
+# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
+# which is the point. Its two platform invocations differ in nearly everything (the program's name
+# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
+# --script), and none of those differences is anybody's decision: they follow from the artifact
+# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
+# requirements rather than preferences, and points --vardir outside program/, which a package swap
+# replaces whole.
+#
+# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
+# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
 # [[supervisor]]
-# type = "command"
+# type = "glpi"
 # name = "glpi"
-# service_name = "glpi-agent"           # the Agent type every GLPI Configuration is aimed at
-# command = "AppRun"                    # bare ⇒ the Client owns and updates the tree
-# program_path = "AppRun"               # …and it is the tree's own entry point
-# args = [
-#     "--script=glpi-agent",            # the AppImage bundles several; this selects the agent
-#     "--daemon", "--no-fork",          # never fork: the Supervisor must keep the pid it spawned
-#     "--conf-file=${config_dir}/glpi-agent-conf",
-#     "--vardir=${supervisor_dir}/agent-state",   # outside program/, which a swap replaces whole
-# ]
 
 # 6. Icinga 2, under a kind of its own. It earns one because nothing above can express what it
 # needs: the daemon takes its directories as -D constants rather than flags, validates a

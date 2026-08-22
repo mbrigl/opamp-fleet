@@ -19,18 +19,20 @@ carries a date once its tag exists.
 
 ### Changed
 
-- **Telegraf gets a kind of its own, and its block is two lines.** Everything the recipe used to
-  spell out — the program's name per platform, `--config` against `telegraf-conf`, how it states
-  its version, and the `SIGHUP` it re-reads its configuration on — is Telegraf's property, so the
-  kind holds it ([ADR-0094](docs/adr/0094-telegraf-gets-a-kind-of-its-own.md)). The reload is why
-  the kind exists: as a block key the signal was refused on Windows at parse time, so one Supervisor
-  set could not serve a mixed fleet.
+- **Telegraf and the GLPI Agent each get a kind of their own, and their blocks are two lines.**
+  Everything the recipes used to spell out is a property of the agent rather than of a host, so the
+  kind holds it ([ADR-0093](docs/adr/0093-the-glpi-agent-gets-a-kind-of-its-own.md),
+  [ADR-0094](docs/adr/0094-telegraf-gets-a-kind-of-its-own.md)). Telegraf's reload is why its kind
+  exists at all: as a block key the signal was refused on Windows at parse time, so one Supervisor
+  set could not serve a mixed fleet. The GLPI Agent's two platform blocks — seven keys on Linux,
+  eight on Windows, differing in nearly every element — become the same two lines on both.
 
-  **What to do:** replace the `command` recipe with the kind.
+  **What to do**, per block:
 
   | Was | Is |
   |---|---|
-  | `type = "command"` with `command`, `args`, `version_args`, `reload_signal` | `type = "telegraf"`, `name = "telegraf"` |
+  | `type = "command"` for Telegraf, with `command`, `args`, `version_args`, `reload_signal` | `type = "telegraf"`, `name = "telegraf"` |
+  | `type = "command"` for the GLPI Agent — two different blocks, seven keys on Linux and eight on Windows | `type = "glpi"`, `name = "glpi"`, the same on both |
 
 - **`working_dir` and `reload_signal` are gone from every block.** A Managed Process now starts in
   the directory its program lives in — this Supervisor's `program/`, or the tree root — instead of
@@ -62,11 +64,10 @@ carries a date once its tag exists.
 
 ### Added
 
-- **An artifact document for Telegraf**, [`docs/artifacts/telegraf.md`](docs/artifacts/telegraf.md):
-  what the artifact is — source, assets, integrity, treatment, the delivered form, what the Client
-  derives from it, the Configurations, and what an upstream change would break. Two tests hold it to
-  the code, one on the packing side and one in the kind, so a release that moves a path turns a test
-  red instead of a rollout.
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
+  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
+  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
+  so an upstream release that moves a path turns a test red instead of a rollout.
 
 - **A Client reports the Supervisor kinds it carries**, one non-identifying attribute per kind
   (`supervisor.kind.telegraf = "true"`), so a Supervisor set can be aimed with a Selector at the
