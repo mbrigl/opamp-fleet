@@ -118,8 +118,17 @@ async fn wait_for_file(path: &Path) {
     }
 }
 
+/// Delivers Icinga's root configuration the way the fleet does (ADR-0092): the entry, and the role
+/// that says it is the root. The block no longer names it — the marking is the fleet's.
 fn write_config(harness: &Harness, body: &str) {
     std::fs::write(harness.config_dir().join("icinga2-conf"), body).expect("configuration");
+    std::fs::write(
+        harness
+            .config_dir()
+            .join(client::storage::SUPPLEMENTARY_FILE),
+        "icinga2-conf main\n",
+    )
+    .expect("the role that marks it");
 }
 
 async fn apply_config(harness: &Harness) {
@@ -143,7 +152,6 @@ async fn apply_config(harness: &Harness) {
 async fn an_unreachable_parent_waits_with_a_reason_and_starts_nothing() {
     let mut harness = start(
         r#"
-        main_config = "icinga2-conf"
         parent_host = "unreachable.example"
         "#,
     );
@@ -171,7 +179,6 @@ async fn an_unreachable_parent_waits_with_a_reason_and_starts_nothing() {
 async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     let mut harness = start(
         r#"
-        main_config = "icinga2-conf"
         parent_host = "master.example"
         node_name = "edge-01"
         "#,
@@ -203,7 +210,6 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
 async fn a_configuration_icinga_refuses_is_reported_failed() {
     let mut harness = start(
         r#"
-        main_config = "icinga2-conf"
         "#,
     );
     write_config(&harness, "include <itl>\n");
@@ -230,7 +236,6 @@ async fn a_configuration_icinga_refuses_is_reported_failed() {
 async fn a_standalone_node_runs_without_enrolment() {
     let mut harness = start(
         r#"
-        main_config = "icinga2-conf"
         "#,
     );
     write_config(&harness, "include <itl>\n");

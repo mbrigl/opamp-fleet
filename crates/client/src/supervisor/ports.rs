@@ -181,12 +181,80 @@ impl SupervisorContext {
     }
 }
 
+/// What a kind knows about its own agent, so a block does not have to say it (ADR-0091).
+///
+/// Every field is a `&'static str` resolved **per platform** at compile time, which is the point:
+/// a constant can be asserted against the artifact this project packs, where a path written in a
+/// manual can only be believed. A kind that knows nothing — `collector`, `command` — returns
+/// [`KindDefaults::none`] and its blocks keep saying what they always said.
+///
+/// A value supplied here is not a default the block may override. It is the answer, and a block
+/// naming the key is refused: two sources of truth for a value this Client computes is how a host
+/// quietly differs from what the fleet believes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindDefaults {
+    /// The program's file name in this Supervisor's own `program/` directory (ADR-0021, ADR-0085).
+    /// `None` leaves it to the block's program key.
+    pub program: Option<&'static str>,
+    /// Where the program sits inside an unpacked package tree (ADR-0023); `None` is a single-file
+    /// package, or a kind that leaves the question to the block.
+    pub program_path: Option<&'static str>,
+    /// The Agent *type* this kind presents (ADR-0033). `None` falls back to the program's file
+    /// name, which is what the block already said.
+    pub service_name: Option<&'static str>,
+    /// What this kind corrects about the fleet's timing policy, and whether its block may state
+    /// any of it at all (ADR-0091). `None` — an unwrapped kind — leaves the three keys in the
+    /// block, because no kind exists there to hold a value; `Some` takes them out of the block and
+    /// states the kind's own corrections, each `None` meaning "the fleet's number is right".
+    pub timing: Option<KindTiming>,
+    /// Whether a block of this kind may pin the Supervisor Endpoint's port. The Endpoint is bound
+    /// for every Supervisor (ADR-0003); pinning it only means something where a Managed Process
+    /// connects to it, which in practice is a Collector carrying the `opampextension`.
+    pub endpoint_port: bool,
+}
+
+/// What a wrapped kind says about timing, over the fleet's own policy (ADR-0091).
+///
+/// Every field is an *agent's* property rather than a host's: how long it needs to shut down, how
+/// long a restart of it has to hold before the fleet may believe it, how long its superseded
+/// version is worth keeping. A kind that has nothing to correct states three `None`s and still
+/// takes the keys out of its block — the value is the fleet's, and there is no host-level answer
+/// to a question about an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KindTiming {
+    /// Overrides `[supervisors] stop_timeout_secs`.
+    pub stop_timeout: Option<Duration>,
+    /// Overrides `[supervisors] apply_grace_secs`.
+    pub apply_grace: Option<Duration>,
+    /// Overrides `[updates] retain_previous_secs` (ADR-0058).
+    pub retain_previous: Option<Duration>,
+}
+
+impl KindDefaults {
+    /// A kind that knows nothing about its agent: the block says everything, as it always has.
+    #[must_use]
+    pub const fn none() -> Self {
+        KindDefaults {
+            program: None,
+            program_path: None,
+            service_name: None,
+            timing: None,
+            endpoint_port: false,
+        }
+    }
+}
+
 /// A compiled-in Supervisor Plugin (ADR-0011): the adapter factory on the Managed-Process side.
 /// A new process kind is a new implementation and one line in
 /// [`registry`](crate::supervisor::registry).
 pub trait Plugin {
     /// The TOML `type` value this plugin serves.
     fn kind(&self) -> &'static str;
+
+    /// What this kind knows about its agent, so a block need not repeat it (ADR-0091). Stated by
+    /// every plugin rather than defaulted, because "this kind knows nothing" is an answer worth
+    /// writing down where a reader of the plugin will see it.
+    fn defaults(&self) -> KindDefaults;
 
     /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
     /// for the example Custom Supervisor. The core takes that key out of the settings, applies

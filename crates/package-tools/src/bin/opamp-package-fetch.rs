@@ -346,7 +346,13 @@ struct Plan {
     out_name: String,
     /// What a `[[supervisor]]` block has to say to install it — or, for this fleet's own Client,
     /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
-    /// because the answer differs per agent and platform and is the next thing an operator needs.
+    /// because it is the next thing an operator needs.
+    ///
+    /// For a **wrapped** agent it is now the `type` alone (ADR-0091): the Client's kind knows the
+    /// program's name, where it sits in the tree, and how it is invoked, so this tool no longer
+    /// dictates a line for a host to transcribe. What it used to name lives in that agent's
+    /// artifact document under `docs/artifacts/`, which the kind's own tests pin — the two ends of
+    /// one artifact, kept in step by a red test rather than by a hint printed on a terminal.
     block_hint: String,
 }
 
@@ -946,8 +952,7 @@ async fn icinga2_plans(version: &str, distro: Option<&str>) -> Result<Vec<Plan>,
             dependencies,
         },
         out_name: format!("icinga2_{version}_linux_amd64.tar.gz"),
-        block_hint: "type = \"icinga2\", binary = \"icinga2\", program_path = \"sbin/icinga2\""
-            .to_string(),
+        block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
     });
     Ok(plans)
 }
@@ -976,11 +981,9 @@ fn windows_plan(version: &str) -> Plan {
         out_name: format!("icinga2_{version}_windows_amd64.tar.gz"),
         // The check plugins stay beside the daemon rather than moving to `plugins/`: on Windows a
         // program finds its DLLs in its *own* directory first, and separating the check
-        // executables from the runtime they share with the daemon would break them.
-        block_hint:
-            "type = \"icinga2\", binary = \"icinga2.exe\", program_path = \"sbin/icinga2.exe\", \
-                     plugin_dir = \"${supervisor_dir}/program/tree/sbin\""
-                .to_string(),
+        // executables from the runtime they share with the daemon would break them. The kind knows
+        // that, which is why it is a comment here and no longer a line an operator writes.
+        block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
     }
 }
 
@@ -1246,8 +1249,7 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
             }],
             action: Action::AsPublished,
             out_name: name.clone(),
-            block_hint: "command = \"glpi-agent.exe\", program_path = \"perl/bin/glpi-agent.exe\""
-                .to_string(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
         });
     }
 
@@ -1268,8 +1270,7 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
                 wrapper: format!("glpi-agent-{version}"),
             },
             out_name: format!("glpi-agent_{version}_linux_amd64.tar.gz"),
-            block_hint: "command = \"AppRun\", program_path = \"AppRun\", args = [\"--script=glpi-agent\", …]"
-                .to_string(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
         });
     }
     plans
@@ -1305,11 +1306,6 @@ fn telegraf_plans(version: &str) -> Vec<Plan> {
             // `usr/bin/telegraf` on Unix but at the root on Windows. Neither matters for a
             // single-file package: the Client finds the member by its *file name*, so the upstream
             // archive installs as it is.
-            let program = if *os == "windows" {
-                "telegraf.exe"
-            } else {
-                "telegraf"
-            };
             Plan {
                 os: (*os).to_string(),
                 arch: (*arch).to_string(),
@@ -1321,7 +1317,7 @@ fn telegraf_plans(version: &str) -> Vec<Plan> {
                 }],
                 action: Action::AsPublished,
                 out_name: name,
-                block_hint: format!("command = {program:?}"),
+                block_hint: "type = \"telegraf\"  (docs/artifacts/telegraf.md)".to_string(),
             }
         })
         .collect()
@@ -2962,8 +2958,51 @@ SHA256: cccc
         ));
     }
 
+    /// Icinga 2's Windows artifact, which is the half of its plan that needs no repository index
+    /// — so it is the half a test can state. The MSI carries no digest of its own, so it is
+    /// verified by its publisher instead (ADR-0072), and the block is the kind alone (ADR-0092).
+    ///
+    /// The packing half of `docs/artifacts/icinga2.md`; its client half is in
+    /// `crates/client/src/supervisor/icinga2.rs`.
+    #[test]
+    fn icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher() {
+        let plan = windows_plan("2.16.5");
+        assert_eq!((plan.os.as_str(), plan.arch.as_str()), ("windows", "amd64"));
+        assert_eq!(plan.sources.len(), 1);
+        assert!(
+            plan.sources[0]
+                .url
+                .ends_with("/windows/Icinga2-v2.16.5-x86_64.msi"),
+            "{}",
+            plan.sources[0].url
+        );
+        match &plan.sources[0].checksum {
+            ChecksumSource::Publisher { expected } => assert_eq!(*expected, "O=Icinga GmbH"),
+            other => panic!(
+                "the MSI publishes no digest, so it is verified by its signature, not {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        match &plan.action {
+            Action::RepackMsi { wrapper } => assert_eq!(wrapper, "icinga2-2.16.5"),
+            other => panic!(
+                "the payload is repacked into this project's own tree shape, not {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(plan.out_name, "icinga2_2.16.5_windows_amd64.tar.gz");
+        assert_eq!(
+            plan.block_hint,
+            "type = \"icinga2\"  (docs/artifacts/icinga2.md)"
+        );
+    }
+
     /// GLPI renamed its zip's case at 1.9, so both spellings have to be found — and the Linux
     /// artifact is the one that gets repacked.
+    ///
+    /// The packing half of `docs/artifacts/glpi-agent.md`; its client half is in
+    /// `crates/client/src/supervisor/glpi.rs`. An upstream that renames an asset should turn this
+    /// red rather than produce a run that quietly packs one platform.
     #[test]
     fn glpi_finds_both_zip_spellings_and_repacks_only_linux() {
         for zip in ["GLPI-Agent-1.19-x64.zip", "glpi-agent-1.19-x64.zip"] {
@@ -2983,6 +3022,9 @@ SHA256: cccc
 
     /// Telegraf's Windows archive is a zip and its Unix ones are tarballs, and upstream spells
     /// 32-bit `i386` where this fleet says `386`.
+    ///
+    /// The packing half of `docs/artifacts/telegraf.md`; its client half is in
+    /// `crates/client/src/supervisor/telegraf.rs`.
     #[test]
     fn telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names() {
         let plans = telegraf_plans("1.39.3");
@@ -2996,7 +3038,12 @@ SHA256: cccc
         assert!(url("linux", "amd64").ends_with("telegraf-1.39.3_linux_amd64.tar.gz"));
         assert!(url("windows", "amd64").ends_with("_windows_amd64.zip"));
         assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
-        assert!(find("windows", "amd64").block_hint.contains("telegraf.exe"));
+        // The block is the kind and nothing else now (ADR-0094): the program's name per platform
+        // is the Client's to know, and `docs/artifacts/telegraf.md` is where the two sides meet.
+        assert_eq!(
+            find("windows", "amd64").block_hint,
+            "type = \"telegraf\"  (docs/artifacts/telegraf.md)"
+        );
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its
