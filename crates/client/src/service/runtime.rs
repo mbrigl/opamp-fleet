@@ -195,6 +195,52 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
     (trust, identity)
 }
 
+/// What a run does when its configuration cannot be read: resolve the update in flight anyway, so
+/// the failure counts (ADR-0020).
+///
+/// Returns `RestartForUpdate` when that resolution rolled the Client back — the pointer now names
+/// the version that *could* read this file, and the manager must start it — and otherwise hands the
+/// configuration error back to be reported and exited on, one attempt closer to that rollback.
+///
+/// Without this, the net catches everything except the one failure a *new* version is most likely
+/// to bring: a file it refuses. A removed configuration key is exactly that
+/// ([ADR-0091](../../../../docs/adr/0091-a-kind-knows-its-own-agent.md)), and for some kinds there
+/// is no block both versions accept, so the cutover per host cannot be avoided — only caught.
+fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
+    let state_dir = recovery_state_dir(spec);
+    tracing::error!(error = %error, state_dir = %state_dir.display(), "cannot read the configuration");
+    match crate::selfupdate::on_start(&state_dir) {
+        Ok(crate::selfupdate::Startup::RolledBack(_)) => Ok(Exit::RestartForUpdate),
+        // Counted, or nothing was in flight. Either way this run cannot continue.
+        _ => Err(error),
+    }
+}
+
+/// Where to look for the update marker when the configuration did not load.
+///
+/// Three sources, in the order of how much they can be trusted to be right. `--state-dir` is what an
+/// installed service passes (`service install` bakes it into the unit), so the case that matters —
+/// a service updating itself into a file it cannot read — is answered by the command line alone. A
+/// foreground run falls back to reading **only** `state_dir` out of the file, leniently: the file
+/// that fails to load usually parses as TOML and fails on a key's meaning, so its own answer is
+/// still there to be read. What is left is the default, which is right for a Client that never
+/// named one.
+fn recovery_state_dir(spec: &RunSpec) -> PathBuf {
+    if let Some(dir) = &spec.state_dir {
+        return dir.clone();
+    }
+    std::fs::read_to_string(&spec.config_path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|table| {
+            table
+                .get("state_dir")
+                .and_then(toml::Value::as_str)
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| ClientConfig::default().state_dir)
+}
+
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
 /// none are), and run the transport the endpoint selects (ADR-0007) until `shutdown` fires.
 ///
@@ -202,7 +248,14 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.
 pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result<Exit, String> {
     heal_torn_pointer();
-    let mut config = load_effective_config(&spec)?;
+    let mut config = match load_effective_config(&spec) {
+        Ok(config) => config,
+        // A version that cannot read this host's file is a failed update like any other, and until
+        // now it was the one failure the probation of ADR-0020 could not see: the load happens
+        // before `on_start`, so the process left before the attempt was counted, the manager
+        // restarted it, and the host stayed on a version that never reached the Server to say so.
+        Err(error) => return unreadable_config(&spec, error),
+    };
     if spec.service {
         start_log_file(&config);
     }
@@ -434,6 +487,80 @@ mod tests {
         let (tx, mut shutdown) = shutdown_channel();
         drop(tx);
         shutdown.requested().await;
+    }
+
+    /// The three sources, in order. `--state-dir` wins because an installed service always passes
+    /// it, which is the case this recovery exists for.
+    #[test]
+    fn the_recovery_state_dir_prefers_the_flag_then_the_file_then_the_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("supervisor.toml");
+        let named = dir.path().join("from-the-file");
+        std::fs::write(
+            &config_path,
+            format!("state_dir = \"{}\"\n", named.display()),
+        )
+        .expect("write");
+
+        let flagged = dir.path().join("from-the-flag");
+        let spec = |state_dir: Option<PathBuf>, config: &std::path::Path| RunSpec {
+            config_path: config.to_path_buf(),
+            state_dir,
+            service: false,
+        };
+        assert_eq!(
+            recovery_state_dir(&spec(Some(flagged.clone()), &config_path)),
+            flagged
+        );
+        assert_eq!(recovery_state_dir(&spec(None, &config_path)), named);
+        assert_eq!(
+            recovery_state_dir(&spec(None, &dir.path().join("absent.toml"))),
+            ClientConfig::default().state_dir
+        );
+    }
+
+    /// A configuration this version cannot read is a failed update attempt, and the marker has to
+    /// be resolved rather than stepped over — otherwise the service manager restarts the version
+    /// that refuses the file, for ever, and ADR-0020's rollback never fires.
+    ///
+    /// The test binary does not run from an install layout, so the resolution takes the "the new
+    /// version did not take over" path: the marker is cleared and an outcome recorded. What is
+    /// asserted is that the marker was *seen at all*, which before this change it was not.
+    #[test]
+    fn an_unreadable_configuration_resolves_the_update_in_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let marker = crate::selfupdate::UpdateMarker {
+            previous_dir: dir.path().join("previous"),
+            new_dir: dir.path().join("new"),
+            version: "9.9.9".to_string(),
+            package_hash_hex: "abcd".to_string(),
+            attempts: 1,
+            trace: None,
+        };
+        // `selfupdate` owns this file name; the test names it to prove the file was consumed.
+        let marker_file = state_dir.join("update-marker.json");
+        std::fs::write(
+            &marker_file,
+            serde_json::to_vec(&marker).expect("serialize"),
+        )
+        .expect("write the marker");
+
+        let outcome = unreadable_config(
+            &RunSpec {
+                config_path: dir.path().join("supervisor.toml"),
+                state_dir: Some(state_dir.clone()),
+                service: true,
+            },
+            "supervisor \"x\": `main_config` is no longer a supervisor key".to_string(),
+        );
+
+        assert!(outcome.is_err(), "the run still ends on the configuration");
+        assert!(
+            !marker_file.exists(),
+            "the update in flight was resolved, not stepped over"
+        );
     }
 
     /// With nothing configured, the line says so in both halves rather than leaving an operator to

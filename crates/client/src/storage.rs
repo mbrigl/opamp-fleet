@@ -5,6 +5,7 @@
 //! The remote configuration is stored losslessly as the received protobuf, plus one plain file per
 //! config-map entry so an operator (and, later, a Managed Process) can read it off disk.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -18,14 +19,21 @@ const CONFIG_PB_FILE: &str = "remote-config.pb";
 const CONFIG_DIR: &str = "config";
 const PACKAGE_FILE: &str = "installed-package.json";
 
-/// Names the entries that carry a role and must therefore **not** be handed to the Managed Process
-/// as configuration (ADR-0016), one per line, written into the config directory beside them.
+/// The role each delivered entry carries (ADR-0016) — `<name> <role>` per line, written into the
+/// config directory beside the entries themselves.
 ///
 /// It lives in that directory because that is where a plugin looks, and it is written only when
 /// there is something to say — a fleet that never sets a role never sees this file. The leading
 /// dot is what keeps it from colliding with an entry: a Configuration name follows the ADR-0010
 /// grammar (lowercase letters, digits, `-`) and [`entry_file_name`] strips leading dots, so no
 /// entry file can ever be named this.
+///
+/// **The value is here because the Baseline says it matters.** `AgentConfigFile.role` is defined as
+/// *"Optional role of the content in the body field. The values and their semantics are Agent
+/// type-specific"* — so a kind may define its own vocabulary, and to read it the value has to
+/// survive the write. This file used to hold names alone, which answered only *whether* an entry
+/// carried a role; a line without a second field still reads that way, which is exactly what an
+/// older Client left behind.
 pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 /// The package this Supervisor's Managed Process currently runs (ADR-0015), persisted so a
@@ -114,7 +122,7 @@ impl Storage {
                 let file_name = entry_file_name(name);
                 write_private(&config_dir.join(&file_name), &file.body)?;
                 if !file.role.is_empty() {
-                    supplementary.push(file_name);
+                    supplementary.push(format!("{file_name} {}", file.role));
                 }
             }
         }
@@ -201,13 +209,27 @@ pub fn config_entries(config_dir: &std::path::Path) -> Vec<PathBuf> {
 /// The names listed in [`SUPPLEMENTARY_FILE`]; empty when there is none, which is the ordinary
 /// case of a fleet that sets no roles.
 fn read_supplementary(config_dir: &std::path::Path) -> Vec<String> {
+    entry_roles(config_dir).into_keys().collect()
+}
+
+/// What role each delivered entry carries, by entry file name (ADR-0016).
+///
+/// A line an older Client wrote carries no role, only a name; it reads back as an empty value —
+/// "this entry carries *a* role", which is all that version ever recorded and all that the
+/// pass-it-or-not decision needs. A kind that defines its own vocabulary asks for the value and
+/// finds it as soon as the next configuration lands.
+#[must_use]
+pub fn entry_roles(config_dir: &std::path::Path) -> BTreeMap<String, String> {
     let Ok(text) = std::fs::read_to_string(config_dir.join(SUPPLEMENTARY_FILE)) else {
-        return Vec::new();
+        return BTreeMap::new();
     };
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_string)
+        .map(|line| match line.split_once(char::is_whitespace) {
+            Some((name, role)) => (name.to_string(), role.trim().to_string()),
+            None => (line.to_string(), String::new()),
+        })
         .collect()
 }
 
@@ -485,6 +507,53 @@ mod tests {
             ]))
             .expect("store");
         assert_eq!(entry_names(&storage.config_dir()), vec!["base"]);
+    }
+
+    /// The value survives the write, because a kind may define its own vocabulary — the Baseline
+    /// defines `role` as *"Agent type-specific"*, which is only usable if the value comes back.
+    #[test]
+    fn a_roles_value_is_readable_per_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_remote_config(&roled_offer(&[
+                ("base", b"a\n", ""),
+                ("root", b"b\n", "main"),
+                ("certs", b"PEM\n", "supplementary"),
+            ]))
+            .expect("store");
+
+        let roles = entry_roles(&storage.config_dir());
+        assert_eq!(roles.get("root").map(String::as_str), Some("main"));
+        assert_eq!(
+            roles.get("certs").map(String::as_str),
+            Some("supplementary")
+        );
+        assert_eq!(roles.get("base"), None, "an unroled entry is not listed");
+        // And the older question — is this entry configuration? — answers as it always did.
+        assert_eq!(entry_names(&storage.config_dir()), vec!["base"]);
+    }
+
+    /// A file an older Client wrote holds names alone. It reads back as "carries a role, value
+    /// unknown", which is exactly what that version recorded and all the pass-it-or-not decision
+    /// ever needed — so an update in flight does not start handing supplementary content to a
+    /// Managed Process as configuration.
+    #[test]
+    fn a_file_written_before_roles_carried_their_value_still_excludes_its_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        for name in ["base", "certs"] {
+            std::fs::write(config_dir.join(name), b"x\n").expect("entry");
+        }
+        std::fs::write(config_dir.join(SUPPLEMENTARY_FILE), "certs\n").expect("old bookkeeping");
+
+        assert_eq!(
+            entry_roles(&config_dir).get("certs").map(String::as_str),
+            Some(""),
+            "a role is recorded, its value is not known"
+        );
+        assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
     /// The common case writes no bookkeeping at all, and a role that is later removed must not

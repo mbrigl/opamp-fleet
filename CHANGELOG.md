@@ -15,6 +15,21 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.4.4]
+
+### Fixed
+
+- **A Client that updates itself into a configuration it cannot read now rolls back.** The
+  self-update's probation ([ADR-0020](docs/adr/0020-client-self-update.md)) counts a failed start
+  and returns the host to the previous version after three attempts — but it never saw this one: a
+  run resolved its configuration *before* it resolved the update in flight, so a new version that
+  refuses the file on this host exited before the attempt was counted. The service manager then
+  restarted that version for ever, and the Server heard nothing, because the Client never reached
+  it. The resolution now also runs on the failing path, finding the marker through `--state-dir`
+  (which an installed service always passes) or the file's own `state_dir`. **What to do:** nothing.
+  A host in that state today recovers as soon as it runs a version carrying this fix — and until
+  then, the way out is to correct the file or to point `current` back by hand.
+
 ## [0.4.3] - 2026-08-21
 
 ### Added

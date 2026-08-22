@@ -1447,7 +1447,7 @@ fn cpu_model() -> Option<&'static str> {
 /// The host's name (`host.name`) — read once. ADR-0017 twice offers a Selector on this attribute
 /// as the way to pin one host to one artifact, so a fleet that does not report it cannot be aimed
 /// at a machine at all.
-fn host_name() -> Option<&'static str> {
+pub(crate) fn host_name() -> Option<&'static str> {
     static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     NAME.get_or_init(read_host_name).as_deref()
 }
