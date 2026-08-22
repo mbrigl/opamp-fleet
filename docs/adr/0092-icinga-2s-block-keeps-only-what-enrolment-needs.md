@@ -1,6 +1,6 @@
 # ADR-0092: Icinga 2's block keeps only what enrolment needs
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 

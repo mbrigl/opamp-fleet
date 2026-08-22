@@ -1,6 +1,6 @@
 # ADR-0094: Telegraf gets a kind of its own
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 

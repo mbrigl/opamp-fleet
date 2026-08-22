@@ -1,6 +1,6 @@
 # ADR-0091: A kind knows its own agent — a block names a decision, never a layout
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 

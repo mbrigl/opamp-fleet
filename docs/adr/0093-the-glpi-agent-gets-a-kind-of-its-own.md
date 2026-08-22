@@ -1,6 +1,6 @@
 # ADR-0093: The GLPI Agent gets a kind of its own
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 

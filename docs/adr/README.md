@@ -119,7 +119,7 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0088](0088-cleartext-own-telemetry-reaches-the-private-address-space.md) | Cleartext own telemetry reaches the private address space — by address, never by name | 🟢 accepted |
 | [0089](0089-an-own-telemetry-offer-states-all-three-destinations.md) | An own-telemetry offer states all three destinations — and an empty endpoint withdraws one | 🟢 accepted |
 | [0090](0090-own-traces-come-from-the-clients-own-tracing-spans.md) | Own traces come from the Client's own `tracing` spans, and a span is a fleet operation | 🟢 accepted |
-| [0091](0091-a-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout | 🟡 proposed |
-| [0092](0092-icinga-2s-block-keeps-only-what-enrolment-needs.md) | Icinga 2's block keeps only what enrolment needs | 🟡 proposed |
-| [0093](0093-the-glpi-agent-gets-a-kind-of-its-own.md) | The GLPI Agent gets a kind of its own | 🟡 proposed |
-| [0094](0094-telegraf-gets-a-kind-of-its-own.md) | Telegraf gets a kind of its own | 🟡 proposed |
+| [0091](0091-a-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout | 🟢 accepted |
+| [0092](0092-icinga-2s-block-keeps-only-what-enrolment-needs.md) | Icinga 2's block keeps only what enrolment needs | 🟢 accepted |
+| [0093](0093-the-glpi-agent-gets-a-kind-of-its-own.md) | The GLPI Agent gets a kind of its own | 🟢 accepted |
+| [0094](0094-telegraf-gets-a-kind-of-its-own.md) | Telegraf gets a kind of its own | 🟢 accepted |
