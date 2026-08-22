@@ -63,3 +63,4 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0032](0032-icinga-2-through-the-fleet.md) | Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source | 🟢 accepted |
 | [0033](0033-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
 | [0034](0034-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
+| [0035](0035-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout, and Telegraf gets a kind of its own | 🟢 accepted |

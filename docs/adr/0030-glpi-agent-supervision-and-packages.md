@@ -4,6 +4,10 @@
 - **Date:** 2026-08-14
 - **Deciders:** Markus Brigl
 
+The `glpi` kind below applies [ADR-0035](0035-kind-knows-its-own-agent.md) to the agent that
+shows most plainly why that rule exists. The rule itself, the `Plugin` seam and the
+artifact-document requirement are stated there.
+
 ## Context
 
 The fleet should manage the [GLPI Agent](https://glpi-agent.readthedocs.io/) — the inventory
@@ -109,12 +113,38 @@ Feasibility was verified empirically against 1.19 in the Dev Container:
   download — is where upstream's published SHA-256 must be checked, and our own signing
   (`opamp-package-sign sign`) is the chain of trust from there to the fleet.
 
+### Two hand-written blocks for one agent
+
+**Without a kind of its own, the GLPI Agent needs two blocks.** `docs/manual/glpi-agent.md`
+documents it as a recipe for the generic `command` Supervisor — seven keys on Linux, eight on
+Windows — and the two differ in nearly everything:
+
+| | Linux | Windows |
+|---|---|---|
+| program | `AppRun` | `glpi-agent.exe` |
+| `program_path` | `AppRun` | `perl/bin/glpi-agent.exe` |
+| `working_dir` | — | `${supervisor_dir}/program/tree` |
+| `args` | `--script=glpi-agent`, then the daemon flags | four Perl `-I` paths, the script by path, then the daemon flags |
+
+Not one of those differences is a decision. They follow from `std::env::consts::EXE_SUFFIX` and from
+where the AppImage puts its interpreter — facts of the artifact this project packs itself (the
+self-contained packages above), transcribed into every host's file by hand.
+
+**The rest of the block is equally fixed.** `--conf-file` points at `glpi-agent-conf`, the name
+`opamp-package-fetch` uploads; `--vardir` points beside the tree because a package swap replaces the
+tree whole; the file logging exists so a daemon with no console has somewhere to write; `--daemon
+--no-fork` is not optional at all — forking would hand the Supervisor a pid it does not own, which
+is a supervision bug, not a preference. And `service_name = "glpi-agent"` is the Agent type every
+GLPI Configuration is aimed at (ADR-0023): the same string on every host, written on every host.
+
+**The one thing an operator does decide** — which hosts run a GLPI Agent — is `type` and `name`.
+
 ## Decision
 
 ### The machine-installed GLPI Agent: a `command` recipe per platform
 
-We will supervise the GLPI Agent with the **existing `command` kind — no new plugin, no code**:
-one `[[supervisor]]` block per platform, running the machine's own GLPI installation as a
+We will supervise a machine-installed GLPI Agent with the **existing `command` kind**: one
+`[[supervisor]]` block per platform, running the machine's own GLPI installation as a
 foreground child via `--daemon --no-fork`, documented as a recipe in the manual.
 
 Concretely, the recipe binds:
@@ -189,15 +219,62 @@ gains `.zip`, read-only and unencrypted, through the
 `deflate` only, so decompression runs on the `flate2`/`miniz_oxide` chain the Client already
 carries and the pure-Rust build (ADR-0006, ADR-0007) is undisturbed.
 
+### A kind of its own: `glpi`
+
+We will add a **`glpi` kind**, and its block will be two lines on both platforms. Every value the
+package bullets above assign to a block — `program_path`, `--script=glpi-agent`, `--vardir`,
+`--conf-file`, `service_name` — is the kind's, not the block's.
+
+1. **The kind knows the invocation, per platform**: the program name and `program_path` from the
+   table above, the full argument list including the Perl `-I` paths, `--conf-file` against
+   `glpi-agent-conf`, `--vardir` beside the tree, the file logging, `--daemon --no-fork`, how it is
+   asked for its version, and `service_name = "glpi-agent"`.
+
+   **The working directory is where the two platforms part.** ADR-0035's general rule — the
+   directory the program lives in — is already right on Linux, where the program *is* the tree
+   root's `AppRun`, so the kind names nothing. On Windows it is not: the program sits at
+   `perl/bin/`, and the bundled Perl expects the tree root, which is why upstream's own portable
+   `.bat` sets it before invoking the agent. So the kind names it there — the one place a wrapper
+   overrides the general derivation, and the case that shows why the derivation is a default rather
+   than a law.
+
+2. **It has no settings of its own.** Its strict parse (`Plugin::check`) accepts an empty table and
+   refuses every key, so a block carrying one fails at startup naming what supplies the value now.
+   A wrapper that needed an escape hatch would be a wrapper that does not know its agent.
+
+   ```toml
+   [[supervisor]]
+   type = "glpi"
+   name = "glpi"
+   ```
+
+3. **`--daemon --no-fork` is part of the kind, not a default an operator may drop**, and the two
+   flags answer two different failures. Without `--daemon` the agent runs its tasks once and exits,
+   and the watchdog restarts it for ever. Without `--no-fork` it detaches, leaving the Supervisor
+   holding a pid that ends immediately while the real process runs on unsupervised. Both were
+   warnings in prose; they become properties of the kind, which is where a supervision requirement
+   belongs.
+
+4. **Its artifact document is `docs/artifacts/glpi-agent.md`**, in ADR-0035 clause 9's shape, with
+   the two tests that clause requires — one against the AppImage repack plan in
+   `opamp-package-fetch`, one against the constants above, `cfg`-gated per platform. GLPI is the
+   agent where those tests earn the most: its Linux artifact is the one this project **repacks**
+   rather than ships as published, so its internal layout is ours to keep in step.
+
 ## Alternatives considered
 
 ### Supervision
 
-- **A dedicated `glpi` plugin kind** carrying the platform defaults (`cfg`-gated program
-  discovery, fixed arguments). Rejected: every difference between the platforms is a *value*
-  the block already expresses — program path, arguments — not a *behavior* the `Runner` lacks.
-  A new kind is warranted when the lifecycle differs (ADR-0011); encoding default paths in
-  Rust buys convenience at the price of a module, and simplicity first says no.
+- **Leave the packaged agent as a `command` recipe and fix the documentation.** Rejected: the
+  documentation is not wrong, it is *duplicated per host* — and it is duplicated per platform on
+  top of that. A recipe cannot be updated when an upstream release moves a path; a kind can.
+- **One block with placeholders instead of two.** `${exe_suffix}` and friends would collapse the
+  two blocks into one. Rejected: it makes the operator's file a template of the artifact's layout,
+  which is the transcription this decision removes rather than shortens — and the Windows argument
+  list is not the Linux one with a suffix appended, it has four extra paths.
+- **Wait for GLPI to publish a self-contained Linux archive**, after which the repack and half the
+  Windows/Linux divergence would go away. Rejected as a reason to wait: the divergence in the block
+  is real today, and if that release comes, this kind is the one place to change.
 - **A kind that drives the native service managers** (`systemctl`/`sc.exe` for the GLPI
   service, instead of spawning a child). Rejected: supervising a process the Client did not
   spawn is a different supervision model — no watchdog, no health gate, no bounded stop — and
@@ -288,13 +365,24 @@ carries and the pure-Rust build (ADR-0006, ADR-0007) is undisturbed.
   link-free it still runs (8 284 members, 259 MB — inside the ADR-0015 limits); the Windows
   zip holds 5 259 files, ~101 MB, `perl/bin/glpi-agent.exe` and `var/`/`etc/` under one root;
   a missing `--vardir` is a hard startup failure, so state must live outside the swapped tree.
+- **`docs/manual/glpi-agent.md`** — the two blocks quoted in the Context; the reasons for `--daemon`
+  (*"the agent runs its tasks once and exits, and the watchdog would restart it forever"*) and
+  `--no-fork` (*"it stays the Supervisor's direct child, one process, on every platform"*), which
+  become point 3; and the warning never to spawn `glpi-agent.bat`, whose wrapper would
+  make the supervised child `cmd.exe`.
+- **`crates/package-tools/src/bin/opamp-package-fetch.rs`** — `glpi_plans` and the `AgentKind` entry
+  naming `glpi-agent` and the Configuration `glpi-agent-conf`, which is where the `glpi` kind's
+  `--conf-file` points; the AppImage repack whose shape the kind compiles in.
 
 ## Consequences
 
 - Positive: the GLPI Agent appears as its own Agent — health, restart, centrally rolled-out
-  configuration — on both platforms, with zero new code and both shipped plugins untouched.
-  The recipe is the first documented Foreign Agent beyond the promtail walkthrough, and it
-  exercises only accepted machinery.
+  configuration — on both platforms. The machine-owned recipe is the first documented Foreign
+  Agent beyond the promtail walkthrough, and it exercises only accepted machinery.
+- **Positive: one block, both platforms.** The GLPI page stops documenting two, and a host's file
+  stops saying anything about Perl.
+- **Positive: the repack and the kind can be kept in step.** They are the two ends of the same
+  artifact, and they are tested against one document instead of against a manual page.
 - Positive: the GLPI Agent reaches **full fleet ownership on amd64 hosts of both platforms** —
   the Server pushes the block (ADR-0019), delivers versioned updates with health gate and
   rollback (ADR-0015), and no fleet host needs Perl, FUSE, snapd, or a preinstalled GLPI
@@ -331,6 +419,12 @@ carries and the pure-Rust build (ADR-0006, ADR-0007) is undisturbed.
   libraries on disk. `service.version` stays unreported (upstream's `1.19-1` is not strict
   SemVer); `packages[].version` is what tracks installs. Linux arm64 and every other platform
   stay on the machine-owned recipe.
+- **Negative: a GLPI Agent that somebody packed differently no longer fits the `glpi` kind.**
+  ADR-0035 clause 8 in the concrete: the answer is the packing tool, not a key.
+- **Negative: an operator who needs an extra GLPI flag now needs a code change** — or the agent's
+  own configuration, which is where most of what one would want to pass belongs anyway. `command`
+  stays available for an installation that genuinely needs to invoke it differently, at the price of
+  writing the whole invocation again.
 - Follow-ups (by topic): optionally teaching `opamp-package-sign pack` a reproducible `--tree`
   mode so tree artifacts get the same deterministic packing as single files without
   hand-rolled `tar` flags; a Linux arm64 package built from the source distribution plus a

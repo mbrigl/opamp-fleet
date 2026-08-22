@@ -53,9 +53,13 @@ state_dir = "client-state"
 # noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
 # supervisor_dir = "/opt/opamp-fleet/supervisors"
 
-# Operator-defined attributes, reported by every Agent this Client presents so the
-# Server's Selectors can target them. A [[supervisor]] block may add its own [supervisor.attributes]
-# table, which overrides these per key.
+# Operator-defined attributes describing this *host*, reported by every Agent this Client presents
+# so the Server's Selectors can target them. They are what a fresh Agent carries into its very
+# first message, before the Server has ever seen it.
+#
+# To tag one Agent among several on this host, use a Server label instead (PUT
+# /api/v1/agents/<uid>/labels): it is keyed by that Agent's uid, matched by the same Selectors, and
+# takes effect without editing a file here.
 # [attributes]
 # env = "prod"
 
@@ -152,10 +156,26 @@ state_dir = "client-state"
 # ── Supervisor Mode ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
-# Client presents itself as a single Agent, as above. There are three kinds of Supervisor —
-# `collector`, `command`, and `icinga2` — and the blocks below work through all of them: the two
-# shapes a Collector comes in, the generic Foreign Agent and two concrete ones, and Icinga 2,
-# which has a kind of its own because it needs one.
+# Client presents itself as a single Agent, as above.
+#
+# There are five kinds of Supervisor, and they fall into two groups. `collector` and `command`
+# know nothing about the agent they run, so their blocks say everything. `icinga2`, `glpi` and
+# `telegraf` are **wrappers**: each knows its agent, so its block says which host runs it and
+# little else — a wrapped block is two lines, four for an Icinga node that enrols. A key that a
+# wrapper supplies is refused by name rather than silently overridden, and the message says what
+# supplies the value now.
+#
+# This Client reports the kinds it carries as attributes of its own Agent
+# (supervisor.kind.telegraf = "true", one key per kind), so a Supervisor set the Server rolls out
+# can be aimed at the Clients that can actually run it.
+#
+# Timing is the fleet's policy first. These two apply to every Managed Process; a wrapped kind
+# corrects them where its agent demands it (Icinga 2 needs sixty seconds to shut down), and only
+# an unwrapped block may state its own.
+# [supervisors]
+# stop_timeout_secs = 10   # graceful-stop budget before the process is killed
+# apply_grace_secs = 3     # how long a restarted process must survive before a received
+#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory
@@ -219,9 +239,10 @@ state_dir = "client-state"
 #                          # Put the first copy there yourself; every later one arrives by package.
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
-# stop_timeout_secs = 10   # graceful-stop budget before the process is killed
-# apply_grace_secs = 3     # how long a restarted process must survive before a received
-#                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
+# stop_timeout_secs = 10   # optional: overrides [supervisors] for this block. Only a kind that
+# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper holds the
+#                          # value instead, because how long an agent needs is the agent's
+#                          # property, not this host's.
 # [supervisor.env]         # optional environment for the process
 # OTLP_HTTP_ENDPOINT = "127.0.0.1:4318"
 
@@ -252,8 +273,8 @@ state_dir = "client-state"
 # never by the Server. A bare file name instead would put it in this Supervisor's own
 # program/ directory and consent to package delivery, like `binary` above.
 #
-# args, working_dir and env values may use two placeholders naming this Supervisor's own
-# directories, so nothing has to be kept in sync with state_dir or supervisor_dir:
+# args and env values may use two placeholders naming this Supervisor's own directories, so
+# nothing has to be kept in sync with state_dir or supervisor_dir:
 #
 #   ${supervisor_dir}   <supervisor_dir>/<name>       — everything this Supervisor owns
 #   ${config_dir}       <supervisor_dir>/<name>/config — the written configuration entries
@@ -272,74 +293,78 @@ state_dir = "client-state"
 # name = "my-agent"
 # command = "my-agent"
 # args = ["--config", "${config_dir}/my-agent-conf"]
-# working_dir = "/var/lib/my-agent"     # optional
-# version_args = ["--version"]          # what it reports as service.version
-# [supervisor.attributes]               # optional attributes for this Agent
-# role = "edge"
+# version_args = ["--version"]          # what it reports as service.version — and, for this kind,
+#                                       # the check run against a staged package before the
+#                                       # running program is stopped
 # [supervisor.env]                      # optional environment for the process
 # LOG_LEVEL = "info"
+#
+# The process starts in the directory its program lives in. There is no working_dir key: the
+# answer is always this Supervisor's own program/ (or its tree root), and the old default — the
+# directory the service manager happened to leave the Client in, usually / — was one nobody chose.
+#
+# There is no reload_signal key either. Whether a program re-reads its configuration on a signal
+# is the program's own convention, and a wrong one is invisible: a signal the process ignores
+# looks exactly like an apply that worked. An agent under this kind applies by restarting; an
+# agent whose in-place reload is worth having is an agent worth a kind of its own — see 4 and 6.
+#
+# To tag ONE Agent among several on this host, use a Server label (PUT /api/v1/agents/<uid>/
+# labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
+# [attributes] table at the top of this file still describes the *host*, and every Agent on it
+# carries those.
 
-# 4. A concrete Foreign Agent: Telegraf, under the same generic "command" Supervisor. Named by
-# a bare file name, so it lives in this Supervisor's program/ directory and takes binary updates
-# from the Server — upload the .tar.gz InfluxData publishes exactly as published, and the member
-# whose file name matches `telegraf` is what gets installed. Telegraf re-reads its configuration
-# on SIGHUP, so declaring it as reload_signal applies a received Configuration (name it
-# `telegraf-conf`, matching args below) with an in-place reload instead of a restart; a reload
-# that fails still falls back to the restart. reload_signal is unix-only. A Configuration name
-# carries no extension — like every name here it is lowercase letters, digits and `-`.
+# 4. Telegraf, under a kind of its own. Two lines: everything else about Telegraf — the program's
+# name per platform, --config against the Configuration named `telegraf-conf`, how it states its
+# version, and the SIGHUP it re-reads its configuration on — is Telegraf's property, so the kind
+# holds it. That last one is why the kind exists: as a block key the signal was refused on Windows
+# at parse time, so one Supervisor set could not serve a mixed fleet. The kind sends the signal
+# where signals exist and restarts where they do not.
+#
+# Upload the .tar.gz InfluxData publishes exactly as published; the member whose file name matches
+# is what gets installed. See docs/artifacts/telegraf.md.
 # [[supervisor]]
-# type = "command"
+# type = "telegraf"
 # name = "telegraf"
-# command = "telegraf"
-# args = ["--config", "${config_dir}/telegraf-conf"]
-# version_args = ["--version"]          # Telegraf prints a Semantic Versioning version
-# reload_signal = "HUP"
 
-# 5. The GLPI Agent, delivered as a package rather than installed — the same generic "command"
-# Supervisor, and the first block here whose package is a whole *tree* rather than one file.
-# `command` is a bare name, so the Client owns and updates it; `program_path` says where inside
-# the delivered tree the program sits, and everything else in the tree travels with it. On Linux
-# the artifact is repacked from upstream's AppImage, whose `AppRun` is the tree's entry point and
-# bundles several programs — `--script=glpi-agent` picks this one. `--vardir` must point *outside*
-# `program/`, because a package swap replaces that directory whole and would take the agent's
-# `deviceid` with it. The full recipe, the Windows block, and what the agent needs before it
-# reports anything are in docs/manual/glpi-agent.md.
+# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
+# which is the point. Its two platform invocations differ in nearly everything (the program's name
+# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
+# --script), and none of those differences is anybody's decision: they follow from the artifact
+# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
+# requirements rather than preferences, and points --vardir outside program/, which a package swap
+# replaces whole.
+#
+# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
+# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
 # [[supervisor]]
-# type = "command"
+# type = "glpi"
 # name = "glpi"
-# service_name = "glpi-agent"           # the Agent type every GLPI Configuration is aimed at
-# command = "AppRun"                    # bare ⇒ the Client owns and updates the tree
-# program_path = "AppRun"               # …and it is the tree's own entry point
-# args = [
-#     "--script=glpi-agent",            # the AppImage bundles several; this selects the agent
-#     "--daemon", "--no-fork",          # never fork: the Supervisor must keep the pid it spawned
-#     "--conf-file=${config_dir}/glpi-agent-conf",
-#     "--vardir=${supervisor_dir}/agent-state",   # outside program/, which a swap replaces whole
-# ]
 
-# 6. Icinga 2, under a kind of its own. It earns one because nothing above can express what it
-# needs: the daemon takes its directories as -D constants rather than flags, validates a
-# configuration before applying it, and is delivered as a tree carrying its own libraries, which
-# is why LD_LIBRARY_PATH is set here and why the bundled copies must win over the ones compiled
-# into the binary's search path. main_config names a *Configuration*, not a path — Icinga reads
-# one root file and pulls the rest in with `include`, so the fleet decides which entry is the
-# root. Leave parent_host out for a standalone node that only runs local checks; with it, the
-# Agent enrols with that parent and needs the ticket named below. Building the artifact, the
-# enrolment, and the Windows differences are in docs/manual/icinga2.md.
+# 6. Icinga 2, under a kind of its own — the only wrapped kind that keeps any keys, and it keeps
+# exactly the four that describe the *installation this host is joining*. Everything about the
+# artifact is the kind's: the daemon's place in the tree, its directories (which Icinga takes as
+# -D constants rather than flags), the LD_LIBRARY_PATH that makes the tree's own libraries win,
+# the sixty seconds it needs to shut down, and the `daemon -C` validation without which a failed
+# reload would be reported as an apply that worked.
+#
+# The four that remain are facts of the Icinga installation, and nothing here can compute them:
+# the ticket was minted on the parent for exactly one common name, and a node that differs from it
+# does not enrol. Leave parent_host out for a standalone node that only runs local checks.
+#
+# Which delivered Configuration is Icinga's root is stated by the fleet, with `role = "main"` on
+# that Configuration; where nothing is marked, the conventional name `icinga2-conf` stands in.
+#
+# Building the artifact, the enrolment and the Windows differences are in docs/manual/icinga2.md;
+# the artifact itself in docs/artifacts/icinga2.md.
 # [[supervisor]]
 # type = "icinga2"
 # name = "icinga2"
-# service_name = "icinga2"              # what Selectors aim at
-# binary = "icinga2"                    # bare ⇒ the Client owns and updates the tree
-# program_path = "sbin/icinga2"         # where the program sits inside the delivered tree
-# stop_timeout_secs = 60                # a busy daemon takes longer to come down than a collector
-# apply_grace_secs = 30
-# main_config = "icinga2-conf"          # the *name of a Configuration*, not a path
-# include_dir = "${supervisor_dir}/program/tree/share/icinga2/include"
-# plugin_dir  = "${supervisor_dir}/program/tree/plugins"
-# parent_host = "master.example.com"    # omit for a standalone node: no enrolment, no ticket
-# parent_port = 5665
-# node_name   = "edge-01.example.com"   # default: this Supervisor's own name
-# ticket_file = "${config_dir}/icinga2-ticket"   # delivered per host as a supplementary entry
-# [supervisor.env]
-# LD_LIBRARY_PATH = "${supervisor_dir}/program/tree/lib"   # the tree's libraries must win
+# parent_host = "master.example.com"    # omit for a standalone node: no enrolment, no ticket.
+#                                       # `host:port` sets a port other than Icinga's 5665.
+# node_name   = "edge-01.example.com"   # this node's NodeName, certificate CN and Endpoint name
+#                                       # in one. Default: this host's FQDN, and where that cannot
+#                                       # be resolved, this Supervisor's own name.
+# ticket_file = "${config_dir}/icinga2-ticket"        # delivered per host as a supplementary entry
+# trusted_cert_file = "${config_dir}/icinga2-parent-cert"  # the parent's own certificate, pinned;
+#                                       # without it the request trusts what the parent presents
+#                                       # on first sight, which is logged as such

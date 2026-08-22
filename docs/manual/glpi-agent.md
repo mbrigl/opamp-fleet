@@ -22,10 +22,9 @@ repack that version and deliver it, which is what this page does. A host may kee
 - [The shape: a foreground daemon](#the-shape-a-foreground-daemon)
 - [1. Hand over the autostart](#1-hand-over-the-autostart)
 - [2. Build and upload the package](#2-build-and-upload-the-package)
-- [3. The block on Linux](#3-the-block-on-linux)
-- [4. The block on Windows](#4-the-block-on-windows)
-- [5. Send its configuration](#5-send-its-configuration)
-- [6. What to expect in the fleet view](#6-what-to-expect-in-the-fleet-view)
+- [3. The block](#3-the-block)
+- [4. Send its configuration](#4-send-its-configuration)
+- [5. What to expect in the fleet view](#5-what-to-expect-in-the-fleet-view)
 - [Updating](#updating)
 - [Running under an account that is not root or LocalSystem](#running-under-an-account-that-is-not-root-or-localsystem)
 - [Troubleshooting](#troubleshooting)
@@ -40,9 +39,11 @@ rollout, health-gating and rollback applies unchanged. Three things are specific
 - **It must be made to run in the foreground**, which its own flags do — see
   [the shape](#the-shape-a-foreground-daemon).
 - **Its state must live outside the delivered tree**, or an update discards the `deviceid` and the
-  GLPI server sees a new asset — see [step 3](#3-the-block-on-linux).
+  GLPI server sees a new asset — see [step 3](#3-the-block).
 - **Its configuration is a Configuration**, typed `glpi-agent`, rolled out and applied by restart
   like any other — the agent has no reload signal.
+- **Its block is two lines**, the same two on both platforms, because the kind knows the rest —
+  see [step 3](#3-the-block).
 
 ## The shape: a foreground daemon
 
@@ -55,8 +56,8 @@ foreground and stay there. Two of its own flags do exactly that:
 - `--no-fork` keeps it from detaching: it stays the Supervisor's direct child, one process, on
   every platform. The daemonizing — start at boot, restart on failure — is the Client's job now.
 
-The agent ends cleanly on the graceful stop, and a configuration change is applied by restart:
-the GLPI Agent has no reload signal, so `reload_signal` stays unset.
+The agent ends cleanly on the graceful stop, and a configuration change is applied by restart: the
+GLPI Agent has no reload signal, and the kind says so — there is nothing to declare in a block.
 
 ## 1. Hand over the autostart
 
@@ -114,100 +115,75 @@ What that does differs per platform, and the difference is worth knowing:
 
 **Linux arm64 is not supported.** Upstream publishes the AppImage for x86_64 only, and there is
 no other self-contained Linux build to repack; a block cannot name the machine's own installation
-instead, because `command` takes a bare file name and nothing else. An arm64 host keeps its
+instead, because this kind installs and names its own program. An arm64 host keeps its
 `apt`/`dnf` GLPI Agent and stays outside the fleet — it gets no health, no fleet-view restart and
 no rolled-out configuration — until upstream publishes an arm64 build or someone repacks one.
 
-## 3. The block on Linux
+## 3. The block
 
-The program is named by a **bare file name** — the only shape a block accepts — and
-`program_path` says where it sits inside the delivered tree:
-
-```toml
-[[supervisor]]
-type = "command"
-name = "glpi"
-service_name = "glpi-agent"
-command = "AppRun"                 # the tree's entry point, in this Supervisor's own program/
-program_path = "AppRun"            # …and where it sits inside the package
-args = [
-    "--script=glpi-agent",         # the AppImage bundles several; this selects the agent
-    "--daemon", "--no-fork",
-    "--conf-file=${config_dir}/glpi-agent-conf",
-    "--vardir=${supervisor_dir}/agent-state",
-    "--logger=file", "--logfile=${supervisor_dir}/glpi-agent.log", "--logfile-maxsize=16",
-]
-version_args = ["--version"]
-```
-
-What each line is doing:
-
-- `command` names a file in this Supervisor's own `program/` directory, which is what lets the
-  Server replace it. `program_path` names the same file inside the archive, because a tree
-  package has to say which member is the program.
-- `service_name = "glpi-agent"` is the Agent **type** every GLPI Configuration is aimed at. The
-  block's `name` is yours; keeping it short (`glpi`) keeps the directory short.
-- `--conf-file=${config_dir}/glpi-agent-conf` points the agent at the written Configuration entry —
-  `glpi-agent-conf` is the *name of the Configuration on the Server*, and a name carries no
-  extension: Configuration names follow the same grammar as every other name here — 1–32
-  lowercase letters, digits and `-`, no dot — while `--conf-file` reads whatever path it is
-  given. See
-  [step 5](#5-send-its-configuration) for what happens before the first one arrives.
-- **`--vardir` must point outside the tree, and the directory must exist.** The agent never
-  creates it and exits if it is missing, and anything inside `program/tree/` is replaced
-  wholesale by the next update — which would discard the agent's `deviceid` and make the GLPI
-  server see a new asset. `${supervisor_dir}/agent-state` is Client-owned, survives every swap,
-  and is removed with the Supervisor. Create it once (configuration management, or by hand)
-  before the first start.
-- The logger flags are optional but earn their keep: the agent logs to stderr by default, and a
-  file under `${supervisor_dir}` is one you can find, sized in MB by `--logfile-maxsize`, and one
-  the purge takes with the Supervisor.
-- `version_args` is best-effort here: the probe accepts strict SemVer only, and GLPI Agent
-  releases are usually two-component (`1.15`), so `service.version` will mostly stay absent. A
-  three-component release (`1.7.1`) reports one. The package's own version is reported either
-  way, so the fleet view always knows which Set is installed.
-
-## 4. The block on Windows
-
-Upstream's build ships no agent executable — it ships a bundled Perl whose interpreter is named
-`perl\bin\glpi-agent.exe`, and the agent is the script `perl\bin\glpi-agent` that interpreter
-runs. The block invokes it the way the portable `.bat` does — interpreter, the four `-I` library
-paths, then the script — with every path inside the delivered tree:
+Two lines, on Linux and on Windows alike:
 
 ```toml
 [[supervisor]]
-type = "command"
+type = "glpi"
 name = "glpi"
-service_name = "glpi-agent"
-command = "glpi-agent.exe"
-program_path = "perl/bin/glpi-agent.exe"
-working_dir = "${supervisor_dir}/program/tree"   # what the portable .bat does
-args = [
-    "-I${supervisor_dir}/program/tree/perl/agent",
-    "-I${supervisor_dir}/program/tree/perl/site/lib",
-    "-I${supervisor_dir}/program/tree/perl/vendor/lib",
-    "-I${supervisor_dir}/program/tree/perl/lib",
-    "${supervisor_dir}/program/tree/perl/bin/glpi-agent",
-    "--daemon", "--no-fork",
-    "--conf-file=${config_dir}/glpi-agent-conf",
-    "--vardir=${supervisor_dir}/agent-state",
-    "--logger=file", "--logfile=${supervisor_dir}/glpi-agent.log", "--logfile-maxsize=16",
-]
-version_args = ["--version"]
 ```
 
-- **Never spawn `glpi-agent.bat`.** The batch file is a wrapper: the supervised child would be
-  `cmd.exe`, the Perl process its grandchild — the stop would kill the wrapper and orphan the
-  agent, and the process telemetry would sample the wrong pid. With the invocation above, the
-  direct child *is* the agent.
-- `${supervisor_dir}/program/tree` is where a tree package lands — the same path
-  [One directory per Agent](client.md#one-directory-per-agent) shows — so the `-I` arguments
-  follow the package instead of naming an install directory. They make the invocation
-  independent of the working directory, and nothing has to be adjusted when the version changes.
-- `reload_signal` must stay unset here twice over: the agent has none, and the key is refused on
-  Windows anyway.
+That is the whole block. Everything the recipe used to spell out — seven keys on Linux, eight on
+Windows, and the two lists differing in nearly every element — is now the kind's, because none of
+it was ever a decision a host makes:
 
-## 5. Send its configuration
+| | Linux | Windows |
+|---|---|---|
+| program | `AppRun`, the repacked AppImage's entry point | `glpi-agent.exe`, upstream's bundled Perl interpreter |
+| in the tree | `AppRun` at the root | `perl/bin/glpi-agent.exe` |
+| picks the agent | `--script=glpi-agent` — the AppImage bundles several | the four `-I` library paths, then the script by path |
+| working directory | the tree root, which is where the program already is | the tree root, which upstream's own portable `.bat` sets |
+
+Those differences follow from `EXE_SUFFIX` and from where the AppImage puts its interpreter — facts
+of the artifact this project packs, which
+[`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md) states once for both sides and pins
+with tests. An upstream release that moves one of them is a red test here, not a rollout that fails
+on every host.
+
+The rest of the invocation is compiled in for the same reason, and three parts of it are worth
+knowing about:
+
+- **`--daemon --no-fork` are supervision requirements, not defaults you may drop.** Without the
+  first the agent runs its tasks once and exits, and the watchdog restarts it forever; without the
+  second it detaches, and the Supervisor is left holding a pid that ends immediately while the real
+  process runs on unsupervised. They used to be warnings in prose. They are now properties of the
+  kind.
+- **`--conf-file` points at `glpi-agent-conf`**, the written Configuration entry — the *name of the
+  Configuration on the Server*, which carries no extension: names here are 1–32 lowercase letters,
+  digits and `-`. See [step 4](#4-send-its-configuration) for what happens before the first one
+  arrives.
+- **`--vardir` points at `${supervisor_dir}/agent-state`, outside the tree.** Anything inside
+  `program/tree/` is replaced wholesale by the next update, which would discard the agent's
+  `deviceid` and make the GLPI server see a new asset. The agent never creates that directory and
+  exits if it is missing, so **the Client makes it before every spawn** — nothing to prepare on the
+  host, and a directory somebody removed comes back on the next restart rather than leaving the
+  Supervisor in a crash loop.
+
+The agent also logs to a file under `${supervisor_dir}`, rotated at 16 MiB, because a daemon with
+no console has nowhere else to write and stderr is not somewhere you can go and look.
+
+**`service.version` is best-effort here.** The probe accepts strict SemVer only, and GLPI Agent
+releases are usually two-component (`1.15`), so the field will mostly stay absent; a
+three-component release (`1.7.1`) reports one. The package's own version is reported either way, so
+the fleet view always knows which Set is installed.
+
+**Never `glpi-agent.bat`.** It does not come up as a choice any more — the kind names the program —
+but it is why: the batch file is a wrapper, so the supervised child would be `cmd.exe` and the Perl
+process its grandchild. The stop would kill the wrapper and orphan the agent, and the process
+telemetry would sample the wrong pid.
+
+**One block serves the whole fleet.** Nothing in it is per-host and nothing in it is per-platform,
+so it can travel as a single Configuration typed `supervisor`
+([The Server can manage the set](client.md#the-server-can-manage-the-set)) instead of being written
+into every host's file — in two variants, as it had to be until now.
+
+## 4. Send its configuration
 
 The configuration the fleet delivers is an ordinary Configuration — typed `glpi-agent` so it
 reaches no other kind of Agent, named `glpi-agent-conf` because that is the file name the
@@ -241,14 +217,14 @@ Prefer the host to keep its configuration to itself? Drop the `--conf-file` argu
 `--server=…` into `args` instead — the Supervisor still gives you health and restart, but a
 rolled-out Configuration then lands in `config/` with nothing reading it.
 
-## 6. What to expect in the fleet view
+## 5. What to expect in the fleet view
 
 | Field | What it shows for this Agent |
 |---|---|
 | `service_name` | `glpi-agent` — aim Configurations (and Selectors) at this. |
 | `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. |
 | `packages` | `Installed` with the Set's version once the tree is in place, or `InstallFailed` with the reason the artifact would not run here. |
-| `service_version` | Usually absent — see the `version_args` note in [step 3](#3-the-block-on-linux). The Set's version above says which release is installed. |
+| `service_version` | Usually absent — see the note on `service.version` in [step 3](#3-the-block). The Set's version above says which release is installed. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |
 | `remote_config_status`, `effective_config` | The `glpi-agent-conf` round trip: `APPLIED` once the restarted agent survives `apply_grace_secs`. |
 
@@ -272,9 +248,9 @@ as that account, and two things follow:
 
 - **The agent's state directory must be writable**, or it exits at startup with *"Can't write in
   …"*. That is the `--vardir` directory — `${supervisor_dir}/agent-state` — and since the Client
-  creates the Supervisor's directory as its own service account, it is writable already. It needs
-  attention only where the directory was created by hand as another user, or where `--vardir` was
-  pointed somewhere else: grant it to the service account (`chown -R <account> <the directory>`).
+  creates it as its own service account — owner-only — it is writable already. It needs attention
+  only on a host where an earlier release's by-hand directory survives under another user: grant it
+  to the service account (`chown -R <account> <the directory>`).
 - **An unprivileged inventory is a partial inventory.** Hardware probes (DMI, disks) need
   elevated rights; the agent runs and reports, but the GLPI server sees less. Decide whether
   that trade is acceptable before moving the Client off root for a host whose inventory matters.
@@ -283,11 +259,11 @@ as that account, and two things follow:
 
 | Symptom | Cause |
 |---|---|
-| The Agent holds with *"the program keeps failing to start"* right after setup | No `glpi-agent-conf` Configuration has been rolled out yet — the agent exits on the missing `--conf-file`. Roll it out ([step 5](#5-send-its-configuration)); the apply ends the hold. The agent's log says `Config: non-existing file …`. |
+| The Agent holds with *"the program keeps failing to start"* right after setup | No `glpi-agent-conf` Configuration has been rolled out yet — the agent exits on the missing `--conf-file`. Roll it out ([step 4](#4-send-its-configuration)); the apply ends the hold. The agent's log says `Config: non-existing file …`. |
 | The hold persists after a rollout | The Configuration does not reach this Agent: its name must be `glpi-agent-conf` (the file name in `args`, and a Configuration name admits no dot), its `service_name` must be `glpi-agent`, and its Selector must match — check the Agent's row for the entry. |
-| *"Can't write in …"* in the agent's log | The `--vardir` directory is missing or not writable by the Client's service account — see [the account section](#running-under-an-account-that-is-not-root-or-localsystem). The agent never creates it. |
+| *"Can't write in …"* in the agent's log | The `--vardir` directory is not writable by the Client's service account — see [the account section](#running-under-an-account-that-is-not-root-or-localsystem). It is no longer ever *missing*: the Client makes it before every spawn. |
 | The host is inventoried twice, or the agent logs that port 62354 is in use | The native autostart is still active beside the Supervisor — [step 1](#1-hand-over-the-autostart) was skipped or a package upgrade re-enabled the service. |
 | Windows: the process exits immediately, log says *"Can't locate … in @INC"* | The `-I` paths do not match the delivered tree — the package's layout differs from `perl/…` under `program/tree`. Check what the artifact actually holds, and fix all five paths in the block together. |
 | `service_version` is empty | Expected for two-component GLPI releases; not a fault. `packages[].version` says which Set is installed and is the field to read instead. |
-| The agent starts, but the GLPI server shows a new asset after every update | `--vardir` points inside `program/tree`, so the `deviceid` is discarded with the replaced tree. Point it at `${supervisor_dir}/agent-state` and let the GLPI server merge the duplicate. |
+| The agent starts, but the GLPI server shows a new asset after every update | An old block still pointed `--vardir` inside `program/tree`, so the `deviceid` was discarded with the replaced tree. The kind now puts it at `${supervisor_dir}/agent-state`; let the GLPI server merge the duplicate. |
 | The configuration is `APPLIED` but the agent still contacts the old GLPI server | The block runs without `--conf-file` (the static-`--server` variant), so the written entry is never read. |
