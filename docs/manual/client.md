@@ -916,14 +916,23 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Five plugin types ship today: `collector` for an OpenTelemetry Collector, `command` for any other
-process — a **Foreign Agent** that speaks no OpAMP — `telegraf` and `glpi`, **wrappers** that know
-their agent's program and invocation so a block need not — and `icinga2` for the one case the first
-two cannot
-express: a daemon that takes its directories as `-D` constants rather than flags, validates a
-configuration before applying it, and needs a certificate from a master before it can do anything
-([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)). A new kind of process
-means a new plugin, not a change to the core — which is what the third one demonstrates.
+Five plugin types ship today, in two groups.
+
+**Two know nothing about the agent they run**, so their blocks say everything: `collector` for an
+OpenTelemetry Collector, and `command` for any other process — a **Foreign Agent** that speaks no
+OpAMP.
+
+**Three are wrappers**, each knowing one agent's program, its layout on each platform and its
+invocation, so its block says which host runs it and little else
+([ADR-0091](../adr/0091-a-kind-knows-its-own-agent.md)): `icinga2` for a daemon that takes its
+directories as `-D` constants rather than flags, validates a configuration before applying it, and
+needs a certificate from a master before it can do anything
+([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)); `glpi` for the GLPI
+inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
+reload signal could not be written in a block a mixed fleet could use.
+
+A new kind of process means a new plugin, not a change to the core — which is what the last three
+demonstrate.
 
 ### The Server can manage the set
 
@@ -973,17 +982,17 @@ edit to the blocks stands only until the next rollout act overwrites it.
 
 #### Wrapped and unwrapped kinds
 
-Kinds fall into two groups. `collector` and `command` know nothing about the agent they run, so
-their blocks say everything. A **wrapper** knows its agent's program, its layout on each platform
-and its invocation, so its block says which host runs it and little else. Every kind states which
-it is, and the sections below say so for each.
+`collector` and `command` know nothing about the agent they run, so their blocks say everything.
+`icinga2`, `glpi` and `telegraf` are **wrappers**: each knows its agent's program, its layout and
+its invocation, so its block says which host runs it and little else — two lines, or four for an
+Icinga node that enrols.
 
 A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
 says what supplies the value now. The same check runs on a Supervisor set the Server offers, so a
 block that would not work is refused *before* any running process is touched.
 
 This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
-kind, `supervisor.kind.command = "true"` — so a Supervisor set can be aimed with a Selector at the
+kind, `supervisor.kind.telegraf = "true"` — so a Supervisor set can be aimed with a Selector at the
 Clients that can actually run it.
 
 #### Timing is the fleet's, then the agent's
@@ -1094,7 +1103,7 @@ There is no `reload_signal` key either. Whether a program re-reads its configura
 the program's own convention, and a wrong value here is the one that stays invisible — a signal the
 process ignores looks exactly like an apply that worked. An agent under this kind therefore applies
 a configuration **by restarting**; an agent whose in-place reload is worth having is an agent worth
-a kind of its own.
+a kind of its own, which `telegraf` and `icinga2` below are.
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
 cannot know what to do with them — a Foreign Agent reads its own configuration file. So you point it
@@ -1122,26 +1131,31 @@ its state, its template library and its account are on **every** invocation, it 
 those directories itself, and it obtains a certificate from an Icinga master before it can do
 anything ([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)).
 
+It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
+**installation this host is joining**. Nothing here can compute them: the ticket was minted on the
+parent for one common name, and a node that differs from it does not enrol.
+
 | Key | Meaning |
 |---|---|
-| `binary` | The program, named by a bare file name — it is the delivered tree's, as everywhere. |
-| `main_config` | The **name of the Configuration** that is Icinga's root configuration file. Icinga reads one file and `include`s the rest. |
-| `include_dir` | Where the template library is inside the tree — reached with `-D IncludeConfDir`, which `include <itl>` resolves against. |
-| `plugin_dir` | Where the check plugins are, for `PluginDir`. Optional. |
-| `data_dir`, `log_dir`, `cache_dir`, `spool_dir`, `run_dir` | Where Icinga writes. Default to `${supervisor_dir}/…`, i.e. beside the tree, so a package update keeps the certificates. |
-| `node_name` | This node's name: `NodeName`, and the common name its certificate is issued for. Defaults to the Supervisor's name. |
-| `parent_host`, `parent_port` | The Icinga master or satellite. Absent means a standalone node with no enrolment. |
-| `ticket_file`, `trusted_cert_file` | Where the enrolment ticket and the pinned parent certificate are read from — both delivered as `supplementary` Configurations (ADR-0069). The pinned file is the parent's *own* certificate, not its CA. |
-| `renew_before_days` | How close to expiry a certificate may come before the Supervisor renews it at start. Default 30. |
-| `run_as_user`, `run_as_group` | The account the daemon may drop to. Defaults to the account this Client runs as. |
-| `log_level`, `args`, `[supervisor.env]` | Console severity, extra daemon arguments, and additional environment. |
+| `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
+| `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
+| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0069). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
+| `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Absent falls back to trust on first sight, which is logged as such. |
+
+Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
+name and place in the tree, the Agent type it presents, its state, log, cache, spool and run
+directories beside the tree, the template library and check plugins inside it, the
+`LD_LIBRARY_PATH` that makes the tree's own libraries win, the account it runs under, the console
+severity, the certificate renewal thirty days before expiry, and the sixty-second stop Icinga needs
+to drain its checks. A block stating one of them is refused by name.
+
+**Which delivered Configuration is Icinga's root** is stated by the fleet rather than by this file:
+the root Configuration carries `role = "main"`, and where the fleet marks none, the conventional
+name `icinga2-conf` stands in. Two entries marked `main` are a reason not to start, naming both.
 
 The recipe with everything around it — building the artifact, the ticket, the configuration, and
-what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md).
-
-A complete worked example — a third party's release repacked and delivered, run as a foreground
-daemon, with the Windows interpreter invocation and the bootstrap of its configuration — is the
-[GLPI Agent recipe](glpi-agent.md).
+what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md); the artifact itself
+is [`docs/artifacts/icinga2.md`](../artifacts/icinga2.md).
 
 ### `type = "glpi"`
 

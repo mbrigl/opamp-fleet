@@ -340,29 +340,31 @@ state_dir = "client-state"
 # type = "glpi"
 # name = "glpi"
 
-# 6. Icinga 2, under a kind of its own. It earns one because nothing above can express what it
-# needs: the daemon takes its directories as -D constants rather than flags, validates a
-# configuration before applying it, and is delivered as a tree carrying its own libraries, which
-# is why LD_LIBRARY_PATH is set here and why the bundled copies must win over the ones compiled
-# into the binary's search path. main_config names a *Configuration*, not a path — Icinga reads
-# one root file and pulls the rest in with `include`, so the fleet decides which entry is the
-# root. Leave parent_host out for a standalone node that only runs local checks; with it, the
-# Agent enrols with that parent and needs the ticket named below. Building the artifact, the
-# enrolment, and the Windows differences are in docs/manual/icinga2.md.
+# 6. Icinga 2, under a kind of its own — the only wrapped kind that keeps any keys, and it keeps
+# exactly the four that describe the *installation this host is joining*. Everything about the
+# artifact is the kind's: the daemon's place in the tree, its directories (which Icinga takes as
+# -D constants rather than flags), the LD_LIBRARY_PATH that makes the tree's own libraries win,
+# the sixty seconds it needs to shut down, and the `daemon -C` validation without which a failed
+# reload would be reported as an apply that worked.
+#
+# The four that remain are facts of the Icinga installation, and nothing here can compute them:
+# the ticket was minted on the parent for exactly one common name, and a node that differs from it
+# does not enrol. Leave parent_host out for a standalone node that only runs local checks.
+#
+# Which delivered Configuration is Icinga's root is stated by the fleet, with `role = "main"` on
+# that Configuration; where nothing is marked, the conventional name `icinga2-conf` stands in.
+#
+# Building the artifact, the enrolment and the Windows differences are in docs/manual/icinga2.md;
+# the artifact itself in docs/artifacts/icinga2.md.
 # [[supervisor]]
 # type = "icinga2"
 # name = "icinga2"
-# service_name = "icinga2"              # what Selectors aim at
-# binary = "icinga2"                    # bare ⇒ the Client owns and updates the tree
-# program_path = "sbin/icinga2"         # where the program sits inside the delivered tree
-# stop_timeout_secs = 60                # a busy daemon takes longer to come down than a collector
-# apply_grace_secs = 30
-# main_config = "icinga2-conf"          # the *name of a Configuration*, not a path
-# include_dir = "${supervisor_dir}/program/tree/share/icinga2/include"
-# plugin_dir  = "${supervisor_dir}/program/tree/plugins"
-# parent_host = "master.example.com"    # omit for a standalone node: no enrolment, no ticket
-# parent_port = 5665
-# node_name   = "edge-01.example.com"   # default: this Supervisor's own name
-# ticket_file = "${config_dir}/icinga2-ticket"   # delivered per host as a supplementary entry
-# [supervisor.env]
-# LD_LIBRARY_PATH = "${supervisor_dir}/program/tree/lib"   # the tree's libraries must win
+# parent_host = "master.example.com"    # omit for a standalone node: no enrolment, no ticket.
+#                                       # `host:port` sets a port other than Icinga's 5665.
+# node_name   = "edge-01.example.com"   # this node's NodeName, certificate CN and Endpoint name
+#                                       # in one. Default: this host's FQDN, and where that cannot
+#                                       # be resolved, this Supervisor's own name.
+# ticket_file = "${config_dir}/icinga2-ticket"        # delivered per host as a supplementary entry
+# trusted_cert_file = "${config_dir}/icinga2-parent-cert"  # the parent's own certificate, pinned;
+#                                       # without it the request trusts what the parent presents
+#                                       # on first sight, which is logged as such

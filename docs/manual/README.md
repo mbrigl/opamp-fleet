@@ -12,6 +12,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[GLPI Agent recipe](glpi-agent.md)** | deliver a third party's release and supervise it: the GLPI inventory agent as a foreground daemon, on Windows and Linux, configured from the Server |
 | **[Icinga 2 recipe](icinga2.md)** | roll out a monitoring agent the fleet owns end to end: the program, its directories, its certificate from the Icinga master, and its configuration |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
+| **[Artifact documents](../artifacts/)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent: [Icinga 2](../artifacts/icinga2.md), [GLPI Agent](../artifacts/glpi-agent.md), [Telegraf](../artifacts/telegraf.md) |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a credential the Server accepts), **connection settings** (the Server can move

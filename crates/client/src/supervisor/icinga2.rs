@@ -23,7 +23,6 @@
 //! the Icinga parent has signed this node's certificate, and an unreachable parent is a wait with
 //! a reason rather than a crash loop.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -43,29 +42,15 @@ use crate::transport::Backoff;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Icinga2Settings {
-    /// The **name of the Configuration** whose entry file is the daemon's root configuration —
-    /// not a path. Icinga reads one root file and pulls the rest in with `include`, so unlike the
-    /// Collector there is nothing to merge: the fleet decides which entry is the root.
-    main_config: String,
-    /// Where the ITL lives inside the delivered tree. Reached with `-D IncludeConfDir`, which is
-    /// what `include <itl>` resolves against — `-I` does *not* override it, so a host with Icinga
-    /// installed would otherwise silently use the machine's copy.
-    include_dir: Option<String>,
-    /// Where Icinga keeps its state — and its certificates, under `certs/`. Beside the tree by
-    /// default, never inside it: a package swap replaces the tree whole.
-    data_dir: Option<String>,
-    log_dir: Option<String>,
-    cache_dir: Option<String>,
-    spool_dir: Option<String>,
-    run_dir: Option<String>,
-    /// Where the check plugins are, for `PluginDir`. Unset leaves the constant alone.
-    plugin_dir: Option<String>,
-    /// This node's common name: `NodeName`, and the name its certificate is issued for. Unset
-    /// takes the Supervisor's own name, which is what the fleet already calls this Agent.
+    /// This node's common name: its `NodeName`, the CN of its certificate, and its Endpoint name
+    /// — Icinga requires the three to be the same string, and the master's ticket was minted for
+    /// exactly it. Not derivable for that reason: nothing on this side can know what was typed on
+    /// the other (ADR-0092).
     node_name: Option<String>,
-    /// The parent (master or satellite) this Agent enrols with and connects to.
+    /// The parent (master or satellite) this Agent enrols with and connects to, as `host` or
+    /// `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no
+    /// enrolment, no certificate to fetch, only local checks.
     parent_host: Option<String>,
-    parent_port: Option<u16>,
     /// The file holding this host's enrolment ticket — a Configuration delivered with
     /// `role = "supplementary"` and a Selector naming one Agent (ADR-0069). Absent means the
     /// signing request waits for `icinga2 ca sign` on the parent.
@@ -74,23 +59,71 @@ struct Icinga2Settings {
     /// what the parent presents against this file. Pinned rather than trusted on sight; absent
     /// falls back to `pki save-cert`, which is trust on first use and is logged as such.
     trusted_cert_file: Option<String>,
-    /// How long before a certificate expires it is renewed, in days. The renewal runs at start
-    /// only, and never mid-run: two things renewing one file is worse than one (ADR-0069).
-    renew_before_days: Option<u64>,
-    /// The account the daemon may run under. Unset takes the account this Client runs as — the
-    /// compiled-in `nagios` does not exist on a fleet-managed host, and *every* invocation of
-    /// `icinga2`, not only the daemon, refuses without it.
-    run_as_user: Option<String>,
-    run_as_group: Option<String>,
-    /// Console log severity (`-x`).
-    log_level: Option<String>,
-    /// Extra daemon arguments, verbatim and last.
-    #[serde(default)]
-    args: Vec<String>,
-    /// Additional environment — the natural home for `LD_LIBRARY_PATH` when the tree carries its
-    /// own libraries.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
+}
+
+/// The keys this kind used to take and now supplies itself (ADR-0092), each with what answers it
+/// now. Refused by name rather than met with serde's "unknown field": a block that carries one was
+/// written against a Client that needed it, and the operator deleting the line deserves to be told
+/// where the value went — the pattern `package` and `accepts_packages` already run.
+const RETIRED: &[(&str, &str)] = &[
+    ("binary", "the kind installs and names its own program"),
+    (
+        "program_path",
+        "the kind knows where its program sits in the tree it delivers",
+    ),
+    ("service_name", "the kind states the Agent type it presents"),
+    ("include_dir", "the ITL is where the delivered tree puts it"),
+    (
+        "plugin_dir",
+        "the check plugins are where the delivered tree puts them",
+    ),
+    (
+        "data_dir",
+        "state lives beside the tree, in this Supervisor's own directory",
+    ),
+    ("log_dir", "as data_dir"),
+    ("cache_dir", "as data_dir"),
+    ("spool_dir", "as data_dir"),
+    ("run_dir", "as data_dir"),
+    (
+        "log_level",
+        "logging belongs in Icinga's own configuration, where `object FileLogger` carries a \
+         `severity` the fleet can roll out",
+    ),
+    (
+        "renew_before_days",
+        "a certificate is renewed 30 days before it expires",
+    ),
+    ("parent_port", "write it into `parent_host` as `host:port`"),
+    (
+        "run_as_user",
+        "the daemon runs under the account this Client runs as — a Managed Process the fleet \
+         installed has no business under another",
+    ),
+    ("run_as_group", "as run_as_user"),
+    ("args", "the kind builds the daemon's arguments whole"),
+    (
+        "main_config",
+        "the fleet marks its root Configuration with `role = \"main\"`, and where it marks none \
+         the conventional name `icinga2-conf` stands in",
+    ),
+    (
+        "env",
+        "the kind sets what the delivered tree needs, LD_LIBRARY_PATH included",
+    ),
+];
+
+/// Refuses a retired key by name, before the strict parse turns it into "unknown field".
+fn refuse_retired(name: &str, settings: &toml::Table) -> Result<(), String> {
+    for (key, answer) in RETIRED {
+        if settings.contains_key(*key) {
+            return Err(format!(
+                "supervisor {name:?}: `{key}` is no longer a supervisor key for type \"icinga2\" \
+                 — {answer}; remove the line"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Everything the daemon needs on its command line, resolved once at start.
@@ -100,7 +133,9 @@ struct Icinga2Settings {
 #[derive(Debug, Clone)]
 pub struct Layout {
     program: PathBuf,
-    main_config: PathBuf,
+    /// Where the fleet's Configuration entries land; the root is resolved out of it on demand
+    /// (ADR-0092), because which entry is the root can change with every rollout.
+    config_dir: PathBuf,
     include_dir: Option<PathBuf>,
     plugin_dir: Option<PathBuf>,
     data_dir: PathBuf,
@@ -174,13 +209,56 @@ impl Layout {
     /// have arrived, and — with a parent configured (the Agent role) — the certificate has to have
     /// been issued. Starting without either produces a process that cannot do its job and a crash
     /// loop that says nothing about why.
-    fn blocked_by(&self) -> Option<String> {
-        if !self.main_config.is_file() {
-            return Some(format!(
-                "awaiting the configuration {}",
-                self.main_config.display()
-            ));
+    /// Icinga's root configuration: the delivered entry the fleet marked, or the conventional
+    /// name if it marked none.
+    ///
+    /// **The mark is a role, and a role is the kind's to define.** The Baseline says so of
+    /// `AgentConfigFile.role`: *"The values and their semantics are Agent type-specific."* So
+    /// `main` means *this* to `icinga2` and nothing to anyone else, which is the field working as
+    /// intended rather than being borrowed. ADR-0016's own two values stay what they are for kinds
+    /// that define nothing further.
+    ///
+    /// Resolved on every spawn rather than once at start: which entry is the root is the fleet's
+    /// answer, and a rollout may change it while this Supervisor runs.
+    ///
+    /// The fallback is the name `opamp-package-fetch` uploads. It exists so a rollout written
+    /// before this Client keeps working — not as the rule, which is why a fleet naming its root
+    /// otherwise only has to mark it.
+    ///
+    /// # Errors
+    /// Returns the reason not to start: nothing delivered yet, or two entries claiming to be the
+    /// root, naming them.
+    fn root_config(&self) -> Result<PathBuf, String> {
+        let roles = crate::storage::entry_roles(&self.config_dir);
+        let marked: Vec<&String> = roles
+            .iter()
+            .filter(|(_, role)| role.as_str() == ROOT_ROLE)
+            .map(|(name, _)| name)
+            .collect();
+        match marked.as_slice() {
+            [one] => return Ok(self.config_dir.join(one)),
+            [] => {}
+            _ => {
+                let names: Vec<&str> = marked.iter().map(|name| name.as_str()).collect();
+                return Err(format!(
+                    "two delivered Configurations claim to be Icinga's root: {} both carry \
+                     `role = \"{ROOT_ROLE}\"`, and the daemon reads one",
+                    names.join(" and ")
+                ));
+            }
         }
+        let conventional = self.config_dir.join(CONVENTIONAL_ROOT);
+        if conventional.is_file() {
+            return Ok(conventional);
+        }
+        Err(format!(
+            "awaiting Icinga's root configuration in {}: no entry carries `role = \"{ROOT_ROLE}\"` \
+             and none is named {CONVENTIONAL_ROOT}",
+            self.config_dir.display()
+        ))
+    }
+
+    fn blocked_by(&self, _root: &std::path::Path) -> Option<String> {
         if self.parent.is_some()
             && !(self.certificate().is_file() && self.ca_certificate().is_file())
         {
@@ -244,7 +322,7 @@ impl Layout {
     /// forwarded the apply blindly would report `APPLIED` for a configuration that never took
     /// effect.
     async fn validate(&self) -> Result<(), String> {
-        let mut args = self.daemon_args();
+        let mut args = self.daemon_args(&self.root_config()?);
         // `-C` next to `daemon`, before the rest, so the same command line is exercised.
         args.insert(1, "-C".to_string());
         run_subcommand(self, &args).await.map(|_| ())
@@ -252,11 +330,11 @@ impl Layout {
 
     /// The daemon's argument vector. Foreground — no `-d`, no `--close-stdio` — because the Runner
     /// supervises what it started and the Client's logging carries the output (ADR-0041).
-    fn daemon_args(&self) -> Vec<String> {
+    fn daemon_args(&self, root: &std::path::Path) -> Vec<String> {
         let mut args = vec![
             "daemon".to_string(),
             "-c".to_string(),
-            self.main_config.display().to_string(),
+            root.display().to_string(),
         ];
         let mut define = |key: &str, value: String| {
             args.push("-D".to_string());
@@ -556,42 +634,41 @@ impl Icinga2Plugin {
     /// goes through the placeholders of ADR-0022; the defaults are expressed in them too, so a
     /// relocated `supervisor_dir` moves the state with it.
     fn layout(ctx: &SupervisorContext, settings: &Icinga2Settings) -> Layout {
-        let path = |value: &Option<String>, default: &str| -> PathBuf {
-            PathBuf::from(ctx.expand(value.as_deref().unwrap_or(default)))
-        };
+        let path = |below: &str| -> PathBuf { PathBuf::from(ctx.expand(below)) };
+        // Inside the tree this kind delivers (ADR-0092): the ITL the root configuration `include`s,
+        // and the check plugins. On Windows the checks stay beside the daemon in `sbin`, because a
+        // Windows program finds its DLLs in its own directory first and the checks share that
+        // runtime (ADR-0072).
+        let tree = ctx
+            .supervisor_dir
+            .join(crate::config::PROGRAM_DIR)
+            .join(crate::config::TREE_DIR);
         Layout {
             program: ctx.program.clone(),
-            main_config: ctx.config_dir.join(&settings.main_config),
-            include_dir: settings
-                .include_dir
-                .as_deref()
-                .map(|dir| PathBuf::from(ctx.expand(dir))),
-            plugin_dir: settings
-                .plugin_dir
-                .as_deref()
-                .map(|dir| PathBuf::from(ctx.expand(dir))),
-            data_dir: path(&settings.data_dir, "${supervisor_dir}/data"),
-            log_dir: path(&settings.log_dir, "${supervisor_dir}/log"),
-            cache_dir: path(&settings.cache_dir, "${supervisor_dir}/cache"),
-            spool_dir: path(&settings.spool_dir, "${supervisor_dir}/spool"),
-            run_dir: path(&settings.run_dir, "${supervisor_dir}/run"),
+            config_dir: ctx.config_dir.clone(),
+            include_dir: Some(tree.join("share").join("icinga2").join("include")),
+            plugin_dir: Some(if cfg!(windows) {
+                tree.join("sbin")
+            } else {
+                tree.join("plugins")
+            }),
+            data_dir: path("${supervisor_dir}/data"),
+            log_dir: path("${supervisor_dir}/log"),
+            cache_dir: path("${supervisor_dir}/cache"),
+            spool_dir: path("${supervisor_dir}/spool"),
+            run_dir: path("${supervisor_dir}/run"),
+            // The operator's, else this host's fully qualified name, else the Supervisor's own —
+            // which the instance-name grammar cannot spell as an FQDN, so it is the last resort
+            // rather than the default it used to be (ADR-0092).
             node_name: settings
                 .node_name
                 .clone()
+                .or_else(|| resolved_fqdn().map(str::to_string))
                 .unwrap_or_else(|| ctx.name.clone()),
-            run_as: match (&settings.run_as_user, &settings.run_as_group) {
-                (Some(user), Some(group)) => Some((user.clone(), group.clone())),
-                _ => current_account(),
-            },
-            log_level: settings
-                .log_level
-                .clone()
-                .unwrap_or_else(|| "information".to_string()),
-            parent: settings
-                .parent_host
-                .clone()
-                .map(|host| (host, settings.parent_port.unwrap_or(DEFAULT_PARENT_PORT))),
-            extra: settings.args.iter().map(|a| ctx.expand(a)).collect(),
+            run_as: current_account(),
+            log_level: DEFAULT_LOG_LEVEL.to_string(),
+            parent: settings.parent_host.as_deref().map(parent_address),
+            extra: Vec::new(),
             ticket_file: settings
                 .ticket_file
                 .as_deref()
@@ -601,18 +678,142 @@ impl Icinga2Plugin {
                 .as_deref()
                 .map(|f| PathBuf::from(ctx.expand(f))),
             pinned_parent: ctx.supervisor_dir.join("trusted-parent.crt"),
-            renew_before: Duration::from_secs(
-                settings
-                    .renew_before_days
-                    .unwrap_or(DEFAULT_RENEW_BEFORE_DAYS)
-                    * 24
-                    * 60
-                    * 60,
-            ),
+            renew_before: Duration::from_secs(DEFAULT_RENEW_BEFORE_DAYS * 24 * 60 * 60),
             marker: ctx.supervisor_dir.join("icinga2-enrolment.json"),
         }
     }
 }
+
+/// What the delivered tree needs in its environment (ADR-0092): on Unix its own libraries, so the
+/// bundled copies win over whatever the machine has. Windows needs none — a program there finds its
+/// DLLs beside itself.
+fn tree_environment(ctx: &SupervisorContext) -> Vec<(String, String)> {
+    if cfg!(windows) {
+        return Vec::new();
+    }
+    let lib = ctx
+        .supervisor_dir
+        .join(crate::config::PROGRAM_DIR)
+        .join(crate::config::TREE_DIR)
+        .join("lib");
+    vec![(
+        "LD_LIBRARY_PATH".to_string(),
+        lib.to_string_lossy().into_owned(),
+    )]
+}
+
+/// This host's fully qualified name, if it has one — the default for `node_name` (ADR-0092).
+///
+/// **Why a resolution rather than the host name this Agent already reports.** That one is
+/// `gethostname`, which the semantic conventions permit to be either form and which is the short
+/// name on most Linux hosts. Icinga wants the FQDN: its own `NodeName` defaults to
+/// `hostname --fqdn`, and an operator following Icinga's instructions mints the ticket with
+/// `pki ticket --cn <fqdn>`. A default that is the short name would therefore be wrong in the way
+/// that *fails enrolment* rather than the way that reads oddly, which is worse than no default.
+///
+/// **Only a name with a dot in it is taken.** What `getaddrinfo` returns for an unqualified host is
+/// often the unqualified name back; accepting that would reintroduce the very default this exists
+/// to replace. Without a dot there is no FQDN to be had here, and the Supervisor's name stands as
+/// before — with `node_name` as the way to say what the master actually knows.
+///
+/// Resolved once per process and only when no `node_name` was configured, so a host whose resolver
+/// is slow or unreachable pays for it once at most — and an operator who sets the key never at all.
+fn resolved_fqdn() -> Option<&'static str> {
+    static FQDN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    FQDN.get_or_init(read_fqdn)
+        .as_deref()
+        .filter(|name| name.contains('.'))
+}
+
+/// The canonical name the resolver gives this host — `hostname --fqdn` by another route, and the
+/// same one it takes: `getaddrinfo` with `AI_CANONNAME`, which consults `/etc/hosts` before DNS
+/// wherever nsswitch says so.
+#[cfg(unix)]
+fn read_fqdn() -> Option<String> {
+    let host = std::ffi::CString::new(crate::supervisor::agent::host_name()?).ok()?;
+    // SAFETY: `hints` is a zeroed `addrinfo` with only the fields below set, `host` outlives the
+    // call, and `result` is written by the callee and freed exactly once below.
+    unsafe {
+        let mut hints: libc::addrinfo = std::mem::zeroed();
+        hints.ai_flags = libc::AI_CANONNAME;
+        hints.ai_family = libc::AF_UNSPEC;
+        let mut result: *mut libc::addrinfo = std::ptr::null_mut();
+        if libc::getaddrinfo(host.as_ptr(), std::ptr::null(), &hints, &mut result) != 0
+            || result.is_null()
+        {
+            return None;
+        }
+        let canonical = (*result).ai_canonname;
+        let name = (!canonical.is_null()).then(|| {
+            std::ffi::CStr::from_ptr(canonical)
+                .to_string_lossy()
+                .into_owned()
+        });
+        libc::freeaddrinfo(result);
+        name.filter(|name| !name.is_empty())
+    }
+}
+
+/// Windows keeps the answer without a lookup, in the machine's own DNS name — but this kind is
+/// unproven there (`docs/manual/icinga2.md`), so rather than reach for an API this crate does not
+/// otherwise use, the default stays what it was and `node_name` says the rest.
+#[cfg(not(unix))]
+fn read_fqdn() -> Option<String> {
+    None
+}
+
+/// The role a delivered Configuration carries to say it is Icinga's root (ADR-0092), and the name
+/// that stands in where the fleet marked nothing — the one `opamp-package-fetch` uploads.
+const ROOT_ROLE: &str = "main";
+const CONVENTIONAL_ROOT: &str = "icinga2-conf";
+
+/// The console severity the daemon is started with (`-x`). Icinga's own default, and no longer a
+/// block key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration
+/// is the place, which the fleet rolls out (ADR-0092).
+const DEFAULT_LOG_LEVEL: &str = "information";
+
+/// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-0092).
+///
+/// One address is one value. A bare IPv6 address has colons of its own, so the split is taken from
+/// the **last** one and only when what follows is a port — `::1` stays a host, `[::1]:5665` and
+/// `master.example:5665` name a port.
+fn parent_address(raw: &str) -> (String, u16) {
+    // Bracketed, the one form that is unambiguous: `[::1]:5665`.
+    if let Some(rest) = raw.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            let port = tail
+                .strip_prefix(':')
+                .and_then(|port| port.parse().ok())
+                .unwrap_or(DEFAULT_PARENT_PORT);
+            return (host.to_string(), port);
+        }
+    }
+    // Unbracketed, exactly one colon separates a host from a port. More than one is an IPv6
+    // address written bare — it carries no port, and reading its last group as one would send this
+    // Agent to `::` on port 1.
+    if raw.matches(':').count() == 1 {
+        if let Some((host, port)) = raw.split_once(':') {
+            if let (false, Ok(port)) = (host.is_empty(), port.parse::<u16>()) {
+                return (host.to_string(), port);
+            }
+        }
+    }
+    (raw.to_string(), DEFAULT_PARENT_PORT)
+}
+
+/// The daemon's file name and its place inside the delivered tree (ADR-0092), per platform.
+///
+/// Windows carries the `.exe` and — the difference that is easy to miss — keeps the check plugins
+/// beside the daemon in `sbin` rather than in `plugins/`, because a Windows program finds its DLLs
+/// in its own directory first and the checks share that runtime (ADR-0072).
+#[cfg(windows)]
+const PROGRAM: &str = "icinga2.exe";
+#[cfg(not(windows))]
+const PROGRAM: &str = "icinga2";
+#[cfg(windows)]
+const PROGRAM_PATH: &str = "sbin/icinga2.exe";
+#[cfg(not(windows))]
+const PROGRAM_PATH: &str = "sbin/icinga2";
 
 /// The port an Icinga master or satellite listens on for the cluster protocol.
 const DEFAULT_PARENT_PORT: u16 = 5665;
@@ -698,23 +899,42 @@ impl Plugin for Icinga2Plugin {
         "binary"
     }
 
-    /// Nothing yet. This kind knows its agent well enough to build its command line, but its block
-    /// still names the program, the tree path and the Agent type — the artifact's shape has not
-    /// moved into the kind (ADR-0092).
+    /// What the tree `opamp-package-fetch --agent icinga2` packs decides, per platform
+    /// (ADR-0092): the daemon's file name, where it sits inside that tree, and the Agent type
+    /// every Icinga Configuration is aimed at. None of the three is a decision a host makes.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
-        crate::supervisor::ports::KindDefaults::none()
+        crate::supervisor::ports::KindDefaults {
+            program: Some(PROGRAM),
+            program_path: Some(PROGRAM_PATH),
+            service_name: Some("icinga2"),
+            // Icinga's own shutdown is slow — it drains its checks and closes its cluster
+            // connections — so 60 seconds is a property of Icinga, not of a host, and the fleet's
+            // 10 would kill it mid-drain. The apply grace is raised for the same reason: a daemon
+            // that takes this long to stop takes a while to be trustworthy after a start.
+            timing: Some(crate::supervisor::ports::KindTiming {
+                stop_timeout: Some(Duration::from_secs(60)),
+                apply_grace: Some(Duration::from_secs(30)),
+                retain_previous: None,
+            }),
+            // Nothing connects to an Icinga Supervisor's Endpoint: the daemon speaks Icinga's
+            // cluster protocol to its parent, not OpAMP to us.
+            endpoint_port: false,
+        }
     }
 
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        let settings: Icinga2Settings = std::mem::take(&mut ctx.settings)
+        let raw = std::mem::take(&mut ctx.settings);
+        refuse_retired(&ctx.name, &raw)?;
+        let settings: Icinga2Settings = raw
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         let layout = Self::layout(&ctx, &settings);
-        let env: Vec<(String, String)> = settings
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), ctx.expand(v)))
-            .collect();
+        // What the delivered tree needs to run at all, and nothing else (ADR-0092): its own
+        // libraries have to win over whatever the machine has, which is the whole point of a
+        // relocatable tree (ADR-0070). Windows needs no equivalent — a program there finds its
+        // DLLs in its own directory first, which is also why the check plugins sit beside the
+        // daemon on that platform.
+        let env: Vec<(String, String)> = tree_environment(&ctx);
         // Two channels, not one: what the core holds goes through the validation gate first, and
         // what the Runner receives is what survived it (ADR-0068).
         let (commands, from_core) = mpsc::channel(16);
@@ -747,27 +967,33 @@ impl Plugin for Icinga2Plugin {
             reload_signal: reload_signal(),
             events: ctx.events,
             commands: command_rx,
-            build: Box::new(move || match layout.blocked_by() {
-                Some(reason) => {
-                    tracing::debug!(supervisor = %name, reason = %reason, "not starting Icinga 2 yet");
-                    None
-                }
-                None => match layout.prepare_dirs() {
-                    Ok(()) => Some(ProcessSpec {
+            build: Box::new(move || {
+                let root = match layout.root_config() {
+                    Ok(root) => root,
+                    Err(reason) => {
+                        tracing::debug!(supervisor = %name, reason = %reason, "not starting Icinga 2 yet");
+                        return None;
+                    }
+                };
+                match layout.blocked_by(&root) {
+                    Some(reason) => {
+                        tracing::debug!(supervisor = %name, reason = %reason, "not starting Icinga 2 yet");
+                        None
+                    }
+                    None => Some(ProcessSpec {
                         program: layout.program.clone(),
-                        args: layout.daemon_args(),
+                        args: layout.daemon_args(&root),
                         env: env.clone(),
                         working_dir: None,
                         // Its worker must not survive the stop (ADR-0068).
                         own_process_group: true,
-                        // This kind still makes its own directories, in `prepare_dirs` above.
-                        ensure_dirs: Vec::new(),
+                        // Icinga creates none of its directories and exits when one is missing
+                        // (ADR-0068). Naming them here rather than making them in this closure is
+                        // the same guarantee through the seam every kind now uses: made before
+                        // every spawn, so one an operator removed comes back.
+                        ensure_dirs: layout.state_dirs(),
                     }),
-                    Err(e) => {
-                        tracing::warn!(supervisor = %name, error = %e, "cannot prepare Icinga 2's directories");
-                        None
-                    }
-                },
+                }
             }),
         };
         tokio::spawn(runner.run(ctx.shutdown));
@@ -784,20 +1010,12 @@ impl Plugin for Icinga2Plugin {
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        let settings: Icinga2Settings = settings
+        // Before the strict parse, so a block written against an older Client is told where its
+        // value went instead of meeting serde's "unknown field" (ADR-0092).
+        refuse_retired(name, &settings)?;
+        let _: Icinga2Settings = settings
             .try_into()
             .map_err(|e| format!("supervisor {name:?}: {e}"))?;
-        if settings.main_config.trim().is_empty() {
-            return Err(format!(
-                "supervisor {name:?}: `main_config` names the Configuration that is Icinga's root \
-                 configuration file, and cannot be empty"
-            ));
-        }
-        if settings.parent_host.is_none() && settings.parent_port.is_some() {
-            return Err(format!(
-                "supervisor {name:?}: `parent_port` without `parent_host` names no parent"
-            ));
-        }
         Ok(())
     }
 }
@@ -824,10 +1042,115 @@ mod tests {
             .expect("settings")
     }
 
+    /// The paths this kind used to be told are now the tree's own (ADR-0092), and the state
+    /// directories sit beside it. Asserted against a context rather than against the settings,
+    /// because after this change the settings have nothing to say about any of them.
+    #[test]
+    fn the_layout_follows_the_delivered_tree_and_needs_no_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisors").join("icinga2");
+        let (_tx, shutdown) = crate::service::runtime::shutdown_channel();
+        let (events, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = SupervisorContext {
+            name: "icinga2".to_string(),
+            supervisor_dir: root.clone(),
+            config_dir: root.join("config"),
+            program: root.join("program/tree").join(PROGRAM_PATH),
+            install: crate::supervisor::process::InstallTarget::Tree {
+                root: root.join("program"),
+                program_path: PathBuf::from(PROGRAM_PATH),
+            },
+            archive_key: None,
+            settings: toml::Table::new(),
+            stop_timeout: Duration::from_secs(1),
+            apply_grace: Duration::from_secs(1),
+            retain_previous: Duration::ZERO,
+            events: crate::supervisor::ports::EventSender::new(0, events),
+            shutdown,
+        };
+        let settings = settings("");
+        let layout = Icinga2Plugin::layout(&ctx, &settings);
+
+        let tree = root.join("program").join("tree");
+        assert_eq!(
+            layout.include_dir,
+            Some(tree.join("share").join("icinga2").join("include")),
+            "the ITL the root configuration includes is the tree's own"
+        );
+        assert_eq!(
+            layout.plugin_dir,
+            Some(if cfg!(windows) {
+                tree.join("sbin")
+            } else {
+                tree.join("plugins")
+            }),
+            "on Windows the checks stay beside the daemon, for the DLLs they share"
+        );
+        assert_eq!(layout.data_dir, root.join("data"));
+        assert_eq!(layout.run_dir, root.join("run"));
+        assert_eq!(layout.log_level, "information");
+        assert_eq!(
+            layout.node_name, "icinga2",
+            "the Supervisor's name, for now"
+        );
+    }
+
+    /// One address is one value (ADR-0092). The IPv6 case is why the split is taken from the last
+    /// colon and only when what follows it is a port.
+    #[test]
+    fn a_parent_carries_its_port_or_icingas_default() {
+        assert_eq!(
+            parent_address("master.example"),
+            ("master.example".to_string(), 5665)
+        );
+        assert_eq!(
+            parent_address("master.example:5666"),
+            ("master.example".to_string(), 5666)
+        );
+        assert_eq!(parent_address("::1"), ("::1".to_string(), 5665));
+        assert_eq!(parent_address("[::1]:5665"), ("::1".to_string(), 5665));
+    }
+
+    /// A block written against an older Client is told where its value went, rather than meeting
+    /// serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
+    #[test]
+    fn a_retired_key_is_refused_by_name_and_says_what_supplies_it_now() {
+        for (key, expected) in [
+            ("plugin_dir = \"x\"", "the delivered tree"),
+            ("log_level = \"debug\"", "object FileLogger"),
+            ("parent_port = 5665", "`parent_host` as `host:port`"),
+            (
+                "run_as_user = \"nagios\"",
+                "the account this Client runs as",
+            ),
+            ("[env]\nLD_LIBRARY_PATH = \"x\"", "LD_LIBRARY_PATH included"),
+        ] {
+            let table: toml::Table = key.parse().expect("table");
+            let error = Icinga2Plugin
+                .check("icinga2", table)
+                .expect_err(&format!("{key} is refused"));
+            assert!(error.contains(expected), "{key} -> {error}");
+        }
+    }
+
+    /// Delivers a root configuration the way the fleet does: the entry, plus the role that says
+    /// it is the root. `role` empty writes only the entry, which is a fleet that marked nothing.
+    fn deliver_root(config_dir: &std::path::Path, name: &str, role: &str, body: &str) {
+        std::fs::create_dir_all(config_dir).expect("config dir");
+        std::fs::write(config_dir.join(name), body).expect("entry");
+        if !role.is_empty() {
+            std::fs::write(
+                config_dir.join(crate::storage::SUPPLEMENTARY_FILE),
+                format!("{name} {role}\n"),
+            )
+            .expect("roles");
+        }
+    }
+
     fn layout(dir: &std::path::Path) -> Layout {
         Layout {
             program: dir.join("program/tree/sbin/icinga2"),
-            main_config: dir.join("config/icinga2-conf"),
+            config_dir: dir.join("config"),
             include_dir: Some(dir.join("program/tree/share/icinga2/include")),
             plugin_dir: Some(dir.join("program/tree/plugins")),
             data_dir: dir.join("data"),
@@ -848,22 +1171,19 @@ mod tests {
         }
     }
 
-    /// `binary` is gone from these settings — the core resolves it (ADR-0021) — so a block that
-    /// still carried it here would be an unknown key, which is exactly what must fail.
+    /// What is left after ADR-0092: the root Configuration's name, and the enrolment. Everything
+    /// else this kind supplies itself, so a block naming one is an unknown key here — and is
+    /// refused by name a step earlier, which the test below covers.
     #[test]
     fn settings_parse_strictly() {
         let parsed = settings(
             r#"
-            main_config = "icinga2-conf"
             parent_host = "master.example"
             node_name = "edge-01"
-            [env]
-            LD_LIBRARY_PATH = "${supervisor_dir}/program/tree/lib"
             "#,
         );
-        assert_eq!(parsed.main_config, "icinga2-conf");
-        assert_eq!(parsed.parent_port, None);
-        assert!(parsed.env.contains_key("LD_LIBRARY_PATH"));
+        assert_eq!(parsed.node_name.as_deref(), Some("edge-01"));
+        assert!(parsed.ticket_file.is_none());
 
         for typo in [
             "binary = \"icinga2\"",
@@ -883,7 +1203,7 @@ mod tests {
     #[test]
     fn the_daemon_arguments_carry_the_relocation() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let args = layout(dir.path()).daemon_args();
+        let args = layout(dir.path()).daemon_args(&dir.path().join("config/icinga2-conf"));
         let joined = args.join(" ");
 
         assert_eq!(args[0], "daemon");
@@ -923,18 +1243,128 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = layout(dir.path());
 
-        let blocked = layout.blocked_by().expect("no configuration yet");
-        assert!(blocked.contains("awaiting the configuration"), "{blocked}");
+        let blocked = layout.root_config().expect_err("no configuration yet");
+        assert!(blocked.contains("awaiting Icinga's root"), "{blocked}");
 
-        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
-        std::fs::write(&layout.main_config, "include <itl>\n").expect("config");
-        let blocked = layout.blocked_by().expect("no certificate yet");
+        deliver_root(
+            &layout.config_dir,
+            "icinga2-conf",
+            ROOT_ROLE,
+            "include <itl>\n",
+        );
+        let root = layout.root_config().expect("the fleet marked it");
+        let blocked = layout.blocked_by(&root).expect("no certificate yet");
         assert!(blocked.contains("awaiting the certificate"), "{blocked}");
 
         std::fs::create_dir_all(layout.certs_dir()).expect("certs dir");
         std::fs::write(layout.certificate(), "cert").expect("cert");
         std::fs::write(layout.ca_certificate(), "ca").expect("ca");
-        assert_eq!(layout.blocked_by(), None);
+        assert_eq!(layout.blocked_by(&root), None);
+    }
+
+    /// What this kind supplies is what `opamp-package-fetch` packs — the client half of
+    /// `docs/artifacts/icinga2.md`, whose packing half is
+    /// `icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher`. Icinga publishes no
+    /// portable tree, so this tree's layout is entirely this project's: an upstream that moves
+    /// something inside it is a change both halves have to answer.
+    #[test]
+    fn the_defaults_are_the_artifacts() {
+        let defaults = Icinga2Plugin.defaults();
+        assert_eq!(defaults.service_name, Some("icinga2"));
+        assert!(!defaults.endpoint_port);
+        #[cfg(windows)]
+        {
+            assert_eq!(defaults.program, Some("icinga2.exe"));
+            assert_eq!(defaults.program_path, Some("sbin/icinga2.exe"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(defaults.program, Some("icinga2"));
+            assert_eq!(defaults.program_path, Some("sbin/icinga2"));
+        }
+    }
+
+    /// The default only takes a name that is actually qualified. An unqualified answer — which is
+    /// what a resolver hands back for a host with no domain — would put the short name where
+    /// Icinga expects the CN its ticket was minted for, and enrolment would fail with a name that
+    /// looks right.
+    #[test]
+    fn only_a_qualified_name_becomes_the_default() {
+        // The resolution itself depends on this machine's resolver, so what is asserted is the
+        // rule applied to it: whatever comes back is either qualified or not used at all.
+        if let Some(name) = resolved_fqdn() {
+            assert!(name.contains('.'), "{name} is not qualified");
+        }
+    }
+
+    /// And the operator's value outranks it, because a master may know this host under a name no
+    /// resolver here would produce (ADR-0092).
+    #[test]
+    fn a_configured_node_name_outranks_the_resolved_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("icinga2");
+        let (_tx, shutdown) = crate::service::runtime::shutdown_channel();
+        let (events, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = SupervisorContext {
+            name: "icinga2".to_string(),
+            supervisor_dir: root.clone(),
+            config_dir: root.join("config"),
+            program: root.join("program/tree").join(PROGRAM_PATH),
+            install: crate::supervisor::process::InstallTarget::Tree {
+                root: root.join("program"),
+                program_path: PathBuf::from(PROGRAM_PATH),
+            },
+            archive_key: None,
+            settings: toml::Table::new(),
+            stop_timeout: Duration::from_secs(1),
+            apply_grace: Duration::from_secs(1),
+            retain_previous: Duration::ZERO,
+            events: crate::supervisor::ports::EventSender::new(0, events),
+            shutdown,
+        };
+        let configured =
+            Icinga2Plugin::layout(&ctx, &settings("node_name = \"edge-01.example\"\n"));
+        assert_eq!(configured.node_name, "edge-01.example");
+    }
+
+    /// The fleet says which entry is the root, with a role this kind defines — the Baseline's own
+    /// model, where *"the values and their semantics are Agent type-specific"*. A marked entry
+    /// wins over the conventional name, which exists only so a rollout written earlier keeps
+    /// working.
+    #[test]
+    fn the_marked_entry_is_the_root_even_beside_the_conventional_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = layout(dir.path());
+        std::fs::create_dir_all(&layout.config_dir).expect("config dir");
+        std::fs::write(layout.config_dir.join("icinga2-conf"), "old\n").expect("entry");
+        std::fs::write(layout.config_dir.join("site-root"), "new\n").expect("entry");
+        std::fs::write(
+            layout.config_dir.join(crate::storage::SUPPLEMENTARY_FILE),
+            format!("site-root {ROOT_ROLE}\nicinga2-zones supplementary\n"),
+        )
+        .expect("roles");
+
+        assert_eq!(
+            layout.root_config().expect("the marked one"),
+            layout.config_dir.join("site-root")
+        );
+    }
+
+    /// And two of them is a question this Client refuses to answer by guessing: the daemon reads
+    /// one root, so a rollout that marks two is a rollout to fix, not a coin to flip.
+    #[test]
+    fn two_marked_entries_are_a_reason_not_to_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = layout(dir.path());
+        std::fs::create_dir_all(&layout.config_dir).expect("config dir");
+        std::fs::write(
+            layout.config_dir.join(crate::storage::SUPPLEMENTARY_FILE),
+            format!("one {ROOT_ROLE}\ntwo {ROOT_ROLE}\n"),
+        )
+        .expect("roles");
+
+        let error = layout.root_config().expect_err("two roots");
+        assert!(error.contains("one and two"), "{error}");
     }
 
     /// Without a parent there is no enrolment to wait for: a standalone Icinga 2 runs as soon as
@@ -944,9 +1374,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut layout = layout(dir.path());
         layout.parent = None;
-        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
-        std::fs::write(&layout.main_config, "include <itl>\n").expect("config");
-        assert_eq!(layout.blocked_by(), None);
+        // A fleet that marked nothing: the conventional name is what stands in.
+        deliver_root(&layout.config_dir, "icinga2-conf", "", "include <itl>\n");
+        let root = layout.root_config().expect("the conventional name");
+        assert_eq!(layout.blocked_by(&root), None);
     }
 
     /// Icinga creates none of its directories and fails on the first write into a missing one.
@@ -1121,30 +1552,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut layout = layout(dir.path());
         layout.program = stub();
-        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
-
-        std::fs::write(&layout.main_config, "include <itl>\n").expect("good config");
+        deliver_root(
+            &layout.config_dir,
+            "icinga2-conf",
+            ROOT_ROLE,
+            "include <itl>\n",
+        );
         layout
             .validate()
             .await
             .expect("a valid configuration passes");
 
-        std::fs::write(&layout.main_config, "object INVALID\n").expect("bad config");
+        std::fs::write(layout.config_dir.join("icinga2-conf"), "object INVALID\n")
+            .expect("bad config");
         let err = layout.validate().await.expect_err("refused");
         assert!(err.contains("syntax error"), "{err}");
     }
 
-    /// ADR-0056: an offered Supervisor set is validated before a running process is touched.
+    /// ADR-0056: an offered Supervisor set is validated before a running process is touched — and
+    /// what it refuses now is a block that still carries a key this kind supplies itself.
     #[test]
-    fn check_refuses_a_block_that_names_no_root_configuration() {
-        let table: toml::Table = "main_config = \"\"".parse().expect("table");
+    fn check_refuses_a_block_that_names_a_retired_key() {
+        let table: toml::Table = "main_config = \"icinga2-conf\"".parse().expect("table");
         let err = Icinga2Plugin.check("icinga2", table).expect_err("refused");
-        assert!(err.contains("main_config"), "{err}");
+        assert!(err.contains("role"), "{err}");
 
-        let table: toml::Table = "main_config = \"c\"\nparent_port = 5665"
-            .parse()
-            .expect("table");
+        let table: toml::Table = "parent_port = 5665".parse().expect("table");
         let err = Icinga2Plugin.check("icinga2", table).expect_err("refused");
-        assert!(err.contains("parent_port"), "{err}");
+        assert!(err.contains("`parent_host` as `host:port`"), "{err}");
     }
 }

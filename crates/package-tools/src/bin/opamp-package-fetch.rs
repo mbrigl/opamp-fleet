@@ -952,8 +952,7 @@ async fn icinga2_plans(version: &str, distro: Option<&str>) -> Result<Vec<Plan>,
             dependencies,
         },
         out_name: format!("icinga2_{version}_linux_amd64.tar.gz"),
-        block_hint: "type = \"icinga2\", binary = \"icinga2\", program_path = \"sbin/icinga2\""
-            .to_string(),
+        block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
     });
     Ok(plans)
 }
@@ -982,11 +981,9 @@ fn windows_plan(version: &str) -> Plan {
         out_name: format!("icinga2_{version}_windows_amd64.tar.gz"),
         // The check plugins stay beside the daemon rather than moving to `plugins/`: on Windows a
         // program finds its DLLs in its *own* directory first, and separating the check
-        // executables from the runtime they share with the daemon would break them.
-        block_hint:
-            "type = \"icinga2\", binary = \"icinga2.exe\", program_path = \"sbin/icinga2.exe\", \
-                     plugin_dir = \"${supervisor_dir}/program/tree/sbin\""
-                .to_string(),
+        // executables from the runtime they share with the daemon would break them. The kind knows
+        // that, which is why it is a comment here and no longer a line an operator writes.
+        block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
     }
 }
 
@@ -2959,6 +2956,45 @@ SHA256: cccc
             collector_checksum("otelcol_0.157.0_linux_amd64.tar.gz", "otelcol", &older),
             ChecksumSource::Sums { .. }
         ));
+    }
+
+    /// Icinga 2's Windows artifact, which is the half of its plan that needs no repository index
+    /// — so it is the half a test can state. The MSI carries no digest of its own, so it is
+    /// verified by its publisher instead (ADR-0072), and the block is the kind alone (ADR-0092).
+    ///
+    /// The packing half of `docs/artifacts/icinga2.md`; its client half is in
+    /// `crates/client/src/supervisor/icinga2.rs`.
+    #[test]
+    fn icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher() {
+        let plan = windows_plan("2.16.5");
+        assert_eq!((plan.os.as_str(), plan.arch.as_str()), ("windows", "amd64"));
+        assert_eq!(plan.sources.len(), 1);
+        assert!(
+            plan.sources[0]
+                .url
+                .ends_with("/windows/Icinga2-v2.16.5-x86_64.msi"),
+            "{}",
+            plan.sources[0].url
+        );
+        match &plan.sources[0].checksum {
+            ChecksumSource::Publisher { expected } => assert_eq!(*expected, "O=Icinga GmbH"),
+            other => panic!(
+                "the MSI publishes no digest, so it is verified by its signature, not {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        match &plan.action {
+            Action::RepackMsi { wrapper } => assert_eq!(wrapper, "icinga2-2.16.5"),
+            other => panic!(
+                "the payload is repacked into this project's own tree shape, not {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(plan.out_name, "icinga2_2.16.5_windows_amd64.tar.gz");
+        assert_eq!(
+            plan.block_hint,
+            "type = \"icinga2\"  (docs/artifacts/icinga2.md)"
+        );
     }
 
     /// GLPI renamed its zip's case at 1.9, so both spellings have to be found — and the Linux

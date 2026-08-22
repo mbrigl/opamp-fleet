@@ -19,13 +19,15 @@ carries a date once its tag exists.
 
 ### Changed
 
-- **Telegraf and the GLPI Agent each get a kind of their own, and their blocks are two lines.**
-  Everything the recipes used to spell out is a property of the agent rather than of a host, so the
-  kind holds it ([ADR-0093](docs/adr/0093-the-glpi-agent-gets-a-kind-of-its-own.md),
-  [ADR-0094](docs/adr/0094-telegraf-gets-a-kind-of-its-own.md)). Telegraf's reload is why its kind
-  exists at all: as a block key the signal was refused on Windows at parse time, so one Supervisor
-  set could not serve a mixed fleet. The GLPI Agent's two platform blocks — seven keys on Linux,
-  eight on Windows, differing in nearly every element — become the same two lines on both.
+- **A wrapped agent's block is two lines.** `icinga2` keeps only its enrolment, and the GLPI Agent
+  and Telegraf get kinds of their own — so a block now says *which host runs this agent* and
+  nothing about how that agent is built
+  ([ADR-0091](docs/adr/0091-a-kind-knows-its-own-agent.md),
+  [ADR-0092](docs/adr/0092-icinga-2s-block-keeps-only-what-enrolment-needs.md),
+  [ADR-0093](docs/adr/0093-the-glpi-agent-gets-a-kind-of-its-own.md),
+  [ADR-0094](docs/adr/0094-telegraf-gets-a-kind-of-its-own.md)). Every retired key is refused **by
+  name** at startup with a message saying what supplies the value now, and the same check refuses a
+  Supervisor set the Server offers before any running process is touched.
 
   **What to do**, per block:
 
@@ -33,6 +35,12 @@ carries a date once its tag exists.
   |---|---|
   | `type = "command"` for Telegraf, with `command`, `args`, `version_args`, `reload_signal` | `type = "telegraf"`, `name = "telegraf"` |
   | `type = "command"` for the GLPI Agent — two different blocks, seven keys on Linux and eight on Windows | `type = "glpi"`, `name = "glpi"`, the same on both |
+  | `type = "icinga2"` with up to a dozen keys | `type = "icinga2"`, `name`, and at most `parent_host`, `node_name`, `ticket_file`, `trusted_cert_file` |
+  | `main_config = "icinga2-conf"` | put `role = "main"` on that Configuration on the Server; where nothing is marked, the name `icinga2-conf` still stands in |
+
+  There is **no block shape both the old and the new Client accept** for a wrapped kind, so the
+  cutover is per host and deliberate. `collector` and `command` blocks are untouched apart from the
+  two keys below.
 
 - **`working_dir` and `reload_signal` are gone from every block.** A Managed Process now starts in
   the directory its program lives in — this Supervisor's `program/`, or the tree root — instead of
@@ -64,15 +72,15 @@ carries a date once its tag exists.
 
 ### Added
 
-- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
-  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
-  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
-  so an upstream release that moves a path turns a test red instead of a rollout.
-
 - **A Client reports the Supervisor kinds it carries**, one non-identifying attribute per kind
   (`supervisor.kind.telegraf = "true"`), so a Supervisor set can be aimed with a Selector at the
   Clients that can actually run it — rather than a Server learning from a `FAILED` that it aimed at
   a Client too old to have the plugin.
+
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
+  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
+  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
+  so an upstream release that moves a path turns a test red instead of a rollout.
 
 - **The Client makes the directories a delivered agent writes into.** An agent the fleet installs
   arrives on a host nobody prepared, and several create nothing themselves — Icinga 2 exits when
@@ -82,6 +90,13 @@ carries a date once its tag exists.
   restart. **What to do:** nothing — and on a GLPI host you no longer create `agent-state` by hand
   before the first start. An `agent-state` an earlier release had you create as another user still
   needs to belong to the Client's service account.
+
+- **`node_name` defaults to the host's FQDN.** Icinga mints a ticket for a common name, and the
+  name an operator following Icinga's instructions uses is the fully qualified one; the previous
+  default was the Supervisor's name, which the name grammar cannot even spell as an FQDN. Only a
+  resolved name containing a dot is taken, so a host with no domain keeps the old default rather
+  than enrolling under a name that looks right. **What to do:** nothing, unless your master knows a
+  host under a name no resolver here produces — then keep stating `node_name`.
 
 ### Fixed
 

@@ -1,7 +1,7 @@
 # Recipe: rolling out and managing Icinga 2
 
 [← User Manual](README.md) · [The Server](server.md) · [The Client](client.md) ·
-[Rollout walkthrough](rollout.md)
+[Rollout walkthrough](rollout.md) · [Artifact: Icinga 2](../artifacts/icinga2.md)
 
 [Icinga 2](https://icinga.com/docs/icinga-2/latest/doc/01-about/) is a monitoring system whose
 agents run on every monitored host, connected to a master or satellite. This recipe puts an Icinga 2
@@ -27,10 +27,11 @@ and its account are — and it creates none of those directories itself.
 
 ## What the kind does for you
 
-`type = "icinga2"` derives ten command-line constants from a handful of values in the block. Three
-of them are not choices at all — they follow from where the Client put things and which account it
-runs as — and getting any of them wrong produces a daemon that starts and quietly uses the wrong
-files:
+`type = "icinga2"` builds the daemon's whole command line — around ten `-D` constants and the
+directories behind them — out of the artifact it delivers, the platform, and the account it runs
+as ([ADR-0092](../adr/0092-icinga-2s-block-keeps-only-what-enrolment-needs.md)). None of it is
+written on a host any more, and getting any of it wrong used to produce a daemon that starts and
+quietly uses the wrong files:
 
 | What | Why the Supervisor sets it |
 |---|---|
@@ -41,7 +42,14 @@ files:
 
 It also creates those directories before every start (Icinga does not), starts the daemon in its own
 process group so a stop takes its worker with it, validates every configuration before applying it,
-and reloads with `SIGHUP` where the platform has signals.
+reloads with `SIGHUP` where the platform has signals, and carries Icinga's own timing — 60 seconds
+for a graceful stop, 30 for the apply grace — because a daemon that drains its checks and closes its
+cluster connections is slower than the fleet's default allows.
+
+**The complete derivation, per platform, is in
+[`docs/artifacts/icinga2.md`](../artifacts/icinga2.md)** — the document the packing tool and this
+kind are both held to by tests, and the one to read before a version bump. This page does not repeat
+it: what follows is only what an operator decides.
 
 ## 1. Build the artifact
 
@@ -141,41 +149,50 @@ tool reads them out of that distribution's package index rather than this page l
 
 ## 2. The block
 
+Four keys, and each describes the Icinga installation this host is **joining** — nothing this
+Client can compute (ADR-0092). The block is the same on both platforms:
+
 ```toml
 [[supervisor]]
 type = "icinga2"
 name = "icinga2"
-service_name = "icinga2"          # what Selectors aim at (ADR-0033)
-binary = "icinga2"                # bare name ⇒ the Client owns and updates the tree (ADR-0021)
-program_path = "sbin/icinga2"     # where the program sits inside the delivered tree
-stop_timeout_secs = 60
-apply_grace_secs = 30
 
-main_config = "icinga2-conf"      # the *name of a Configuration*, not a path
-include_dir = "${supervisor_dir}/program/tree/share/icinga2/include"
-plugin_dir  = "${supervisor_dir}/program/tree/plugins"
-
-parent_host = "master.example.com"
-parent_port = 5665
-node_name   = "edge-01.example.com"          # default: the Supervisor's name
-ticket_file = "${config_dir}/icinga2-ticket" # delivered per host, see below
-
-[supervisor.env]
-LD_LIBRARY_PATH = "${supervisor_dir}/program/tree/lib"
+parent_host = "master.example.com"                       # or "master.example.com:5665"
+node_name = "edge-01.example.com"                        # default: this host's FQDN
+ticket_file = "${config_dir}/icinga2-ticket"             # delivered per host, see below
+trusted_cert_file = "${config_dir}/icinga2-parent-cert"  # optional, see below
 ```
 
-`LD_LIBRARY_PATH` is what makes the bundled libraries win over the ones compiled into the binary's
-search path. Leave `parent_host` out for a standalone node that only runs local checks: then there
-is no enrolment, and the daemon starts as soon as its configuration arrives.
+- **`parent_host`** is the master or satellite this Agent enrols with and connects to. The port
+  rides in the value as `host:port` and defaults to Icinga's 5665. Leave the key out for a
+  standalone node that only runs local checks: then there is no enrolment, and the daemon starts as
+  soon as its configuration arrives.
+- **`node_name`** is the one value that must match what was typed on the *other* side: it is the
+  `NodeName`, the certificate's common name, and the Endpoint name at once, and Icinga requires the
+  three to be the same string. It defaults to this host's fully qualified name — resolved the way
+  `hostname --fqdn` resolves it, which is also where `icinga2 pki ticket --cn …` takes its argument
+  — so a fleet whose master knows its hosts by FQDN need not write it at all. Only a name with a
+  dot in it is accepted as that default; where the resolver has none to give, the Supervisor's own
+  name stands and this key is how you say what the master actually knows.
+- **`ticket_file`** and **`trusted_cert_file`** name delivered Configuration entries, not files you
+  put on the host — see [step 3](#3-enrolment-the-ticket).
 
-On **Windows** the same block differs in three values: `binary = "icinga2.exe"`,
-`program_path = "sbin/icinga2.exe"`, and `plugin_dir` pointing at `sbin` — the check executables
-stay beside the daemon there, because a Windows program finds its DLLs in its own directory first.
-No `LD_LIBRARY_PATH` is needed, and `reload_signal` does not exist, so a configuration change is a
-restart.
+**Everything else the block used to carry is gone**, and a block still carrying any of it fails at
+startup with a message naming what supplies the value now: `binary`, `program_path`, `service_name`,
+`include_dir`, `plugin_dir`, the five state directories, `log_level`, `run_as_user`/`run_as_group`,
+`parent_port`, `renew_before_days`, `args`, `env`, `stop_timeout_secs`, `apply_grace_secs` — and
+`main_config`, which became a mark on the Configuration itself ([step 4](#4-send-its-configuration)).
+There is no block shape that both the old and the new Client accept, so the cutover is per host and
+deliberate: the old Client requires `main_config`, this one refuses it.
 
-An Icinga 2 the machine already installed is **not** supervised in place: `binary` takes a bare
-file name and nothing else, so there is no block shape that points at
+**One block now serves the whole fleet.** With `node_name` defaulting to the FQDN nothing in it is
+per-host any more, so it can travel as a single Configuration typed `supervisor`
+([The Server can manage the set](client.md#the-server-can-manage-the-set)) instead of being written
+into every host's `supervisor.toml`. What stays per host is the ticket, which was always its own
+Configuration.
+
+An Icinga 2 the machine already installed is **not** supervised in place: the kind installs and
+names its own program, so no block can point at
 `/usr/lib/x86_64-linux-gnu/icinga2/sbin/icinga2`. The route across is the one this page describes
 — repack that version with `opamp-package-fetch` and let the fleet deliver it — and the native
 service is disabled once the fleet-delivered tree runs. The host keeps whatever the package
@@ -300,7 +317,8 @@ rather than inside it.
 | Symptom | Cause |
 |---|---|
 | `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, or a signature nobody granted yet. It retries with backoff; the daemon deliberately does not start meanwhile. |
-| `awaiting the configuration …` | No root Configuration has arrived yet, or `main_config` names one that does not match this Agent. |
+| `awaiting the configuration …` | No root Configuration has arrived yet: nothing delivered carries `role = "main"`, and no entry is named `icinga2-conf` either. |
+| `two configurations claim to be the root` | Two delivered entries carry `role = "main"`. The message names both; take the role off the one that is not Icinga's root file. |
 | `remote_config_status = FAILED` with a syntax error | Icinga refused the configuration. The running daemon kept the previous one — fix the Configuration and roll out again. |
 | `InstallFailed`, *"does not run on this host"* | The artifact was built against a newer glibc, or on a host missing a library. Rebuild on the oldest distribution you serve. |
 | A check the parent assigns fails with `CheckCommand does not exist` | The root configuration includes `<itl>` but not `<plugins>`: the templates are there, the commands are not. |
