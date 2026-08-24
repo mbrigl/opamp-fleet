@@ -4,7 +4,7 @@
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
 
-Amends [ADR-0016](0016-what-a-package-is-and-how-it-is-aimed.md) point 8 and
+Amends
 [ADR-0028](0028-a-rollout-is-an-explicit-act.md) point 7 on acceptance: rollback is not a rollout.
 
 > **This document was accepted on 2026-08-19, re-opened on 2026-08-20 and re-accepted the same day**,
@@ -142,7 +142,7 @@ and against what it claims to have only where it reports no running version that
     running.
 
 11. **Rollback is not a rollout.** ADR-0028 point 7's *"rollback of a package is rolling out the older
-    Set"* and ADR-0016 point 8's *"greater-version-wins makes rollbacks publication moves"* are
+    Set"* and the Set model's *"greater-version-wins makes rollbacks publication moves"* are
     withdrawn. An operator who wants an Agent back on its predecessor has
     [ADR-0015](0015-package-delivery-for-managed-processes.md)'s retention window on the
     Agent and, for the Client itself, ADR-0018's pointer move; a bad version is otherwise taken back

@@ -4,292 +4,331 @@
 - **Date:** 2026-08-05
 - **Deciders:** Markus Brigl
 
-This decision supersedes the **structural** decisions of
-[ADR-0017](0017-package-artifacts.md) point 6 (the `(name, os, arch)` store key, the
-per-variant version, the per-variant history) and [ADR-0017](0017-package-artifacts.md)
-points 14 and 16 (the type as a mutable attribute set after upload, and the untyped-inert state).
-Everything those ADRs *guarantee* survives and is strengthened: the platform vocabulary,
-canonicalisation, and mandatory platform fit (ADR-0017 points 8–12), the type fit and its raw
-comparison (ADR-0017 points 15, 17, 18), file-or-source entries
-([ADR-0017](0017-package-artifacts.md)), and the publication gate
-([ADR-0028](0028-a-rollout-is-an-explicit-act.md)) — whose one asymmetry this
-decision removes.
+This decision amends without superseding: [ADR-0017](0017-package-artifacts.md) (the
+Platform vocabulary, the alias table, and mandatory platform fit stand),
+[ADR-0017](0017-package-artifacts.md) (the type is *half the
+identity*, so a late-typing window and a mutable-attribute shape are unrepresentable),
+[ADR-0034](0034-what-reaches-an-agent.md) (points 2 to 6 and 9 to 11 are untouched; only *which
+key* `claimed_version` reads changes, and point 1's tie-break clause goes while fit by type and
+platform stands), [ADR-0028](0028-a-rollout-is-an-explicit-act.md) (points 1, 3, 4 and 6 stand; 2,
+5 and 8 change shape; 9 becomes moot), [ADR-0015](0015-package-delivery-for-managed-processes.md)
+(where the signature an Agent verifies comes from), and
+[ADR-0017](0017-package-artifacts.md) (a source entry keeps its URL, its mandatory
+SHA-256 and its headers, and loses only its per-entry signature).
+
+It cites [ADR-0023](0023-what-describes-an-agent.md) **unchanged** and makes it load-bearing: a label is
+how an Agent enters a Deployment.
+
+It decides two things: **the object** (the Package) and **the act** (the Deployment, which takes in
+the name, the aim and the signature the Package gives up). A Package without a Deployment is
+something nothing can aim; the dependency runs one way only.
 
 ## Context
 
-Package delivery works end to end (ADR-0015): an operator uploads an artifact through the REST API
-and every capable Agent downloads, verifies, applies, and health-gates it, reporting progress on the
-way. What it cannot do on its own is aim.
+### The object
 
-**Without a Selector, a package is offered to the whole fleet.** Configurations are targeted by a
-Selector ([ADR-0012](0012-selector-targeted-configurations-and-rest-api.md)) — matched
-against the attributes an Agent reports. A package that carries no Selector at all is offered to
-every Agent whose Supervisor names it, at once. Goal 9 states that a change may address *"the whole
-fleet or a chosen subset of it, so a configuration can be rolled out to part of the fleet before all
-of it"*, and the vision applies that same expectation to software: *"it can update an agent's binary
-in place"* as part of the same control loop. A binary is precisely the change an operator wants to
-try on five hosts before three hundred.
+Consider a package identified by the triple *(name, Agent type, version)* that carries, besides its
+artifacts, a Selector, an `addon` flag, and one optional signature per entry. Four observations, all
+from this repository:
 
-**Naming the package on the host decides on the host, not on the Server.** A `[[supervisor]]` block
-that opts in by naming one (`package = "otelcol"`) makes the two things an operator most needs to
-steer — *who* gets an update and *which* artifact they get — settings in a file on every managed
-machine. A fleet spanning `linux/amd64`, `linux/arm64`, and Windows then needs one package name per
-platform and a matching `client.toml` on each host, even though every Agent already reports
-`host.arch` and `os.type` in its description. Nothing about that is reachable from the REST API or
-the bundled UI, which is what goal 5 promises an operator.
+**1. The name is a second identity for a thing that already has one.** The Agent type is compared
+raw against the reported `service.name` and decides fit (ADR-0017). The name decides nothing — it
+is the map key on the wire and the grouping key for resolution, and in every artifact this project
+ships the two are already the same string. `fleet-packages/supervisor@0.4.3@supervisor/` is not a
+coincidence: ADR-0022 fixed the Client's own Agent type at `supervisor` and named its package after
+it, and `opamp-package-fetch` uploads under its `service_name` as both name and type without ever
+having been told to. The model carries a degree of freedom nobody uses, and the one place it
+*could* be used — two packages of one Agent type under different names — is precisely the ambiguity
+`resolve` has to rank its way out of.
 
-The protocol is not what is in the way. The Baseline describes `PackagesAvailable` as *"the packages
-that are available on the Server **for this Agent**"* — the offer is per-Agent by design, and its
-`all_packages_hash` gates re-offering per Agent as well. The Server already composes a per-Agent
-remote configuration this way; a single global package offer has no reason to exist.
+**2. The `addon` flag is a Server-side concept with no Client behind it.** The Baseline distinguishes
+top-level packages from addons. The Client refuses every addon: an offer of addons only is reported
+as an operator error ([`agent.rs`](../../crates/client/src/supervisor/agent.rs), the
+`PackageType::Addon` filter). The flag therefore never changes what any host installs. It only
+changes what the store must sort, and it takes a byte in the offer hash preimage for the trouble.
 
-### The missing object: the release
+**3. Aim on the object makes "what is this artifact" and "who gets it" one editable record.** A
+Selector that is mutable while the bytes are frozen is correct, and it is also the sign that two
+different lifetimes are living in one document. Its consequence is a ranking: where several
+packages match an Agent, the most specific Selector wins. That ranking is one an operator cannot
+see — the answer to "which artifact does this host get" is not readable off any one object, it has
+to be computed across all of them.
 
-A package model grown by accretion shows its seams. A package as a *name* carries a Selector, an
-Agent type, and a publication state; under the name sit per-platform variants, each with **its own
-version** and its own one-step history. Four properties arrive over up to four requests, and three
-consequences follow:
+**4. Nothing is deployed.** The package store is empty; no fleet holds an installed record written
+by this Server. Every compatibility argument that would normally shape a change of this size —
+migrate the store, keep the hash preimage stable, alias the old routes — is void. That is not a
+licence to be careless; it is a licence to *delete*, and AGENTS.md §1 asks for exactly that.
 
-- **"Which version is this package at" has up to five answers.** With the version on the variant
-  (ADR-0017), `linux-amd64` can hold `3.1.0` while `windows-amd64` still holds `3.0.0` — sometimes a
-  rollout in progress, sometimes a forgotten upload, and the model cannot tell the two apart. A
-  release is one version across five artifacts; such a store has no object that *is* that release.
-- **A late type creates an untyped state that exists only to be inert.** ADR-0017 put the type on a
-  sub-resource because the *artifact* upload was the wrong place for it — five uploads could
-  disagree. The price is a window in which a package exists untyped, a state whose only meaning is
-  "not finished", plus a rule (offered to nobody) to make that window safe. The window is an
-  artifact of the request choreography, not of the domain.
-- **Replacing bytes in place is the one path around the publication gate.** ADR-0028 stages new
-  packages but lets an upload *replace* the artifact of a published package and distribute
-  immediately — a deliberate asymmetry ("the ordinary in-place upgrade"), with the workaround
-  "retract first" for anyone who wants staging. In-place replacement is also what forces a hidden
-  history: because a new version *overwrites* the old one, the store must secretly remember what it
-  destroyed, one step deep, per variant.
+### The act
 
-The requirement reorganises the model around the object that was missing — the release. A package
-defines a **Set**. Each Set is identified by **name, Agent type, and version**, and may define a
-Selector. A Set holds **one or more entries**, each identified by **os and arch**, with no two
-entries for the same combination. An entry carries **either an uploaded file or a source with its
-SHA-256**, and optionally a signature. **Saving a Set does not make it available to any Client** —
-publication stays its own act.
+With the Package stripped to its bytes, three things have to land somewhere: the aim, the
+signature, and the act that releases it. Putting them on a new object is not bookkeeping — it
+answers a question a package-carried aim cannot.
 
-The wire imposes one constraint and one freedom. `PackagesAvailable` maps a package *name* to one
-offered version and hash per Agent — so whatever the store holds, offer resolution must reduce
-"every Set named `otelcol`" to at most one per Agent. And the Baseline leaves the offered set
-entirely to the Server ("the packages that are available on the Server **for this Agent**"), so
-holding many versions and offering one is conformant, exactly as holding drafts is (ADR-0028).
+**Which artifact does this host get?** With aim on the package, the answer is computed, not read:
+gather the packages whose type and platform fit, keep those whose Selector matches, rank by
+Selector specificity, break ties by version, and refuse an unbreakable tie. Each step is
+defensible; the sum is a rule no operator can evaluate by looking at anything. Its failure mode is
+`package_conflict`, and the shape it exists for — a fleet-wide package plus a narrower canary — is
+exactly the shape that makes the ranking necessary in the first place.
+
+**Where does the signature belong?** On the artifact record, supplied as a query parameter on the
+upload, signing is a property of the *bytes*, which sounds right and is not: what an operator signs
+off on is a release to a set of machines. It would also put a field back on the object that was just
+emptied.
+
+**What does a rollout name?** ADR-0028 gets the hard part right — nothing distributes without an
+explicit act, and an act pins content per Agent. If the thing the act names is a package, releasing
+"the software this channel runs" is *n* acts over *n* packages that nothing holds together.
+
+**And the Selector cannot say "not".** Every Selector is equality over the effective description
+([`configs::matches`](../../crates/server/src/configs.rs)); there is no negation and no set
+difference. "Everyone except the canary hosts" is not a writable Selector. Any model that requires
+disjoint targets must get disjointness from *membership*, not from exclusion — which is what
+ADR-0023's labels already are.
 
 ## Decision
 
-We will give a **Package a Selector**, exactly as a Configuration has one, and make the **Server**
-decide which artifact an Agent is offered — so a rollout is aimed from the REST API and the UI, not
-from a file on each host.
+### The Package: what an Agent type runs at a version
 
-1. **A Package carries a Selector.** An empty Selector means the whole fleet, as with
-   Configurations. The Server offers an Agent only the packages whose Selector matches its reported
-   attributes, and computes `all_packages_hash` over *that* Agent's set, so the Baseline's re-offer
-   gate keeps working per Agent.
+We will make the **Package** the unit the store holds, identified by **(Agent type, version)** and
+holding nothing but its entries — no name of its own, no Selector, no kind flag, no signature — and
+the store carries no migration machinery, because there is no store left to migrate.
 
-2. **A Supervisor says only whether it accepts updates, never which one.**
-   `accepts_packages = true` means "this Managed Process's binary is updated from the top-level
-   package the Server selects for me"; absent, the Supervisor takes no package offers. There is no
-   `package = "name"` key: choosing the artifact is the Server's job, and a second way to choose it
-   on the host would keep the decision in the place this decision moves it out of. A `client.toml`
-   carrying `package = "…"` fails at startup with a message naming the replacement — loudly, as
-   ADR-0008 requires, never silently ignored.
+1. **Identity is the pair, stated at creation, never edited.** A Package is created as
+   `(agent_type, version)`; both tokens follow a conservative token grammar (printable, no path
+   separators, no `@`), so the pair embeds losslessly in a file name and a URL. A new version is a
+   new Package. A Package has no free-form `name`; the ADR-0010 name grammar belongs to the
+   Deployment's name (point 9), where a human-chosen label belongs.
 
-   Pinning one host to a specific artifact does not disappear; it lives on the Server, where a
-   Selector on that host's `host.name` (or an operator attribute) expresses it — and, unlike a line
-   in a file on that machine, is visible in the fleet view.
+2. **The name is derived, and there are two of them — they answer different questions.**
+   - The **wire name** is the Agent type alone. It is the `PackagesAvailable` map key, the
+     `PackageStatuses` key an Agent reports back, and the value `[self_update] package` is compared
+     against. It must be *stable across versions*, which is why it cannot carry one.
+   - The **display name** is `<agent_type> <version>` — the UI, the log line, the operator's ear.
 
-3. **One top-level package per Agent, resolved by specificity.** The Baseline states
-   there is *"normally only one top-level package, which implements the primary functionality of the
-   Agent"*, and a Supervisor has one binary to replace. Where several top-level packages match an
-   Agent, the **most specific Selector wins** — the one naming the most attributes. That is what
-   makes the shape an operator actually reaches for work: a fleet-wide package with an empty
-   Selector, plus a narrower one aimed at the hosts a rollout starts on, which overrides it for
-   exactly those and leaves everyone else alone.
+   This is the sharpest consequence of point 1 and the one most easily got wrong:
+   deriving one name and using it in both places would either break the Client's self-update guard
+   on every release or make the fleet view unreadable.
 
-   Only a *tie* — two equally specific Selectors both matching one Agent — has no defensible
-   answer. That Agent is offered nothing, and the fleet view says why on the Agent itself
-   (`package_conflict`), because a rollout that silently never starts is worse than one that
-   explains itself. Matching addons are offered alongside the chosen top-level package.
+3. **A Package holds entries and a derived hash, and nothing else.** A Package holds one
+   entry per canonical `(os, arch)` pair (ADR-0017's vocabulary and alias table), so a duplicate is
+   unrepresentable; each entry is **either** an uploaded artifact (the Server computes and stores
+   its SHA-256) **or** a source reference (URL, mandatory SHA-256, optional headers — ADR-0017), and
+   one entry suffices. The per-package hash the wire carries is `len(version) || version ||
+   content_hash`, with **no kind byte**. The Platform has no place in it — two platforms' artifacts
+   differ by content hash by construction. The hash is surfaced to the operator on the entry,
+   because it is the exact value an Agent compares, and an operator who can read it can answer "did
+   this host take my bytes" without trusting a status field.
 
-   Refusing the ambiguity at the API instead — rejecting a Selector that could overlap another —
-   does not work: every package starts with an empty Selector, which overlaps everything, so a store
-   holding two packages could never have a Selector set on either. It also forbids the
-   fleet-wide-plus-canary shape outright, which is the whole point.
+4. **The Server has no `addon` flag.** Every Package is top-level;
+   `PackageType::Addon` is never emitted. **The Client's refusal of addons stays exactly where it
+   is** — it is not the other half of a flag but a defence against a non-conforming *peer*: the
+   Baseline permits any Server to offer addons, this Client speaks to `opamp-go` in the conformance
+   tests, and without the filter a foreign Server could write an addon over a Managed Process's
+   binary. Only the Server's half is absent.
 
-4. **The Selector is set through its own sub-resource**, `PUT …/selector` beneath the
-   Set's resource (point 10), with the same JSON shape a Configuration uses. A Set
-   without a Selector behaves exactly as one with an empty Selector.
+5. **The store holds Packages, one directory each, and knows no migration.** The layout
+   is `<packages_dir>/<agent_type>@<version>/` holding `package.json` and one `<os>-<arch>.bin` per
+   uploaded entry. There is no `migrate_legacy` and no `published` / `formerly_published` /
+   `formerly_offered` seed for ADR-0028 point 9: they would serve stores that do not exist. A
+   directory in a shape this version does not know **fails startup naming the path**, rather than
+   being skipped; that is the one line standing between an empty store and a half-tidied
+   development machine, and it follows ADR-0017 point 13's rule that an unreadable store is loud.
 
-### A package is a versioned Set
+6. **The REST resource is the pair.** `/api/v1/packages/{agent_type}/{version}`, with
+   the entry routes beneath it (`…/entries/{os}/{arch}` for bytes, `…/entries/{os}/{arch}/source`
+   for a source). The create body has **no writable field** — so `{}` creates a Package. There is
+   no `PUT …/selector` and no `POST …/rollout` on a Package: aim and release are not its business
+   (points 9 and 16). The download route carries no name segment either.
+   The OpenAPI document follows (ADR-0012). No route takes a package name, not even as an alias: an
+   alias would need a `name` the model has no field for, and there is no deployed consumer to
+   spare.
 
-We will make the **Set** the unit the package store holds, identified by **(name, Agent type,
-version)**, immutable in its bytes while published, and offered to nobody until published.
+7. **What ADR-0034 decides is untouched.** A Package reaches an Agent only as an
+   upgrade, the running `service.version` decides in both directions, and an unorderable claim
+   refuses. The claimed version is read under the Agent type, because that is the key an Agent
+   reports its status under.
 
-5. **Identity is the triple, stated at creation, never edited.** A Set is created as one
-   document — name, Agent type, version, and optionally a Selector — and the triple is its key:
-   creating "the same Set again" addresses the same resource, and a new version is a **new Set**,
-   never a mutation of an old one. There is no moment where a Set exists untyped, and no inert
-   state to explain; ADR-0017's objection to stating the type at upload (it was per-artifact five
-   times) does not apply, because here it is per-Set once. Name follows the ADR-0010 grammar;
-   version and Agent type are bounded to a conservative token grammar (printable, no path
-   separators, no `@`) so the triple embeds losslessly in file names and URLs. The type is compared
-   **raw** against the reported `service.name` (ADR-0017 point 15).
+### The Deployment: aim, signature, and rollout
 
-6. **Entries are a map keyed by Platform, so a duplicate is unrepresentable.** A Set
-   holds one entry per canonical `(os, arch)` pair (ADR-0017's vocabulary and alias table,
-   unchanged). Writing an entry for a pair the Set already holds *replaces* that entry — while the
-   Set is a draft. Each entry is **either** an uploaded artifact (the Server computes and stores its
-   SHA-256) **or** a source reference (URL, mandatory SHA-256, optional headers — ADR-0017
-   unchanged), and either way an optional Ed25519 signature. One entry suffices for a Set to be
-   publishable; five platforms are five entries under one identity, which is what makes a release
-   one object.
+We will have the **Deployment** — a named set of Packages, aimed by a Selector, carrying the
+signature of each artifact — be the only thing that is rolled out, and rule that **an Agent belongs
+to at most one**.
 
-7. **A saved Set reaches nobody; publication is per Set; published bytes are
-   immutable.** Every Set is created a draft, and — closing ADR-0028's asymmetry — there is no
-   in-place upgrade to exempt: the "ordinary version bump" is a new Set, staged like everything
-   else. Publishing a Set with no entries is refused (`409`): a Set *contains one or more entries*
-   by definition, and the empty state exists only while an operator is still assembling one. While
-   a Set is published its entries cannot be written or deleted (`409`; retract first): the fleet is
-   installing those bytes, and a hash that changes under an offer is the confusion the publication
-   gate exists to prevent. The **Selector stays editable in every state** — aim is not bytes, and
-   moving a published Set between rings is precisely how a rollout proceeds (point
-   3).
+8. **A Supervisor says only whether it accepts updates, never which one.** Operators
+   depend on this rule. `accepts_packages = true` means "this Managed Process's binary is updated
+   from the Package the Server selects for me"; absent, the Supervisor takes no package offers. A
+   `package = "…"` key in the Client's configuration fails at startup with a message naming its
+   replacement — loudly, as ADR-0008 requires, never silently ignored. Choosing the artifact is the
+   Server's job.
 
-8. **Offer resolution: fit, aim, then version — at most one Set per name per Agent.**
-   For one Agent, the candidates are the published Sets whose Agent type equals the reported
-   `service.name`, holding an entry for the reported platform, whose Selector matches
-   (fit-before-aim, ADR-0017/0031 and point 1, all unchanged). Among candidates
-   *sharing a name*, the most specific Selector wins (point 3's rule, ranking Sets);
-   among equally specific candidates the **greater version** wins, compared as ADR-0009 compares
-   versions; a tie that version comparison cannot break (equal, or not versions at all) is a
-   conflict — offer nothing under that name, and surface it (`package_conflict`), as ambiguous
-   targeting is surfaced. The winner is offered under the Set's name with the Set's version and the
-   fitting entry's hash — **nothing changes on the wire or in the Client**.
+9. **A Deployment is name, Selector, packages, signatures.** The name follows the ADR-0010
+   grammar (it is the one human-chosen label in the model). The Selector is ADR-0012's semantics
+   unchanged — equality pairs over the effective description, so an operator learns one targeting
+   mechanism, not two. It holds **one Package per Agent type**, and one signature per
+   `(Package, Platform)`.
 
-   Greater-version-wins is what makes rollouts and rollbacks publication moves: publish `3.1.0`
-   beside a fleet-wide `3.0.0` with a canary Selector and the ring gets `3.1.0` while everyone
-   else keeps `3.0.0`; widen the Selector to finish the rollout; retract `3.1.0` and the fleet
-   falls back to `3.0.0` — one step back, except the step is any published version and the record
-   of what "back" is, is the store itself.
+10. **At most one Package per Agent type, refused at the API.** A second Package of a type
+   already present answers `409`. Two of one type would collide on the wire map key *and* fit the
+   same Agent; refusing at write time turns a resolution-time mystery into an error at the moment
+   of the mistake. Refusing ambiguity at the API fails when the collision is on the *aim*: every
+   Selector starts empty, so the *first* write would always be refused and the store could never
+   leave the state it started in. That dead end does not exist here, because the collision is on
+   the **type**, which is identity, not on the aim.
 
-9. **The store holds Sets, one directory each.** The filesystem layout is
-   `<packages_dir>/<name>@<version>@<type>/` holding `set.json` (identity, Selector, publication
-   state, and every entry's metadata) and one `<os>-<arch>.bin` per uploaded entry — the grammar
-   of point 5 is what makes the directory name parse back unambiguously, as ADR-0017's
-   `@` trick did for variants. There is no `.previous.bin` and no hidden history: earlier versions
-   are kept openly, as Sets.
+11. **The Selector must not be empty.** An empty Selector is the channel that collides
+   with every other, and a forgotten field would silently become the base for the whole fleet — the
+   class of accident ADR-0028 exists to prevent. `400`, at creation and at every edit — the status
+   this API already uses for a body it will not accept; it holds no other validation code.
 
-10. **The REST resource is the triple.** The package routes address
-   `/api/v1/packages/{name}/{agent_type}/{version}`: `PUT` creates the Set (body: Selector,
-   optional), entry routes beneath it write bytes (`PUT …/entries/{os}/{arch}`, body the artifact,
-   optional `signature=<hex>`) or a source (`PUT …/entries/{os}/{arch}/source`, body as ADR-0017),
-   `PUT …/selector` and `PUT …/publication` keep their shapes, `DELETE` removes an entry or the
-   Set. `GET /api/v1/packages` lists Sets grouped by name, each with its entries, reach, and
-   publication state. There is no `/type` and no `/rollback` route — the first is identity, the
-   second is a publication move. The OpenAPI document follows, as it must (ADR-0012).
+12. **Channels are a label partition, and there is no "everyone" shortcut.** Because a
+   Selector cannot express exclusion (Context), disjoint channels come from a key every Agent
+   carries. **The Server prescribes none** — there is no reserved word and no special handling —
+   and which one an operator picks says what the partition *means*: `channel` (`stable`, `beta`)
+   for release risk, where the host subscribes once and the channel is handed one version after
+   another; `region` for where it runs, where a release follows the sun or stays pinned to a
+   jurisdiction; `tenant` for whose it is, where one customer moves on their own schedule. They
+   compose — `{tenant, channel}` is two equality pairs and needs nothing new. What they share is
+   why they work: each names a property of the **host**. A key naming the Deployment instead would
+   put one fact in two places, so re-aiming a channel would mean editing every host in it. The
+   value arrives from provisioning, through the `[attributes]` table the Client's configuration
+   already documents, or as a Server label (ADR-0023) — which is how a host moves between channels
+   without the machine being touched. An Agent carrying no channel belongs to no Deployment and
+   waits; that is ADR-0028 point 6's rule, reached one step earlier, and the fleet view
+   distinguishes it from "waiting for a rollout" because the operator's next move differs.
 
-11. **The bundled UI supports the model from the start, as a master–detail view.** The
-   Packages tab is **one table of Sets** — one row per Set, showing its identity (name, Agent type,
-   version), publication state, the platforms it holds, and its reach. Selecting a row makes that
-   Set the *current* record and shows it in a **detail form**; while nothing is current, the form
-   is not visible. **Create** opens the form empty to define a new Set — the only moment the
-   identity fields are writable (point 5); on an existing Set the form offers exactly
-   what the API offers: the Selector always, the entries while the Set is a draft — each entry
-   removable in place, and a new one addable in place through its own **Add** action, so
-   assembling a five-platform release is five adds on one draft rather than five saves. **OK**
-   persists the form's changes through the REST routes (including an entry still sitting in the
-   editor) and **Cancel** discards them; both conclude the form — the current record is let go and
-   the form leaves the screen, a failed save alone keeping it open beside its message. Delete
-   stands alone on the form's left, Cancel and OK conclude it on the right; **Delete** removes the
-   current Set, after which nothing is current and the form hides. One thing is deliberately *not*
-   in the form at all: the publication state. Publishing and retracting are their own control, a
-   per-row button in the table beside the Set's state, because the publication gate's seam — the press
-   that releases a rollout is never the press that carries the bytes — is the reason the gate
-   works, and a publication flag folded into "save" would be armed by the same click that edits a
-   Selector. The form enforces no rule of its own: what it greys out is what the Server answers
-   `409` to, one rule, rendered.
+13. **An Agent belongs to at most one Deployment; any overlap is a conflict.** Not the
+   most specific, not the newest — none. The Agent is reported under the existing
+   `package_conflict` surface, naming both Deployments. No specificity ranking applies anywhere:
+   Configurations never used one, and Deployments do not either.
 
-12. **An existing store is migrated at first open — loudly where it cannot be.** Each
-   stored package becomes one Set per distinct variant version, carrying the entries that share
-   that version and the package's Selector, type, and publication state; a remembered previous
-   version (the one-step `previous` slot) becomes an **unpublished** Set of that version, so
-   nothing an operator could roll back to is lost. A stored package with **no Agent type cannot
-   become a Set** — the type is identity — and fails startup naming the file, ADR-0017 point 13's
-   rule: it was inert before and would be unrepresentable now, and inventing a type would aim bytes
-   this Server cannot judge.
+14. **A conflict takes the candidate away, never a standing assignment.** An Agent
+   already rolled out to keeps its offer — ADR-0028's rule that nothing distributes *or
+   un-distributes* by itself binds in both directions, and creating an overlapping Deployment must
+   not withdraw software from a running host. An Agent never rolled out to is offered nothing and
+   the view says why. This is the sentence most easily got wrong in one line of code, and it is
+   the one this decision most depends on.
+
+15. **The signature lives here, per `(Package, Platform)`, and the wire is unchanged.**
+   What an Agent receives in `DownloadableFile.signature` is the signature its Deployment holds for
+   the artifact it is offered. The Client's verification policy is untouched (ADR-0015): with a
+   verification key configured a signature is mandatory, without one a signed artifact is refused.
+   The Server cannot refuse an unsigned Package — an unsigned fleet is a legitimate policy — so it
+   **reports** the gap rather than hiding it, and the same Package in two Deployments must be
+   signed in each.
+
+16. **Both rollout acts name a Deployment.** `POST /api/v1/deployments/{name}/rollout`
+   releases to every Agent it fits and aims at; `POST /api/v1/agents/{uid}/rollout` releases to
+   one. Both pin content as of that press (ADR-0028 point 2), and an Agent's assignment is at most
+   one pair — the Deployment it came from and the Package that was pinned. Naming a bare Package in
+   the per-Agent act is deliberately **not** offered: it would bypass the Deployment that supplies
+   the signature.
+
+17. **The per-Agent act refuses to pick a side.** Under a conflict it answers `409` even
+   though the operator named a Deployment. Otherwise the conflict is sidestepped for good instead
+   of fixed, and the canary path becomes the way into a state the bulk path forbids.
+
+18. **Immutability follows the assignment, and it freezes exactly what a standing offer
+    travels with — no more.** A Package assigned to at least one Agent has immutable entries
+    (ADR-0028 point 8). On a Deployment, two things join it: the **signature** of a Package that
+    channel released, and the channel's **hold** on that Package. Both for one reason: what gates
+    re-offering is the package hash, which covers the version and the content and **not** the
+    signature. A signature changed under a standing offer would therefore never reach the Agent
+    installing against the old one, and removing the Package — which takes its signatures with it —
+    would silently turn a signed rollout unsigned for any Agent that has not finished, so a Client
+    with a verification key would refuse an artifact it was already downloading for a reason
+    nothing said out loud.
+
+    **Everything else stays editable, and that is not a concession.** The Selector always — aim is
+    not bytes. Adding a Package for an Agent type the channel does not hold: it changes no existing
+    offer and surfaces as waiting. And, decisively, **swapping the version a channel holds**: the
+    Agents already released keep their pinned Package and their offer, the new version shows as
+    waiting, and the next press moves them. That *is* how a rollout proceeds.
+
+19. **The bundled UI has a Deployments tab, and Packages has no aim.** The Packages tab
+    is a master–detail view — one table of Packages, a detail form for the current record that
+    hides while nothing is current, OK and Cancel concluding it on the right and Delete alone on
+    its left — and shows no Selector, no kind and no reach; reach is a property of aim. The
+    Deployments tab is the same shape with the **per-row rollout button** beside it: ADR-0028's
+    seam, as ADR-0028 keeps it — the press that changes the fleet is never the press that saves. An
+    Agent with no Deployment is shown calmly; it is the normal state of a freshly enrolled host, not
+    a fault.
+
+20. **Point 9 of ADR-0028 is moot and is not carried forward.** It read a pre-ADR store
+    as rolled out so an upgrade would not empty the fleet's offers. There is no such store: the
+    package store is empty and no Agent record holds an assignment written by this Server. The seed
+    and its marker do not exist, and this is recorded so their absence does not read as an
+    oversight.
 
 ## Alternatives considered
 
-- **Leave targeting to `client.toml`.** Rejected. It works — the platform case is solved by naming
-  `otelcol-linux-amd64` per host — but it puts the rollout decision on three hundred machines and
-  outside the API that goal 5 makes the integration contract. A staged rollout then means editing
-  and redistributing host configuration, which is the problem this project exists to remove.
-- **Reuse Configurations to carry the package name.** Rejected. It would let an operator aim a
-  rollout with the mechanism that already aims, but it conflates two lifecycles: a configuration is
-  applied by restarting on new files, a package is verified, swapped, health-gated, and rolled back.
-  Tying them means a config change and a binary change cannot be reasoned about — or reverted —
-  separately.
-- **Keep `package = "name"` alongside the new opt-in, as an explicit pin.** Rejected, after weighing
-  it as the compatible option. It would spare existing `client.toml` files a change, and a pin is
-  occasionally what an operator wants — a test host that must not follow the fleet. But it leaves two
-  ways to decide the same thing, one of them on the machine this decision is trying to stop editing,
-  and the pin is expressible on the Server anyway: a Selector matching that host's `host.name`. One
-  mechanism, visible in the fleet view, beats two that can disagree.
-- **One key with two meanings (`package = true` or `package = "name"`).** Rejected. It is the most
-  compact spelling and breaks nothing, but the same key then means "whether" in one form and "which"
-  in the other — a distinction a reader has to know rather than see. Config keys are read under
-  pressure; this one would be read wrong.
+### The Package
 
-- **Refuse an overlapping Selector at the API.** Rejected on contact with the code, which is the
-  honest reason: with every existing package carrying an empty Selector, the first `PUT` is always
-  refused, and there is no order in which two packages can be narrowed — the store cannot leave the
-  state it starts in. Resolving at offer time has no such dead end, and it turns the common case
-  (a default plus an override) from an error into the mechanism.
-- **Target by Instance UID instead of a Selector.** Rejected. Naming Agents individually pins a
-  rollout to identities that are reassignable (`AgentIdentification`) and says nothing about *why*
-  those hosts were chosen. A Selector over reported attributes survives re-identification and is
-  self-documenting — and it is already the project's vocabulary.
+- **Keep the name as an optional field defaulting to the Agent type.** Smallest diff, and it leaves
+  room for two artifacts of one type under different names. Rejected: the room is the problem. It
+  is the degree of freedom that makes `resolve` need a ranking, and an optional identity field is
+  one every operator must decide about once and no operator wants to.
+- **Identity `(name, version)`, with the type as an attribute.** Rejected: the type is what decides
+  fit, and an attribute is editable. Re-typing published bytes to a different kind of Agent is
+  exactly what immutable identity forecloses.
+- **Identity `(name, Agent type, version)`, with a Selector on the package.** It keeps a second
+  identity beside the type and puts aim on the object; both are what the Context above shows to
+  produce a ranking no operator can read.
+- **Keep the `addon` flag against a future need.** The Baseline has the concept and dropping it
+  narrows what this Server can express. Rejected under §1 (YAGNI): no Client this project ships
+  installs one, no artifact it builds is one, and the flag's only effect would be a byte in a hash
+  and a branch in resolution. It can come back with the Client support that would give it meaning —
+  named here as a follow-up topic, not a number.
+- **Keep a kind byte in the hash preimage anyway, for stability.** With a deployed fleet this would
+  be mandatory: dropping it changes every package hash, and the Client compares exactly that hash,
+  so every host would re-download software it already runs. With an empty store it buys nothing and
+  leaves an unexplained constant in a hash function for the next reader to fear. Rejected *because*
+  the store is empty — and the reason is recorded so a future reader does not restore the byte by
+  cargo cult.
+- **Keep `migrate_legacy` and add a second stage.** The conservative reading, and wrong here: a
+  migration with no source is untestable in the only way that matters and untrue as documentation.
+  Deleting it is a decision, so it is written down rather than done quietly.
+- **One opaque Package ID (a hash) instead of two path segments.** The ID would appear in URLs, file
+  names and the UI while meaning nothing to a human, and a bounded token grammar buys the same
+  safety while keeping `telegraf@1.30.0` readable in a directory listing.
 
-- **Keep the accreted model and only add the missing staging** (make in-place replacement stage
-  too — ADR-0028's rejected stricter reading). Smallest change, and it fixes only one of the three
-  seams: versions stay per-variant, the untyped window stays, and rollback stays a hidden single
-  step. Rejected: the requirement is the reorganisation, and each seam traces to the same root —
-  the store has no object for a release.
-- **Version per variant** (ADR-0017's shape). It permits a per-platform rollout of different
-  versions under one name without multiple Sets. Rejected: multiple Sets express that case
-  explicitly (two Sets, two Selectors) — and the implicit form is indistinguishable from a
-  half-finished upload, which is the ambiguity operators actually hit.
-- **Identity without the Agent type** — `(name, version)`, type as an attribute. One fewer path
-  segment, and two Sets differing only by type are odd. Rejected: the requirement names the triple;
-  the type is as constitutive of "what is this artifact" as the version (ADR-0017's whole point),
-  and an attribute is editable — retyping published bytes to a different kind of Agent is exactly
-  the mistake immutable identity forecloses.
-- **Refuse every same-specificity tie instead of greater-version-wins.** Simpler rule, no version
-  ordering needed, fully explicit. Rejected, narrowly: it makes the natural end state of every
-  rollout — old and new both published fleet-wide — a conflict that stops offers entirely, so
-  operators must retract the old version at the precise moment they finish a rollout, and the
-  rollback target vanishes with it. Greater-version-wins keeps the old version harmlessly
-  published as the standing fallback; the tie rule still catches genuinely incomparable versions.
-- **Mutable entries on published Sets** (in-place replacement). Rejected: it is the hole in
-  ADR-0028's gate, restated; with cheap versioned Sets the ordinary upgrade has a first-class shape,
-  and immutability is what lets an operator read a published Set's hash as a fact.
-- **A Set may be published empty.** Rejected: the requirement says one or more entries, and an
-  empty published Set is an offer of nothing that still occupies a name and a version.
-- **Keep exactly one previous version per package** (a hidden `previous` slot and a `/rollback`
-  route). It bounds disk at twice a package's size. Rejected: versions are first-class Sets, and a
-  rollback is a publication move over any published version, not a hidden single step.
-- **Automatic pruning of superseded Sets.** Keeping one version bounds disk; Sets do not. Rejected
-  *here*: retention is the same broad question ADR-0026 deferred for Agents and ADR-0010 for version
-  directories, and deciding it as a footnote would repeat the mistake those ADRs declined. Deleting a
-  Set is one request; the follow-up names the policy question.
-- **Encode the triple as one opaque Set ID** (a hash) instead of three path segments. Robust
-  against any character in any field. Rejected: the ID would appear in URLs, file names, and the
-  UI while meaning nothing to a human; a bounded token grammar (point 5) buys the same
-  safety and keeps `otelcol@3.1.0@otelcol-contrib` readable in a directory listing.
+### The Deployment
+
+- **The empty Selector as a catch-all Deployment that loses to every other.** Restores the
+  base-plus-canary shape with one bounded rule instead of general specificity, and guarantees no
+  host is ever orphaned. Rejected on two counts. It is a ranking — one level deep, but the very
+  specificity ranking this decision withdraws — and it makes *forgetting* a field the way to target
+  the whole fleet, which runs against every gate this project has built. It also makes overlap
+  structural: the base overlaps everything by construction, so a write-time check could never
+  exist, which is precisely the dead end point 10 describes.
+- **Inequality in Selectors (`key != value`).** The most expressive fix, and not far-fetched —
+  Kubernetes label selectors have `NotIn`/`DoesNotExist`. Rejected under §1: the operator must keep
+  both Selectors in sync by hand (a third channel means editing the base Deployment's exclusions),
+  which is the maintenance burden membership models exist to remove; overlap stops being visible by
+  eye; and it changes a Specification concept for Configurations too, for a need the partition
+  already covers. Named as a follow-up topic if the partition proves too rigid.
+- **Keep specificity, on the Deployment.** The smallest change, and it preserves the canonical
+  fleet-wide-plus-canary shape. Rejected: it preserves the thing that makes the model unreadable.
+  "Which Deployment does this host belong to" would still be a computation over all Deployments
+  rather than a fact about one, and the requirement is a partition.
+- **Naming a Deployment in the per-Agent act *is* the disambiguation** (point 17
+  inverted). Tempting, and the operator has after all said which one they mean. Rejected: it makes
+  the conflict permanently liveable, and a rule that can be waived per Agent is not a partition.
+- **Freeze a released channel whole ("immutable membership").** Rejected: it forbids updating a
+  fleet at all, because swapping the version a channel holds is how a rollout proceeds. The tests
+  of point 18 catch exactly this.
+- **A separate ADR for the one-Deployment-per-Agent rule.** Rejected: that rule *is* what makes a
+  Deployment a partition rather than a label, and split out, this decision could not state what it
+  decided.
+- **Deployments carry Configurations too.** The tidier end state — one Selector, one act, one object
+  per channel — and where this is likely to go. Deferred deliberately: it is a second lifecycle with
+  its own revision model (ADR-0028/0061), and folding it in here would double a change that is
+  already large. Named as a follow-up topic.
+- **Signatures stay on the artifact; the Deployment only names the required key.** Smallest
+  signature change and no re-signing when a Package moves. Rejected: it leaves an attribute on the
+  Package, which holds only entries (point 3), and it puts the release decision back on
+  the bytes.
 
 ## Sources / Prior art
 
@@ -300,108 +339,99 @@ version)**, immutable in its bytes while published, and offered to nobody until 
   *for this Agent*), which is both the constraint resolution satisfies and the licence for holding
   what is not offered.
 
-- [`opamp-go`](https://github.com/open-telemetry/opamp-go) — checked as the behavioural oracle: its
-  example Server only logs `PackagesAvailable`/`ServerProvidedAllPackagesHash` and never offers a
-  package, so there is no upstream targeting behaviour to copy. The model is ours to choose, within
-  what the protocol already provides.
+  It also carries `signature` per downloadable file, so the Deployment changes only where the
+  Server reads that field from. The stable wire name of point 2 is what the per-Agent
+  map key has to be, and point 4 makes the single top-level package structural rather
+  than enforced.
 
-- **[OCI Image Index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)** —
-  already ADR-0017's model, and an even closer fit for Sets: one *reference* (name + tag ≈ name +
-  version) resolves to a manifest list with one entry per required `platform` object, each naming
-  its digest — a Set with entries, almost field for field. Registries also settle point
-  7's rule: a pushed manifest's digest is immutable; moving consumers is done by moving
-  references (tags/publication), not by rewriting bytes.
+- **[OCI Image Index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)** — a
+  *reference* is `name:tag`, and the name is the software's identity, not a label beside it. One
+  manifest list, one entry per `platform` object, each naming its digest.
 - **[Debian repository format](https://wiki.debian.org/DebianRepository/Format)** /
-  **[RPM repositories](https://rpm-software-management.github.io/)** — a released package is
-  `(name, version, architecture)` with per-file checksums and detached signatures, and a *suite*
-  (stable/testing) decides availability separately from presence in the pool: presence is not
-  publication, which is ADR-0028's gate and point 7 in thirty-year-old production form.
-- **[BindPlane rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/rollouts)**
-  — staged versions released by an explicit act, already ADR-0028's source; the versioned-Set
-  shape extends the same separation from configurations to artifacts.
+  **[RPM](https://rpm-software-management.github.io/)** — a released package is
+  `(name, version, architecture)`; the name *is* what the software is, and nothing carries a second
+  identity beside it. Thirty years of the shape the Package converges on.
+- **[WSUS update approval](https://learn.microsoft.com/en-us/windows-server/administration/windows-server-update-services/deploy/3-approve-and-deploy-updates-in-wsus)**
+  — approval binds a concrete update to a **computer group**; membership, never exclusion. ADR-0028
+  took the approval act from here; the Deployment takes the group.
+- **[Jamf Pro patch policies](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Patch_Policies)**
+  — deployment requires an explicit policy binding one specific version to an explicit **scope**,
+  and a scope is built from groups. Again membership.
+- **[Bindplane rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/rollouts)**
+  — the source ADR-0028 already reads: edits create a version, deployment starts on an
+  explicit act, rollback is rolling out a pinned historical version. Point 16 keeps that
+  shape with a Deployment as the thing named.
+- **[Argo CD manual sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)** — desired
+  state stored, drift *displayed*, nothing applied until an operator presses Sync. The model for the
+  waiting view, which points 12 and 14 extend to "belongs to no Deployment".
+- **[Kubernetes label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/)**
+  — the counter-model weighed in Alternatives: set-based selectors *do* have `NotIn` and
+  `DoesNotExist`, and Kubernetes still expects membership labels for grouping. Read as evidence that
+  negation is possible and that the ecosystem does not lean on it for cohorts.
 
-- [ADR-0012](0012-selector-targeted-configurations-and-rest-api.md) — the Selector semantics
-  this reuses verbatim (every pair must equal a reported attribute; an empty Selector matches all),
-  so an operator learns one targeting mechanism, not two.
-- [ADR-0015](0015-package-delivery-for-managed-processes.md) — the delivery, verification, and
-  health-gating this leaves untouched; only *who is offered what* is decided here.
-
-- This repository: [ADR-0017](0017-package-artifacts.md) (file-or-source entries, kept),
-  [ADR-0009](0009-version-baking-comparison-and-display.md) (the version
-  comparison point 8 ranks by), [ADR-0017](0017-package-artifacts.md) (structure superseded,
-  guarantees kept), [ADR-0028](0028-a-rollout-is-an-explicit-act.md) (the gate,
-  kept and closed).
+- This repository: ADR-0010 (the name grammar, the Deployment's), ADR-0012 (Selector semantics,
+  reused verbatim), ADR-0015 (delivery and verification, amended in where the signature comes
+  from), ADR-0017 (source entries, kept, without a per-entry signature; the platform and type
+  guarantees kept, structure amended), ADR-0023 (labels, unchanged and now load-bearing), ADR-0028
+  (the act, amended), ADR-0022 (the Client's own Agent type is `supervisor`, which is why the
+  derived name needs no exception), ADR-0034 (the version test, point 1's tie-break withdrawn).
 
 ## Consequences
 
-- Positive: a binary rollout can be staged — a Selector on `role`, `host.name`, or an operator
-  attribute reaches five hosts first, and widening it is one API call. This is goal 9 applied to
-  software rather than only to configuration.
-- Positive: a heterogeneous fleet stops needing per-host wiring. `host.arch` and `os.type` are
-  already reported, so one package per platform, each with a Selector, updates every machine from
-  the Server — and the UI can show which Agents a package targets, as it already does for
-  Configurations.
-- Negative / trade-offs: `all_packages_hash` is per-Agent, so the Server cannot keep one
-  precomputed aggregate. The cost is small (a hash over the matching set per exchange) but it is a
-  real change to the gate that stops re-offering, and getting it wrong means either a re-offer loop
-  or a missed update — it needs its own test.
-- Negative / trade-offs: **this breaks every `client.toml` that names a package.** `package = "…"`
-  is refused at startup and must become `accepts_packages = true`, with the artifact choice moved
-  into a Selector on the Server. A one-line edit per host, but a required one, and a Client that is
-  updated before its Server has Selectors configured will accept an offer chosen by an empty
-  Selector — i.e. the fleet-wide package — which is safe, but worth saying out loud in the release
-  note.
-- Negative / trade-offs: specificity is a precedence rule, and precedence rules have to be learned.
-  "The Selector naming more attributes wins" is simple, but an operator who expects "last write
-  wins" or "most recently uploaded wins" will be surprised once.
-- Negative / trade-offs: a tie leaves an Agent with no package at all until someone narrows a
-  Selector. It is reported on the Agent in the fleet view and in the Server's log, but it is a
-  state an operator can reach by widening a Selector that was fine before, and nothing warns at the
-  moment of the change — only afterwards, on the Agents it affects.
-- Negative / trade-offs: a Selector that stops matching an Agent does **not** uninstall anything —
-  the Agent keeps running what it installed. That is deliberate (the protocol has no "revert to the
-  previous artifact" and a silent downgrade would be worse), but "remove from the Selector" reading
-  as "leave it as it is" will surprise someone.
+- **Positive:** the answer to "what is this artifact" is readable off one object with two fields.
+  Two Packages of one Agent type at one version are unrepresentable rather than a conflict to
+  rank. `resolve` has no grouping pass, no specificity comparison and no addon partition, and the
+  tree carries no migration and publication-seed machinery.
+- **Positive:** there is no ranking — no specificity comparison, no version tie-break and no
+  unbreakable-tie conflict. A channel is a thing an operator can name, look at, sign, and release
+  in one act, and a Deployment's reach is a fact about the Deployment rather than a number computed
+  against every other one. **Stated precisely, because it is easy to overclaim:** what this buys is
+  not a structural guarantee that one Deployment matches — two Deployments may still both name
+  `channel = "stable"` alongside a differing second key and collide. It is that such a collision is
+  **refused and named** instead of silently resolved by a rule nobody can see. Loud beats ranked;
+  the partition is a discipline on top, not a proof.
+- **Negative / trade-offs:** two artifacts of one Agent type at one version — two Collector builds
+  at `0.109.0`, say — cannot coexist; they must differ in type or in version, which is what their
+  `service.name` already says about them. The absence of the kind flag narrows this Server against
+  the Baseline. And an operator who typed the Client's `[self_update] package` as something other
+  than an Agent type will see that Client refuse the offer, visibly, on its fleet row.
+- **Negative / trade-offs:** **there is no "roll out to everyone".** A fleet-wide delivery requires
+  every Agent to carry the same channel value, and a freshly enrolled host belongs to no Deployment
+  until it is labelled. That is a real discipline; it belongs to provisioning rather than to the
+  Server, and it is the price of a partition. The same Package in two Deployments must be signed in
+  each, even though Ed25519 over the same bytes with the same key yields the same signature —
+  duplication that buys a Package holding nothing but its entries.
+- **Follow-ups (by topic, never by number):** whether the Client's `[self_update] package` key
+  should be renamed now that its value is an Agent type; whether addons return once a Client can
+  install one; a retention policy for superseded Packages, which stays open; whether a
+  Configuration should be aimed by the Deployment that already aims its Agent's Package, instead of
+  carrying a Selector of its own — the two-meanings-of-Selector question this change defers;
+  inequality in Selectors, if the partition proves too rigid; refusing an overlapping Selector at
+  write time rather than at resolution, once a fleet is large enough that a conflict is expensive
+  to notice.
 
-- Follow-ups: a bulk restart across a selected set of Agents, which the fleet view's unused
-  checkboxes already suggest.
+### The wording the specification needs
 
-- Positive: **a release is one object.** Five platforms' artifacts under one identity, staged
-  together, published together, with one version — the ambiguity "rollout in progress or forgotten
-  upload?" stops being representable.
-- Positive: **the publication gate has no exception left.** Nothing an operator saves — new Set,
-  new entry, replaced draft entry — reaches any Client until the publication act, and published
-  bytes cannot change underneath the fleet.
-- Positive: **rollback is visible and multi-step.** The store openly holds every version; falling
-  back is retracting a Set, the target is any version still published, and the fleet view can show
-  the whole ladder.
-- Positive: no untyped state, no late-typing window, and the type can never disagree with itself
-  across platforms.
-- Positive: the UI ships the model in the same change, and its master–detail shape mirrors the
-  store one to one — the table is the Set list, the form is one Set, and every constraint the form
-  shows (frozen identity, entries locked while published) is the Server's own rule, not a second
-  implementation of it.
-- Negative / trade-offs: **the largest package-API break yet** — every route under
-  `/api/v1/packages` changes shape, `/type` and `/rollback` disappear, and every script and the
-  bundled UI must follow. Pre-1.0, and the alternative is carrying two models; but ADR-0017 called
-  its four route changes the largest break since ADR-0012, and this is larger.
-- Negative / trade-offs: **disk is unbounded by design.** One remembered version would cap a
-  package at twice its size; Sets accumulate until deleted, which is the "artifact registry by
-  accident" that cap was meant to prevent — accepted knowingly, because the registry role is now
-  explicit and manual deletion is one request, with retention named as the follow-up.
-- Negative / trade-offs: **greater-version-wins puts semantics on the version string.** Two
-  equally aimed Sets are ordered by ADR-0009 comparison, so a fleet whose versions are not
-  comparable (Foreign Agents numbering freely) falls to the conflict rule and must keep Selectors
-  disjoint or publication exclusive. The rule is mechanical but it is one more thing the manual
-  must state plainly.
-- Negative / trade-offs: adding a platform to a published Set means retract → add → republish — a
-  window in which the Set reaches nobody. Rare (a release is normally built whole), and the
-  alternative (mutable published Sets) reopens the gate; but it is a real two-minute cost on a
-  case in-place upload handles in one request.
-- Negative / trade-offs: migration turns each package into as many Sets as it had distinct
-  variant versions, and an untyped stored package **fails startup** until the file is removed —
-  ADR-0017's medicine, applied once more, with the same operator cost.
-- Follow-ups: a retention policy for superseded Sets (by topic, with the Agent-record and
-  version-directory retention questions it joins); surfacing the version ladder per name in the
-  bundled UI; and extending the ADR-0026 storage-port pattern to this store once that ADR's
-  precedent stands.
+`docs/SPECIFICATION.md` defines **Package** at line 242, has no term for the Deployment, and defines
+**Selector** (line 239) as serving a configuration alone. This decision does not change it
+unilaterally — the specification outranks every ADR (AGENTS.md §3.4). The conflict is raised here,
+with the wording this decision needs, to be accepted or amended together with the decision:
+
+> - **Package** — a versioned, downloadable software artifact an Agent installs, identified by the
+>   **Agent type it is built for and its version**; its display name is derived from the two. It is
+>   verified against a content hash, and against a signature where one is configured — the signature
+>   travelling with the Deployment that offers it rather than with the artifact record. The Server
+>   offers Packages; an Agent reports the status of each. This is how the Server updates an agent's
+>   software, not only its configuration.
+>
+> - **Selector** — the rule by which the Server addresses a **subset** of the fleet for a
+>   Configuration or a Deployment, so a change reaches the matching Agents and leaves the rest
+>   running what they already run. One mechanism with two subjects, not two mechanisms.
+>
+> - **Deployment** — a named set of Packages, aimed at a subset of the Fleet by a Selector and
+>   carrying the signature of each Package's artifact. It is the only thing that is rolled out. An
+>   Agent belongs to **at most one**: two Deployments matching one Agent is a conflict, and that
+>   Agent is offered nothing new until it is resolved.
+
+**Fleet** (line 159) is deliberately left as it stands — all Agents managed by the Server. That the
+word was already taken is why this object is called a Deployment.
