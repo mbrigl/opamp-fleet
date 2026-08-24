@@ -72,7 +72,7 @@ Four things it does on every run:
   the host is unbroken ([ADR-0018](../adr/0018-packages-imported-from-a-url.md)).
 - **It uploads the agent's default configuration with the package** — but only the ones the
   Server does not already have, see [below](#the-default-configuration).
-- **It never distributes anything.** Uploading stores a Set and saves a Configuration; reaching a
+- **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching a
   host is the rollout act, which stays yours
   ([step 6 of the walkthrough](rollout.md#6-roll-it-out)).
 
@@ -153,7 +153,7 @@ $ opamp-package-fetch --agent telegraf --version 1.39.3 \
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
-| `--server <url>` | Create the Set and upload each artifact as its platform's entry. Cannot be combined with `--no-upload`. |
+| `--server <url>` | Create the Package and upload each artifact as its platform's entry. It stops there: putting the Package in a deployment is an operator act, and the tool prints the call that does it. Cannot be combined with `--no-upload`. |
 | `--no-upload` | Write the artifacts and stop, without the upload question. |
 
 `--version` names the *release to fetch*, not this tool's own version — `--version 1.19`, not a
@@ -235,8 +235,8 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 
 | What it answers | What to do |
 |---|---|
-| `409 … immutable` | The Set is already rolled out to an Agent, so its entries are fixed ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Set first. |
-| `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Set you no longer roll out, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
+| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Package first. |
+| `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
 | `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |
 
@@ -249,12 +249,13 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 ### What it does not do
 
 - **It does not sign.** Signing needs a key, and where that key lives is a decision a tool should
-  not make silently — use [`opamp-package-sign sign`](#opamp-package-sign) and pass the signature
-  on the upload's `signature` query parameter.
-- **It does not roll out.** See above; that act is the operator's.
-- **It does not aim.** A Set arrives with no Selector, which means *every* Agent of its type once
-  rolled out. Narrow it first if that is not what you want
+  not make silently — use [`opamp-package-sign sign`](#opamp-package-sign) and record the
+  signature on the deployment that offers the bytes
   ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)).
+- **It does not aim, and it does not roll out.** A Package reaches a host only once a Deployment
+  holds it, and which channel that is is not a decision a fetch tool should make. What it stores sits
+  in the store, visible as `in no deployment`, until you put it somewhere
+  ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)); the tool prints the call.
 
 ### Prerequisites and limits
 

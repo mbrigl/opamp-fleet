@@ -17,7 +17,7 @@
 //! # put that hex in the Client's `[packages] verification_key`
 //! sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
 //! sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
-//! curl -X PUT "http://<server>:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
+//! curl -X PUT "http://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
 //!      --data-binary @promtail-3.0.0.tar.gz
 //! ```
 //!
@@ -95,7 +95,7 @@ enum Command {
         #[arg(long)]
         archive_key: Option<String>,
     },
-    /// Print an artifact's SHA-256 (hex) — the `sha256` of `PUT /api/v1/packages/{name}/source`
+    /// Print an artifact's SHA-256 (hex) — the `sha256` of `PUT …/entries/<os>/<arch>/source`
     /// for an artifact this Server will not hold.
     Sha256 {
         /// The artifact to hash, exactly as the Agents will fetch it.

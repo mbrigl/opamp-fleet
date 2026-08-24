@@ -488,11 +488,13 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
     if server.is_none() {
         eprintln!(
-            "\nNothing was uploaded. To do it later, create the Set and PUT each artifact:\n  \
+            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, and \
+             put it in the deployment that should carry it:\n  \
              curl -X PUT -H 'Content-Type: application/json' -d '{{}}' \\\n       \
-             <server>/api/v1/packages/{name}/{name}/{version}\n  \
+             <server>/api/v1/packages/{name}/{version}\n  \
              curl -X PUT --data-binary @<artifact> \\\n       \
-             \"<server>/api/v1/packages/{name}/{name}/{version}/entries/<os>/<arch>\"",
+             \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>\"\n  \
+             curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}",
             name = source.service_name,
             version = version
         );
@@ -2151,7 +2153,7 @@ async fn upload(
     plan: &Plan,
     artifact: &Path,
 ) -> Result<(), String> {
-    let set = format!("{server}/api/v1/packages/{service_name}/{service_name}/{version}");
+    let set = format!("{server}/api/v1/packages/{service_name}/{version}");
     eprintln!("  creating the Set at {set} …");
     let response = http()?
         .put(&set)
@@ -2171,7 +2173,12 @@ async fn upload(
         Err(e) => return Err(refusal_behind(&entry, &e).await),
     };
     expect_ok(response, &entry).await?;
-    eprintln!("  stored as the {}/{} entry — not distributed: press the rollout when it should reach hosts", plan.os, plan.arch);
+    eprintln!(
+        "  stored as the {}/{} entry — and it reaches nobody yet: a package aims at nothing by \
+         itself (ADR-0095). Put it in a deployment when it should reach hosts:\n    \
+         curl -X PUT <server>/api/v1/deployments/<ring>/packages/{}/{}",
+        plan.os, plan.arch, service_name, version
+    );
     Ok(())
 }
 
