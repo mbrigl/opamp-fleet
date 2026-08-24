@@ -123,3 +123,5 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | [0092](0092-icinga-2s-block-keeps-only-what-enrolment-needs.md) | Icinga 2's block keeps only what enrolment needs | 🟢 accepted |
 | [0093](0093-the-glpi-agent-gets-a-kind-of-its-own.md) | The GLPI Agent gets a kind of its own | 🟢 accepted |
 | [0094](0094-telegraf-gets-a-kind-of-its-own.md) | Telegraf gets a kind of its own | 🟢 accepted |
+| [0095](0095-a-package-is-what-an-agent-type-runs-at-a-version.md) | A Package is what an Agent type runs at a version — the name and the aim leave it | 🟡 proposed |
+| [0096](0096-a-deployment-aims-packages-at-a-channel.md) | A Deployment aims Packages at a channel, signs them, and is the only thing rolled out — and an Agent belongs to at most one | 🟡 proposed |
