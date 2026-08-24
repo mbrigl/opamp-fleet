@@ -40,33 +40,53 @@ max_message_size_bytes = 67108864
 # default heartbeat of 30 s, because one missed beat is a lost packet.
 stale_after_secs = 90
 
-# Where software packages are persisted (ADR-0015, organised as Sets by ADR-0052): one directory
-# per Set, holding its metadata and one artifact per platform. A Set is identified by its NAME,
-# the AGENT TYPE it is built for, and its VERSION — stated at creation, never edited; a new
-# version is a new Set. The type is compared raw against the `service.name` the Agents report
-# (ADR-0034), so spell it exactly — a Client updating itself is typed `supervisor`.
+# Where software packages are persisted (ADR-0015, reorganised by ADR-0095 and ADR-0096). Two
+# objects share this directory, and the split is the whole of the model:
 #
-# Create a Set (always a draft) with
-# PUT /api/v1/packages/{name}/{agent_type}/{version} — body {"selector": {...}, "addon": false}.
-# Then store one entry per platform: upload an artifact with
-# PUT /api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body,
-# optional Ed25519 signature=<hex>), or point the entry at an artifact hosted elsewhere with
-# PUT .../entries/{os}/{arch}/source (ADR-0018: url + sha256, optional headers for a private
-# source); the Server stores only that reference and never downloads it. No two entries share a
-# platform — writing one again replaces it, while the Set is a draft.
+#   <packages_dir>/<agent type>@<version>/   a PACKAGE: what an Agent type runs at a version.
+#                                            Its identity is those two tokens and nothing else —
+#                                            no name of its own, no Selector, no kind flag —
+#                                            holding one artifact per platform. It aims at nobody
+#                                            and is never rolled out.
+#   <packages_dir>/deployments/<name>.json   a DEPLOYMENT: a name, the channel its Selector aims at,
+#                                            at most one Package per Agent type, and each
+#                                            artifact's Ed25519 signature. The only thing rolled
+#                                            out.
 #
-# Aim the Set with its Selector (ADR-0017), editable in every state via PUT .../selector: an empty
-# Selector targets every Agent of the Set's type; among Sets of one name the most specific
-# Selector wins, and among equally specific ones the greater version — so a canary ring is one
-# Selector edit, and finishing the rollout is widening it.
+# The Agent type is compared raw against the `service.name` the Agents report (ADR-0034), so spell
+# it exactly — a Client updating itself is typed `supervisor`.
 #
-# Finally release it with PUT .../publication — body {"published": true} (ADR-0043). SAVING NEVER
-# DISTRIBUTES: a Set is a draft, offered to nobody, until this call — and publishing an empty Set
-# is refused. While a Set is published its entries are immutable (retract it to change them, or
-# create the next version as its own Set). {"published": false} withdraws the offer; nothing is
-# uninstalled, and the fleet falls back to the newest version still published under the same name
-# — which is what a rollback is now: a publication move, not a hidden history (ADR-0052 replaces
-# ADR-0019's one-step rollback).
+# Create a Package with PUT /api/v1/packages/{agent_type}/{version} — the body has no writable
+# field, so {} is all of it. Then store one entry per platform: upload an artifact with
+# PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body), or point
+# the entry at an artifact hosted elsewhere with PUT .../entries/{os}/{arch}/source (ADR-0018:
+# url + sha256, optional headers for a private source); the Server stores only that reference and
+# never downloads it. No two entries share a platform — writing one again replaces it.
+#
+# Then put it in a channel and sign it there:
+#   PUT  /api/v1/deployments/{name}                    body {"selector": {"channel": "stable"}}
+#   PUT  /api/v1/deployments/{name}/packages/{agent_type}/{version}
+#   PUT  /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}
+#   POST /api/v1/deployments/{name}/rollout               <- THE ONLY CALL THAT DISTRIBUTES
+#
+# SAVING NEVER DISTRIBUTES: everything above the rollout stores. An Agent that enrols, or is
+# labelled into the channel, afterwards waits for an act of its own.
+#
+# An Agent belongs to AT MOST ONE Deployment. Two claiming it is a conflict — it is offered
+# nothing new and the fleet view names both — so a Selector may not be empty and there is no
+# fleet-wide default. A Selector is equality and cannot say "not", so channels are a partition over
+# an attribute every Agent carries. The Server prescribes NO key — `channel` (which stream of
+# versions a host follows), `region` (where it runs) and `tenant` (whose it is) are examples, not a
+# schema. Set it in the host's [attributes], or as a Server label (PUT /api/v1/agents/<uid>/labels),
+# which needs no access to the host.
+#
+# A canary is two channels holding different versions. Finishing the rollout is giving the stable
+# channel the canary's version and pressing once more — NOT widening the canary channel, which would
+# have both claim the same hosts.
+#
+# While a Package is rolled out to an Agent its entries are immutable; ship a change as the next
+# version, which is a new Package. Taking a bad version back is not a rollout: the fleet only
+# moves forward, and what reverses a release is the host's own health-gated rollback.
 #
 # The download endpoint sits on the unauthenticated REST plane — the content hash and signature
 # are what protect an installed binary, so sign packages and configure the key on the Client.

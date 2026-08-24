@@ -38,6 +38,38 @@ fn this_host() -> Platform {
 use client::selfupdate::EXIT_RESTART_FOR_UPDATE;
 use client::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 
+/// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
+/// name. Aim belongs to the Deployment now (ADR-0096): a Package reaches nobody by itself, so a
+/// test that wants one delivered has to say which ring the host is in — which is the model.
+fn ring_holding(state: &server::fleet::AppState, id: &server::packages::PackageId) -> String {
+    ring_holding_signed(state, id, None)
+}
+
+/// The same, recording the artifact's signature on the ring — where a signature lives since
+/// ADR-0096. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
+/// ring is what has to carry it.
+fn ring_holding_signed(
+    state: &server::fleet::AppState,
+    id: &server::packages::PackageId,
+    signature: Option<(&server::packages::Platform, Vec<u8>)>,
+) -> String {
+    let deployments = state.deployment_store().expect("deployments are armed");
+    let selector =
+        std::collections::BTreeMap::from([("service.name".to_string(), id.agent_type.clone())]);
+    deployments.put("stable", selector).expect("ring");
+    // `replace`: a ring holds one Package per Agent type, so pointing it at another
+    // version is a swap, which is exactly what a test walking through versions is doing.
+    deployments
+        .put_package("stable", id, true)
+        .expect("package into the ring");
+    if let Some((platform, bytes)) = signature {
+        deployments
+            .put_signature("stable", id, platform, bytes)
+            .expect("signature onto the ring");
+    }
+    "stable".to_string()
+}
+
 /// The version directory laid out before the update. Joined one component at a time, never as
 /// `versions/<name>`: this test builds the Windows pointer with `mklink`, a `cmd` builtin that
 /// reads an embedded `/` as the start of a switch.
@@ -59,7 +91,9 @@ async fn spawn_server(store: PackageStore) -> (std::net::SocketAddr, Arc<AppStat
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store, String::new()))),
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
     );
     // The configuration directory only has to outlive the Server, which outlives the test.
     std::mem::forget(dir);
@@ -420,12 +454,10 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     // The Client's own Agent reports the constant type `supervisor` (ADR-0033, ADR-0077), and a Set
     // reaches only Agents of its type — the type is part of its identity (ADR-0052). Its name is
     // the same string, which is what the consent below is narrowed to.
-    let set = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
+    let set = server::packages::PackageId::new("supervisor", version).expect("package id");
+    store.create(&set).expect("create package");
     store
-        .create_or_update(&set, Default::default(), false)
-        .expect("create set");
-    store
-        .put_entry(&set, &this_host(), None, artifact)
+        .put_entry(&set, &this_host(), artifact)
         .expect("put entry");
 
     let (addr, state) = spawn_server(store).await;
@@ -437,12 +469,12 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 
     let mut service = Supervised::start(&program, &config);
 
-    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, and it needs the
+    // A saved Package reaches nobody (ADR-0061): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
     wait_until("the rollout act to reach the agent", || {
         service.tend();
         state
-            .rollout_package(&set)
+            .rollout_deployment(&ring_holding(&state, &set))
             .ok()
             .filter(|assigned| *assigned >= 1)
             .map(|_| ())
@@ -518,12 +550,10 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     let artifact = std::fs::read(newer).expect("read the newer client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    let set = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
+    let set = server::packages::PackageId::new("supervisor", version).expect("package id");
+    store.create(&set).expect("create package");
     store
-        .create_or_update(&set, Default::default(), false)
-        .expect("create set");
-    store
-        .put_entry(&set, &this_host(), None, artifact)
+        .put_entry(&set, &this_host(), artifact)
         .expect("put entry");
 
     let (addr, state) = spawn_server(store).await;
@@ -578,7 +608,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     wait_until("the rollout act to reach the agent", || {
         service.tend();
         state
-            .rollout_package(&set)
+            .rollout_deployment(&ring_holding(&state, &set))
             .ok()
             .filter(|assigned| *assigned >= 1)
             .map(|_| ())
@@ -644,12 +674,10 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
     let set_of = |version: &str| {
-        let id = server::packages::SetId::new("supervisor", "supervisor", version).expect("set id");
+        let id = server::packages::PackageId::new("supervisor", version).expect("package id");
+        store.create(&id).expect("create package");
         store
-            .create_or_update(&id, Default::default(), false)
-            .expect("create set");
-        store
-            .put_entry(&id, &this_host(), None, b"not a client".to_vec())
+            .put_entry(&id, &this_host(), b"not a client".to_vec())
             .expect("put entry");
         id
     };
@@ -688,19 +716,25 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     assert_eq!(reported_status, "Installed");
 
     assert_eq!(
-        state.rollout_package(&same).expect("the act runs"),
+        state
+            .rollout_deployment(&ring_holding(&state, &same))
+            .expect("the act runs"),
         0,
         "a Set at the version this Client already runs must reach nobody (ADR-0076)"
     );
     assert_eq!(
-        state.rollout_package(&older).expect("the act runs"),
+        state
+            .rollout_deployment(&ring_holding(&state, &older))
+            .expect("the act runs"),
         0,
         "and an older one must never be installed over a newer Client"
     );
     // The control: what the gate refuses is the version, not this Client — a greater Set still
     // reaches it, which is the whole point of being able to update a fleet at all.
     assert_eq!(
-        state.rollout_package(&newer).expect("the act runs"),
+        state
+            .rollout_deployment(&ring_holding(&state, &newer))
+            .expect("the act runs"),
         1,
         "a greater Set still reaches this Client"
     );
@@ -712,33 +746,36 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     );
 }
 
-/// The name in `[self_update]` is the whole of the protection (ADR-0020): a package with an empty
-/// Selector reaches every consenting Agent, and one written over the Client would take the host
-/// out of reach. Anything not called what that section says is refused and reported — never
-/// applied, and never a reason to restart.
+/// The name in `[self_update]` is the whole of the protection on this side of the wire (ADR-0020):
+/// anything not called what that section says is refused and reported — never applied, and never a
+/// reason to restart.
+///
+/// Since ADR-0095 the *offered* name is the Agent type itself, so the mistyped-artifact case this
+/// test used to stage — a Collector binary typed `supervisor` but named `otelcol` — is no longer
+/// representable: a Package of type `supervisor` is always offered under the name `supervisor`.
+/// What is still reachable, and what this test now drives, is the operator error ADR-0095 names in
+/// its Consequences: `[self_update] package` set to something that is *not* this Client's Agent
+/// type. The Client then refuses every offer it will ever get, visibly, on its fleet row — which
+/// is the behaviour that has to be observable, since nothing else would say so.
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     let version = version_of(&client);
 
-    // A perfectly good Client artifact — under a name this Client did not consent to.
+    // A perfectly good Client artifact, correctly typed — offered to a Client whose
+    // `[self_update] package` names something else.
     let artifact = std::fs::read(&client).expect("read the client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // Typed — and numbered — so that it *does* reach the Client, which is the only way this test
-    // can still test what it is named for. ADR-0034 makes the Server refuse to send a package of
-    // another type, and ADR-0076/ADR-0079 one that is not an upgrade over the version this Client
-    // reports running; the guards are independent by design, so the case exercised here is the one
-    // where neither of the Server's fires: an operator uploads a Collector artifact, mistypes its
-    // agent type as the Client's, and numbers it higher than anything released. The Client's name
-    // check (ADR-0020) is then all that is left.
-    let set = server::packages::SetId::new("otelcol", "supervisor", NEWER_VERSION).expect("set id");
+    // Typed as this Client's own Agent type and numbered above what it runs, so that neither of
+    // the Server's guards fires — ADR-0034's type check nor ADR-0083's upgrade test. The offer
+    // arrives; the Client's own name check (ADR-0020) is then all that is left, and it is looking
+    // at a configured name that does not match.
+    let set = server::packages::PackageId::new("supervisor", NEWER_VERSION).expect("package id");
+    store.create(&set).expect("create package");
     store
-        .create_or_update(&set, Default::default(), false)
-        .expect("create set");
-    store
-        .put_entry(&set, &this_host(), None, artifact)
+        .put_entry(&set, &this_host(), artifact)
         .expect("put entry");
 
     let (addr, state) = spawn_server(store).await;
@@ -747,16 +784,16 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("supervisor.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
+    std::fs::write(&config, config_toml(addr, &state_dir, "otelcol")).expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
-    // A saved Set reaches nobody (ADR-0061): the rollout act releases it, and it needs the
+    // A saved Package reaches nobody (ADR-0061): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
     wait_until("the rollout act to reach the agent", || {
         service.tend();
         state
-            .rollout_package(&set)
+            .rollout_deployment(&ring_holding(&state, &set))
             .ok()
             .filter(|assigned| *assigned >= 1)
             .map(|_| ())
@@ -779,11 +816,17 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     );
     // Nothing was installed: the only package this Client reports is the one it *is* — its own
     // binary, at the version it runs, which it states whether or not a package put it there
-    // (ADR-0076). The refused `otelcol` is not among them.
+    // (ADR-0076). The refused offer left nothing behind.
     let snapshot = state.snapshot();
     let agent = view(&snapshot, "self-updating-client").expect("the client's own agent");
     let names: Vec<&str> = agent.packages.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["supervisor"], "nothing was installed");
+    assert_eq!(
+        names,
+        vec!["otelcol"],
+        "nothing was installed — and the misconfiguration shows twice: this Client reports its \
+         own binary under the name it was told to consent to, which is not the name any offer \
+         for it will ever carry"
+    );
     assert_eq!(
         agent.packages[0].version,
         opamp::version::identity(&version)

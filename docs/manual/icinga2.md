@@ -277,7 +277,7 @@ $ curl -u fleet-admin:secret -X POST \
 
 ## Updates and rollback
 
-A new version is a new Set, rolled out the same way; the Supervisor unpacks it beside the running
+A new version is a new Package, rolled out the same way; the Supervisor unpacks it beside the running
 tree, **proves it starts** before stopping anything, then swaps, health-gates, and rolls back if the
 new one does not stay up. A package that cannot run on the host — a tree built against a newer glibc
 — is refused before the running daemon is touched, and the fleet view carries the linker's own

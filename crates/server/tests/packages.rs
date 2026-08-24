@@ -25,7 +25,9 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store, String::new()))),
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
     );
     let (addr, rest_addr) =
         support::serve(state.clone(), server::transport::Admission::open()).await;
@@ -56,30 +58,28 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
 /// an entry may be stored under for these Agents to be offered it (ADR-0031).
 const HOST: &str = "linux/amd64";
 
-/// The base of one Set's routes: `/api/v1/packages/<name>/<type>/<version>` (ADR-0052) — the
-/// identity is the path, stated at creation and never edited.
-fn set_url(server: &TestServer, name: &str, version: &str) -> String {
+/// The base of one Package's routes: `/api/v1/packages/<agent type>/<version>` (ADR-0095) — the
+/// identity **is** the path, stated at creation and never edited. There is no name beside the two.
+fn set_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
-        "http://{}/api/v1/packages/{name}/{}/{version}",
-        server.rest_addr,
-        support::AGENT_TYPE
+        "http://{}/api/v1/packages/{agent_type}/{version}",
+        server.rest_addr
     )
 }
 
 /// The artifact download of one Set — on the **Agent plane** (ADR-0066), which is where the
 /// `download_url` in an offer points and the one `/api/v1` route the Operator plane does not serve.
-fn download_url(server: &TestServer, name: &str, version: &str) -> String {
+fn download_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
-        "http://{}/api/v1/packages/{name}/{}/{version}/file",
-        server.addr,
-        support::AGENT_TYPE
+        "http://{}/api/v1/packages/{agent_type}/{version}/file",
+        server.addr
     )
 }
 
-/// `PUT /api/v1/packages/{name}/{type}/{version}` — creates the Set; saved, distributed to nobody.
-async fn create_set(server: &TestServer, name: &str, version: &str) {
+/// `PUT /api/v1/packages/{agent type}/{version}` — creates the Package; saved, distributed to nobody.
+async fn create_set(server: &TestServer, agent_type: &str, version: &str) {
     let response = reqwest::Client::new()
-        .put(set_url(server, name, version))
+        .put(set_url(server, agent_type, version))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -90,7 +90,7 @@ async fn create_set(server: &TestServer, name: &str, version: &str) {
 /// `PUT …/entries/{os}/{arch}` — stores one platform's artifact into a Set.
 async fn upload_entry(
     server: &TestServer,
-    name: &str,
+    agent_type: &str,
     version: &str,
     platform: &str,
     artifact: &[u8],
@@ -98,7 +98,7 @@ async fn upload_entry(
     reqwest::Client::new()
         .put(format!(
             "{}/entries/{platform}",
-            set_url(server, name, version)
+            set_url(server, agent_type, version)
         ))
         .body(artifact.to_vec())
         .send()
@@ -106,11 +106,23 @@ async fn upload_entry(
         .expect("put entry")
 }
 
-/// `POST …/rollout` — the one act that distributes (ADR-0061): the Set is assigned to every
-/// Agent it currently fits and its Selector aims at. Returns the outcome body.
-async fn rollout(server: &TestServer, name: &str, version: &str) -> serde_json::Value {
+/// `POST /api/v1/deployments/<channel>/rollout` — the one act that distributes (ADR-0061): the channel's
+/// Package is assigned to every Agent it claims. Returns the outcome body.
+/// One channel as the API answers with it — where the reach counts live since ADR-0096.
+async fn ring_view(server: &TestServer, channel: &str) -> serde_json::Value {
+    reqwest::Client::new()
+        .get(deployment_url(server, channel))
+        .send()
+        .await
+        .expect("get deployment")
+        .json()
+        .await
+        .expect("json")
+}
+
+async fn rollout_ring(server: &TestServer, channel: &str) -> serde_json::Value {
     let response = reqwest::Client::new()
-        .post(format!("{}/rollout", set_url(server, name, version)))
+        .post(format!("{}/rollout", deployment_url(server, channel)))
         .send()
         .await
         .expect("post rollout");
@@ -118,33 +130,52 @@ async fn rollout(server: &TestServer, name: &str, version: &str) -> serde_json::
     response.json().await.expect("json")
 }
 
+/// A channel aiming at `pairs`, holding this Package. Aim lives on the Deployment (ADR-0096), so a
+/// test that wants something delivered says which hosts are in the channel — and `replace` because a
+/// channel holds one Package per Agent type, so pointing it at another version is a swap.
+async fn ring_holding(
+    server: &TestServer,
+    channel: &str,
+    pairs: &[(&str, &str)],
+    version: &str,
+) -> String {
+    assert_eq!(put_deployment(server, channel, pairs).await.status(), 200);
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/{version}?replace=true",
+            deployment_url(server, channel),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200, "the channel takes the package");
+    channel.to_string()
+}
+
+/// The channel every test that does not care about aim uses: it claims every Agent of the type this
+/// fleet reports.
+async fn everyone(server: &TestServer, version: &str) -> String {
+    ring_holding(
+        server,
+        "stable",
+        &[("service.name", support::AGENT_TYPE)],
+        version,
+    )
+    .await
+}
+
 /// Create + upload in one go: the Set is complete — and still reaches nobody until a rollout act
 /// names it (ADR-0061).
-async fn upload(server: &TestServer, name: &str, version: &str, artifact: &[u8]) {
-    create_set(server, name, version).await;
-    let response = upload_entry(server, name, version, HOST, artifact).await;
+async fn upload(server: &TestServer, agent_type: &str, version: &str, artifact: &[u8]) {
+    create_set(server, agent_type, version).await;
+    let response = upload_entry(server, agent_type, version, HOST, artifact).await;
     assert_eq!(response.status(), 200, "upload should succeed");
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).to_vec()
-}
-
-/// `PUT …/selector` — how an operator aims a Set, in any state.
-async fn set_selector(
-    server: &TestServer,
-    name: &str,
-    version: &str,
-    pairs: &[(&str, &str)],
-) -> reqwest::Response {
-    let selector: std::collections::BTreeMap<&str, &str> = pairs.iter().copied().collect();
-    reqwest::Client::new()
-        .put(format!("{}/selector", set_url(server, name, version)))
-        .json(&serde_json::json!({ "selector": selector }))
-        .send()
-        .await
-        .expect("put selector")
 }
 
 /// ADR-0052's versions under ADR-0061: versions are first-class Sets, and the act names the one
@@ -164,16 +195,16 @@ async fn the_act_names_the_version_it_releases() {
 
     // The Agent is known first — a rollout act assigns to the fleet as it is.
     assert!(offered(1).await.is_none());
-    upload(&server, "otelcol", "0.156.0", b"old-binary").await;
-    upload(&server, "otelcol", "0.157.0", b"new-binary").await;
+    upload(&server, support::AGENT_TYPE, "0.156.0", b"old-binary").await;
+    upload(&server, support::AGENT_TYPE, "0.157.0", b"new-binary").await;
 
     // Both versions are saved; the act names the one the operator releases.
     assert_eq!(
-        rollout(&server, "otelcol", "0.157.0").await["assigned_agents"],
+        rollout_ring(&server, &everyone(&server, "0.157.0").await).await["assigned_agents"],
         1
     );
     assert_eq!(
-        offered(2).await.expect("an offer").packages["otelcol"].version,
+        offered(2).await.expect("an offer").packages[support::AGENT_TYPE].version,
         "0.157.0"
     );
 
@@ -181,15 +212,15 @@ async fn the_act_names_the_version_it_releases() {
     // has nothing installed to be held against (ADR-0076) and the older Set still reaches it —
     // and its artifact is still here.
     assert_eq!(
-        rollout(&server, "otelcol", "0.156.0").await["assigned_agents"],
+        rollout_ring(&server, &everyone(&server, "0.156.0").await).await["assigned_agents"],
         1
     );
     let fallback = offered(3).await.expect("the fallback offer");
-    assert_eq!(fallback.packages["otelcol"].version, "0.156.0");
+    assert_eq!(fallback.packages[support::AGENT_TYPE].version, "0.156.0");
     let served = reqwest::Client::new()
         .get(format!(
             "{}?os=linux&arch=amd64",
-            download_url(&server, "otelcol", "0.156.0")
+            download_url(&server, support::AGENT_TYPE, "0.156.0")
         ))
         .send()
         .await
@@ -206,9 +237,9 @@ async fn the_act_names_the_version_it_releases() {
 #[tokio::test]
 async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
     let (server, _scratch) = spawn_with_packages().await;
-    upload(&server, "otelcol", "1.2.3", b"the-new-binary").await;
+    upload(&server, support::AGENT_TYPE, "1.2.3", b"the-new-binary").await;
     let path = format!(
-        "/api/v1/packages/otelcol/{}/1.2.3/file?os=linux&arch=amd64",
+        "/api/v1/packages/{}/1.2.3/file?os=linux&arch=amd64",
         support::AGENT_TYPE
     );
 
@@ -250,9 +281,9 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
         0
     );
 
-    upload(&server, "otelcol", "1.2.3", b"the-new-binary").await;
+    upload(&server, support::AGENT_TYPE, "1.2.3", b"the-new-binary").await;
     assert_eq!(
-        rollout(&server, "otelcol", "1.2.3").await["assigned_agents"],
+        rollout_ring(&server, &everyone(&server, "1.2.3").await).await["assigned_agents"],
         1,
         "the act assigns the one known Agent"
     );
@@ -265,7 +296,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     );
     let offer = reply.packages_available.expect("an offer");
     assert!(!offer.all_packages_hash.is_empty());
-    let available = &offer.packages["otelcol"];
+    let available = &offer.packages[support::AGENT_TYPE];
     assert_eq!(available.version, "1.2.3");
     let file = available.file.as_ref().expect("a downloadable file");
     // download_base was empty, so the URL is a path the Client resolves against its endpoint —
@@ -273,7 +304,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     assert_eq!(
         file.download_url,
         format!(
-            "/api/v1/packages/otelcol/{}/1.2.3/file?os=linux&arch=amd64",
+            "/api/v1/packages/{}/1.2.3/file?os=linux&arch=amd64",
             support::AGENT_TYPE
         )
     );
@@ -296,9 +327,9 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
         | AgentCapabilities::ReportsPackageStatuses as u64;
     installed.package_statuses = Some(PackageStatuses {
         packages: [(
-            "otelcol".to_string(),
+            support::AGENT_TYPE.to_string(),
             PackageStatus {
-                name: "otelcol".to_string(),
+                name: support::AGENT_TYPE.to_string(),
                 agent_has_version: "1.2.3".to_string(),
                 status: PackageStatusEnum::Installed as i32,
                 ..Default::default()
@@ -321,8 +352,8 @@ async fn no_offer_without_the_capability() {
     let uid = InstanceUid::default();
     // full_report declares no AcceptsPackages.
     exchange(&server, &full_report(&uid, "incapable", 1)).await;
-    upload(&server, "otelcol", "1.0.0", b"bin").await;
-    rollout(&server, "otelcol", "1.0.0").await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"bin").await;
+    rollout_ring(&server, &everyone(&server, "1.0.0").await).await;
     let reply = exchange(&server, &full_report(&uid, "incapable", 2)).await;
     assert!(
         reply.packages_available.is_none(),
@@ -335,7 +366,7 @@ async fn no_offer_without_the_capability() {
 #[tokio::test]
 async fn an_entry_needs_its_set_first() {
     let (server, _scratch) = spawn_with_packages().await;
-    let response = upload_entry(&server, "otelcol", "1.0.0", HOST, b"bytes").await;
+    let response = upload_entry(&server, support::AGENT_TYPE, "1.0.0", HOST, b"bytes").await;
     assert_eq!(response.status(), 404);
 }
 
@@ -351,12 +382,12 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
     let artifact: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
         .map(|i| (i % 251) as u8)
         .collect();
-    upload(&server, "otelcol", "1.2.3", &artifact).await;
+    upload(&server, support::AGENT_TYPE, "1.2.3", &artifact).await;
 
     let downloaded = reqwest::Client::new()
         .get(format!(
             "{}?os=linux&arch=amd64",
-            download_url(&server, "otelcol", "1.2.3")
+            download_url(&server, support::AGENT_TYPE, "1.2.3")
         ))
         .send()
         .await
@@ -383,7 +414,9 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store, String::new())))
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            ))
             .with_max_package_size(4096),
     );
     let (addr, rest_addr) =
@@ -395,14 +428,20 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
         _dir: dir,
     };
 
-    create_set(&server, "otelcol", "1.0.0").await;
-    let response = upload_entry(&server, "otelcol", "1.0.0", HOST, &vec![0u8; 8192]).await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+    let response = upload_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        HOST,
+        &vec![0u8; 8192],
+    )
+    .await;
     assert_eq!(response.status(), 413);
 }
 
-/// The point of ADR-0017, under ADR-0061: the Selector decides whom the rollout act assigns, so
-/// a binary rollout can be tried on part of the fleet first — and nobody outside the aim is
-/// touched by the act.
+/// The point of ADR-0096: the channel decides whom the rollout act assigns, so a binary rollout can
+/// be tried on part of the fleet first — and nobody outside it is touched by the act.
 #[tokio::test]
 async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -430,17 +469,12 @@ async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
     }
     exchange(&server, &elsewhere).await;
 
-    upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-new-binary").await;
+    let channel = ring_holding(&server, "linux-channel", &[("os.type", "linux")], "2.0.0").await;
     assert_eq!(
-        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
+        rollout_ring(&server, &channel).await["assigned_agents"],
         1,
-        "the act reaches exactly the aim"
+        "the act reaches exactly the channel"
     );
 
     let mut report = full_report(&targeted, "collector", 2);
@@ -449,7 +483,7 @@ async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
         .await
         .packages_available
         .expect("the matching Agent is offered it");
-    assert!(offer.packages.contains_key("otelcol"));
+    assert!(offer.packages.contains_key(support::AGENT_TYPE));
     assert!(!offer.all_packages_hash.is_empty());
 
     // The Agent outside the aim is offered nothing at all — not an empty offer, no offer: it
@@ -459,7 +493,7 @@ async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
     let reply = exchange(&server, &elsewhere2).await;
     assert!(
         reply.packages_available.is_none(),
-        "an Agent outside the Selector is offered nothing"
+        "an Agent outside the channel is offered nothing"
     );
 }
 
@@ -474,28 +508,26 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
         | AgentCapabilities::ReportsPackageStatuses as u64;
     exchange(&server, &report).await;
 
-    upload(&server, "otelcol", "2.0.0", b"for-linux").await;
-    upload(&server, "otelcol-win", "2.0.0", b"for-windows").await;
+    // Two Packages of one Agent type differ by version (ADR-0095) — there is no name to tell them
+    // apart any more, which is the point: what distinguishes two artifacts is what they are and
+    // which release they belong to.
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"for-linux").await;
+    upload(&server, support::AGENT_TYPE, "2.1.0", b"for-windows").await;
+    // Two channels, disjoint by platform — which is what a partition looks like when the attribute
+    // that separates the hosts is one they all report (ADR-0096 point 4).
+    let linux = ring_holding(&server, "linux-channel", &[("os.type", "linux")], "2.0.0").await;
+    let windows = ring_holding(
+        &server,
+        "windows-channel",
+        &[("os.type", "windows")],
+        "2.1.0",
+    )
+    .await;
+    assert_eq!(rollout_ring(&server, &linux).await["assigned_agents"], 1);
     assert_eq!(
-        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        set_selector(&server, "otelcol-win", "2.0.0", &[("os.type", "windows")])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
-        1
-    );
-    assert_eq!(
-        rollout(&server, "otelcol-win", "2.0.0").await["assigned_agents"],
+        rollout_ring(&server, &windows).await["assigned_agents"],
         0,
-        "the act toward the windows Set assigns nobody in this fleet"
+        "the act toward the windows channel assigns nobody in this fleet"
     );
 
     let mut report = full_report(&uid, "collector", 2);
@@ -508,7 +540,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     assert_eq!(
         offer.packages.len(),
         1,
-        "only the Set the act assigned this Agent"
+        "only the Package the act assigned this Agent"
     );
 
     // Echoing exactly that aggregate settles it — the Server must not keep re-offering.
@@ -517,9 +549,9 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
         | AgentCapabilities::ReportsPackageStatuses as u64;
     installed.package_statuses = Some(PackageStatuses {
         packages: [(
-            "otelcol".to_string(),
+            support::AGENT_TYPE.to_string(),
             PackageStatus {
-                name: "otelcol".to_string(),
+                name: support::AGENT_TYPE.to_string(),
                 agent_has_version: "2.0.0".to_string(),
                 status: PackageStatusEnum::Installed as i32,
                 ..Default::default()
@@ -538,9 +570,10 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     );
 }
 
-/// The canary shape an operator actually wants, under ADR-0061: the fleet version and the canary
-/// version are two Sets of one name; the narrower Selector aims the act at the ring, and
-/// widening it plus one more act finishes the rollout. Nobody moves without an act.
+/// The canary shape an operator actually wants, under ADR-0096: **two channels, disjoint by a label**
+/// — because a Selector is equality and cannot say "not", so the fleet-wide-plus-narrower-override
+/// shape ADR-0017 allowed is gone. Each channel holds its own version; the rollout finishes by moving
+/// the canary host's label back and rolling the stable channel out again. Nobody moves without an act.
 #[tokio::test]
 async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -552,19 +585,24 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
         exchange(&server, &report).await;
     }
 
-    upload(&server, "otelcol", "2.0.0", b"the-fleet-binary").await;
-    upload(&server, "otelcol", "3.0.0", b"the-canary-binary").await;
-    assert_eq!(
-        set_selector(
-            &server,
-            "otelcol",
-            "3.0.0",
-            &[("service.instance.name", "canary-host")]
-        )
-        .await
-        .status(),
-        200
-    );
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-fleet-binary").await;
+    upload(&server, support::AGENT_TYPE, "3.0.0", b"the-canary-binary").await;
+    // The partition: one host is in the canary channel, the other in the stable one. Disjoint by
+    // construction, which is what makes exactly one Deployment claim each Agent.
+    let stable = ring_holding(
+        &server,
+        "stable",
+        &[("service.instance.name", "ordinary-host")],
+        "2.0.0",
+    )
+    .await;
+    let canary_ring = ring_holding(
+        &server,
+        "canary",
+        &[("service.instance.name", "canary-host")],
+        "3.0.0",
+    )
+    .await;
 
     async fn version_offered_to(
         server: &TestServer,
@@ -578,16 +616,13 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
             .await
             .packages_available
             .expect("an offer");
-        offer.packages["otelcol"].version.clone()
+        offer.packages[support::AGENT_TYPE].version.clone()
     }
 
-    // The fleet version goes to everyone; the canary act reaches only the ring.
+    // Each act reaches exactly its own channel.
+    assert_eq!(rollout_ring(&server, &stable).await["assigned_agents"], 1);
     assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
-        2
-    );
-    assert_eq!(
-        rollout(&server, "otelcol", "3.0.0").await["assigned_agents"],
+        rollout_ring(&server, &canary_ring).await["assigned_agents"],
         1
     );
     assert_eq!(
@@ -601,49 +636,41 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
         "everyone else keeps the fleet-wide version"
     );
 
-    // The rollout finishes: the Selector widens — which distributes nothing by itself — and the
-    // next act assigns the canary version to the rest.
-    assert_eq!(
-        set_selector(&server, "otelcol", "3.0.0", &[])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        rollout(&server, "otelcol", "3.0.0").await["assigned_agents"],
-        2
-    );
+    // The rollout finishes by giving the stable channel the canary's version — which distributes
+    // nothing by itself — and pressing once more. Widening the canary channel instead would make both
+    // claim the same host, which is a conflict, not a rollout.
+    ring_holding(
+        &server,
+        "stable",
+        &[("service.instance.name", "ordinary-host")],
+        "3.0.0",
+    )
+    .await;
+    assert_eq!(rollout_ring(&server, &stable).await["assigned_agents"], 1);
     assert_eq!(
         version_offered_to(&server, &ordinary, "ordinary-host", 3).await,
         "3.0.0"
     );
 }
 
-/// Two equally specific Selectors on *different names* reaching one Agent is still the one case
-/// with no defensible answer: the Server offers neither and says so in the fleet view.
+/// The one case with no defensible answer, restated for ADR-0096. It is no longer about versions
+/// or specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
+/// either is. The Server offers nothing and the fleet view names both.
 #[tokio::test]
-async fn equally_specific_selectors_offer_nothing_and_are_reported() {
+async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     let (server, _scratch) = spawn_with_packages().await;
-    upload(&server, "otelcol", "2.0.0", b"one").await;
-    upload(&server, "otelcol-next", "3.0.0", b"two").await;
-    // Both name exactly one attribute, and both match the Agent below.
-    assert_eq!(
-        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(
-        set_selector(
-            &server,
-            "otelcol-next",
-            "3.0.0",
-            &[("os.description", "Testix 1.0 LTS")]
-        )
-        .await
-        .status(),
-        200
-    );
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"one").await;
+    upload(&server, support::AGENT_TYPE, "3.0.0", b"two").await;
+    // Two channels that overlap on the Agent below. Under ADR-0017 the second would have won by
+    // being no less specific, or lost by being no more; now neither happens.
+    ring_holding(&server, "by-platform", &[("os.type", "linux")], "2.0.0").await;
+    ring_holding(
+        &server,
+        "by-os",
+        &[("os.description", "Testix 1.0 LTS")],
+        "3.0.0",
+    )
+    .await;
 
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "collector", 1);
@@ -651,7 +678,7 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
     let reply = exchange(&server, &report).await;
     assert!(
         reply.packages_available.is_none(),
-        "an ambiguous target is offered nothing"
+        "an Agent two channels claim is offered nothing"
     );
 
     let view = &server.state.snapshot()[0];
@@ -660,8 +687,8 @@ async fn equally_specific_selectors_offer_nothing_and_are_reported() {
         .as_ref()
         .expect("the fleet view says why");
     assert!(
-        conflict.contains("otelcol") && conflict.contains("otelcol-next"),
-        "the reason names both packages: {conflict}"
+        conflict.contains("by-platform") && conflict.contains("by-os"),
+        "the reason names every channel in the way: {conflict}"
     );
 }
 
@@ -693,11 +720,11 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
 
     let url = format!("http://{source_addr}/releases/otelcol.tar.gz");
     let digest = sha256(b"the-artifact-we-never-see");
-    create_set(&server, "otelcol", "0.157.0").await;
+    create_set(&server, support::AGENT_TYPE, "0.157.0").await;
     let response = reqwest::Client::new()
         .put(format!(
             "{}/entries/{HOST}/source",
-            set_url(&server, "otelcol", "0.157.0")
+            set_url(&server, support::AGENT_TYPE, "0.157.0")
         ))
         .json(&serde_json::json!({
             "url": url,
@@ -709,7 +736,7 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
         .expect("put source");
     assert_eq!(response.status(), 200);
     assert_eq!(
-        rollout(&server, "otelcol", "0.157.0").await["assigned_agents"],
+        rollout_ring(&server, &everyone(&server, "0.157.0").await).await["assigned_agents"],
         1
     );
 
@@ -720,7 +747,7 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
         .await
         .packages_available
         .expect("an offer");
-    let file = offer.packages["otelcol"]
+    let file = offer.packages[support::AGENT_TYPE]
         .file
         .as_ref()
         .expect("a downloadable file");
@@ -736,7 +763,7 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
     let local = reqwest::Client::new()
         .get(format!(
             "{}/file?os=linux&arch=amd64",
-            set_url(&server, "otelcol", "0.157.0")
+            set_url(&server, support::AGENT_TYPE, "0.157.0")
         ))
         .send()
         .await
@@ -753,7 +780,7 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
 #[tokio::test]
 async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not() {
     let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, "otelcol", "1.0.0").await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
 
     // A source that answers 404 — the shape of a mistyped release path.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -778,7 +805,7 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
         reqwest::Client::new()
             .put(format!(
                 "{}/entries/{HOST}/source",
-                set_url(server_ref, "otelcol", "1.0.0")
+                set_url(server_ref, support::AGENT_TYPE, "1.0.0")
             ))
             .json(&serde_json::json!({
                 "url": url,
@@ -816,7 +843,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     // A Set for a different kind of Agent, complete — and its act assigns nobody.
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/promtail/promtail/1.0.0",
+            "http://{}/api/v1/packages/promtail/1.0.0",
             server.rest_addr
         ))
         .json(&serde_json::json!({}))
@@ -826,7 +853,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     assert_eq!(response.status(), 200);
     let response = reqwest::Client::new()
         .put(format!(
-            "http://{}/api/v1/packages/promtail/promtail/1.0.0/entries/{HOST}",
+            "http://{}/api/v1/packages/promtail/1.0.0/entries/{HOST}",
             server.rest_addr
         ))
         .body(b"the-binary".to_vec())
@@ -834,19 +861,28 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .await
         .expect("put entry");
     assert_eq!(response.status(), 200);
+    // A channel that claims this Agent, holding only a Package built for another type. The channel is
+    // right, the Agent is in it, and it still gets nothing — because fit is by type, before any
+    // channel is consulted (ADR-0034).
+    assert_eq!(
+        put_deployment(&server, "stable", &[("service.name", support::AGENT_TYPE)])
+            .await
+            .status(),
+        200
+    );
     let response = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/v1/packages/promtail/promtail/1.0.0/rollout",
-            server.rest_addr
+        .put(format!(
+            "{}/packages/promtail/1.0.0",
+            deployment_url(&server, "stable")
         ))
         .send()
         .await
-        .expect("rollout");
+        .expect("put package");
     assert_eq!(response.status(), 200);
-    let outcome: serde_json::Value = response.json().await.expect("json");
+    let outcome = rollout_ring(&server, "stable").await;
     assert_eq!(
         outcome["assigned_agents"], 0,
-        "a Set built for another type fits nobody here"
+        "a Package built for another type fits nobody here"
     );
 
     let mut report = full_report(&uid, "edge-01", 2);
@@ -860,9 +896,9 @@ async fn a_set_reaches_only_agents_of_its_type() {
     );
 
     // The same artifact under this fleet's type reaches it.
-    upload(&server, "otelcol", "1.0.0", b"the-binary").await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
     assert_eq!(
-        rollout(&server, "otelcol", "1.0.0").await["assigned_agents"],
+        rollout_ring(&server, &everyone(&server, "1.0.0").await).await["assigned_agents"],
         1
     );
     let mut report = full_report(&uid, "edge-01", 3);
@@ -871,7 +907,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .await
         .packages_available
         .expect("an offer");
-    assert!(offer.packages.contains_key("otelcol"));
+    assert!(offer.packages.contains_key(support::AGENT_TYPE));
 }
 
 /// ADR-0076 end to end: a Set reaches an Agent only as an **upgrade**. What the Agent reports
@@ -891,9 +927,9 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
             | AgentCapabilities::ReportsPackageStatuses as u64;
         report.package_statuses = Some(PackageStatuses {
             packages: [(
-                "otelcol".to_string(),
+                support::AGENT_TYPE.to_string(),
                 PackageStatus {
-                    name: "otelcol".to_string(),
+                    name: support::AGENT_TYPE.to_string(),
                     agent_has_version: version.to_string(),
                     status: PackageStatusEnum::Installed as i32,
                     ..Default::default()
@@ -912,7 +948,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     /// would actually reach.
     async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
         let list: serde_json::Value = reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+            .get(format!("http://{}/api/v1/deployments", server.rest_addr))
             .send()
             .await
             .expect("list")
@@ -923,22 +959,23 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
             .as_array()
             .expect("array")
             .iter()
-            .find(|p| p["version"] == version)
-            .unwrap_or_else(|| panic!("no set at {version} in the list"))
+            .find(|d| d["packages"][0]["version"] == version)
+            .unwrap_or_else(|| panic!("no channel holding {version} in the list"))
             .clone();
         (
-            row["matching_agents"].as_i64().expect("matching_agents"),
+            row["claiming_agents"].as_i64().expect("claiming_agents"),
             row["targeted_agents"].as_i64().expect("targeted_agents"),
         )
     }
 
     exchange(&server, &running(&uid, 1, "1.0.0")).await;
-    upload(&server, "otelcol", "1.0.0", b"what-it-runs").await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"what-it-runs").await;
 
-    // It aims at the one Agent there is, and reaches nobody: the Agent already runs it.
+    // The channel claims the one Agent there is, and reaches nobody: the Agent already runs it.
+    let channel = everyone(&server, "1.0.0").await;
     assert_eq!(counts(&server, "1.0.0").await, (1, 0));
     assert_eq!(
-        rollout(&server, "otelcol", "1.0.0").await["assigned_agents"],
+        rollout_ring(&server, &channel).await["assigned_agents"],
         0,
         "the bulk act skips an Agent it would not move"
     );
@@ -949,9 +986,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
             "http://{}/api/v1/agents/{uid}/rollout",
             server.rest_addr
         ))
-        .json(&serde_json::json!({
-            "package": { "name": "otelcol", "agent_type": support::AGENT_TYPE, "version": "1.0.0" }
-        }))
+        .json(&serde_json::json!({ "deployment": channel }))
         .send()
         .await
         .expect("rollout to agent");
@@ -965,18 +1000,17 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
         "{body}"
     );
 
-    // A greater version aims at the same Agent and reaches it.
-    upload(&server, "otelcol", "2.0.0", b"the-next-one").await;
+    // A greater version in the same channel reaches it. The channel is the constant; what it holds is
+    // what an operator changes (ADR-0096) — two channels claiming this Agent would be a conflict.
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-next-one").await;
+    let channel = everyone(&server, "2.0.0").await;
     assert_eq!(counts(&server, "2.0.0").await, (1, 1));
-    assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
-        1
-    );
+    assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
     let offer = exchange(&server, &running(&uid, 2, "1.0.0"))
         .await
         .packages_available
         .expect("an offer");
-    assert_eq!(offer.packages["otelcol"].version, "2.0.0");
+    assert_eq!(offer.packages[support::AGENT_TYPE].version, "2.0.0");
 
     // And once the Agent reports it installed, the assignment keeps composing the offer — the
     // Set the Agent runs must not vanish from its desired state (ADR-0076 point 5).
@@ -984,10 +1018,13 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
         .await
         .packages_available
         .expect("the assignment still composes an offer");
-    assert_eq!(offer.packages["otelcol"].version, "2.0.0");
+    assert_eq!(offer.packages[support::AGENT_TYPE].version, "2.0.0");
 
-    // But it is no longer waiting for anything, and no count proposes it.
+    // But it is no longer waiting for anything: the channel still claims it and proposes nothing.
     assert_eq!(counts(&server, "2.0.0").await, (1, 0));
+    // And pointing the channel back at the older version proposes nothing either — a Package that
+    // would move this Agent backwards is no candidate, whichever channel holds it (ADR-0083).
+    everyone(&server, "1.0.0").await;
     assert_eq!(counts(&server, "1.0.0").await, (1, 0));
 }
 
@@ -1002,30 +1039,32 @@ async fn a_set_says_how_many_agents_it_reaches() {
 
     async fn list(server: &TestServer) -> serde_json::Value {
         reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+            .get(format!("http://{}/api/v1/deployments", server.rest_addr))
             .send()
             .await
-            .expect("list packages")
+            .expect("list deployments")
             .json()
             .await
             .expect("json")
     }
 
-    async fn reach(server: &TestServer, name: &str) -> i64 {
+    async fn reach(server: &TestServer, version: &str) -> i64 {
         list(server)
             .await
             .as_array()
             .expect("array")
             .iter()
-            .find(|p| p["name"] == name)
-            .unwrap_or_else(|| panic!("no set {name} in the list"))["targeted_agents"]
+            .find(|d| d["packages"][0]["version"] == version)
+            .unwrap_or_else(|| panic!("no channel holding {version} in the list"))
+            ["targeted_agents"]
             .as_i64()
             .expect("targeted_agents")
     }
 
-    // Uploaded under the type this fleet reports: it reaches the one Agent there is.
-    upload(&server, "otelcol", "1.0.0", b"binary").await;
-    assert_eq!(reach(&server, "otelcol").await, 1);
+    // Uploaded under the type this fleet reports, in a channel that claims it: one Agent.
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"binary").await;
+    everyone(&server, "1.0.0").await;
+    assert_eq!(reach(&server, "1.0.0").await, 1);
 
     // A second Agent on the same platform doubles it.
     exchange(
@@ -1033,27 +1072,37 @@ async fn a_set_says_how_many_agents_it_reaches() {
         &support::full_report(&InstanceUid::default(), "two", 1),
     )
     .await;
-    assert_eq!(reach(&server, "otelcol").await, 2);
+    assert_eq!(reach(&server, "1.0.0").await, 2);
 
     // A Selector that matches nobody: still stored, still valid, reaching no one — the case that
     // was invisible before.
-    assert_eq!(
-        set_selector(&server, "otelcol", "1.0.0", &[("env", "prod")])
-            .await
-            .status(),
-        200
-    );
-    assert_eq!(reach(&server, "otelcol").await, 0);
+    ring_holding(&server, "stable", &[("env", "prod")], "1.0.0").await;
+    assert_eq!(reach(&server, "1.0.0").await, 0);
 
-    // An entry for a platform this fleet does not run reaches nobody either.
-    create_set(&server, "fluentbit", "2.0.0").await;
-    let response = upload_entry(&server, "fluentbit", "2.0.0", "windows/amd64", b"exe").await;
+    // An entry for a platform this fleet does not run reaches nobody either — the same channel,
+    // pointed back at the whole fleet, holding a Package none of these hosts can take.
+    create_set(&server, support::AGENT_TYPE, "2.0.0").await;
+    let response = upload_entry(
+        &server,
+        support::AGENT_TYPE,
+        "2.0.0",
+        "windows/amd64",
+        b"exe",
+    )
+    .await;
     assert_eq!(response.status(), 200);
-    assert_eq!(reach(&server, "fluentbit").await, 0);
+    ring_holding(
+        &server,
+        "stable",
+        &[("service.name", support::AGENT_TYPE)],
+        "2.0.0",
+    )
+    .await;
+    assert_eq!(reach(&server, "2.0.0").await, 0);
 }
 
 /// ADR-0042 reaches packages, not just Configurations — which is the case it exists for. A binary
-/// rollout starts on the hosts an operator moved into the canary ring, and moving one in needs no
+/// rollout starts on the hosts an operator moved into the canary channel, and moving one in needs no
 /// access to that host.
 #[tokio::test]
 async fn a_label_aims_a_set_at_part_of_the_fleet() {
@@ -1063,18 +1112,13 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     exchange(&server, &full_report(&canary, "canary-host", 1)).await;
     exchange(&server, &full_report(&rest, "other-host", 1)).await;
 
-    upload(&server, "otelcol", "2.0.0", b"the-new-binary").await;
-    assert_eq!(
-        set_selector(&server, "otelcol", "2.0.0", &[("rollout", "canary")])
-            .await
-            .status(),
-        200
-    );
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-new-binary").await;
+    ring_holding(&server, "stable", &[("rollout", "canary")], "2.0.0").await;
 
-    // Nobody reports `rollout`, so the aimed Set reaches no one — and the count says so.
+    // Nobody reports `rollout`, so the channel claims no one — and the count says so.
     async fn reach(server: &TestServer) -> i64 {
         let list: serde_json::Value = reqwest::Client::new()
-            .get(format!("http://{}/api/v1/packages", server.rest_addr))
+            .get(format!("http://{}/api/v1/deployments", server.rest_addr))
             .send()
             .await
             .expect("list")
@@ -1085,7 +1129,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     }
     assert_eq!(reach(&server).await, 0);
 
-    // One call moves the first host into the ring.
+    // One call moves the first host into the channel.
     let labelled = reqwest::Client::new()
         .put(format!(
             "http://{}/api/v1/agents/{canary}/labels",
@@ -1099,21 +1143,18 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     assert_eq!(
         reach(&server).await,
         1,
-        "exactly the ring, and nothing else"
+        "exactly the channel, and nothing else"
     );
 
-    // The label only aims (ADR-0061); the act distributes — to the ring, and nobody else.
-    assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
-        1
-    );
+    // The label only aims (ADR-0061); the act distributes — to the channel, and nobody else.
+    assert_eq!(rollout_ring(&server, "stable").await["assigned_agents"], 1);
     let mut report = full_report(&canary, "canary-host", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     let offer = exchange(&server, &report)
         .await
         .packages_available
         .expect("the canary host is offered the package");
-    assert!(offer.packages.contains_key("otelcol"));
+    assert!(offer.packages.contains_key(support::AGENT_TYPE));
 
     let mut report = full_report(&rest, "other-host", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
@@ -1122,7 +1163,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
             .await
             .packages_available
             .is_none(),
-        "the host outside the ring is offered nothing"
+        "the host outside the channel is offered nothing"
     );
 }
 
@@ -1144,7 +1185,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
         exchange(server, &report).await.packages_available
     }
-    async fn view(server: &TestServer, name: &str) -> serde_json::Value {
+    async fn view(server: &TestServer, version: &str) -> serde_json::Value {
         reqwest::Client::new()
             .get(format!("http://{}/api/v1/packages", server.rest_addr))
             .send()
@@ -1156,31 +1197,57 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
             .as_array()
             .expect("array")
             .iter()
-            .find(|p| p["name"] == name)
-            .unwrap_or_else(|| panic!("no set {name}"))
+            .find(|p| p["agent_type"] == support::AGENT_TYPE && p["version"] == version)
+            .unwrap_or_else(|| panic!("no package at {version}"))
             .clone()
     }
 
-    // An empty Set cannot be rolled out: it contains one or more entries by definition.
-    create_set(&server, "otelcol", "2.0.0").await;
-    let empty = reqwest::Client::new()
-        .post(format!("{}/rollout", set_url(&server, "otelcol", "2.0.0")))
+    // A channel holding no Package cannot be rolled out: there would be nothing to release.
+    assert_eq!(
+        put_deployment(&server, "stable", &[("service.name", support::AGENT_TYPE)])
+            .await
+            .status(),
+        200
+    );
+    let hollow = reqwest::Client::new()
+        .post(format!("{}/rollout", deployment_url(&server, "stable")))
         .send()
         .await
         .expect("rollout");
-    assert_eq!(empty.status(), 409, "an empty set cannot be rolled out");
+    assert_eq!(
+        hollow.status(),
+        409,
+        "an empty channel cannot be rolled out"
+    );
 
-    let response = upload_entry(&server, "otelcol", "2.0.0", HOST, b"the-binary").await;
+    // A Package with no entries is a different case, and it is **not** an error: the channel is
+    // rolled out, and the Agent is simply not among those it moves. Refusing here would make an
+    // operator's half-finished upload look like a broken channel.
+    create_set(&server, support::AGENT_TYPE, "2.0.0").await;
+    let channel = everyone(&server, "2.0.0").await;
+    assert_eq!(
+        rollout_ring(&server, &channel).await["assigned_agents"],
+        0,
+        "a Package holding no entry for this host moves nobody"
+    );
+
+    let response = upload_entry(&server, support::AGENT_TYPE, "2.0.0", HOST, b"the-binary").await;
     assert_eq!(response.status(), 200);
 
-    let staged = view(&server, "otelcol").await;
+    let staged = view(&server, "2.0.0").await;
     assert!(
         staged.get("published").is_none(),
         "ADR-0061: there is no publication state to show: {staged}"
     );
     assert_eq!(
-        staged["targeted_agents"], 1,
-        "the aim can be checked before the act, which is what the count is for"
+        staged["deployments"],
+        serde_json::json!(["stable"]),
+        "the Package says which channels hold it — it aims at nobody by itself (ADR-0095)"
+    );
+    assert_eq!(
+        ring_view(&server, "stable").await["targeted_agents"],
+        1,
+        "and the channel says whom the act would move, before the act"
     );
     assert!(
         offered_now(&server, &uid, 2).await.is_none(),
@@ -1188,44 +1255,43 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     );
 
     // Its entries are still editable: nothing is assigned yet.
-    let editable = upload_entry(&server, "otelcol", "2.0.0", HOST, b"the-binary-v2").await;
+    let editable = upload_entry(
+        &server,
+        support::AGENT_TYPE,
+        "2.0.0",
+        HOST,
+        b"the-binary-v2",
+    )
+    .await;
     assert_eq!(editable.status(), 200, "an unassigned set is editable");
 
     // The act is its own request, and the fleet has the package on the next exchange.
-    assert_eq!(
-        rollout(&server, "otelcol", "2.0.0").await["assigned_agents"],
-        1
-    );
+    assert_eq!(rollout_ring(&server, "stable").await["assigned_agents"], 1);
     let offer = offered_now(&server, &uid, 3)
         .await
         .expect("the released package");
-    assert!(offer.packages.contains_key("otelcol"));
+    assert!(offer.packages.contains_key(support::AGENT_TYPE));
 
     // While assigned, the bytes are frozen: writing or deleting an entry answers 409 —
     // the Server's rule, which is exactly what the UI renders as a greyed-out control.
-    let frozen = upload_entry(&server, "otelcol", "2.0.0", HOST, b"other-bytes").await;
+    let frozen = upload_entry(&server, support::AGENT_TYPE, "2.0.0", HOST, b"other-bytes").await;
     assert_eq!(frozen.status(), 409, "assigned entries are immutable");
     let frozen_delete = reqwest::Client::new()
         .delete(format!(
             "{}/entries/{HOST}",
-            set_url(&server, "otelcol", "2.0.0")
+            set_url(&server, support::AGENT_TYPE, "2.0.0")
         ))
         .send()
         .await
         .expect("delete entry");
     assert_eq!(frozen_delete.status(), 409);
     // The Selector is not bytes, and stays editable.
-    assert_eq!(
-        set_selector(&server, "otelcol", "2.0.0", &[("os.type", "linux")])
-            .await
-            .status(),
-        200
-    );
+    ring_holding(&server, "stable", &[("os.type", "linux")], "2.0.0").await;
 
     // Deleting the Set removes its assignments with it: the offer is withdrawn, and nothing is
     // uninstalled — an Agent that already took it keeps running it (ADR-0017).
     let deleted = reqwest::Client::new()
-        .delete(set_url(&server, "otelcol", "2.0.0"))
+        .delete(set_url(&server, support::AGENT_TYPE, "2.0.0"))
         .send()
         .await
         .expect("delete set");
@@ -1237,7 +1303,10 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
 
     // Rolling out a Set that does not exist is a 404, not a Set conjured out of a URL.
     let missing = reqwest::Client::new()
-        .post(format!("{}/rollout", set_url(&server, "nosuch", "1.0.0")))
+        .post(format!(
+            "{}/rollout",
+            set_url(&server, support::AGENT_TYPE, "9.9.9")
+        ))
         .send()
         .await
         .expect("rollout");
@@ -1250,7 +1319,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
 #[tokio::test]
 async fn a_source_url_aimed_at_an_internal_address_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, "otelcol", "1.0.0").await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
 
     let server_ref = &server;
     let put_source = |url: &str| {
@@ -1259,7 +1328,7 @@ async fn a_source_url_aimed_at_an_internal_address_is_refused() {
             reqwest::Client::new()
                 .put(format!(
                     "{}/entries/{HOST}/source",
-                    set_url(server_ref, "otelcol", "1.0.0")
+                    set_url(server_ref, support::AGENT_TYPE, "1.0.0")
                 ))
                 .json(&serde_json::json!({
                     "url": url,
@@ -1293,7 +1362,9 @@ async fn the_package_store_has_a_total_size_ceiling() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store, String::new())))
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            ))
             .with_max_total_package_bytes(10 * 1024),
     );
     let (addr, rest_addr) =
@@ -1306,21 +1377,693 @@ async fn the_package_store_has_a_total_size_ceiling() {
     };
 
     // The first artifact fits under the ceiling.
-    create_set(&server, "one", "1.0.0").await;
-    let first = upload_entry(&server, "one", "1.0.0", HOST, &vec![0u8; 8 * 1024]).await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+    let first = upload_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        HOST,
+        &vec![0u8; 8 * 1024],
+    )
+    .await;
     assert_eq!(
         first.status(),
         200,
         "the first artifact is within the ceiling"
     );
 
-    // A second distinct name would take the store past the ceiling — refused, and nothing is left
-    // staged for it.
-    create_set(&server, "two", "1.0.0").await;
-    let second = upload_entry(&server, "two", "1.0.0", HOST, &vec![0u8; 8 * 1024]).await;
+    // A second Package would take the store past the ceiling — refused, and nothing is left staged
+    // for it. It has to be a second *version*: two artifacts of one Agent type are told apart by
+    // version now (ADR-0095), and writing 1.0.0 again would replace the entry above rather than
+    // add to it — which would have this test pass without the store ever growing.
+    create_set(&server, support::AGENT_TYPE, "2.0.0").await;
+    let second = upload_entry(
+        &server,
+        support::AGENT_TYPE,
+        "2.0.0",
+        HOST,
+        &vec![0u8; 8 * 1024],
+    )
+    .await;
     assert_eq!(
         second.status(),
         507,
         "the second upload is refused: it would exceed the store ceiling"
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// Deployments (ADR-0096)
+// -------------------------------------------------------------------------------------------
+
+fn deployment_url(server: &TestServer, name: &str) -> String {
+    format!("http://{}/api/v1/deployments/{name}", server.rest_addr)
+}
+
+async fn put_deployment(
+    server: &TestServer,
+    name: &str,
+    pairs: &[(&str, &str)],
+) -> reqwest::Response {
+    let selector: std::collections::BTreeMap<&str, &str> = pairs.iter().copied().collect();
+    reqwest::Client::new()
+        .put(deployment_url(server, name))
+        .json(&serde_json::json!({ "selector": selector }))
+        .send()
+        .await
+        .expect("put deployment")
+}
+
+/// A Deployment must name the channel it aims at. There is no fleet-wide default, and the refusal
+/// says what to write instead — an empty Selector is what a forgotten field looks like, and it
+/// would collide with every other channel (ADR-0096 point 3).
+#[tokio::test]
+async fn a_deployment_without_a_selector_is_refused() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let refused = reqwest::Client::new()
+        .put(deployment_url(&server, "everyone"))
+        .json(&serde_json::json!({ "selector": {} }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"].as_str().expect("error").contains("channel"),
+        "the refusal tells the operator what to write: {body}"
+    );
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/deployments", server.rest_addr))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed.as_array().expect("array").len(), 0, "nothing stored");
+}
+
+/// A channel cannot offer what the store does not hold, and it holds one Package per Agent type.
+/// Both refusals happen at the write, where the mistake is, rather than at resolution.
+#[tokio::test]
+async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
+    let (server, _scratch) = spawn_with_packages().await;
+    assert_eq!(
+        put_deployment(&server, "stable", &[("channel", "stable")])
+            .await
+            .status(),
+        200
+    );
+
+    let missing = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/1.0.0",
+            deployment_url(&server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(
+        missing.status(),
+        404,
+        "a package nobody uploaded cannot be offered"
+    );
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"v2").await;
+    let added = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/1.0.0",
+            deployment_url(&server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(added.status(), 200);
+
+    let taken = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/2.0.0",
+            deployment_url(&server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(
+        taken.status(),
+        409,
+        "a second package of one type is refused"
+    );
+    let body: serde_json::Value = taken.json().await.expect("json");
+    assert!(
+        body["error"].as_str().expect("error").contains("1.0.0"),
+        "the refusal names what is in the way: {body}"
+    );
+
+    // Replacing is a separate, explicit ask — and then the channel runs the other version.
+    let replaced = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/2.0.0?replace=true",
+            deployment_url(&server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("replace");
+    assert_eq!(replaced.status(), 200);
+    let view: serde_json::Value = replaced.json().await.expect("json");
+    assert_eq!(view["packages"][0]["version"], "2.0.0");
+    assert_eq!(
+        view["packages"][0]["display_name"],
+        format!("{} 2.0.0", support::AGENT_TYPE)
+    );
+}
+
+/// The signature belongs to the Deployment, not the artifact (ADR-0096 point 7) — and the view
+/// reports which platforms are covered, because an unsigned artifact is a legitimate policy the
+/// Server cannot refuse, only surface.
+#[tokio::test]
+async fn a_deployment_carries_the_signature_and_says_what_is_unsigned() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
+    put_deployment(&server, "stable", &[("channel", "stable")]).await;
+    let base = deployment_url(&server, "stable");
+    reqwest::Client::new()
+        .put(format!("{base}/packages/{}/1.0.0", support::AGENT_TYPE))
+        .send()
+        .await
+        .expect("put package");
+
+    let view: serde_json::Value = reqwest::Client::new()
+        .get(&base)
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        view["packages"][0]["signed_platforms"]
+            .as_array()
+            .expect("array")
+            .len(),
+        0,
+        "nothing is signed yet, and the view says so rather than staying silent"
+    );
+
+    let signed = reqwest::Client::new()
+        .put(format!(
+            "{base}/signatures/{}/1.0.0/linux/amd64",
+            support::AGENT_TYPE
+        ))
+        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("sign");
+    assert_eq!(signed.status(), 200);
+    let view: serde_json::Value = signed.json().await.expect("json");
+    assert_eq!(view["packages"][0]["signed_platforms"][0], "linux/amd64");
+
+    // A signature for a Package this channel does not hold has nothing to attach to.
+    let orphan = reqwest::Client::new()
+        .put(format!(
+            "{base}/signatures/{}/9.9.9/linux/amd64",
+            support::AGENT_TYPE
+        ))
+        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("sign");
+    assert_eq!(orphan.status(), 404);
+
+    // And it leaves with the Package it was about.
+    let stripped = reqwest::Client::new()
+        .delete(format!("{base}/packages/{}/1.0.0", support::AGENT_TYPE))
+        .send()
+        .await
+        .expect("remove");
+    assert_eq!(stripped.status(), 200);
+    let view: serde_json::Value = stripped.json().await.expect("json");
+    assert_eq!(view["packages"].as_array().expect("array").len(), 0);
+}
+
+/// The aim stays editable and the channel keeps what it holds — moving a Deployment between channels is
+/// how a rollout proceeds, and it is not a change of bytes.
+#[tokio::test]
+async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
+    put_deployment(&server, "canary", &[("channel", "canary")]).await;
+    let base = deployment_url(&server, "canary");
+    reqwest::Client::new()
+        .put(format!("{base}/packages/{}/1.0.0", support::AGENT_TYPE))
+        .send()
+        .await
+        .expect("put package");
+
+    let widened = reqwest::Client::new()
+        .put(format!("{base}/selector"))
+        .json(&serde_json::json!({ "selector": { "channel": "stable" } }))
+        .send()
+        .await
+        .expect("re-aim");
+    assert_eq!(widened.status(), 200);
+    let view: serde_json::Value = widened.json().await.expect("json");
+    assert_eq!(view["selector"]["channel"], "stable");
+    assert_eq!(
+        view["packages"][0]["agent_type"],
+        support::AGENT_TYPE,
+        "re-aiming keeps what the channel holds"
+    );
+
+    // Re-aiming something that is not there is a 404, not a Deployment conjured out of a URL.
+    let missing = reqwest::Client::new()
+        .put(format!("{}/selector", deployment_url(&server, "nosuch")))
+        .json(&serde_json::json!({ "selector": { "channel": "stable" } }))
+        .send()
+        .await
+        .expect("re-aim");
+    assert_eq!(missing.status(), 404);
+
+    let deleted = reqwest::Client::new()
+        .delete(&base)
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(deleted.status(), 204);
+    let again = reqwest::Client::new()
+        .delete(&base)
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(again.status(), 404);
+}
+
+/// The signature an Agent is offered comes from **its** Deployment (ADR-0096 point 7), not from
+/// the artifact record — so the same Package in two channels travels with each channel's own signature.
+#[tokio::test]
+async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
+
+    // Two hosts, two disjoint channels, one Package — signed differently in each.
+    let a = InstanceUid::default();
+    let b = InstanceUid::default();
+    for (uid, name) in [(&a, "host-a"), (&b, "host-b")] {
+        let mut report = full_report(uid, name, 1);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(&server, &report).await;
+    }
+    for (channel, host, byte) in [("channel-a", "host-a", 1u8), ("channel-b", "host-b", 2u8)] {
+        ring_holding(
+            &server,
+            channel,
+            &[("service.instance.name", host)],
+            "1.0.0",
+        )
+        .await;
+        let signed = reqwest::Client::new()
+            .put(format!(
+                "{}/signatures/{}/1.0.0/linux/amd64",
+                deployment_url(&server, channel),
+                support::AGENT_TYPE
+            ))
+            .json(&serde_json::json!({ "signature": hex::encode([byte; 64]) }))
+            .send()
+            .await
+            .expect("sign");
+        assert_eq!(signed.status(), 200);
+        assert_eq!(rollout_ring(&server, channel).await["assigned_agents"], 1);
+    }
+
+    for (uid, name, byte) in [(&a, "host-a", 1u8), (&b, "host-b", 2u8)] {
+        let mut report = full_report(uid, name, 2);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        let offer = exchange(&server, &report)
+            .await
+            .packages_available
+            .expect("an offer");
+        assert_eq!(
+            offer.packages[support::AGENT_TYPE]
+                .file
+                .as_ref()
+                .expect("a file")
+                .signature,
+            vec![byte; 64],
+            "each host is offered the signature of the channel it belongs to"
+        );
+    }
+}
+
+/// The retired upload parameter is refused **by name**, never ignored: a signature dropped on the
+/// floor is an unsigned rollout nobody notices.
+#[tokio::test]
+async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
+    let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+    let refused = reqwest::Client::new()
+        .put(format!(
+            "{}/entries/{HOST}?signature={}",
+            set_url(&server, support::AGENT_TYPE, "1.0.0"),
+            hex::encode([7u8; 64])
+        ))
+        .body(b"the-binary".to_vec())
+        .send()
+        .await
+        .expect("put entry");
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
+            .contains("/signatures/"),
+        "the refusal names the route that takes it now: {body}"
+    );
+}
+
+/// **The rule the whole conflict model turns on.** A conflict takes the *candidate* away and never
+/// a standing assignment: an Agent already rolled out to keeps its offer, because nothing
+/// distributes — or un-distributes — by itself (ADR-0061). Creating an overlapping channel must not
+/// withdraw software from a running host, and that is one `if` away from being wrong.
+#[tokio::test]
+async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
+    let channel = everyone(&server, "1.0.0").await;
+    assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
+    async fn offered(
+        server: &TestServer,
+        uid: &InstanceUid,
+        sequence: u64,
+    ) -> Option<opamp::proto::PackagesAvailable> {
+        let mut report = full_report(uid, "edge-01", sequence);
+        report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+        exchange(server, &report).await.packages_available
+    }
+    let before = offered(&server, &uid, 2)
+        .await
+        .expect("the released package");
+
+    // A second channel that claims the same Agent. Now nothing new can be proposed to it…
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-next-one").await;
+    ring_holding(&server, "second", &[("os.type", "linux")], "2.0.0").await;
+    let view = &server.state.snapshot()[0];
+    assert!(
+        view.package_conflict.is_some(),
+        "the view says why nothing new is proposed"
+    );
+    assert!(
+        view.pending_packages.is_empty(),
+        "and proposes nothing while it stands"
+    );
+
+    // …but what it already has is untouched: the same version, the same hash, still offered.
+    assert_eq!(
+        view.assigned_package,
+        format!("{}@1.0.0", support::AGENT_TYPE)
+    );
+    let after = offered(&server, &uid, 3)
+        .await
+        .expect("the assignment still composes an offer");
+    assert_eq!(
+        after.packages[support::AGENT_TYPE].version,
+        before.packages[support::AGENT_TYPE].version
+    );
+    assert_eq!(after.all_packages_hash, before.all_packages_hash);
+}
+
+/// The per-Agent act refuses to pick a side (ADR-0096 point 9): naming a channel while a second one
+/// also claims the Agent is `409`, even though the operator has said which they mean. Honouring it
+/// would sidestep the conflict for good and make this path the way into a state the channel-wide act
+/// forbids.
+#[tokio::test]
+async fn the_per_agent_act_refuses_to_pick_a_side() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"one").await;
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"two").await;
+    ring_holding(
+        &server,
+        "by-name",
+        &[("service.name", support::AGENT_TYPE)],
+        "1.0.0",
+    )
+    .await;
+
+    // With one channel the per-Agent act works, which is what makes the refusal below meaningful.
+    let ok = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/v1/agents/{uid}/rollout",
+            server.rest_addr
+        ))
+        .json(&serde_json::json!({ "deployment": "by-name" }))
+        .send()
+        .await
+        .expect("rollout to agent");
+    assert_eq!(ok.status(), 200);
+
+    ring_holding(&server, "by-platform", &[("os.type", "linux")], "2.0.0").await;
+    for named in ["by-name", "by-platform"] {
+        let refused = reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/agents/{uid}/rollout",
+                server.rest_addr
+            ))
+            .json(&serde_json::json!({ "deployment": named }))
+            .send()
+            .await
+            .expect("rollout to agent");
+        assert_eq!(
+            refused.status(),
+            409,
+            "naming {named:?} is not a way past the conflict"
+        );
+    }
+}
+
+/// What a **standing offer travels with** is frozen (ADR-0096 point 10): the signature of a
+/// Package this channel released, and the channel's hold on that Package. What gates re-offering is the
+/// package hash, which does not cover the signature — so a signature changed under a standing
+/// offer would never reach the Agent installing against the old one, and one removed would turn a
+/// signed rollout unsigned for any Agent that has not finished.
+///
+/// **Swapping the version the channel holds is deliberately not frozen**, and the last assertion here
+/// pins that: it is how a rollout proceeds, it leaves every standing offer exactly as it was, and
+/// a rule that forbade it would forbid updating a fleet at all.
+#[tokio::test]
+async fn a_ring_freezes_what_it_has_released() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"the-next-one").await;
+    let channel = everyone(&server, "1.0.0").await;
+    let sign = |version: &str| {
+        format!(
+            "{}/signatures/{}/{version}/linux/amd64",
+            deployment_url(&server, &channel),
+            support::AGENT_TYPE
+        )
+    };
+    let signed = reqwest::Client::new()
+        .put(sign("1.0.0"))
+        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("sign");
+    assert_eq!(
+        signed.status(),
+        200,
+        "before the act, the channel is editable"
+    );
+    assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
+
+    // Now every write against what it released answers 409, and says what to do instead.
+    for (method, url) in [
+        ("PUT", sign("1.0.0")),
+        (
+            "DELETE",
+            format!(
+                "{}/packages/{}/1.0.0",
+                deployment_url(&server, &channel),
+                support::AGENT_TYPE
+            ),
+        ),
+    ] {
+        let client = reqwest::Client::new();
+        let request = if method == "PUT" {
+            client
+                .put(&url)
+                .json(&serde_json::json!({ "signature": hex::encode([9u8; 64]) }))
+        } else {
+            client.delete(&url)
+        };
+        let refused = request.send().await.expect("write");
+        assert_eq!(refused.status(), 409, "{method} {url} must be frozen");
+    }
+
+    // But pointing the channel at the next version is not frozen — that is the ordinary upgrade.
+    let swapped = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/2.0.0?replace=true",
+            deployment_url(&server, &channel),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("swap");
+    assert_eq!(
+        swapped.status(),
+        200,
+        "a channel must stay updatable, or a fleet cannot be updated at all"
+    );
+
+    // Deleting the signature is frozen too, and the offer still carries the one that was released.
+    let frozen = reqwest::Client::new()
+        .delete(sign("1.0.0"))
+        .send()
+        .await
+        .expect("delete signature");
+    assert_eq!(frozen.status(), 409);
+    let mut report = full_report(&uid, "edge-01", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
+    assert_eq!(
+        offer.packages[support::AGENT_TYPE]
+            .file
+            .as_ref()
+            .expect("a file")
+            .signature,
+        vec![7u8; 64]
+    );
+}
+
+/// ADR-0095 point 3: the hash an Agent verifies against is readable off the package, so "did this
+/// host take my bytes" is answerable without trusting a status field.
+#[tokio::test]
+async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let artifact = b"the-binary";
+    upload(&server, support::AGENT_TYPE, "1.0.0", artifact).await;
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/packages", server.rest_addr))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    let entry = &listed[0]["entries"][0];
+    assert_eq!(
+        entry["content_hash"].as_str().expect("content_hash"),
+        hex::encode(sha256(artifact)),
+        "the SHA-256 an Agent checks what it downloaded against"
+    );
+
+    // And the package hash is the one the offer carries, so the two can be compared by eye.
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+    let channel = everyone(&server, "1.0.0").await;
+    assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
+    let mut report = full_report(&uid, "edge-01", 2);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let offer = exchange(&server, &report)
+        .await
+        .packages_available
+        .expect("an offer");
+    assert_eq!(
+        entry["package_hash"].as_str().expect("package_hash"),
+        hex::encode(&offer.packages[support::AGENT_TYPE].hash),
+        "the hash the Agent echoes back once it is in sync"
+    );
+}
+
+/// ADR-0096 point 4: the fleet view tells apart the states that would otherwise be one empty row,
+/// because the operator's next move differs in each. An Agent in **no channel** has to be labelled;
+/// one in a channel that holds nothing for it needs a package uploaded; one with something waiting
+/// needs a press.
+#[tokio::test]
+async fn the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_agent() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    // 1. No channel claims it — the ordinary state right after an enrolment.
+    let view = &server.state.snapshot()[0];
+    assert_eq!(view.deployment, "", "no channel claims it");
+    assert_eq!(view.assigned_deployment, "");
+    assert!(view.pending_packages.is_empty());
+    assert!(
+        view.package_conflict.is_none(),
+        "and that is not a conflict"
+    );
+
+    // 2. A channel claims it, but holds nothing it can take: a Package for another Agent type.
+    assert_eq!(
+        put_deployment(&server, "stable", &[("service.name", support::AGENT_TYPE)])
+            .await
+            .status(),
+        200
+    );
+    create_set(&server, "promtail", "1.0.0").await;
+    let response = upload_entry(&server, "promtail", "1.0.0", HOST, b"p").await;
+    assert_eq!(response.status(), 200);
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/promtail/1.0.0",
+            deployment_url(&server, "stable")
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+
+    let view = &server.state.snapshot()[0];
+    assert_eq!(view.deployment, "stable", "the channel claims it now");
+    assert!(
+        view.pending_packages.is_empty(),
+        "but proposes nothing — the distinction the operator needs"
+    );
+
+    // 3. Give the channel something it can take: now it waits for a press.
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/1.0.0",
+            deployment_url(&server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+    let view = &server.state.snapshot()[0];
+    assert_eq!(view.deployment, "stable");
+    assert_eq!(view.pending_packages.len(), 1, "now something waits");
+    assert_eq!(view.pending_packages[0].deployment, "stable");
 }

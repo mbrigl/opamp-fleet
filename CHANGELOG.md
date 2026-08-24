@@ -15,6 +15,61 @@ carries a date once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Changed
+
+- **A package is now `(Agent type, version)`, and a new object — the **Deployment** — carries the
+  aim, the signature and the rollout act** ([ADR-0095](docs/adr/0095-a-package-is-what-an-agent-type-runs-at-a-version.md),
+  [ADR-0096](docs/adr/0096-a-deployment-aims-packages-at-a-channel.md)). The free-form package name is
+  gone; the Agent type is the identity and the name a package carries on the wire.
+
+  **What you must do before starting the upgraded Server:**
+
+  1. **Clear `<config_dir>/agents/`.** The Agent record format changed and there is no reader for
+     the old one — the Server refuses to start and names the file. Every Agent re-enrols and
+     re-reports on its next message; what is lost is the rollouts you had made, which step 3
+     restores.
+  2. **Clear `<packages_dir>/`** if it holds anything. There is no migration: the Server refuses to
+     start on a directory in the old `<name>@<version>@<type>` layout rather than reading it as an
+     empty store.
+  3. **Re-upload, then put each package in a deployment and roll it out.** Nothing reaches a host
+     until a deployment holds a package and its rollout is pressed.
+
+  **The rule that changes how a rollout is aimed:** an Agent belongs to at most one Deployment, and
+  a Deployment's Selector may never be empty. The fleet-wide-package-plus-narrower-canary shape is
+  gone — a Selector is equality and cannot express "everyone except", so channels are a **partition**
+  over an attribute every Agent carries (`channel = "stable"`, `region = "eu-central"`,
+  `tenant = "acme"` — the key is yours, the Server prescribes none), set in the host's
+  `[attributes]` or as
+  a Server label. **There is no "roll out to everyone" any more**, and a host carrying no such value
+  belongs to no deployment until it is labelled.
+
+  **Route changes** (old → new):
+
+  | before | now |
+  |---|---|
+  | `PUT /api/v1/packages/{name}/{type}/{version}` | `PUT /api/v1/packages/{agent_type}/{version}` — body `{}` |
+  | `PUT …/{name}/{type}/{version}/entries/{os}/{arch}?signature=` | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` — the signature moved (below) |
+  | `PUT …/selector` | `PUT /api/v1/deployments/{name}` — body `{"selector": {…}}`, never empty |
+  | `POST …/packages/…/rollout` | `POST /api/v1/deployments/{name}/rollout` |
+  | `{"package": {…}}` in a per-Agent rollout | `{"deployment": "<name>"}` |
+  | — | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` |
+  | — | `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}` |
+
+  **The signature moved to the Deployment**, because what an operator signs off on is a release to a
+  set of machines. Passing one on the artifact upload is refused `400` naming the new route rather
+  than ignored. A channel holding no signature offers the artifact unsigned; a Client with
+  `[packages] verification_key` set refuses it on arrival, as it always has.
+
+  **`[self_update] package` on the Client must be the Client's own Agent type** — `supervisor`, the
+  default. There is no separate package name for it to differ from any more, so a value that is not
+  the Agent type refuses every offer that Client will ever get, visibly on its fleet row.
+
+  Addons are no longer offered: an Agent has one binary to replace and its Deployment holds one
+  package for its type, so the Baseline's "normally only one top-level package" is structural here.
+  No Client this project ships ever installed one.
+
 ## [0.4.4] - 2026-08-22
 
 ### Changed

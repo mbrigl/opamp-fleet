@@ -74,7 +74,7 @@ Four things it does on every run:
   Server does not already have, see [below](#the-default-configuration).
 - **It never distributes anything.** Uploading stores a Set and saves a Configuration; reaching a
   host is the rollout act, which stays yours
-  ([step 5 of the walkthrough](rollout.md#5-aim-it-then-roll-it-out)).
+  ([step 6 of the walkthrough](rollout.md#6-roll-it-out)).
 
 ### Interactive
 
@@ -237,7 +237,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 |---|---|
 | `409 … immutable` | The Set is already rolled out to an Agent, so its entries are fixed ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Set first. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Set you no longer roll out, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
-| `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-distributing-software)). |
+| `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |
 
 Because the refusal arrives while the artifact is still being sent, the connection can reset before
@@ -254,7 +254,7 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 - **It does not roll out.** See above; that act is the operator's.
 - **It does not aim.** A Set arrives with no Selector, which means *every* Agent of its type once
   rolled out. Narrow it first if that is not what you want
-  ([step 5](rollout.md#5-aim-it-then-roll-it-out)).
+  ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)).
 
 ### Prerequisites and limits
 

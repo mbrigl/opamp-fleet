@@ -15,10 +15,11 @@ The example is `promtail` — one static binary, which is the requirement (see
 - [2. Build the artifact](#2-build-the-artifact)
 - [3. Sign it](#3-sign-it-optional-but-decide-fleet-wide)
 - [4. Give it to the Server](#4-give-it-to-the-server)
-- [5. Aim it, then roll it out](#5-aim-it-then-roll-it-out)
-- [6. Send its configuration](#6-send-its-configuration)
-- [7. Watch it land](#7-watch-it-land)
-- [8. Ship an update](#8-ship-an-update)
+- [5. Put it in a deployment and sign it there](#5-put-it-in-a-deployment-and-sign-it-there)
+- [6. Roll it out](#6-roll-it-out)
+- [7. Send its configuration](#7-send-its-configuration)
+- [8. Watch it land](#8-watch-it-land)
+- [9. Ship an update](#9-ship-an-update)
 - [Troubleshooting](#troubleshooting)
 
 ## Limits worth knowing first
@@ -93,9 +94,9 @@ $ opamp-package-fetch
 It verifies every download against the SHA-256 upstream published, leaves the artifact untouched
 wherever upstream's container is one a Client can open — so the hash the fleet verifies is the
 one on the release page — and repacks only where upstream ships no installable archive. It never
-rolls anything out: reaching a host is still [step 5](#5-aim-it-then-roll-it-out). The full
+rolls anything out: reaching a host is still [step 5](#6-roll-it-out). The full
 option list is in [the tools page](tools.md#opamp-package-fetch); if you take that route, read
-on at [step 5](#5-aim-it-then-roll-it-out).
+on at [step 5](#6-roll-it-out).
 
 For anything else — your own agent, or a project that tool has never heard of — the rest of this
 step is how an artifact is built by hand.
@@ -177,92 +178,119 @@ installed binary.
 
 ## 4. Give it to the Server
 
-Create the **Set** — its identity is the package name, the Agent type, and the version — then
+Create the **Package** — its identity is the Agent type and the version, and nothing else — then
 either upload the artifact as an entry, or point the Server at one hosted elsewhere. Nothing in
-this step reaches any host: a stored Set waits for the rollout act in the next one.
+this step reaches any host, and nothing in the next one does either: a stored Package aims at
+nobody at all.
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0
+       http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0
 ```
 
-The **Agent type** (the middle path segment) is compared raw against the `service.name` the
-Agents report — for a Supervisor that is its block's `name`. A typo here is a rollout that
-reaches nobody, which the reach count in step 5 makes visible.
+The **Agent type** (the first path segment) is compared raw against the `service.name` the Agents
+report — for a Supervisor that is its block's `service_name`, or the program's file name when the
+block states none. A typo here is a rollout that reaches nobody, which the channel's reach count in
+step 6 makes visible. There is no separate package name: what a Package *is* and which release it
+belongs to are the whole of its identity.
 
-**Upload** — the artifact is the body; the platform is the path. The Server hashes what it
-stores, so no hash is passed here. `os` and `arch` say which machines this artifact runs on: the
-Server offers an Agent only the entry built for the platform it reported.
+**Upload** — the artifact is the body; the platform is the path. The Server hashes what it stores,
+so no hash is passed here. `os` and `arch` say which machines this artifact runs on: the Server
+offers an Agent only the entry built for the platform it reported.
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64?signature=$sig"
+       "http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64"
 ```
+
+No signature here — it goes on the deployment in step 5. Passing `?signature=` is refused with a
+`400` naming the route that takes it, rather than dropped, because a signature silently lost is an
+unsigned rollout nobody notices.
 
 Their values are what an Agent reports as `os.type` and `host.arch` — `linux`, `darwin`, `windows`
 and `amd64`, `arm64`. The tokens off an upstream release file name work too (`macos` is `darwin`,
 `x86_64` is `amd64`), and the response says which canonical pair was stored.
 
-**A fleet on several platforms is still one Set.** Store each build as its own entry, and every
+**A fleet on several platforms is still one Package.** Store each build as its own entry, and every
 host is offered its own binary:
 
 ```console
 $ curl -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/arm64"
+       "http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/arm64"
 ```
 
-**Or reference** — the Server stores the address and *your* SHA-256, offers them
-verbatim, and never downloads the artifact. This is where the hash from step 2 is required, because
-nothing else stands between the mirror and the fleet:
+**Or reference** — the Server stores the address and *your* SHA-256, offers them verbatim, and
+never downloads the artifact. This is where the hash from step 2 is required, because nothing else
+stands between the mirror and the fleet:
 
 ```console
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\"}" \
-       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/entries/linux/amd64/source
+       http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/source
 ```
 
-The package **name** (the first `promtail` in the URL) is the Server's name for the package. It
-has nothing to do with the member name inside the archive, and nothing to do with the
-Supervisor's name — only the *member* has to match the configured program.
+The Agent type has nothing to do with the member name inside the archive — only the *member* has
+to match the configured program.
 
-## 5. Aim it, then roll it out
+## 5. Put it in a deployment and sign it there
 
-A Set with no Selector would reach every Agent of its type that accepts packages. Start narrower:
+A **Deployment** is the channel this release goes to: a name, a Selector, the Packages it offers, and
+each artifact's signature. It is the only thing that is rolled out.
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/selector
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
+       http://127.0.0.1:4321/api/v1/deployments/canary
+$ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.0.0
+$ curl -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       http://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.0.0/linux/amd64
 ```
 
-Each pair must equal an attribute the Agent reported — `env` here comes from `[attributes]` in
-`supervisor.toml`. The Selector aims **every platform** of the Set at once, because the aim belongs
-to the Set; the platform decides only which bytes each host gets. Editing it distributes nothing:
-it decides whom the next act reaches, and the Set's two counts say how many that is — check them
-now. `matching_agents` is whom it aims at: `0` there means the type, the platforms, or the
-Selector missed. `targeted_agents` is whom it would actually upgrade, which is what the act
-changes.
+Each Selector pair must equal an attribute the Agent reported — `channel` here comes from
+`[attributes]` in `supervisor.toml`, or from a label you set on the Server. **The Server prescribes
+no key**: `channel` says which stream of versions a host follows, `region` where it runs, `tenant`
+whose it is, and all three are yours to invent (see the Server manual, *Channels are a partition*). **The Selector may not
+be empty**: an Agent belongs to at most one Deployment, so a channel matching everybody would collide
+with every other one. That is the price of the model and it is worth saying out loud — **there is
+no "everyone" shortcut.** A host that carries no such value belongs to no Deployment and waits.
+
+The signature belongs here rather than to the artifact because what you are signing off on is a
+release to a set of machines. The same Package in two channels is signed in each; a platform left
+unsigned is offered unsigned, which a Client with `verification_key` set refuses on arrival.
+
+## 6. Roll it out
 
 **The rollout act is what distributes** — nothing before this press changed any host:
 
 ```console
-$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.0.0/rollout
+$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/canary/rollout
 {"assigned_agents": 3}
 ```
 
-It assigns the Set to every Agent it fits and the Selector aims at, **as the fleet is now**. A
-host that enrols (or is labelled into the ring) afterwards is not touched: its row on the Agents
-tab shows the Set *waiting*, with a per-Agent **roll out** control — press that, or repeat the
-Set's act, when it should follow. To try one host before the ring, skip the Set's act and use the
-per-Agent one first:
+Check the channel's counts first — they are on `GET /api/v1/deployments` and on its row in the UI.
+`claiming_agents` is who is in the channel: `0` means the Selector missed. `targeted_agents` is who
+the act would actually move, which is what the press changes. `conflicting_agents` is who this channel
+cannot reach because a second Deployment claims them too — resolve that by narrowing a Selector,
+because the Server will not pick between two channels.
+
+The act assigns the channel's Package to every Agent it claims, **as the fleet is now**. A host that
+enrols (or is labelled into the channel) afterwards is not touched: its row on the Agents tab shows
+the Package *waiting*, with a per-Agent **roll out** control — press that, or repeat the channel's
+act, when it should follow. To try one host first, use the per-Agent act:
 
 ```console
 $ curl -X POST -H 'Content-Type: application/json' \
-       -d '{"package": {"name": "promtail", "agent_type": "promtail", "version": "3.0.0"}}' \
+       -d '{"deployment": "canary"}' \
        http://127.0.0.1:4321/api/v1/agents/<instance_uid>/rollout
 ```
 
-## 6. Send its configuration
+It must be the Deployment that actually claims that Agent, and it is refused while a second one
+claims it too — naming one here would sidestep the conflict rather than fix it.
+
+**Finishing the rollout** is giving the stable channel the same version and pressing again. Widening
+the canary channel instead is *not* how it ends: both channels would then claim the same hosts, which is
+a conflict, not a rollout.
+
+## 7. Send its configuration
 
 The binary and the configuration travel independently — the Supervisor writes every matching
 Configuration into its `config/` directory under that Configuration's own name, and the program is
@@ -282,7 +310,7 @@ the argument are the same string. Change the Configuration and roll it out again
 rewrites the file and restarts the process so it re-reads it. An Agent keeps the exact revision
 it was rolled out — an edit waits, visible per Agent on the fleet view, until the next act.
 
-## 7. Watch it land
+## 8. Watch it land
 
 ```console
 $ curl -s http://127.0.0.1:4321/api/v1/agents | jq '.[] | select(.service_name=="promtail")'
@@ -304,24 +332,32 @@ Behind that, on the host: the artifact is streamed to `<supervisor_dir>/promtail
 verified, unpacked, swapped over `program/promtail`, made executable, restarted, and **health-gated
 on `apply_grace_secs`** — a version that will not stay up is rolled back to its predecessor.
 
-## 8. Ship an update
+## 9. Ship an update
 
-An update is steps 2, 4 and 5 again with a new version — a new version is a new Set, and the old
-one stays in the store beside it:
+An update is steps 2, 4, 5 and 6 again with a new version — a new version is a new Package, and the
+old one stays in the store beside it. The channel is the constant; **what it holds is what changes**,
+which is why the swap is explicit:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"env": "canary"}}' \
-       http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0
+$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
+       http://127.0.0.1:4321/api/v1/packages/promtail/3.1.0
 $ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/entries/linux/amd64?signature=$sig"
-$ curl -X POST http://127.0.0.1:4321/api/v1/packages/promtail/promtail/3.1.0/rollout
+       "http://127.0.0.1:4321/api/v1/packages/promtail/3.1.0/entries/linux/amd64"
+$ curl -X PUT "http://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.1.0?replace=true"
+$ curl -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       http://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.1.0/linux/amd64
+$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
-The Selector is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **rolling 3.0.0 out
-again is not how you take 3.1.0 back**. A Set reaches an Agent only as an upgrade over the version
+Without `?replace=true` the third line answers `409` naming 3.0.0 — a channel holds one Package per
+Agent type, and swapping the version it runs is meant to be something you say rather than
+something that happens.
+
+The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in the
+channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the version
 that Agent reports installed
-([ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md)), so once the ring reports
-3.1.0 the older act reaches nobody: the bulk act answers `{"assigned_agents": 0}` and the
+([ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md)), so once the channel reports
+3.1.0 the older one reaches nobody: the channel's act answers `{"assigned_agents": 0}` and the
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
 version it reports *running* instead
 ([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)),
@@ -332,7 +368,7 @@ install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for
 `retain_previous_secs`, and a binary that will not stay up past `apply_grace_secs` is put back
-automatically — step 7's health gate. If the new version is bad in a way the health gate cannot
+automatically — step 8's health gate. If the new version is bad in a way the health gate cannot
 see, publish the old content as a **new, greater version** (`3.1.1`) and roll that out; the fleet
 only moves forward.
 
@@ -350,7 +386,11 @@ only moves forward.
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
 | A signed package is refused | No `verification_key` on that Client — a Client without one refuses *signed* packages, not only unsigned ones. |
-| An Agent that accepts packages is offered nothing | Two equally specific Selectors reach it; see `package_conflict` on its fleet row. |
+| An Agent that accepts packages is offered nothing | Two Deployments claim it, and an Agent belongs to at most one; `package_conflict` on its fleet row names both. Narrow one Selector. |
+| An Agent shows no deployment at all | It carries no attribute any channel's Selector matches. That is the ordinary state right after an enrolment — label it into a channel (`PUT /api/v1/agents/<uid>/labels`) or set `channel` in its `[attributes]`. |
+| A package shows `in no deployment` | Stored and unreachable: nothing aims it. Put it in a channel. |
+| A channel shows `aims at nobody` | Its Selector names an attribute nobody reports, or a value nobody carries. Compare it against the attributes on the Agents tab. |
+| An upload answers `400` about a signature | Signatures belong to the deployment that offers the bytes; the message names the route. |
 | The package routes answer `404` | Package delivery is not configured on the Server (`packages_dir`). |
 | An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
 | An Agent that accepts packages is offered nothing, and there is no conflict | No artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

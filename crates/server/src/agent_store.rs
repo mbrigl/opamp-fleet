@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::fleet::Transport;
-use crate::packages::SetId;
+use crate::packages::PackageId;
 
 /// Everything about one Agent that survives a restart: what it reported and what an operator
 /// queued for it — never what a live connection knows (`connected`, the owning connection).
@@ -52,7 +52,7 @@ pub struct PersistedAgent {
     pub config_assignments: Option<BTreeMap<String, String>>,
     /// The package Sets the operator rolled out to this Agent (ADR-0061), keyed by package name.
     /// `None` marks a record whose seed has not run — it runs when package delivery is armed.
-    pub package_assignments: Option<BTreeMap<String, SetId>>,
+    pub package_assignment: Option<crate::fleet::PackageAssignment>,
 }
 
 impl PersistedAgent {
@@ -133,12 +133,22 @@ struct Envelope {
     /// is exactly the migration marker the fleet reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_assignments: Option<BTreeMap<String, String>>,
-    /// The package assignments (ADR-0061), package name → `<name>@<version>@<type>`.
+    /// What was rolled out to this Agent (ADR-0061, ADR-0096): the Deployment that released it
+    /// and the Package it pinned, as `<agent type>@<version>`. Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    package_assignments: Option<BTreeMap<String, String>>,
+    package_assignment: Option<PackageAssignmentMeta>,
 }
 
-const ENVELOPE_VERSION: u32 = 1;
+/// One Agent's package assignment as persisted.
+#[derive(Serialize, Deserialize)]
+struct PackageAssignmentMeta {
+    deployment: String,
+    package: String,
+}
+
+/// Bumped for ADR-0096's assignment shape, with **no reader for version 1**: there is no legacy
+/// store to support, so an envelope this Server did not write is named rather than guessed at.
+const ENVELOPE_VERSION: u32 = 2;
 
 fn encode<M: Message>(message: &Option<M>) -> Option<String> {
     message
@@ -178,19 +188,23 @@ impl Envelope {
             package_statuses: encode(&record.package_statuses),
             available_components: encode(&record.available_components),
             config_assignments: record.config_assignments.clone(),
-            package_assignments: record.package_assignments.as_ref().map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|(name, id)| (name.clone(), id.to_string()))
-                    .collect()
+            package_assignment: record.package_assignment.as_ref().map(|assignment| {
+                PackageAssignmentMeta {
+                    deployment: assignment.deployment.clone(),
+                    package: assignment.package.to_string(),
+                }
             }),
         }
     }
 
     fn into_record(self) -> Result<PersistedAgent, String> {
         if self.version != ENVELOPE_VERSION {
+            // Loud, and it stops the Server: an Agent record is what the fleet knows about a host,
+            // and one silently skipped would look exactly like a host that never enrolled.
             return Err(format!(
-                "envelope version {} is not the understood {ENVELOPE_VERSION}",
+                "envelope version {} is not the understood {ENVELOPE_VERSION} — this Server reads \
+                 no earlier record format. Clear the agents directory; every Agent re-enrols and \
+                 re-reports on its next message, and what is lost is the operator's rollouts",
                 self.version
             ));
         }
@@ -214,17 +228,15 @@ impl Envelope {
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
             config_assignments: self.config_assignments,
-            package_assignments: self
-                .package_assignments
-                .map(|assignments| {
-                    assignments
-                        .into_iter()
-                        .map(|(name, id)| {
-                            SetId::parse(&id)
-                                .map(|parsed| (name, parsed))
-                                .map_err(|e| format!("invalid package assignment: {e}"))
+            package_assignment: self
+                .package_assignment
+                .map(|assignment| {
+                    PackageId::parse(&assignment.package)
+                        .map(|package| crate::fleet::PackageAssignment {
+                            deployment: assignment.deployment,
+                            package,
                         })
-                        .collect::<Result<BTreeMap<String, SetId>, String>>()
+                        .map_err(|e| format!("invalid package assignment: {e}"))
                 })
                 .transpose()?,
         })
@@ -334,10 +346,10 @@ mod tests {
                 "base".to_string(),
                 "0123abcd".to_string(),
             )])),
-            package_assignments: Some(BTreeMap::from([(
-                "otelcol".to_string(),
-                SetId::new("otelcol", "otelcol", "1.2.3").expect("set id"),
-            )])),
+            package_assignment: Some(crate::fleet::PackageAssignment {
+                deployment: "stable".to_string(),
+                package: PackageId::new("otelcol", "1.2.3").expect("package id"),
+            }),
         }
     }
 
@@ -365,7 +377,7 @@ mod tests {
         let uid = InstanceUid::default();
         let mut old = record();
         old.config_assignments = None;
-        old.package_assignments = None;
+        old.package_assignment = None;
         store.put(&uid, &old).expect("put");
         let text = std::fs::read_to_string(dir.path().join("agents").join(format!("{uid}.json")))
             .expect("read");
@@ -375,7 +387,7 @@ mod tests {
         );
         let restored = store.load().expect("load");
         assert!(restored[&uid].config_assignments.is_none());
-        assert!(restored[&uid].package_assignments.is_none());
+        assert!(restored[&uid].package_assignment.is_none());
     }
 
     /// The dirty check's foundation: a report that only moves the timestamp and the sequence

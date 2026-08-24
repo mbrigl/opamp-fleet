@@ -6,7 +6,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 
 | Part | Read it to |
 |---|---|
-| **[Server](server.md)** | run the control plane: the listener, Configurations and Selectors, packages, the REST API, authentication, TLS |
+| **[Server](server.md)** | run the control plane: the listener, Configurations and Selectors, packages and deployments, the REST API, authentication, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[GLPI Agent recipe](glpi-agent.md)** | deliver a third party's release and supervise it: the GLPI inventory agent as a foreground daemon, on Windows and Linux, configured from the Server |
@@ -119,12 +119,17 @@ Managed Process reads by path* — a rule file, a lookup table — rather than c
 started with. The Client writes it beside the configuration under its own name, and leaves it out of
 what the process is configured with.
 
-**Package.** A named artifact the Server distributes. It states the
-Agent **type** it is built for and reaches no Agent of another, whatever its Selector says —
-a package with no type set reaches nobody at all — and within that type its Selector
-picks which Agents, and its platform which bytes each of them gets. The Server decides which
-artifact an Agent is offered; the Client decides whether it accepts packages at all. Artifacts are
-verified by content hash always, and by Ed25519 signature when a verification key is configured.
+**Package.** What an Agent type runs at a version — its identity is those two things and nothing
+else, and it holds one artifact per platform. It reaches no Agent of another type, and it aims at
+nobody by itself.
+
+**Deployment.** Where a Package goes: a name, the **channel** a Selector aims at, at most one Package
+per Agent type, and each artifact's signature. It is the only thing that is rolled out, and an
+Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports
+rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over an
+attribute every Agent carries; there is no fleet-wide default. The Server decides which artifact an
+Agent is offered; the Client decides whether it accepts packages at all. Artifacts are verified by
+content hash always, and by Ed25519 signature when a verification key is configured.
 
 **Transports.** The URL scheme in the Client's `endpoint` selects the transport:
 `ws://`/`wss://` for WebSocket, where the Server pushes changes within seconds, and

@@ -146,10 +146,16 @@ async fn main() {
                 // ADR-0015.
                 info!("offering software packages to the fleet");
             }
-            Some(server::fleet::PackageOffering::new(
+            match server::fleet::PackageOffering::new(
                 store,
                 config.advertised_url.clone().unwrap_or_default(),
-            ))
+            ) {
+                Ok(offering) => Some(offering),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Err(e) => {
             eprintln!("{e}");
