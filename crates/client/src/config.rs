@@ -883,6 +883,24 @@ impl Default for ClientConfig {
     }
 }
 
+/// `path` against the current working directory when it is relative, unchanged when it is not.
+///
+/// Lexical rather than `canonicalize`: that needs the file to exist, and these directories are
+/// named before they are created. It also follows symbolic links, which would be wrong here — the
+/// versioned install layout (ADR-0010) points at its current version *with* a link, and resolving
+/// it would freeze a path that stops being true at the next update.
+pub(crate) fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        // Nothing to be relative to: hand the path over as written and let the failure name the
+        // real reason rather than inventing a directory.
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored.
@@ -899,9 +917,11 @@ impl ClientConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             legacy_name_beside(path)?;
+            let default = ClientConfig::default();
             return Ok(ClientConfig {
                 path: Some(path.to_path_buf()),
-                ..ClientConfig::default()
+                state_dir: absolute(&default.state_dir),
+                ..default
             });
         }
         let text = std::fs::read_to_string(path)
@@ -912,6 +932,15 @@ impl ClientConfig {
         // everything downstream — the effective-configuration report above all — sees the mask.
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
+        // **Every directory this Client derives is made absolute here**, and this is the one place
+        // it can be done once. Since ADR-0091 a Managed Process starts in its own directory, so a
+        // path the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}`
+        // it substitutes — is resolved by that process against a directory the Client has left.
+        // `state_dir` defaults to the relative `client-state`, so leaving these relative made the
+        // ordinary configuration the broken one: the program was looked for under itself, and a
+        // Collector that did start could not find the configuration written for it.
+        config.state_dir = absolute(&config.state_dir);
+        config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
         config.check_supervisor_names()?;
         if let Some(auth) = &config.auth {
             // A half-configured block must fail now, not at the first exchange.
@@ -1108,6 +1137,63 @@ impl ClientConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every directory this Client derives is absolute, however the operator wrote it.
+    ///
+    /// Since ADR-0091 a Managed Process starts in its own directory, so a relative path handed to
+    /// it is resolved against a directory the Client has left — and `state_dir` defaults to the
+    /// relative `client-state`, which made the ordinary configuration the broken one. Two failures
+    /// came out of it: the program was looked for beneath itself, and a Collector that did start
+    /// could not open the configuration written for it.
+    #[test]
+    fn a_relative_state_dir_yields_absolute_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "state_dir = \"client-state\"\n").expect("write");
+
+        let config = ClientConfig::load(&path).expect("load");
+        assert!(
+            config.state_dir.is_absolute(),
+            "state_dir stayed relative: {}",
+            config.state_dir.display()
+        );
+        for derived in [
+            config.supervisors_root(),
+            config.supervisor_dir("otelcol"),
+            config.staging_dir_for(Some("otelcol")),
+            config.staging_dir_for(None),
+        ] {
+            assert!(
+                derived.is_absolute(),
+                "a derived directory stayed relative: {}",
+                derived.display()
+            );
+        }
+
+        // An explicit supervisor_dir follows the same rule, and an absolute one is left alone.
+        std::fs::write(
+            &path,
+            "state_dir = \"client-state\"\nsupervisor_dir = \"supervisors\"\n",
+        )
+        .expect("write");
+        assert!(ClientConfig::load(&path)
+            .expect("load")
+            .supervisors_root()
+            .is_absolute());
+        // An already-absolute path is handed through untouched. What *is* absolute is the
+        // platform's answer, not this test's: on Windows `/var/lib/fleet` has no drive and is
+        // root-relative, so it would be joined onto the current one — correctly. The fixture is
+        // therefore a path this host calls absolute, written as a TOML **literal** string so a
+        // Windows backslash needs no escaping.
+        let already = dir.path().join("state");
+        assert!(already.is_absolute(), "the fixture must be absolute here");
+        std::fs::write(&path, format!("state_dir = '{}'\n", already.display())).expect("write");
+        assert_eq!(
+            ClientConfig::load(&path).expect("load").state_dir,
+            already,
+            "an absolute path is handed through untouched"
+        );
+    }
     use super::*;
 
     #[test]
