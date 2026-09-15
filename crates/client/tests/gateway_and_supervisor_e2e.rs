@@ -122,13 +122,13 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
-            "command = {stub}\n",
+            "command = {stub:?}\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
-        stub = format!("{:?}", install_stub(&state_dir, "local-agent")),
+        stub = install_stub(&state_dir, "local-agent"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
@@ -235,13 +235,13 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
-            "command = {stub}\n",
+            "command = {stub:?}\n",
             "args = [\"--touch\", {marker:?}]\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
-        stub = format!("{:?}", install_stub(&state_dir, "local-agent")),
+        stub = install_stub(&state_dir, "local-agent"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
