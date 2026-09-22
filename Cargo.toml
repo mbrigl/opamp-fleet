@@ -111,7 +111,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 # where a string literal would quietly keep emitting the old one.
 opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 # The standard bridge from this Client's existing `tracing` output to OTLP log records (ADR-0036).
-opentelemetry-appender-tracing = "0.32"
+opentelemetry-appender-tracing = "0.33"
 # The other half of that bridge (ADR-0090): the appender above converts `tracing` *events* and says
 # so itself — this converts `tracing` *spans* into OpenTelemetry spans, which is what makes the
 # `own_traces` exporter have anything to export. Numbered one release ahead of the OTel crates it
