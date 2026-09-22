@@ -124,7 +124,7 @@ tracing-opentelemetry = "0.33"
 # `opentelemetry-otlp`; declaring them directly adds no supply chain, it only makes the trait
 # nameable so the exporters can be handed a client bound to this process's Tokio runtime — see
 # `client/src/telemetry.rs` for why that binding is necessary.
-opentelemetry-http = { version = "0.32", default-features = false, features = ["reqwest"] }
+opentelemetry-http = { version = "0.33", default-features = false, features = ["reqwest"] }
 async-trait = "0.1"
 
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
