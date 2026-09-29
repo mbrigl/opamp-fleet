@@ -119,7 +119,7 @@ opentelemetry-appender-tracing = "0.32"
 # (ADR-0090 clause 1), not a range to widen. It is also what gives the exported log records their
 # TraceId: entering a span activates its OpenTelemetry context, which is where the appender reads
 # the correlation from — the reason its own `experimental_use_tracing_span_context` could be dropped.
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 # The OTLP exporters' HTTP client trait. Both crates are already compiled into this binary through
 # `opentelemetry-otlp`; declaring them directly adds no supply chain, it only makes the trait
 # nameable so the exporters can be handed a client bound to this process's Tokio runtime — see
