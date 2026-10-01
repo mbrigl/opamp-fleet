@@ -49,6 +49,7 @@ fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    client::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {

@@ -19,6 +19,8 @@ use futures_util::stream;
 /// cross-origin case needs a second origin on the same process, and `localhost` versus `127.0.0.1`
 /// is one — same socket, different host in the URL, which is exactly what the header rule compares.
 async fn spawn() -> SocketAddr {
+    // What main() does at startup: without a process provider, reqwest refuses to build a client.
+    client::tls::install_ring_provider();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
