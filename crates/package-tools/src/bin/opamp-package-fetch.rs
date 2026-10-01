@@ -128,6 +128,7 @@ impl AgentKind {
         let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
         match self {
             // `v0.158.0` — three numeric parts behind a `v`, and nothing else.
+            AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 let rest = tag.strip_prefix('v')?;
                 let parts: Vec<&str> = rest.split('.').collect();
                 (parts.len() == 3 && parts.iter().all(|p| numeric(p))).then(|| rest.to_string())
@@ -147,17 +148,36 @@ impl AgentKind {
     /// the `--version` flag, which takes the version an operator reads on the release page.
     fn tag_of_version(self, version: &str) -> String {
         match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 format!("v{version}")
             }
             AgentKind::Supervisor => format!("version/{version}"),
         }
     }
 
+    /// The systems this agent can be fetched for, as the agent menu states them.
+    ///
+    /// A hint, not the plan: what is actually offered comes from the release itself a step later.
+    /// It is here because the menu asks for an agent before any of that is known, and picking one
+    /// only to be told that it publishes nothing for the systems an operator runs is a round trip
+    /// the operator should not have to make.
+    ///
+    /// The Collectors publish per platform and add new ones between releases, so naming their
+    /// architectures here would be a table going stale — the operating systems are the honest
+    /// answer, and the platform question that follows shows the release's own list.
+    fn platforms(self) -> String {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib => {
+                "linux, darwin, windows — as the release publishes".to_string()
+            }
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
             // this repository decides it should — and the column's question, "does it run on the
             // hosts I have", deserves the concrete answer where one can be given.
             AgentKind::Supervisor => group_platforms(SUPERVISOR_PLATFORMS.iter().copied()),
+        }
+    }
+
     /// The line that introduces the per-platform hints printed when the fetch is done.
     ///
     /// Every other agent is installed by a Supervisor, which needs a block; this fleet's own Client
@@ -170,27 +190,77 @@ impl AgentKind {
         }
     }
 
+    /// The Configurations this agent needs before it can do anything, aimed the way
+    /// `scripts/seed_test_configs.sh` aims them — which is where these bodies come from, and why
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
+    fn default_configurations(self) -> &'static [DefaultConfiguration] {
+        // Aiming differs by how an Agent's type becomes known. The Collectors report a
+        // `service.name` of their own, so a Selector on that attribute is what reaches them; the
+        // rest are matched by Agent type (ADR-0023).
+        match self {
+            AgentKind::Otelcol => &[DefaultConfiguration {
+                name: "otelcol-conf",
+                selector: &[("service.name", "otelcol")],
+                service_name: "",
+                body: include_str!("../../../../config/examples/otelcol-conf.yaml"),
+            }],
+            AgentKind::OtelcolContrib => &[DefaultConfiguration {
+                name: "otelcol-contrib-conf",
+                selector: &[("service.name", "otelcol-contrib")],
+                service_name: "",
+                body: include_str!("../../../../config/examples/otelcol-contrib-conf.yaml"),
+            }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
+        }
     }
 }
 
+/// A Configuration this tool puts on the Server beside the package, when the Server has none of
+/// that name yet.
+///
+/// The body is compiled in rather than read from the repository: this tool is released as a
+/// binary an operator runs anywhere (ADR-0010), so a file path beside it would be a default that
+/// only works in a checkout.
+struct DefaultConfiguration {
+    /// The Configuration's name — also the file name its entry gets in the Supervisor's config
+    /// directory, which is what the `[[supervisor]]` block has to name.
+    name: &'static str,
+    /// Equality pairs against the Agent's attributes; empty aims at every Agent of the type below.
+    selector: &'static [(&'static str, &'static str)],
+    /// The Agent type this is for (ADR-0023); empty is every type.
     service_name: &'static str,
+    body: &'static str,
+}
+
+/// One file to fetch, and where the SHA-256 it must match comes from.
+struct Download {
+    url: String,
     checksum: ChecksumSource,
+}
+
 /// One platform's artifact, planned before anything is downloaded.
 struct Plan {
     /// The platform as *this fleet* names it (ADR-0026), which is what the upload path carries.
     os: String,
     arch: String,
+    /// What has to be fetched. Every one of them is verified before any of them is used.
+    sources: Vec<Download>,
     /// What has to happen to the downloaded bytes before they are a package artifact.
     action: Action,
     /// The artifact's file name in `--out-dir`.
     out_name: String,
     /// What a `[[supervisor]]` block has to say to install it — or, for this fleet's own Client,
     /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
+    /// because it is the next thing an operator needs.
+    ///
+    /// For a **wrapped** agent it is now the `type` alone (ADR-0017): the Client's kind knows the
+    /// program's name, where it sits in the tree, and how it is invoked, so this tool no longer
+    /// dictates a line for a host to transcribe. What it used to name lives in that agent's
+    /// artifact document under `docs/artifacts/`, which the kind's own tests pin — the two ends of
+    /// one artifact, kept in step by a red test rather than by a hint printed on a terminal.
     block_hint: String,
 }
 
@@ -245,11 +315,8 @@ async fn run(cli: Cli) -> Result<(), String> {
     };
     let tag = agent.tag_of_version(&version);
 
-    let assets = if agent.needs_assets() {
-        release_assets(&source, &tag).await?
-    } else {
-        Vec::new()
-    };
+    let assets = release_assets(&source, &tag).await?;
+    let available = plans(agent, &version, &assets).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
         // the operator a trip to the release page: everything published before ADR-0019 carries
@@ -283,6 +350,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         for (plan, artifact) in &produced {
             upload(server, source.service_name, &version, plan, artifact).await?;
         }
+        upload_default_configurations(server, agent).await?;
     }
 
     eprintln!("\nDone. {}", agent.install_hint());
@@ -297,8 +365,13 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
     if server.is_none() {
         eprintln!(
+            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, and \
+             put it in the deployment that should carry it:\n  \
              curl -X PUT -H 'Content-Type: application/json' -d '{{}}' \\\n       \
+             <server>/api/v1/packages/{name}/{version}\n  \
              curl -X PUT --data-binary @<artifact> \\\n       \
+             \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>\"\n  \
+             curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}",
             name = source.service_name,
             version = version
         );
@@ -323,6 +396,58 @@ async fn run(cli: Cli) -> Result<(), String> {
 
 // ── The questions ───────────────────────────────────────────────────────────
 
+/// Platform pairs as one menu line: `linux/amd64+arm64 windows/amd64`.
+///
+/// Grouped by operating system, and tightly, because the menu is one line per agent and a line
+/// that wraps at eighty columns is one `dialoguer` redraws wrongly when the selection moves.
+fn group_platforms<'p>(pairs: impl Iterator<Item = (&'p str, &'p str)>) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (os, arch) in pairs {
+        match groups.iter_mut().find(|(name, _)| *name == os) {
+            Some((_, arches)) => arches.push(arch),
+            None => groups.push((os, vec![arch])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(os, arches)| format!("{os}/{}", arches.join("+")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The agent menu's lines, name and systems in two columns.
+///
+/// Its own function so the width rule below is testable against the very lines the menu shows,
+/// rather than against a copy of them that drifts.
+fn agent_menu_labels() -> Vec<String> {
+    // Asked of clap rather than written out again. A second list of the same agents is exactly how
+    // `icinga2` came to be missing from this prompt while `--agent icinga2` worked: adding a
+    // variant is one place, and the menu now follows it whether or not anyone remembers this
+    // function.
+    let agents = AgentKind::value_variants();
+    // The systems beside each name, in a column: the choice that follows this one is a platform,
+    // and an agent that publishes nothing for the systems an operator runs is better seen here
+    // than after two more questions.
+    let width = agents
+        .iter()
+        .map(|a| a.source().service_name.len())
+        .max()
+        .unwrap_or(0);
+    agents
+        .iter()
+        .map(|a| {
+            format!(
+                "{name:<width$}  {platforms}",
+                name = a.source().service_name,
+                platforms = a.platforms()
+            )
+        })
+        .collect()
+}
+
+fn choose_agent() -> Result<AgentKind, String> {
+    let agents = AgentKind::value_variants();
+    let labels = agent_menu_labels();
     let picked = Select::new()
         .with_prompt("Which agent")
         .items(&labels)
@@ -498,6 +623,7 @@ async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, Strin
 }
 
 /// What this release offers, one entry per platform this fleet can name.
+async fn plans(
     agent: AgentKind,
     version: &str,
     assets: &[(String, String)],
@@ -539,6 +665,10 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
         plans.push(Plan {
             os: os.clone(),
             arch,
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: collector_checksum(name, dist, assets),
+            }],
             action: Action::AsPublished,
             out_name: name.clone(),
             block_hint: format!("binary = {program:?}  (type = \"collector\")"),
@@ -594,7 +724,10 @@ fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
         plans.push(Plan {
             os,
             arch,
+            sources: vec![Download {
+                url: url.clone(),
                 checksum: ChecksumSource::Sums { urls: sums.clone() },
+            }],
             action: Action::AsPublished,
             out_name: name.clone(),
             // Not a `[[supervisor]]` block: a Client installs this one over itself, and what
@@ -657,7 +790,36 @@ fn normalize_arch(arch: &str) -> Option<String> {
 /// whatever [`Action`] the plan carries. Returns the file that is now ready to upload.
 async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     eprintln!("\n{}/{}", plan.os, plan.arch);
+    let mut fetched = Vec::new();
+    for source in &plan.sources {
+        let downloaded = out_dir.join(
+            Path::new(&source.url)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| plan.out_name.clone()),
+        );
+        eprintln!("  downloading {} …", source.url);
+        download(&source.url, &downloaded).await?;
+
+        let published = published_sha256(&source.checksum, &downloaded).await?;
+        let actual = hex::encode(sha256_file(&downloaded)?);
+        if actual != published {
+            // The file stays for inspection: a mismatch is either a truncated download or
+            // something that deserves a look, and deleting the evidence serves neither.
+            return Err(format!(
+                "{} does not match the SHA-256 upstream published\n  upstream: {published}\n  \
+                 downloaded: {actual}",
+                downloaded.display()
+            ));
+        }
+        eprintln!("  verified against upstream's SHA-256");
+        fetched.push(downloaded);
     }
+    // Every plan has exactly one; the ones that act on "the download" mean this.
+    let downloaded = fetched
+        .first()
+        .cloned()
+        .ok_or_else(|| "a plan with nothing to fetch".to_string())?;
 
     match &plan.action {
         Action::AsPublished => {
@@ -667,9 +829,6 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
 async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<String, String> {
     let urls = match source {
@@ -878,6 +1037,7 @@ async fn upload(
     plan: &Plan,
     artifact: &Path,
 ) -> Result<(), String> {
+    let set = format!("{server}/api/v1/packages/{service_name}/{version}");
     eprintln!("  creating the Set at {set} …");
     let response = http()?
         .put(&set)
@@ -897,15 +1057,86 @@ async fn upload(
         Err(e) => return Err(refusal_behind(&entry, &e).await),
     };
     expect_ok(response, &entry).await?;
+    eprintln!(
+        "  stored as the {}/{} entry — and it reaches nobody yet: a package aims at nothing by \
+         itself. Put it in a deployment when it should reach hosts:\n    \
+         curl -X PUT <server>/api/v1/deployments/<ring>/packages/{}/{}",
+        plan.os, plan.arch, service_name, version
+    );
     Ok(())
 }
 
+/// Puts this agent's default Configurations beside the package — **only the ones the Server does
+/// not already have**.
+///
+/// A package alone leaves an Agent with nothing to run: the Supervisor holds at "awaiting
+/// configuration" until a Configuration of the name its block reads arrives. Uploading the default
+/// with the package closes that gap in the same act.
+///
+/// Two rules keep it from being a surprise. **An existing Configuration is never touched** — the
+/// name is asked for first, and one that answers is left exactly as the operator left it, edits and
+/// all. And **nothing is distributed**: saving only saves (ADR-0025), so the default reaches no
+/// Agent until an operator reads it and presses the rollout. That matters here, because these
+/// bodies are starting points with example values in them — a parent host to correct, a plugin
+/// path to confirm.
+async fn upload_default_configurations(server: &str, agent: AgentKind) -> Result<(), String> {
+    for config in agent.default_configurations() {
+        let url = format!("{server}/api/v1/configurations/{}", config.name);
+        if configuration_exists(&url).await? {
+            eprintln!("  {} is already on the Server — left as it is", config.name);
+            continue;
+        }
+        let selector: serde_json::Map<String, serde_json::Value> = config
+            .selector
+            .iter()
+            .map(|(k, v)| {
+                (
+                    (*k).to_string(),
+                    serde_json::Value::String((*v).to_string()),
+                )
+            })
+            .collect();
+        let spec = serde_json::json!({
+            "selector": selector,
+            "body": config.body,
+            "service_name": config.service_name,
+        });
+        eprintln!("  storing the default configuration {} …", config.name);
+        let response = http()?
+            .put(&url)
+            .header("Content-Type", "application/json")
+            .body(spec.to_string())
+            .send()
+            .await
+            .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
+        expect_ok(response, &url).await?;
+        eprintln!(
+            "  saved — read it over and press its rollout when it should reach hosts, since it \
+             carries example values"
+        );
+    }
+    Ok(())
+}
+
+/// Whether the Server already holds a Configuration of this name. `404` is the answer that means
+/// "no"; anything else that is not a success is an answer this tool must not read past — a Server
+/// that refuses the question would otherwise have a default written over the top of what it holds.
+async fn configuration_exists(url: &str) -> Result<bool, String> {
     let response = http()?
         .get(url)
         .send()
         .await
         .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
+    match response.status() {
+        status if status.is_success() => Ok(true),
+        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        status => {
             let body = response.text().await.unwrap_or_default();
+            Err(format!("{url} answered {status}: {}", body.trim()))
+        }
+    }
+}
+
 /// Why an upload never came back with a status.
 ///
 /// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
@@ -1040,6 +1271,55 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// The agent menu names the systems each agent can be fetched for, which is not something to
+    /// discover three questions later. Every variant answers —
+    /// adding one without a line here is the omission this catches.
+    #[test]
+    fn the_agent_menu_states_the_systems_each_agent_is_published_for() {
+        for agent in super::AgentKind::value_variants() {
+            let platforms = agent.platforms();
+            assert!(
+                platforms.contains('/') || platforms.contains("linux"),
+                "{agent:?} names no system: {platforms:?}"
+            );
+        }
+    }
+
+    /// `group_platforms` states that a menu line wrapping at eighty columns is one `dialoguer`
+    /// redraws wrongly as the selection moves — but nothing held anyone to it, and a line written
+    /// by hand rather than by that function promptly ran to ninety-five. The rule is measured here
+    /// on the lines the menu really shows, with the two columns `dialoguer` prefixes them with.
+    ///
+    /// Columns, not bytes: the Collectors' line carries an em dash.
+    #[test]
+    fn no_agent_menu_line_wraps() {
+        const SELECTION_PREFIX: usize = 2;
+        for label in super::agent_menu_labels() {
+            let columns = SELECTION_PREFIX + label.chars().count();
+            assert!(
+                columns <= 80,
+                "this line renders {columns} columns wide and will wrap: {label:?}"
+            );
+        }
+    }
+
+    /// Every agent the `--agent` flag accepts is also offered when the flag is omitted.
+    ///
+    /// The two came apart once — `icinga2` was reachable by flag and absent from the prompt for as
+    /// long as the prompt kept its own list — so what is asserted here is that the menu is built
+    /// from the same variants clap validates against.
+    #[test]
+    fn the_prompt_offers_every_agent_the_flag_accepts() {
+        use clap::ValueEnum as _;
+        let offered: Vec<&str> = super::AgentKind::value_variants()
+            .iter()
+            .map(|agent| agent.source().service_name)
+            .collect();
+        for expected in ["otelcol", "otelcol-contrib"] {
+            assert!(offered.contains(&expected), "{expected} is not offered");
+        }
+    }
+
     use super::*;
     use std::io::Read as _;
 
@@ -1333,6 +1613,7 @@ mod tests {
     /// delivers the response would be a test that sometimes passes.
     #[tokio::test]
     async fn a_refusal_lost_with_the_upload_is_asked_for_again() {
+        use std::io::Write;
 
         // What `main` does before anything builds a client (ADR-0013).
         client::tls::install_ring_provider();
@@ -1396,6 +1677,10 @@ mod tests {
         let plan = Plan {
             os: "linux".into(),
             arch: "amd64".into(),
+            sources: vec![Download {
+                url: String::new(),
+                checksum: ChecksumSource::BareDigest { url: String::new() },
+            }],
             action: Action::AsPublished,
             out_name: "otelcol_0.0.1_linux_amd64.tar.gz".into(),
             block_hint: String::new(),
@@ -1409,12 +1694,20 @@ mod tests {
             "the operator is told what the Server refused, not that it could not be reached: {error}"
         );
     }
+
     /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
     /// is storable: the name follows the ADR-0019 grammar the Server enforces (which admits no dot,
     /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
     /// aimed at something — by Selector or by Agent type — rather than at the whole fleet.
+    ///
+    /// This is the test that fails when a variant is added and its default is forgotten, which is
     /// the only way an agent could reach a Server with a package and nothing to run. The Client's
     /// own package is the one exemption, and it is stated below rather than skipped.
+    #[test]
+    fn every_agent_carries_a_storable_default_configuration() {
+        for agent in AgentKind::value_variants() {
+            let defaults = agent.default_configurations();
+            let service_name = agent.source().service_name;
             if matches!(agent, AgentKind::Supervisor) {
                 // The one package nothing supervises. A Client reads `supervisor.toml` on its own
                 // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0017), so
@@ -1427,10 +1720,52 @@ mod tests {
                 );
                 continue;
             }
+            assert!(
+                !defaults.is_empty(),
+                "{service_name} has no default configuration"
+            );
+            for config in defaults {
+                assert!(
+                    !config.name.is_empty()
+                        && config
+                            .name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "{service_name}: {:?} is not a name the Server would accept",
+                    config.name
+                );
+                assert!(
+                    !config.body.trim().is_empty(),
+                    "{service_name}: {} has an empty body",
+                    config.name
+                );
+                assert!(
+                    !config.selector.is_empty() || !config.service_name.is_empty(),
+                    "{service_name}: {} would be aimed at every Agent in the fleet",
+                    config.name
+                );
+            }
+        }
+    }
+
+    /// The upload asks before it writes: a Configuration the Server already holds is left exactly
+    /// as it is — operator edits included — and only the missing one is stored.
+    ///
+    /// The stand-in Server answers `200` for `otelcol-conf` and `404` for `otelcol-contrib-conf`,
+    /// and records every request, so what the test asserts is the *absence* of a PUT over the top
+    /// of the existing one.
+    #[tokio::test]
+    async fn a_default_configuration_the_server_already_holds_is_not_written_over() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
         client::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let server = format!("http://{}", listener.local_addr().expect("addr"));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
                 let mut head = Vec::new();
@@ -1442,4 +1777,48 @@ mod tests {
                     }
                 }
                 let head = String::from_utf8_lossy(&head).into_owned();
+                let Some(line) = head.lines().next() else {
+                    continue;
+                };
+                recorded.lock().expect("lock").push(line.to_string());
+                // A body must be read before the answer, or the response races a reset.
+                let length: usize = head
+                    .to_ascii_lowercase()
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = stream.read_exact(&mut body);
+                let answer = if line.starts_with("GET") && line.contains("/otelcol-conf ") {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+                } else if line.starts_with("GET") {
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+                };
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+
+        for agent in [AgentKind::Otelcol, AgentKind::OtelcolContrib] {
+            upload_default_configurations(&server, agent)
+                .await
+                .expect("the Server accepted the one it was missing");
+        }
+
+        let seen = seen.lock().expect("lock").clone();
+        assert!(
+            seen.iter().any(|r| r.starts_with("PUT")
+                && r.contains("/api/v1/configurations/otelcol-contrib-conf")),
+            "the missing configuration is stored: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|r| r.starts_with("PUT") && r.contains("/api/v1/configurations/otelcol-conf")),
+            "the one the Server already holds is left alone: {seen:?}"
+        );
+    }
 }

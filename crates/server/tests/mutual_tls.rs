@@ -135,8 +135,10 @@ async fn serve(
 }
 
 fn client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
+    server::tls::install_ring_provider();
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(ca_pem.as_bytes()).expect("ca")])
         // The certificate is for `localhost`, the listener is on 127.0.0.1.
         .resolve(
             "localhost",

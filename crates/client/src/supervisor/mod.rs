@@ -524,17 +524,6 @@ mod tests {
         )
     }
 
-            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
-            state = root.join("state").to_string_lossy(),
-        let dir = tempfile::tempdir().expect("tempdir");
-        let block = &config.supervisors[0];
-        let plugins = registry();
-        let plugin = find_plugin(&plugins, block).expect("the kind is known");
-        assert_eq!(
-            effective_service_name(block, plugin, &program.path).expect("a type"),
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir = tempfile::tempdir().expect("tempdir");
-                state = dir.path().join("state").to_string_lossy(),
     /// A Client says which kinds it carries, one key per kind (ADR-0017 clause 18), so a Selector
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
@@ -551,21 +540,20 @@ mod tests {
                 plugin.kind()
             );
         }
+
         // An operator's own value under the same key is left alone: a configured attribute is the
         // host's statement about itself, and this only fills in what nothing else said.
         let stated = kind_attributes(
+            [("supervisor.kind.command".to_string(), "no".to_string())]
                 .into_iter()
                 .collect(),
         );
         assert_eq!(
+            stated.get("supervisor.kind.command").map(String::as_str),
             Some("no")
         );
     }
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let block = &config.supervisors[0];
-        let timing = effective_timing(&config, block, find_plugin(&plugins, block).expect("kind"))
-            .expect("resolved");
     /// And where a kind states no correction, the fleet's policy reaches the Supervisor unchanged
     /// — including for an unwrapped kind, whose block may still override it because no kind exists
     /// there to hold the value.

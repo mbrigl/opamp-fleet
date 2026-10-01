@@ -4,8 +4,73 @@ Operator-facing changes to the Server and the Client — what a running deployme
 about, in particular anything that must be edited or moved before an upgrade. The reasoning behind
 each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says only what to do.
 
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
+`[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
+`version/*` tag from ([ADR-0012](docs/adr/0012-versions-resolved-in-the-internal-crate.md), superseding the
+version-source decision of [ADR-0012](docs/adr/0012-versions-resolved-in-the-internal-crate.md)). A section
+carries a date once its tag exists.
 
+> **Where this file starts.** Entries begin with release 0.1.0. The work before it — package
+> delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
+> rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
+> all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [0.4.5] - 2026-08-24
+
+### Changed
+
+- **A package is now `(Agent type, version)`, and a new object — the **Deployment** — carries the
+  aim, the signature and the rollout act** ([ADR-0026](docs/adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md),
+  [ADR-0026](docs/adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The free-form package name is
+  gone; the Agent type is the identity and the name a package carries on the wire.
+
+  **What you must do before starting the upgraded Server:**
+
+  1. **Clear `<config_dir>/agents/`.** The Agent record format changed and there is no reader for
+     the old one — the Server refuses to start and names the file. Every Agent re-enrols and
+     re-reports on its next message; what is lost is the rollouts you had made, which step 3
+     restores.
+  2. **Clear `<packages_dir>/`** if it holds anything. There is no migration: the Server refuses to
+     start on a directory in the old `<name>@<version>@<type>` layout rather than reading it as an
+     empty store.
+  3. **Re-upload, then put each package in a deployment and roll it out.** Nothing reaches a host
+     until a deployment holds a package and its rollout is pressed.
+
+  **The rule that changes how a rollout is aimed:** an Agent belongs to at most one Deployment, and
+  a Deployment's Selector may never be empty. The fleet-wide-package-plus-narrower-canary shape is
+  gone — a Selector is equality and cannot express "everyone except", so channels are a **partition**
+  over an attribute every Agent carries (`channel = "stable"`, `region = "eu-central"`,
+  `tenant = "acme"` — the key is yours, the Server prescribes none), set in the host's
+  `[attributes]` or as
+  a Server label. **There is no "roll out to everyone" any more**, and a host carrying no such value
+  belongs to no deployment until it is labelled.
+
+  **Route changes** (old → new):
+
+  | before | now |
+  |---|---|
+  | `PUT /api/v1/packages/{name}/{type}/{version}` | `PUT /api/v1/packages/{agent_type}/{version}` — body `{}` |
+  | `PUT …/{name}/{type}/{version}/entries/{os}/{arch}?signature=` | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` — the signature moved (below) |
+  | `PUT …/selector` | `PUT /api/v1/deployments/{name}` — body `{"selector": {…}}`, never empty |
+  | `POST …/packages/…/rollout` | `POST /api/v1/deployments/{name}/rollout` |
+  | `{"package": {…}}` in a per-Agent rollout | `{"deployment": "<name>"}` |
+  | — | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` |
+  | — | `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}` |
+
+  **The signature moved to the Deployment**, because what an operator signs off on is a release to a
+  set of machines. Passing one on the artifact upload is refused `400` naming the new route rather
+  than ignored. A channel holding no signature offers the artifact unsigned; a Client with
+  `[packages] verification_key` set refuses it on arrival, as it always has.
+
+  **`[self_update] package` on the Client must be the Client's own Agent type** — `supervisor`, the
+  default. There is no separate package name for it to differ from any more, so a value that is not
+  the Agent type refuses every offer that Client will ever get, visibly on its fleet row.
+
+  Addons are no longer offered: an Agent has one binary to replace and its Deployment holds one
+  package for its type, so the Baseline's "normally only one top-level package" is structural here.
+  No Client this project ships ever installed one.
+
+## [0.4.4] - 2026-08-22
 
 ### Changed
 
@@ -63,6 +128,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   A host in that state today recovers as soon as it runs a version carrying this fix — and until
   then, the way out is to correct the file or to point `current` back by hand.
 
+## [0.4.3] - 2026-08-21
 
 ### Added
 
@@ -119,6 +185,10 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   environment by variable name only, never by value. **What to do:** nothing, unless you are
   chasing one of those, in which case `RUST_LOG=debug` now answers it.
 
+## [0.4.2] - 2026-08-21
+
+### Added
+
 - **`opamp-package-fetch` can fetch the Client itself** — `--agent supervisor` reads this project's
   own releases, verifies each `.tar.gz` against the `SHA256SUMS` the release publishes, and uploads
   the five platforms into one Set named and typed `supervisor`
@@ -129,6 +199,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   prints the `[self_update] package = "supervisor"` consent rather than a `[[supervisor]]` block,
   and uploads no default configuration, because a Client's own configuration is its host's.
   **What to do:** nothing. The manual procedure still works.
+
+### Changed
 
 - **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
   ([ADR-0016](docs/adr/0016-what-an-agent-reports-about-itself.md)). Own telemetry
@@ -362,11 +434,15 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   rollback. The Collector uses its own `--version`; the `command` kind uses
   `version_args`, the arguments an operator has already declared safe to invoke the program with,
   and without that key it keeps no preflight at all. The health gate and rollback of
+  [ADR-0026](docs/adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) are unchanged behind
   it. **What to do:** nothing, unless a program you supervise cannot answer the arguments you gave
   it — a Collector that does not respond to `--version` within five seconds, or a `command` whose
   `version_args` exit non-zero, now has its *packages* refused as well as reporting no version.
   Nothing that already runs is touched either way.
-- **`opamp-package-fetch` offers release *series*, and its refusals name only what is missing.** The
+- **`opamp-package-fetch` names the systems each agent is published for**, in the agent menu
+  itself, so a choice is no longer made blind — the Collectors by operating system (their
+  architectures come from the release). **What to do:** nothing.
+- **`opamp-package-fetch` offers release *series*.** The
   version question used to list the five newest tags, which for an agent that patches often was five
   patches of one line, so the
   one thing an operator looks for there — a version to go back to — was not in it. It now lists the
@@ -381,6 +457,19 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   and a click opens the reason in a dialog, the way the effective-configuration column already
   worked. **What to do:** nothing; no field of `GET /api/v1/agents` changed, and `health_error` and
   `remote_config_error` are still there for anything reading the API.
+- **A Managed Process may be stopped as a process group.** A daemon that runs a worker of its own
+  otherwise leaves that worker running when the bounded stop escalates to a kill.
+  Opt-in per kind; the existing kinds are unaffected.
+- **`opamp-package-fetch` uploads the agent's default configuration with the package.** A package
+  alone leaves an Agent with nothing to run — the Supervisor holds at *awaiting configuration*
+  until a Configuration of the name its block reads arrives — so an upload now stores that default
+  too: the two Collector ones.
+  The bodies are the ones in `config/examples/`, compiled into the tool.
+  **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
+  untouched**, edits included, so a second upload changes nothing; and saving still distributes
+  nothing ([ADR-0025](docs/adr/0025-rollout-and-what-reaches-an-agent.md)) — read the default over and
+  roll it out yourself, since it carries example values.
+
 - **The install path lost two levels, and `--instance` is gone.** The Client installed under
   `<base>/opamp-fleet/client/<instance>` — a product level, a component level asserting `client`
   where the program is called `supervisor`, and an instance level holding the constant `default` on
@@ -579,6 +668,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   a host over from a machine-installed program is unaffected: that route declares no packages at
   all, and the fleet-owned form starts from an empty program directory.
 
+## [0.3.2] - 2026-08-17
 
 ### Added
 
@@ -656,6 +746,39 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 ### Added
 
+- **A package artifact may be a `.zip`.**
+  The
+  Client now opens three containers, still decided by leading bytes: `.tar.gz`, `.7z`, and
+  `.zip` — as a single-file package and as a tree (`program_path`), held to the same member
+  rules as the others (no links, no paths climbing out, the same member and size bounds). Zip
+  support is **read-only and unencrypted**: an encrypted member is refused with a message
+  pointing at `.7z`, which is what `[packages] archive_key` opens. This exists so an upstream
+  build published as a zip can be uploaded or
+  referenced exactly as published, with upstream's own SHA-256 as the hash every Agent verifies.
+  **What to do:** nothing, unless you relied on a `.zip` artifact being installed *as* the
+  program. That was never useful — the agent would not start — but it did leave the file in
+  place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
+  right container for a tree on Unix, being the one that carries file modes.
+- **The operator tools moved to their own crate**
+  ([ADR-0010](docs/adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
+  `opamp-package-sign` and the new `opamp-package-fetch` are `crates/package-tools`, not binaries
+  of the Client: the crate that runs on every managed host no longer carries tooling that never
+  runs there. The binaries keep their names and their behaviour.
+  **What to do:** nothing, unless you build them by crate — `cargo build -p client --bin
+  opamp-package-sign` becomes `-p package-tools`. `cargo run --bin opamp-package-sign` is
+  unchanged, because `--bin` resolves across the workspace. A release ships neither tool, as
+  before.
+- **`opamp-package-fetch`, an operator tool that fetches an upstream release and makes it a
+  package.** It knows where the OpenTelemetry Collector (`otelcol`, `otelcol-contrib`)
+  publishes, offers the last five versions and the platforms that release
+  actually carries, verifies every download against the SHA-256 upstream published, and uploads
+  each artifact as its platform's entry when told to. Interactive by default; `--agent`,
+  `--version`, `--platform`, `--out-dir`, `--server` and `--no-upload` make it scriptable.
+  Artifacts travel **as published** wherever upstream's container is one a Client can open, so
+  the hash the fleet verifies is the one on the release page. See
+  [the tools page](docs/manual/tools.md#opamp-package-fetch).
+  **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
+  artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**
   ([ADR-0017](docs/adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). A `[[supervisor]]` block of
   `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
@@ -732,6 +855,42 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   (`ComponentHealth.last_error`) beside the existing `healthy` and `health_status`.
   **What to do:** nothing — the column and field appear on upgrade.
 
+### Security
+
+- **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
+  ([ADR-0017](docs/adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0017) is now refused
+  (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
+  that would let the Server spawn a machine binary that never passed through package signing. A
+  bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
+  Supervisor an operator writes in `client.toml` by hand.
+  **What to do:** if you deliver a Supervisor set over the wire, name each program with a bare file
+  name (delivered by package); machine binaries stay in the host's local `client.toml`.
+
+- **The Server bounds how many Agent records it holds** — a new `max_agents` in `server.toml`
+  (default 100 000). A report bearing a *new* `instance_uid` past the ceiling is answered
+  `Unavailable` (retry later) instead of admitted, so a peer minting fresh self-asserted UIDs
+  (ADR-0021) cannot exhaust memory and disk; Agents already known keep reporting.
+  **What to do:** nothing for a normal fleet. A very large deployment can raise `max_agents`; the
+  real defence against an anonymous flood is `[auth]` (ADR-0021), and this is the backstop while it
+  is off.
+
+- **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
+  `[connection_offer]` credential (ADR-0014) or `[telemetry_offer]` headers (ADR-0016) are handed
+  to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
+  peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
+  unchanged.
+  **What to do:** set `[auth]` to gate credential delivery, or accept the exposure knowingly.
+
+- **Hardening, no operator action.** A Server-offered package whose name could escape the staging
+  directory is refused (path traversal); `client.toml` keeps its `0600` mode when a Supervisor set
+  is rewritten, so the OpAMP credential is not left world-readable; archive listing and member
+  skipping are bounded against a decompression bomb; the certificate the Server issues to an Agent
+  is forced to a client-auth leaf regardless of what the CSR requested (no CA certificate from a
+  crafted request); and the bundled UI escapes `'` and `` ` `` so agent-reported strings cannot
+  break out of an HTML attribute.
+
+## [0.2.5] - 2026-08-12
 
 ### Changed
 
@@ -772,6 +931,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
   field over a `service.name` Selector pair when creating new ones.
 
+## [0.2.4] - 2026-08-12
 
 ### Added
 
@@ -798,6 +958,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   `opamp-fleet-client service install` once after the update, then delete the leftover
   `versions/` and `current` under `/var/lib/opamp-fleet/client/<instance>`.
 
+## [0.2.3] - 2026-08-12
+
 ### Added
 
 - **The fleet survives a Server restart.** Agent records now persist — one JSON file per Agent
@@ -811,6 +973,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   **What to do:** nothing. Note that forgetting an Agent (`DELETE /api/v1/agents/{uid}`) is now
   also what frees its stored record, and that reported effective configurations — which may embed
   credentials — now persist under the owner-only `agents/` directory.
+
+### Changed
 
 - **A package is now a versioned Set, and the package API changed shape for it.** A Set is
   identified by *name, Agent type, and version* — stated at creation, never edited; it may define
@@ -837,8 +1001,11 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
   Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
   capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
+  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0024) — the forget chip
+  in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
   No operator action required.
 
+## [0.2.2] - 2026-08-11
 
 ### Added
 
@@ -884,6 +1051,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   install staged into an impossible path. The failed installs rolled back cleanly and left nothing
   behind; no cleanup is needed — install this version's `.msi`.
 
+## [0.2.1] - 2026-08-11
 
 ### Fixed
 
@@ -1009,6 +1177,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   path did not, so the value could surface in a log line. It now matches. No operator action
   required.
 
+## [0.2.0] - 2026-08-10
+
 ### Added
 
 - **A release now ships native installers: `.deb`, `.rpm` and `.msi`**
@@ -1044,6 +1214,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   mutually exclusive with `--interactive`, and keeps an existing configuration rather than
   overwriting it. It takes **no** credential: a flag would stand in the shell history and the process
   list, which is why `--interactive` hides that prompt in the first place.
+
+### Fixed
 
 - **A Gateway now says why it hung up on an oversized message.** The Baseline answers a message past
   the size limit with a WebSocket close of `1009 Message Too Big`, and
@@ -1083,6 +1255,20 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   `server 0.2.0` no longer matches a development build. Nothing else changes: the Client's string is
   what it always was, and no Agent, configuration or stored file is touched.
 
+- **The fleet view shows an Agent's Instance UID again.** It had been the line under the agent name
+  until [ADR-0016](docs/adr/0016-what-an-agent-reports-about-itself.md) gave a
+  row both the operator's name for an Agent and the type it reports, and the UID moved into the name
+  link's tooltip — where nothing on a printed, screenshotted or scrolled-past row carried it. It is a
+  third line in the name cell now, below the type, and one click selects the whole of it.
+
+  That UID is what every REST call names an Agent by (`/api/v1/agents/{instance_uid}/…`), so reading
+  a row in order to act on it needed the value in front of you rather than under the pointer. Nothing
+  else changed: the fleet filter already searched the UID, and the row actions already carried it.
+
+## [0.1.3] - 2026-08-09
+
+### Changed
+
 - **Delete in the package form removes one artifact, not the whole package.** It deletes the
   platform named in the form — the artifact the selected chip stands for — and leaves the other
   platforms of that name alone. Before, one press on a form filled from a `linux-amd64` chip took
@@ -1104,6 +1290,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
   screen; asking for it is now a request rather than a press.
 
+## [0.1.2] - 2026-08-09
 
 ### Added
 
@@ -1226,6 +1413,10 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   This is the Client's own package only. A Managed Process's package record is unchanged: only the
   program itself knows its version there, and it is reported by the version probe.
 
+## [0.1.1] - 2026-08-09
+
+### Added
+
 - **A Client running as a service now writes its own log to disk**
   ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)), at
   `<state_dir>/logs/`, one file per day with seven days kept.
@@ -1268,6 +1459,10 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   cannot claim a reach the fleet does not get. It counts the fleet **as reported so far**: a package
   staged ahead of the hosts it is meant for reads `0` legitimately, which is why it is a number to
   read rather than a rejected upload.
+
+## [0.1.0] - 2026-08-09
+
+### Added
 
 - **An Agent can be forgotten** ([ADR-0024](docs/adr/0024-the-fleet-record.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
@@ -1512,6 +1707,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
   link, more than 10 000 members, or more than 2 GiB unpacked. A `.tar.gz` carries file modes and
   is the right format for a tree; a `.7z` is opened too, but only the program is made executable.
 
+### Changed
 
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
@@ -1602,6 +1798,8 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 - A package artifact that is a bare program is now **moved** into place rather than copied, saving a
   second full write of it. An artifact that is an archive is still unpacked, so an upstream
   Collector release (`.tar.gz`) is unaffected.
+
+### Fixed
 
 - **An Agent that installed a package went on reporting the version it replaced.** The package
   itself was reported correctly — `Installed`, with the new version, in the fleet view's package
