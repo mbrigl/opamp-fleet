@@ -240,6 +240,7 @@ pub fn entry_roles(config_dir: &std::path::Path) -> BTreeMap<String, String> {
 /// umask default the directory is world-listable, so on a multi-user host another local user could
 /// read that material; owner-only closes it. The Managed Process runs as this same user, so it still
 /// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0014).
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {

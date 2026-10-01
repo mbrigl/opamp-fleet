@@ -1,6 +1,7 @@
 //! Server-set labels on an Agent (ADR-0026).
 //!
 //! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and
+//! until now it could only be invented in `supervisor.toml` on the machine. Moving a host between channels
 //! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0020 set out to
 //! remove, surviving in the one place it mattered most.
 //!
@@ -32,6 +33,7 @@ pub struct LabelStore {
 
 impl LabelStore {
     /// Opens the store, creating the directory and loading every persisted set. A file that does
+    /// not parse fails startup rather than being skipped: a rollout channel that silently vanished is
     /// worse than one that refuses to start (ADR-0011's principle).
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
@@ -221,6 +223,7 @@ mod tests {
     }
 
     /// The point of the decision: a label is matchable exactly like a reported attribute, so a
+    /// Selector written for `rollout = canary` finds a host an operator moved into that channel.
     #[test]
     fn a_label_is_matched_like_a_reported_attribute() {
         let described = described(&[("os.type", "linux")]);
@@ -278,6 +281,7 @@ mod tests {
         assert!(check_pairs(&labels(&[("rollout", "  ")])).is_err());
     }
 
+    /// A channel assignment that evaporated with a restart would be worse than none, because it would
     /// evaporate quietly.
     #[test]
     fn labels_survive_a_reopen_and_an_empty_set_clears_them() {

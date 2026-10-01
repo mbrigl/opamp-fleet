@@ -333,6 +333,7 @@ mod tests {
     /// never reaches the network, so no server has to refuse it.
     #[tokio::test]
     async fn an_oversized_report_is_never_sent() {
+        crate::tls::install_ring_provider();
         let report = AgentToServer {
             instance_uid: vec![9; 512],
             ..Default::default()
@@ -386,6 +387,7 @@ mod tests {
     /// an intermediary route by Agent without decoding the body.
     #[tokio::test]
     async fn the_instance_uid_rides_as_a_header() {
+        crate::tls::install_ring_provider();
         let (addr, seen) =
             stub("HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
         let uid = InstanceUid::default();
@@ -412,6 +414,7 @@ mod tests {
     /// about the Agent's state needs rebuilding.
     #[tokio::test]
     async fn a_throttling_response_is_honoured_for_the_interval_it_names() {
+        crate::tls::install_ring_provider();
         let (addr, _) = stub(
             "HTTP/1.1 503 Service Unavailable\r\nretry-after: 2\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
         )
@@ -438,6 +441,7 @@ mod tests {
     /// interval"* rather than polling straight on.
     #[tokio::test]
     async fn throttling_without_a_hint_waits_the_recommended_minimum() {
+        crate::tls::install_ring_provider();
         let (addr, _) = stub(
             "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
         )
@@ -463,6 +467,7 @@ mod tests {
     /// report just refused.
     #[tokio::test]
     async fn an_oversized_report_is_refused_rather_than_treated_as_a_lost_exchange() {
+        crate::tls::install_ring_provider();
         let (addr, _) = stub(
             "HTTP/1.1 413 Content Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
         )
@@ -486,6 +491,7 @@ mod tests {
     /// with the limit applied as the body arrives instead of after it is buffered whole.
     #[tokio::test]
     async fn an_oversized_response_is_discarded() {
+        crate::tls::install_ring_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

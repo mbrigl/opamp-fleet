@@ -405,6 +405,7 @@ mod tests {
     /// exporters, and a Server whose hash gate therefore never closed and re-offered for ever.
     #[tokio::test]
     async fn a_telemetry_only_offer_is_applied_without_reconnecting() {
+        crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
         // Loopback is the cleartext exception (ADR-0025) — nothing leaves the machine.
@@ -451,6 +452,7 @@ mod tests {
     /// offer — not warned to a log while the Server is told everything applied.
     #[tokio::test]
     async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
+        crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
         // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0025).
@@ -510,6 +512,7 @@ mod tests {
     /// like a stuck install. Driven by a server that trickles the artifact out.
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
+        crate::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
 
