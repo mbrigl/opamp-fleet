@@ -50,6 +50,12 @@ pub struct ProcessSpec {
     /// ([`InstallTarget::prepare`]). This is for what the agent writes at run time, which lives
     /// outside `program/` precisely because a package swap replaces that whole.
     pub ensure_dirs: Vec<PathBuf>,
+    /// Start the process as the leader of its own process group, so the bounded stop can signal
+    /// the **group** rather than one pid (ADR-0019). A daemon that runs a worker of its own —
+    /// Icinga 2's umbrella does — otherwise leaves that worker orphaned and running when the stop
+    /// escalates to a kill, holding the very state directory and port the Supervisor manages.
+    /// Off by default: a process with no children of its own gains nothing from it.
+    pub own_process_group: bool,
 }
 
 /// What a package replaces on disk.
@@ -129,10 +135,56 @@ impl InstallTarget {
         }
     }
 
+    /// Unpacks the verified artifact **beside** what runs, without touching it.
+    ///
+    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0019: the
+    /// staged program can be proved to run *before* the running one is stopped, so a package that
+    /// could never have worked costs no downtime at all.
+    fn stage(
+        &self,
+        artifact: &std::path::Path,
+        archive_key: Option<&str>,
+    ) -> Result<Staged, String> {
         match self {
+            InstallTarget::Binary(path) => {
+                let temp = stage_executable(artifact, path, archive_key)?;
+                Ok(Staged {
+                    root: temp
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_default(),
+                    program: temp.clone(),
+                    temp,
+                })
+            }
             InstallTarget::Tree { root, program_path } => {
+                let staging = stage_tree(artifact, root, program_path, archive_key)?;
+                Ok(Staged {
+                    program: staging.join(program_path),
+                    root: staging.clone(),
+                    temp: staging,
+                })
+            }
+        }
+    }
+
+    /// Moves what was staged into the live name. The live path is free by the time this is called —
+    /// [`set_aside`](Self::set_aside) has just moved it — so this is one rename, which is what
+    /// makes the swap atomic.
+    fn commit(&self, staged: &Staged) -> Result<(), String> {
+        let live = self.live();
+        std::fs::rename(&staged.temp, &live)
+            .map_err(|e| format!("cannot install {}: {e}", live.display()))
+    }
+
+    /// Throws a staged package away — after a refused preflight, or a failed commit.
+    fn discard(&self, staged: &Staged) {
         match self {
             InstallTarget::Binary(_) => {
+                let _ = std::fs::remove_file(&staged.temp);
+            }
+            InstallTarget::Tree { .. } => {
+                let _ = std::fs::remove_dir_all(&staged.temp);
             }
         }
     }
@@ -198,11 +250,45 @@ impl InstallTarget {
     }
 }
 
+/// What an unpacked, not-yet-installed package looks like on disk.
+///
+/// It exists so the two halves of an install — unpack beside, then rename over — can be separated
+/// by a check (ADR-0019).
+#[derive(Debug, Clone)]
+pub struct Staged {
+    /// The staged tree's root, or the staged file's directory. `${staged}` in a
+    /// [`Preflight`]'s environment resolves to this.
+    root: PathBuf,
+    /// The program itself, inside the staged tree.
+    program: PathBuf,
+    /// What [`InstallTarget::commit`] renames over the live name.
+    temp: PathBuf,
+}
+
+/// How a plugin proves a staged program can run at all, before it replaces the running one.
+///
+/// The check is a start, because a start is the definition of "does this run here": it catches a
+/// library the host does not have and a libc too old for the build in one go, and the dynamic
+/// linker's own message — *"version `GLIBC_2.39' not found"* — is what the fleet gets told
+/// (ADR-0019). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+pub struct Preflight {
+    pub args: Vec<String>,
+    /// Environment for the check. `${staged}` in a value resolves to the staged tree's root, so a
+    /// tree carrying its own libraries is checked against **those** rather than against the ones
+    /// the running version happens to leave behind.
+    pub env: Vec<(String, String)>,
+}
+
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// How to read a version out of what the program printed. `None` is [`find_semver`], the
+    /// strict Semantic Versioning read every Managed Process was held to until ADR-0019: a program
+    /// whose version banner is not SemVer — Icinga 2 prints `r2.14.6-1` — reported none at all,
+    /// and a kind that knows its program's convention can now say so instead.
+    pub parse: Option<fn(&str) -> Option<String>>,
 }
 
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
@@ -224,6 +310,9 @@ pub struct Runner {
     pub archive_key: Option<String>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
+    /// How to prove a staged package runs before it replaces what does (ADR-0019). `None` keeps
+    /// the pre-ADR-0019 behaviour: the swap is the first thing that finds out.
+    pub preflight: Option<Preflight>,
     /// The signal that makes the running process re-read its configuration in place (ADR-0017);
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
     /// fails, or a process that dies on it, falls back to the restart (`reload-or-restart`).
@@ -366,12 +455,26 @@ impl Runner {
                         }
                     }
                     Some(ProcessCommand::ApplyPackage { staged, version, hash, span }) => {
+                        // Unpack beside what runs and prove it starts, *before* anything is
+                        // stopped (ADR-0019): a package that could never have run costs no
+                        // downtime, and the reason it could not is the linker's own.
                         //
                         // The install's trace came with the command (ADR-0016): every phase below
                         // runs inside it, so the download that started it and the rollback that may
                         // end it are one trace across two tasks.
                         let prepared = self.stage_and_check(&staged).instrument(span.clone()).await;
+                        let _ = std::fs::remove_file(&staged);
+                        let prepared = match prepared {
+                            Ok(prepared) => prepared,
+                            Err(e) => {
+                                warn!(supervisor = %self.name, version = %version, error = %e, "refusing a package that will not run here");
                                 crate::telemetry::failed(&span, &e);
+                                self.events
+                                    .send(ProcessEvent::PackageApplied { hash, result: Err(e) })
+                                    .await;
+                                continue;
+                            }
+                        };
                         // Swap the binary, restart, and health-gate on the apply grace — a binary
                         // that will not stay up is rolled back to the bytes it replaced (ADR-0028).
                         stop(&mut child, self.stop_timeout, &self.name).await;
@@ -488,12 +591,30 @@ impl Runner {
     /// hundreds of megabytes, and holding two copies of one in RAM to update it is not a trade
     /// this makes. The artifact may already be gone by the time it is cleaned up —
     /// [`install_executable`] moves it when it can — so every removal of it is best-effort.
+    /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
+    /// program starts. Nothing that runs is touched here; that is the whole point (ADR-0019).
     /// The `stage` phase of an install's trace (ADR-0016); the preflight below is its own child.
     #[instrument(name = "stage", skip_all, fields(supervisor = %self.name))]
+    async fn stage_and_check(&self, artifact: &std::path::Path) -> Result<Staged, String> {
+        let target = self
+            .install
+            .as_ref()
+            .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
+        let staged = target.stage(artifact, self.archive_key.as_deref())?;
+        if let Some(preflight) = &self.preflight {
+            if let Err(e) = run_preflight(&staged, preflight).await {
+                target.discard(&staged);
+                return Err(e);
+            }
+        }
+        Ok(staged)
+    }
+
     /// The `swap` phase, with `gate` and — where it comes to that — `rollback` beneath it.
     #[instrument(name = "swap", skip_all, fields(supervisor = %self.name, version = %version))]
     async fn swap_and_gate(
         &self,
+        staged: Staged,
         version: &str,
         child: &mut Option<Child>,
         shutdown: &mut Shutdown,
@@ -508,13 +629,16 @@ impl Runner {
         let has_backup = match target.set_aside() {
             Ok(has_backup) => has_backup,
             Err(e) => {
+                target.discard(&staged);
                 return GraceOutcome::Failed(e);
             }
         };
+        if let Err(e) = target.commit(&staged) {
             // Put the old one back before reporting: the process must not be left with none.
             if has_backup {
                 let _ = target.restore();
             }
+            target.discard(&staged);
             return GraceOutcome::Failed(e);
         }
         info!(supervisor = %self.name, version = %version, program = %target.live().display(), "package staged; restarting");
@@ -735,6 +859,7 @@ impl Runner {
             tokio::spawn(probe_version(
                 probe.program.clone(),
                 probe.args.clone(),
+                probe.parse,
                 self.events.clone(),
             ));
         }
@@ -815,6 +940,13 @@ impl Runner {
         }
         // If the runner is dropped without a graceful stop, take the process along.
         command.kill_on_drop(true);
+        // Its own process group, so `stop` can signal the group and leave no worker behind
+        // (ADR-0019). Unix-only: what Windows offers instead is a job object, which the stop
+        // there does not use yet.
+        #[cfg(unix)]
+        if spec.own_process_group {
+            command.process_group(0);
+        }
         match command.spawn() {
             Ok(child) => {
                 info!(supervisor = %self.name, program = %spec.program.display(), "process started");
@@ -878,6 +1010,12 @@ const STABLE_RUN_FLOOR: Duration = Duration::from_secs(10);
 /// versionless output is logged and otherwise ignored — probing must never break supervision.
 ///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
+pub async fn probe_version(
+    program: PathBuf,
+    args: Vec<String>,
+    parse: Option<fn(&str) -> Option<String>>,
+    events: EventSender,
+) {
     let mut command = Command::new(&program);
     command.args(&args).kill_on_drop(true);
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
@@ -897,6 +1035,7 @@ const STABLE_RUN_FLOOR: Duration = Duration::from_secs(10);
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    match parse.unwrap_or(find_semver)(&text) {
         Some(version) => {
             info!(program = %program.display(), version = %version, "version probed");
             events
@@ -970,11 +1109,15 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     };
     #[cfg(unix)]
     if let Some(pid) = c.id() {
+        signal_child(pid, libc::SIGTERM);
         if tokio::time::timeout(timeout, c.wait()).await.is_ok() {
             info!(supervisor = %name, "process stopped");
             return;
         }
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
+        // The group too, so a worker the child spawned does not survive the escalation and go on
+        // holding what the Supervisor manages (ADR-0019). `Child::kill` below only reaps the one.
+        signal_child(pid, libc::SIGKILL);
     }
     #[cfg(not(unix))]
     let _ = timeout; // Windows has no SIGTERM equivalent: kill is the stop.
@@ -982,12 +1125,63 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
+/// Runs a plugin's preflight against a staged package (ADR-0019).
+///
+/// Bounded like the version probe, because this is the same shape of question asked of a program
+/// nobody has run yet. The message on failure is the program's own — a linker error names the
+/// library or the symbol version, which is exactly what an operator needs and what an exit status
+/// alone destroys.
 #[instrument(name = "preflight", skip_all)]
+async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), String> {
+    let mut command = Command::new(&staged.program);
+    command.args(&preflight.args).kill_on_drop(true);
+    for (key, value) in &preflight.env {
+        command.env(
+            key,
+            value.replace("${staged}", &staged.root.to_string_lossy()),
+        );
+    }
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
+        Err(_) => return Err("the packaged program did not answer in time".to_string()),
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = format!(
+        "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let reason = said
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("no output")
+        .to_string();
+    Err(format!(
+        "the packaged program does not run on this host: {reason}"
+    ))
+}
+
+/// Signals the Managed Process — **or its whole process group**, when the child leads one.
+///
+/// Leading a group is what a plugin asks for with [`ProcessSpec::own_process_group`], so the test
+/// is the fact rather than a flag threaded through the Runner: a child whose process group id is
+/// its own pid is a group the Supervisor created for it, and everything in it descends from the
+/// process it started. Anything else is signalled alone, exactly as before (ADR-0019).
+#[cfg(unix)]
+fn signal_child(pid: u32, signal: i32) {
+    let pid = pid as libc::pid_t;
+    // SAFETY: plain getpgid(2)/kill(2) on the child's pid; no memory is touched.
+    let leads_group = unsafe { libc::getpgid(pid) } == pid;
+    unsafe {
+        libc::kill(if leads_group { -pid } else { pid }, signal);
+    }
+}
+
 /// The result of an in-place reload attempt (ADR-0017).
 enum Reloaded {
     /// Signalled and survived the grace — applied, the process kept running.
@@ -1041,9 +1235,11 @@ enum GraceOutcome {
 /// where the binary's name is known, and the member of that name is what gets installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
+fn stage_executable(
     artifact: &std::path::Path,
     path: &std::path::Path,
     archive_key: Option<&str>,
+) -> Result<PathBuf, String> {
     let temp = path.with_extension("staged");
     // A raw artifact is already the program, and it was downloaded into this Supervisor's own
     // directory — so it can be renamed into place instead of copied, which the staging path below
@@ -1061,6 +1257,7 @@ enum GraceOutcome {
             .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
         install::write_program(artifact, &temp, &member, archive_key)?;
     }
+    Ok(temp)
 }
 
 /// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0028).
@@ -1074,10 +1271,12 @@ enum GraceOutcome {
 /// which directory prefix is dropped so the unpacked tree starts where the configuration says it
 /// does. A raw artifact — no archive at all — is written to that path directly, so an agent
 /// configured for a tree does not fail merely because someone uploaded a bare binary.
+fn stage_tree(
     artifact: &std::path::Path,
     root: &std::path::Path,
     program_path: &std::path::Path,
     archive_key: Option<&str>,
+) -> Result<PathBuf, String> {
     let staging = root.join(".staging");
     // A previous attempt that died between unpacking and the rename would leave this behind.
     let _ = std::fs::remove_dir_all(&staging);
@@ -1108,6 +1307,8 @@ enum GraceOutcome {
                 info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
                 Ok(())
             }
+            crate::archive::Kind::Zip => {
+                let summary = crate::archive::extract_tree_zip(artifact, program_path, staging)?;
                 info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
                 Ok(())
             }
@@ -1132,8 +1333,10 @@ enum GraceOutcome {
     // The tree carries its own modes where the archive had them, but whether the *program* can be
     // executed is not something to inherit from how someone built an archive.
     install::make_executable(&program)?;
+    Ok(staging)
 }
 
+pub(crate) fn unhealthy(status: String, last_error: String) -> ComponentHealth {
     ComponentHealth {
         healthy: false,
         status,
@@ -1218,6 +1421,9 @@ mod tests {
 
         let program = dir.path().join("program/agent");
         std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+        let target = InstallTarget::Binary(program.clone());
+        let staged = target.stage(&artifact, None).expect("stage");
+        target.commit(&staged).expect("commit");
 
         assert_eq!(std::fs::read(&program).expect("read"), b"the-program");
         assert!(
@@ -1242,6 +1448,7 @@ mod tests {
     /// An archive can never be moved: what belongs at the program's path is one member of it, not
     /// the container. It is unpacked, and the artifact stays for the caller to clean up.
     ///
+    /// This is also the stream branch of `stage_executable`. The other way into it — a rename
     /// that fails because the staging directory an operator configured is on another filesystem —
     /// runs the same code and is not forced here; doing so would need a second mount.
     #[test]
@@ -1264,6 +1471,9 @@ mod tests {
         }
 
         let program = dir.path().join("agent");
+        let target = InstallTarget::Binary(program.clone());
+        let staged = target.stage(&artifact, None).expect("stage");
+        target.commit(&staged).expect("commit");
 
         assert_eq!(std::fs::read(&program).expect("read"), b"the-member");
         assert!(

@@ -204,6 +204,9 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     /// Opens the store, creating the directory and loading every persisted Configuration. A file
+    /// that does not parse is a startup error — never silently ignored (ADR-0009's principle),
+    /// and that now includes a file in a shape this Server no longer writes: there is no legacy
+    /// reader, so an unreadable file is named rather than guessed at.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -219,6 +222,7 @@ impl ConfigStore {
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let config: Configuration = serde_json::from_str(&text)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
             validate_name(&config.name)
                 .map_err(|e| format!("invalid configuration name in {}: {e}", path.display()))?;
@@ -351,6 +355,7 @@ impl ConfigStore {
     /// The candidates for one Agent (ADR-0027): each Configuration whose saved revision fits it,
     /// as `(name, hash of the saved revision)` in name order. What the fleet view diffs against
     /// the Agent's assignments to show what is waiting, and what "roll out everything" assigns.
+    pub fn candidates_for(&self, description: Option<&AgentDescription>) -> Vec<(String, String)> {
         self.configs
             .read()
             .expect("configs lock")
@@ -587,6 +592,9 @@ mod tests {
         let released = store.compose(&assignments).expect("offered");
         assert_eq!(released.entries[0].body, "v1\n");
 
+        store
+            .put_saved("base", revision(&[], "v2\n"))
+            .expect("edit");
         assert_eq!(
             store.compose(&assignments).expect("offered").hash,
             released.hash,
@@ -613,6 +621,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
         let first = put_assigned(&store, "base", revision(&[], "v1\n"));
+        store
+            .put_saved("base", revision(&[], "v2\n"))
+            .expect("edit");
         let second_hash = store.retain_saved("base").expect("retain");
         assert_eq!(store.get("base").expect("base").retained.len(), 2);
 
@@ -631,7 +642,32 @@ mod tests {
             .expect("collecting an unknown name is a no-op");
     }
 
+    /// No legacy reader: a file in a shape this Server no longer writes is a startup error that
+    /// names the path, not a file quietly read as something else. Both retired shapes are covered
+    /// — the flat pre-ADR-0027 record and the two-revision ADR-0027 one.
     #[test]
+    fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
+        for (file, body) in [
+            (
+                "flat.json",
+                r#"{"name":"flat","selector":{"os.type":"linux"},"body":"receivers: {}\n"}"#,
+            ),
+            (
+                "staged.json",
+                r#"{"name":"staged","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(file), body).expect("write the retired shape");
+
+            let error = ConfigStore::open(dir.path().to_path_buf())
+                .map(|_| ())
+                .expect_err("a retired shape is refused, never guessed at");
+            assert!(
+                error.contains(file),
+                "the error must name the file an operator has to deal with, got: {error}"
+            );
+        }
     }
 
     #[test]
@@ -699,10 +735,18 @@ mod tests {
         let desired = store.compose(&assignments).expect("desired");
         let names: Vec<&str> = desired.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["aa-base", "zz-extra"]);
+        assert_eq!(
+            desired.hash,
+            store.compose(&assignments).expect("again").hash
+        );
 
         // The hash covers names and bodies: an edit changes it — once a rollout act pins it.
         let aa = put_assigned(&store, "aa-base", revision(&[], "a2"));
         let assignments = merge(&[&zz, &aa]);
+        assert_ne!(
+            store.compose(&assignments).expect("edited").hash,
+            desired.hash
+        );
     }
 
     #[test]
@@ -738,7 +782,10 @@ mod tests {
         // Changing only the role changes the hash, so the edit actually reaches the fleet.
         let ruleset = put_assigned(&store, "ruleset", revision(&[], "rules: []\n"));
         let assignments = merge(&[&base, &ruleset]);
+        assert_ne!(
             store.compose(&assignments).expect("desired").hash,
+            desired.hash
+        );
         assert_ne!(store.compose(&assignments).expect("desired").hash, without);
     }
 

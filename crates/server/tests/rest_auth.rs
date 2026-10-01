@@ -18,11 +18,15 @@ const PROTOBUF: &str = "application/x-protobuf";
 /// A Server whose Operator plane accepts one operator, with package delivery armed so the Agent
 /// plane has an artifact to serve.
 async fn spawn_guarded() -> TestServer {
+    server::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = PackageStore::open(dir.path().join("packages")).expect("store");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
     );
     let auth: RestAuthConfig = toml::from_str(
         r#"
@@ -177,6 +181,7 @@ async fn the_agent_plane_is_untouched_by_the_operator_credential() {
 
     // The operator uploads an artifact through the guarded plane …
     let set = format!(
+        "http://{}/api/v1/packages/{}/1.2.3",
         server.rest_addr,
         support::AGENT_TYPE
     );
@@ -200,6 +205,7 @@ async fn the_agent_plane_is_untouched_by_the_operator_credential() {
     // … and the Agent downloads it from its own plane with nothing to present.
     let downloaded = client
         .get(format!(
+            "http://{}/api/v1/packages/{}/1.2.3/file?os=linux&arch=amd64",
             server.addr,
             support::AGENT_TYPE
         ))

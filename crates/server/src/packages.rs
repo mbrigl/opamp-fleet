@@ -19,6 +19,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use crate::deployments::Deployment;
 use opamp::proto::{
     AgentDescription, DownloadableFile, Header, Headers, PackageAvailable, PackageType,
     PackagesAvailable,
@@ -123,36 +124,96 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A Package's identity (ADR-0028): the Agent type it is built for and its version, stated at
+/// creation and never edited. A new version is a **new Package**, and the type is as constitutive
+/// of "what is this artifact" as the version — an attribute would be editable, and retyping stored
+/// bytes to another kind of Agent is exactly the mistake an immutable identity forecloses.
+///
+/// There is no name beside these two. What a name would have added is a second identity for a
+/// thing that already has one, and the only thing it could express — two Packages of one Agent
+/// type at one version — is the ambiguity resolution used to have to rank its way out of.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PackageId {
+    /// The Agent type this Package is built for, matched **raw** against the `service.name` an
+    /// Agent reports (ADR-0028) — there is no canonical set of Agent types to normalise against.
+    /// It is also the **wire name**: the `PackagesAvailable` map key and the key an Agent reports
+    /// its `PackageStatuses` under, which is why it must not carry the version.
+    pub agent_type: String,
+    /// The version every entry of this Package shares. A release is one version across its
+    /// platforms; the Package is the object that *is* that release.
     pub version: String,
 }
 
+/// The subdirectory of `packages_dir` the Deployments live in (ADR-0028) — skipped by the package
+/// loader, which owns every *other* entry in that directory.
+pub const DEPLOYMENTS_DIR: &str = "deployments";
+
+impl PackageId {
+    /// Validates both parts; the one gate every write goes through.
+    pub fn new(agent_type: &str, version: &str) -> Result<Self, String> {
+        validate_identity_token(agent_type, "agent type")?;
         validate_identity_token(version, "version")?;
+        Ok(PackageId {
+            agent_type: agent_type.to_string(),
             version: version.to_string(),
         })
     }
 
-    fn dir_name(&self) -> String {
+    /// What an operator reads: the Agent type **and** its version. Never the wire name — that one
+    /// is stable across versions on purpose (see [`PackageId::agent_type`]), and using it here
+    /// would make every version of a Package look like the same row.
+    pub fn display_name(&self) -> String {
+        format!("{} {}", self.agent_type, self.version)
     }
 
+    /// The Package's directory name: `<agent_type>@<version>`. Neither token admits an `@`, so the
+    /// pair parses back unambiguously — and stays readable in a directory listing, which an opaque
+    /// hash would not be.
+    fn dir_name(&self) -> String {
+        format!("{}@{}", self.agent_type, self.version)
+    }
+
+    /// Parses the `<agent_type>@<version>` form the [`Display`] impl and the Package directory use
+    /// — also the persisted shape of a package assignment (ADR-0027).
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut parts = text.split('@');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(agent_type), Some(version), None) => PackageId::new(agent_type, version),
             _ => Err(format!(
+                "{text:?} is not an <agent type>@<version> package identity"
             )),
         }
     }
 }
 
+impl fmt::Display for PackageId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.agent_type, self.version)
     }
 }
 
+/// A stored Package (ADR-0028): its identity, and one entry per Platform. Nothing else.
 ///
+/// **The Platform fits, the Deployment aims** — the split ADR-0028 named, with the aiming half
+/// moved out (ADR-0028). What a Package is has nothing to say about who gets it, which is why
+/// there is no Selector here and no kind flag: an Agent's Deployment holds one Package for its
+/// type, and that is the whole of the decision.
+///
+/// Artifacts stay on disk (`<package>/<os>-<arch>.bin`) and are streamed to whoever asks — a
+/// program weighs hundreds of megabytes, and a fleet server holding every one of them in memory,
+/// plus a copy per download, is the shape this deliberately avoids.
 #[derive(Clone)]
+pub struct Package {
+    pub id: PackageId,
+    /// One entry per Platform — a map, so a duplicate for the same combination is unrepresentable.
+    /// A Package may sit empty while it is being assembled; rolling one out empty is refused.
     pub entries: BTreeMap<Platform, Entry>,
 }
 
 /// One platform's artifact of a Set: **either** an uploaded file **or** a source reference, with
+/// the hash that identifies what an Agent installs. The **signature** is not here: what an
+/// operator signs off on is a release to a set of machines, so it belongs to the Deployment that
+/// offers these bytes (ADR-0028 point 28), and the same artifact in two channels is signed in each.
 #[derive(Clone)]
 pub struct Entry {
     pub platform: Platform,
@@ -180,6 +241,7 @@ pub struct Source {
     pub headers: BTreeMap<String, String>,
 }
 
+impl Package {
     /// The per-package hash the Agent compares to decide whether to download: over the fields that
     /// identify the offer (type, version) and the content. Framed length-prefixed so no boundary
     /// is ambiguous. The Platform needs no place in it — two platforms' artifacts differ in their
@@ -199,9 +261,13 @@ pub struct Source {
     /// endpoint. A **referenced** artifact is offered as the address it names, with whatever
     /// headers the operator gave — the Baseline's Download Server "may be on the same host as the
     /// OpAMP Server or a different host", and this is that other host (ADR-0028).
+    /// One entry as a wire `PackageAvailable`. `signature` is the Deployment's, for these exact
+    /// bytes on this exact platform (ADR-0028 point 28) — empty where the channel holds none, which is
+    /// a policy the Server reports rather than refuses (ADR-0028).
     fn to_available(
         &self,
         entry: &Entry,
+        signature: &[u8],
         download_base: &str,
         headers: Option<Headers>,
     ) -> PackageAvailable {
@@ -209,6 +275,7 @@ pub struct Source {
             Some(source) => DownloadableFile {
                 download_url: source.url.clone(),
                 content_hash: entry.content_hash.clone(),
+                signature: signature.to_vec(),
                 // The Server's own credential has no business at someone else's address; what
                 // travels is what the operator said that source needs.
                 headers: (!source.headers.is_empty()).then(|| Headers {
@@ -224,12 +291,19 @@ pub struct Source {
             },
             None => DownloadableFile {
                 download_url: format!(
+                    "{download_base}/api/v1/packages/{}/{}/file?os={}&arch={}",
+                    self.id.agent_type, self.id.version, entry.platform.os, entry.platform.arch
                 ),
                 content_hash: entry.content_hash.clone(),
+                signature: signature.to_vec(),
                 headers,
             },
         };
         PackageAvailable {
+            // Always top-level. An Agent has one binary to replace, its Deployment holds one
+            // Package for its type, and no Client this project ships installs an addon — so the
+            // kind is structural rather than a flag anyone could set (ADR-0028 point 18).
+            r#type: PackageType::TopLevel as i32,
             version: self.id.version.clone(),
             file: Some(file),
             hash: self.package_hash(entry),
@@ -239,6 +313,9 @@ pub struct Source {
 
 /// One Set as the REST API lists it (ADR-0028): its identity, whom it targets, and what it holds
 /// for each platform — never the artifact bytes.
+pub struct PackageSummary {
+    /// The Agent type this Package is built for — its identity, and its wire name.
+    pub agent_type: String,
     pub version: String,
     /// One entry per Platform, in platform order.
     pub entries: Vec<EntrySummary>,
@@ -249,10 +326,19 @@ pub struct EntrySummary {
     pub os: String,
     pub arch: String,
     pub size: u64,
+    /// The SHA-256 of the artifact, hex — **the exact value the Agent verifies against**.
+    pub content_hash: String,
+    /// The per-package hash this entry is offered under, hex — what an Agent echoes back once it
+    /// is in sync, and what gates re-offering.
+    pub package_hash: String,
     /// The address an Agent fetches this from when the Server does not hold it (ADR-0028).
     pub source_url: Option<String>,
 }
 
+impl PackageSummary {
+    fn of(set: &Package) -> Self {
+        PackageSummary {
+            agent_type: set.id.agent_type.clone(),
             version: set.id.version.clone(),
             entries: set
                 .entries
@@ -261,6 +347,8 @@ pub struct EntrySummary {
                     os: entry.platform.os.clone(),
                     arch: entry.platform.arch.clone(),
                     size: entry.size,
+                    content_hash: hex::encode(&entry.content_hash),
+                    package_hash: hex::encode(set.package_hash(entry)),
                     source_url: entry.source.as_ref().map(|s| s.url.clone()),
                 })
                 .collect(),
@@ -268,13 +356,17 @@ pub struct EntrySummary {
     }
 }
 
+/// A Set as persisted: `<agent_type>@<version>/package.json`, entries inline. One document per Set —
 /// what ADR-0028 kept secretly (other versions), this store keeps openly, as more Sets.
 #[derive(Serialize, Deserialize)]
+struct PackageMeta {
+    agent_type: String,
     version: String,
     #[serde(default)]
     entries: Vec<EntryMeta>,
 }
 
+/// One entry as persisted inside `package.json`; an uploaded entry's bytes are `<os>-<arch>.bin`
 /// beside it.
 #[derive(Serialize, Deserialize)]
 struct EntryMeta {
@@ -304,6 +396,10 @@ impl EntryMeta {
     }
 }
 
+impl PackageMeta {
+    fn of(set: &Package) -> Self {
+        PackageMeta {
+            agent_type: set.id.agent_type.clone(),
             version: set.id.version.clone(),
             entries: set.entries.values().map(EntryMeta::of).collect(),
         }
@@ -311,12 +407,20 @@ impl EntryMeta {
 }
 
 /// The persistent package store (ADR-0028): one directory per Set under `packages_dir`, holding
+/// `package.json` and one `<os>-<arch>.bin` per uploaded entry, restored at startup. The in-memory
 /// map is what the control loop reads.
 pub struct PackageStore {
     dir: PathBuf,
+    sets: RwLock<BTreeMap<PackageId, Package>>,
 }
 
 impl PackageStore {
+    /// Opens the store, creating the directory and loading every persisted Set. A metadata or
+    /// artifact file that cannot be read, does not parse, or whose artifact no longer matches its
+    /// recorded hash is a startup error — a corrupt distribution artifact must never ship. There
+    /// is **no migration**: a directory in a shape this Server does not write is named in that
+    /// error rather than skipped, so a store left over from an older layout is reported instead of
+    /// quietly appearing empty.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -337,18 +441,47 @@ impl PackageStore {
                 .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
                 .path();
             if !path.is_dir() {
+                // A Set is a directory. A loose file at the top level is what the pre-ADR-0028
+                // store wrote (`<name>.json`, `<name>@<os>-<arch>.json`/`.bin`), and there is no
+                // reader for it any more — so it is named rather than skipped. Skipping would turn
+                // an old store into one that merely looks empty, which is the failure an operator
+                // cannot see (ADR-0009: loud, never silently ignored).
+                return Err(format!(
+                    "{} is not a Package directory — this Server reads no other package store \
+                     layout. \
+                     Move it aside or delete it; nothing here will be migrated.",
+                    path.display()
+                ));
+            }
+            // The one directory here that is deliberately not a Package: the channel store the
+            // Deployments live in (ADR-0028), armed by this same `packages_dir`.
+            if path.file_name().and_then(|n| n.to_str()) == Some(DEPLOYMENTS_DIR) {
                 continue;
             }
+            let meta_path = path.join("package.json");
             if !meta_path.exists() {
+                // Skipping is the dangerous half. A store written by an older layout —
+                // `<name>@<version>@<type>/set.json` — would open *successfully and empty*: no
+                // offer, no error, and a package list an operator reads as "nothing uploaded yet"
+                // (ADR-0028 point 19). So the directory is named instead.
+                return Err(format!(
+                    "{} holds no package.json — this Server reads no other package store layout. \
+                     Move it aside or delete it; nothing here will be migrated.",
+                    path.display()
+                ));
             }
             let text = std::fs::read_to_string(&meta_path)
                 .map_err(|e| format!("cannot read {}: {e}", meta_path.display()))?;
+            let meta: PackageMeta = serde_json::from_str(&text)
                 .map_err(|e| format!("cannot parse {}: {e}", meta_path.display()))?;
+            let id = PackageId::new(&meta.agent_type, &meta.version)
                 .map_err(|e| format!("invalid identity in {}: {e}", meta_path.display()))?;
             // The directory name is derived from the identity; a mismatch means the artifacts
             // will not be found where the store looks for them, so it is refused by name.
             if path.file_name().and_then(|n| n.to_str()) != Some(id.dir_name().as_str()) {
                 return Err(format!(
+                    "{} does not match the identity {} its package.json states — rename \
+                     the directory or fix the file",
                     path.display(),
                     id.dir_name()
                 ));
@@ -390,6 +523,7 @@ impl PackageStore {
                     },
                 );
             }
+            sets.insert(id.clone(), Package { id, entries });
         }
         Ok(PackageStore {
             dir,
@@ -397,28 +531,38 @@ impl PackageStore {
         })
     }
 
+    /// Where this store keeps its Packages — the directory the Deployments sit beneath
+    /// (ADR-0028), so the two are armed by one configuration key.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
+    fn set_dir(&self, id: &PackageId) -> PathBuf {
         self.dir.join(id.dir_name())
     }
 
     /// Every Set, in identity order — the REST list view; never the artifact bytes.
+    pub fn list(&self) -> Vec<PackageSummary> {
         self.sets
             .read()
             .expect("sets lock")
             .values()
+            .map(PackageSummary::of)
             .collect()
     }
 
     /// One stored Set as the REST API presents it; `None` when no such Set exists.
+    pub fn summary(&self, id: &PackageId) -> Option<PackageSummary> {
         self.sets
             .read()
             .expect("sets lock")
             .get(id)
+            .map(PackageSummary::of)
     }
 
     /// Where one uploaded artifact lives, for the download endpoint to stream from. `None` when no
     /// Set of that identity holds one for that Platform, or holds it as a reference.
+    pub fn artifact_path(&self, id: &PackageId, platform: &Platform) -> Option<PathBuf> {
         self.sets
             .read()
             .expect("sets lock")
@@ -458,13 +602,21 @@ impl PackageStore {
             .sum()
     }
 
+    /// Creates a Package. **Saving never distributes** (ADR-0027), and there is nothing to update:
+    /// a Package is its identity and its entries, so creating one that exists is the same request
+    /// arriving twice.
+    pub fn create(&self, id: &PackageId) -> Result<(), String> {
         let mut sets = self.sets.write().expect("sets lock");
+        if sets.contains_key(id) {
+            return Ok(());
         }
+        let set = Package {
             id: id.clone(),
             entries: BTreeMap::new(),
         };
         std::fs::create_dir_all(self.set_dir(id))
             .map_err(|e| format!("cannot create {}: {e}", self.set_dir(id).display()))?;
+        let meta = serde_json::to_vec_pretty(&PackageMeta::of(&set)).expect("package serializes");
         self.write_meta(id, &meta)?;
         sets.insert(id.clone(), set);
         Ok(())
@@ -479,12 +631,14 @@ impl PackageStore {
     /// Returns an error when no Set of that identity exists. The fleet refuses the upload before
     /// this when the Set is assigned to an Agent — an assigned Set's bytes are immutable
     /// (ADR-0027), so there would be nothing an upload could become.
+    pub fn staging_path(&self, id: &PackageId, platform: &Platform) -> Result<PathBuf, String> {
         self.writable(id)?;
         Ok(self.set_dir(id).join(format!("{}.upload", platform.tag())))
     }
 
     /// The gate every entry write passes: the Set must exist. The immutability of an assigned
     /// Set (ADR-0027) is the fleet's to enforce — only it knows the assignments.
+    fn writable(&self, id: &PackageId) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
         Ok(())
@@ -498,9 +652,11 @@ impl PackageStore {
     /// nothing behind.
     pub fn put_staged(
         &self,
+        id: &PackageId,
         platform: &Platform,
         staged: &Path,
     ) -> Result<(), String> {
+        let result = self.store_staged(id, platform, staged);
         if result.is_err() {
             let _ = std::fs::remove_file(staged);
         }
@@ -509,6 +665,7 @@ impl PackageStore {
 
     fn store_staged(
         &self,
+        id: &PackageId,
         platform: &Platform,
         staged: &Path,
     ) -> Result<(), String> {
@@ -535,6 +692,7 @@ impl PackageStore {
     /// small artifact use. A real upload takes [`put_staged`](Self::put_staged) instead.
     pub fn put_entry(
         &self,
+        id: &PackageId,
         platform: &Platform,
         artifact: Vec<u8>,
     ) -> Result<(), String> {
@@ -564,6 +722,7 @@ impl PackageStore {
     /// receive.
     pub fn set_entry_source(
         &self,
+        id: &PackageId,
         platform: &Platform,
         content_hash: Vec<u8>,
         source: Source,
@@ -600,13 +759,16 @@ impl PackageStore {
         )
     }
 
+    /// Writes one entry into the Set's map and its `package.json` — the single path every entry write
     /// converges on. Replacing the entry for a Platform the Set already holds is what "no
     /// duplicate entries" means in a map: the combination stays unique by construction.
+    fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<(), String> {
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
             .ok_or_else(|| format!("no package set {id}"))?;
         set.entries.insert(entry.platform.clone(), entry);
+        let meta = serde_json::to_vec_pretty(&PackageMeta::of(set)).expect("set serializes");
         self.write_meta(id, &meta)
     }
 
@@ -614,6 +776,7 @@ impl PackageStore {
     /// this before calling here when the Set is assigned to an Agent (ADR-0027). The last entry
     /// taken away leaves an **empty Set**, kept: a Set being reassembled is a normal state, and
     /// deleting the Set is its own act.
+    pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
@@ -626,6 +789,7 @@ impl PackageStore {
             std::fs::remove_file(&artifact)
                 .map_err(|e| format!("cannot delete {}: {e}", artifact.display()))?;
         }
+        let meta = serde_json::to_vec_pretty(&PackageMeta::of(set)).expect("set serializes");
         self.write_meta(id, &meta)?;
         Ok(true)
     }
@@ -633,6 +797,7 @@ impl PackageStore {
     /// Deletes a whole Set — entries, artifacts, and metadata; `Ok(false)` when none of that
     /// identity exists. The fleet removes every assignment that referenced it, which withdraws
     /// the offer; Agents that installed it keep running it (ADR-0028).
+    pub fn delete_set(&self, id: &PackageId) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         if sets.remove(id).is_none() {
             return Ok(false);
@@ -651,12 +816,28 @@ impl PackageStore {
     /// race, not a state.
     pub fn offer_for_assigned(
         &self,
+        assigned: Option<&PackageId>,
+        deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
         download_base: &str,
         headers: Option<Headers>,
     ) -> Option<PackagesAvailable> {
         let sets = self.sets.read().expect("sets lock");
+        let (set, entry) = assigned_entry(&sets, assigned, description)?;
+        // The signature is the *assigned* Deployment's, not whichever channel claims the Agent now:
+        // an offer travels with what the act released (ADR-0028 point 28). A channel that holds none
+        // offers the artifact unsigned, which a Client with a verification key refuses — that is
+        // the operator's policy meeting their omission, and both ends report it.
+        let signature = deployment
+            .and_then(|d| d.signature(&set.id, &entry.platform))
+            .unwrap_or_default();
         Some(PackagesAvailable {
+            packages: [(
+                set.id.agent_type.clone(),
+                set.to_available(entry, signature, download_base, headers),
+            )]
+            .into(),
+            all_packages_hash: aggregate_hash(set, entry),
         })
     }
 
@@ -665,19 +846,39 @@ impl PackageStore {
     /// and has nothing to be in sync with.
     pub fn assigned_hash_for(
         &self,
+        assigned: Option<&PackageId>,
         description: Option<&AgentDescription>,
     ) -> Vec<u8> {
         let sets = self.sets.read().expect("sets lock");
+        match assigned_entry(&sets, assigned, description) {
+            Some((set, entry)) => aggregate_hash(set, entry),
+            None => Vec::new(),
         }
     }
 
+    /// The Package a rollout act would release to this Agent — the **candidate** (ADR-0027),
+    /// never an offer.
+    ///
+    /// One Deployment claims the Agent (ADR-0028); the Package it holds for the Agent's type has
+    /// to fit its platform and be an **upgrade** over what the Agent reports (ADR-0027). `None`
+    /// where any of those is missing — including the ordinary case of an Agent no channel claims yet.
+    pub fn candidate(
         &self,
+        deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
         installed: &InstalledVersions,
+    ) -> Option<PackageId> {
         let sets = self.sets.read().expect("sets lock");
+        resolve(&sets, deployment?, description, installed).map(|(set, _)| set.id.clone())
     }
 
+    /// Whether an explicit rollout act may release this Package to this Agent: it must exist,
+    /// hold an entry for the platform the Agent reports, be built for its type, and be an
+    /// **upgrade** over what the Agent reports installed under that type (ADR-0027).
     ///
+    /// Aim is **not** checked here any more — whom a Package reaches is its Deployment's business
+    /// (ADR-0028), and the act names the Deployment, so the channel has already been decided by the
+    /// time this is asked.
     ///
     /// Still **not** the version *ranking* of [`resolve`]: rolling out a Set older than a sibling
     /// the store also holds stays the operator's to make. What ADR-0027 forbids is aiming an act
@@ -685,6 +886,7 @@ impl PackageStore {
     /// the button itself now answer the same question.
     pub fn fits_agent(
         &self,
+        id: &PackageId,
         description: Option<&AgentDescription>,
         installed: &InstalledVersions,
     ) -> Result<(), String> {
@@ -701,8 +903,10 @@ impl PackageStore {
                 "set {id} fits no platform this Agent reports — it reports none"
             ));
         };
+        if reported_agent_type(description) != Some(set.id.agent_type.as_str()) {
             return Err(format!(
                 "set {id} is built for Agent type {:?}, which this Agent does not report",
+                set.id.agent_type
             ));
         }
         if !set.entries.contains_key(&platform) {
@@ -724,6 +928,7 @@ impl PackageStore {
                     "set {id} is not an upgrade for this Agent, which runs {runs:?}; its package \
                      status claims {has:?} for package {:?}, which is not consulted while the \
                      Agent reports what it runs",
+                    set.id.agent_type
                 ),
                 (Some(runs), None) => {
                     format!("set {id} is not an upgrade for this Agent, which runs {runs:?}")
@@ -731,6 +936,7 @@ impl PackageStore {
                 (None, Some(has)) => format!(
                     "set {id} is not an upgrade for this Agent, which reports {has:?} installed \
                      for package {:?} and no version it runs that can be ordered",
+                    set.id.agent_type
                 ),
                 (None, None) => {
                     format!("set {id} is not an upgrade for this Agent, which reports no version")
@@ -740,7 +946,10 @@ impl PackageStore {
         Ok(())
     }
 
+    fn write_meta(&self, id: &PackageId, bytes: &[u8]) -> Result<(), String> {
         let dir = self.set_dir(id);
+        let path = dir.join("package.json");
+        let temp = dir.join("package.json.tmp");
         // Metadata can carry a private source's headers (a bearer token, ADR-0028), so it is
         // written owner-only — the mode is set in the open call so the token is never briefly
         // world-readable, and the rename onto `path` carries the mode with it.
@@ -787,7 +996,21 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
     Ok((size, hasher.finalize().to_vec()))
 }
 
+/// The entry one Agent is offered: its assignment, narrowed to the artifact built for the
+/// platform it reports.
+///
+/// The platform still has to fit. An assignment pins *which* release the operator released; which
+/// artifact of it this host takes is the machine's own answer, and a host reporting a platform the
+/// release does not hold is offered nothing rather than something else.
+fn assigned_entry<'a>(
+    sets: &'a BTreeMap<PackageId, Package>,
+    assigned: Option<&PackageId>,
     description: Option<&AgentDescription>,
+) -> Option<(&'a Package, &'a Entry)> {
+    let platform = Platform::reported(description)?;
+    let set = sets.get(assigned?)?;
+    let entry = set.entries.get(&platform)?;
+    Some((set, entry))
 }
 
 /// What an Agent reports it has installed, per package name: `PackageStatuses.packages[name]
@@ -817,6 +1040,7 @@ pub type InstalledVersions = BTreeMap<String, String>;
 ///
 /// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
 fn upgrades(
+    set: &Package,
     installed: &InstalledVersions,
     description: Option<&AgentDescription>,
 ) -> bool {
@@ -841,7 +1065,9 @@ fn upgrades(
 
 /// What an Agent claims to have installed under this Set's name, if it claims anything: a package
 /// status reported with an empty version is no claim (ADR-0027).
+fn claimed_version<'a>(set: &Package, installed: &'a InstalledVersions) -> Option<&'a str> {
     installed
+        .get(&set.id.agent_type)
         .map(String::as_str)
         .filter(|has| !has.is_empty())
 }
@@ -857,13 +1083,41 @@ fn reported_service_version(description: Option<&AgentDescription>) -> Option<&s
     .filter(|version| !version.is_empty())
 }
 
+/// Whether a Package fits an Agent at all: built for the type it reports, and holding an entry
+/// for the platform it reports. Both are mandatory, and neither has an "unknown, so anything goes"
+/// case (ADR-0028) — an Agent reporting neither fits nothing.
+///
+/// Aim is not here. Whom a Package reaches is its Deployment's business (ADR-0028).
+fn fits(set: &Package, platform: &Platform, service_name: &str) -> bool {
+    set.id.agent_type == service_name && set.entries.contains_key(platform)
 }
 
+/// What one Agent's Deployment would release to it, if an operator rolled out now.
 ///
+/// Four tests, and every one of them is a hard gate: the Agent reports a platform and a type
+/// (ADR-0028), its Deployment holds a Package for that type (ADR-0028), that Package fits,
+/// and it is an **upgrade** over what the Agent runs (ADR-0027).
 ///
+/// There is no ranking left. The Deployment holds at most one Package per Agent type, so the
+/// specificity comparison and the version tie-break ADR-0028 needed have nothing to
+/// choose between — a state that used to be ambiguous is now one a write refuses to create.
 fn resolve<'a>(
+    sets: &'a BTreeMap<PackageId, Package>,
+    deployment: &Deployment,
     description: Option<&AgentDescription>,
     installed: &InstalledVersions,
+) -> Option<(&'a Package, &'a Entry)> {
+    let platform = Platform::reported(description)?;
+    let service_name = reported_agent_type(description)?;
+    let set = sets.get(deployment.package_for(service_name)?)?;
+    if !fits(set, &platform, service_name) || !upgrades(set, installed, description) {
+        return None;
+    }
+    let entry = set
+        .entries
+        .get(&platform)
+        .expect("the fit proved the entry");
+    Some((set, entry))
 }
 
 /// The Agent type an Agent reports, as `service.name` (ADR-0015) — the identifying attribute the
@@ -871,13 +1125,21 @@ fn resolve<'a>(
 ///
 /// `None` for an Agent that has not described itself or reports no type, which fits no Set
 /// (ADR-0028). An empty value is `None` too: it is not a type.
+pub fn reported_agent_type(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
         &description?.identifying_attributes,
         opamp::attributes::SERVICE_NAME,
     )
 }
 
+/// The aggregate over what one Agent is offered — its name and its content. One Package per
+/// Agent now, so there is nothing to sort; the shape is kept because it is what the Baseline's
+/// `all_packages_hash` is and what the Agent echoes back.
+fn aggregate_hash(set: &Package, entry: &Entry) -> Vec<u8> {
     let mut hasher = Sha256::new();
+    hasher.update((set.id.agent_type.len() as u64).to_le_bytes());
+    hasher.update(set.id.agent_type.as_bytes());
+    hasher.update(set.package_hash(entry));
     hasher.finalize().to_vec()
 }
 
@@ -894,6 +1156,8 @@ mod tests {
         Platform::new("windows", "amd64").expect("platform")
     }
 
+    fn id(agent_type: &str, version: &str) -> PackageId {
+        PackageId::new(agent_type, version).expect("package id")
     }
 
     /// An Agent description reporting a platform and a type, plus whatever else a Selector
@@ -930,8 +1194,11 @@ mod tests {
 
     /// A Set with one uploaded linux entry — stored, which since ADR-0027 reaches nobody until
     /// an assignment names it.
+    fn stored_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> PackageId {
         let id = id(name, version);
+        store.create(&id).expect("create");
         store
+            .put_entry(&id, &linux(), artifact.to_vec())
             .expect("entry");
         id
     }
@@ -944,29 +1211,64 @@ mod tests {
             .collect()
     }
 
+    /// A Deployment holding one Package and aiming at everything the tests describe. Aim lives
+    /// there now (ADR-0028), so a store test that wants a candidate has to say which channel the
+    /// Agent is in — which is the model, not scaffolding.
+    fn channel(id: &PackageId) -> Deployment {
+        Deployment {
+            name: "stable".to_string(),
+            selector: BTreeMap::from([("channel".to_string(), "stable".to_string())]),
+            packages: BTreeMap::from([(id.agent_type.clone(), id.clone())]),
+            signatures: BTreeMap::new(),
+        }
+    }
+
+    /// The candidate a rollout act would release to an Agent that has installed nothing.
     fn candidates(store: &PackageStore, description: &AgentDescription) -> Vec<(String, String)> {
         candidates_for(store, description, &InstalledVersions::new())
     }
 
+    /// The candidate a rollout act would release to this Agent, as `(type, version)` — for every
+    /// Package the store holds, each read through a channel that offers exactly it. At most one
+    /// survives per call; collecting them is how a test asks "which of these would reach it".
     fn candidates_for(
         store: &PackageStore,
         description: &AgentDescription,
         installed: &InstalledVersions,
     ) -> Vec<(String, String)> {
+        let ids: Vec<PackageId> = store
+            .sets
+            .read()
+            .expect("sets lock")
+            .keys()
+            .cloned()
+            .collect();
+        let mut names: Vec<(String, String)> = ids
+            .iter()
+            .filter_map(|id| store.candidate(Some(&channel(id)), Some(description), installed))
+            .map(|id| (id.agent_type, id.version))
             .collect();
         names.sort();
+        names.dedup();
         names
     }
 
+    /// What this Agent is offered, given its assignment, as `(type, version)`.
     fn offered(
         store: &PackageStore,
+        assigned: Option<&PackageId>,
         description: &AgentDescription,
     ) -> Vec<(String, String)> {
+        let held = assigned.map(channel);
+        let deployment = held.as_ref();
         store
+            .offer_for_assigned(assigned, deployment, Some(description), "", None)
             .map(|offer| {
+                offer
                     .packages
                     .iter()
                     .map(|(name, p)| (name.clone(), p.version.clone()))
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -979,7 +1281,9 @@ mod tests {
         {
             let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
             let set = id("otelcol", "1.2.3");
+            store.create(&set).expect("create");
             store
+                .put_entry(&set, &linux(), b"linux-bytes".to_vec())
                 .expect("linux entry");
             store
                 .set_entry_source(
@@ -1016,17 +1320,25 @@ mod tests {
             "the candidate is visible"
         );
         assert!(
+            offered(&store, None, &agent("linux", "amd64", &[])).is_empty(),
             "no assignment, no offer"
         );
         assert_eq!(
+            offered(&store, Some(&set), &agent("linux", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
     }
 
+    /// The gate an explicit rollout act runs (ADR-0027): the Package must hold entries and fit
+    /// the Agent's type and platform. **Aim is no longer among them** — whom a Package reaches is
+    /// its Deployment's, and the act names the channel. The version *ranking* stays out too: an Agent
+    /// that has installed nothing takes the older Package as readily as the newer one.
     #[test]
+    fn fits_agent_checks_fit_but_neither_aim_nor_the_ranking() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let empty = id("otelcol", "0.9.0");
+        store.create(&empty).expect("create");
         assert!(store
             .fits_agent(
                 &empty,
@@ -1038,14 +1350,27 @@ mod tests {
 
         let old = stored_set(&store, "otelcol", "1.0.0", b"v1");
         let new = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let in_channel = agent("linux", "amd64", &[("channel", "canary")]);
+        assert!(
             store
+                .fits_agent(&old, Some(&in_channel), &InstalledVersions::new())
                 .is_ok(),
             "the older Set fits an Agent that runs nothing yet"
+        );
         assert!(store
+            .fits_agent(&new, Some(&in_channel), &InstalledVersions::new())
             .is_ok());
+        assert!(
+            store
                 .fits_agent(
+                    &old,
+                    Some(&agent("linux", "amd64", &[])),
                     &InstalledVersions::new()
                 )
+                .is_ok(),
+            "an Agent outside any channel still *fits* this Package — whom it reaches is the \
+             Deployment's question, and the act has already answered it by naming one (ADR-0028)"
+        );
         assert!(store
             .fits_agent(
                 &new,
@@ -1054,16 +1379,20 @@ mod tests {
             )
             .expect_err("wrong platform")
             .contains("no entry for"));
+        assert!(
+            store
                 .fits_agent(
                     &new,
                     Some(&AgentDescription::default()),
                     &InstalledVersions::new()
                 )
+                .is_err(),
             "no platform and no type fits nothing"
         );
         assert!(store
             .fits_agent(
                 &id("otelcol", "9.9.9"),
+                Some(&in_channel),
                 &InstalledVersions::new(),
             )
             .expect_err("unknown set")
@@ -1202,6 +1531,9 @@ mod tests {
             "the program says it is at 9.9.9; a Set at 2.0.0 moves it nowhere"
         );
 
+        // A Collector numbering itself far below the Package that carries it: every version above
+        // that number clears the test, the claim notwithstanding. Which of them an Agent gets is
+        // no longer decided here — a channel holds one, and there is nothing left to rank.
         let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
         stored_set(&store, "otelcol", "1.5.0", b"v15");
         assert_eq!(
@@ -1210,7 +1542,15 @@ mod tests {
                 &running_agent("0.98.0"),
                 &installed(&[("otelcol", "2.0.0")])
             ),
+            [
+                ("otelcol".to_string(), "1.5.0".to_string()),
+                ("otelcol".to_string(), "2.0.0".to_string())
+            ],
+            "both clear 0.98.0 — the claim of 2.0.0 is not consulted while the Agent says what it \
+             runs (ADR-0027)"
         );
+        assert!(
+            store
                 .fits_agent(
                     &id("otelcol", "1.5.0"),
                     Some(&running_agent("0.98.0")),
@@ -1229,12 +1569,18 @@ mod tests {
     fn a_claim_the_running_program_denies_no_longer_holds_the_set_back() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "0.4.1", b"v041");
+        let claims_041 = installed(&[("otelcol", "0.4.1")]);
 
         assert_eq!(
             candidates_for(&store, &running_agent("0.4.0"), &claims_041),
+            [("otelcol".to_string(), "0.4.1".to_string())],
             "the version it runs is what it has; the record says only how it once got there"
         );
+        assert!(
+            store
                 .fits_agent(
+                    &id("otelcol", "0.4.1"),
                     Some(&running_agent("0.4.0")),
                     &claims_041
                 )
@@ -1249,6 +1595,7 @@ mod tests {
         );
         let refusal = store
             .fits_agent(
+                &id("otelcol", "0.4.1"),
                 Some(&running_agent("0.4.1+a1b2c3d")),
                 &claims_041,
             )
@@ -1274,12 +1621,18 @@ mod tests {
     fn a_claim_above_the_set_no_longer_holds_it_back_either() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        stored_set(&store, "otelcol", "0.4.1", b"v041");
+        let claims_042 = installed(&[("otelcol", "0.4.2")]);
 
         assert_eq!(
             candidates_for(&store, &running_agent("0.4.0"), &claims_042),
+            [("otelcol".to_string(), "0.4.1".to_string())],
             "the record names a binary this host is not running; 0.4.1 still moves it forward"
         );
+        assert!(
+            store
                 .fits_agent(
+                    &id("otelcol", "0.4.1"),
                     Some(&running_agent("0.4.0")),
                     &claims_042
                 )
@@ -1321,22 +1674,53 @@ mod tests {
         );
     }
 
+    /// Only the Package its channel holds is a candidate. Two versions of one Agent type used to be
+    /// ranked against each other — and, when nothing could order them, refused as a tie. A
+    /// Deployment holds one Package per type (ADR-0028), so there is no second contender to rank
+    /// or refuse: the store answers what the channel points at, or nothing.
     #[test]
+    fn only_the_package_its_ring_holds_is_a_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let a = stored_set(&store, "otelcol", "nightly-a", b"a");
+        let b = stored_set(&store, "otelcol", "nightly-b", b"b");
         let host = agent("linux", "amd64", &[]);
 
+        // Neither version can be ordered against the other, which used to be the one case with no
+        // defensible answer. It is now a question nobody asks.
+        for held in [&a, &b] {
+            assert_eq!(
+                store.candidate(Some(&channel(held)), Some(&host), &InstalledVersions::new()),
+                Some(held.clone()),
+                "the channel decides, and it holds exactly one"
+            );
+        }
         assert_eq!(
+            store.candidate(
+                Some(&channel(&a)),
+                Some(&host),
+                &installed(&[("otelcol", "1.0.0")])
+            ),
+            None,
+            "and what is no upgrade is still no candidate (ADR-0027)"
         );
     }
 
+    /// An Agent no channel claims is a candidate for nothing — the ordinary state of a host that has
+    /// enrolled and not been labelled yet, and not an error.
     #[test]
+    fn an_agent_without_a_ring_is_offered_no_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         stored_set(&store, "otelcol", "1.0.0", b"v1");
         assert_eq!(
+            store.candidate(
+                None,
                 Some(&agent("linux", "amd64", &[])),
                 &InstalledVersions::new()
+            ),
+            None
+        );
     }
 
     /// Fit before aim (ADR-0028): an entry for another platform, or a Set for another
@@ -1346,7 +1730,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         stored_set(&store, "otelcol", "1.0.0", b"linux-only");
+        let foreign = PackageId::new("promtail", "1.0.0").expect("id");
+        store.create(&foreign).expect("create");
         store
+            .put_entry(&foreign, &linux(), b"p".to_vec())
             .expect("entry");
 
         assert!(candidates(&store, &agent("windows", "amd64", &[])).is_empty());
@@ -1355,7 +1742,13 @@ mod tests {
             [("otelcol".to_string(), "1.0.0".to_string())],
             "the promtail set fits another type and is not a candidate"
         );
+        assert_eq!(
+            store.candidate(
+                Some(&channel(&id("otelcol", "1.0.0"))),
+                Some(&AgentDescription::default()),
                 &InstalledVersions::new()
+            ),
+            None,
             "no platform and no type fits nothing"
         );
     }
@@ -1367,13 +1760,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = id("otelcol", "1.0.0");
+        store.create(&set).expect("create");
         let mac = Platform::new("macos", "x86_64").expect("canonicalised");
         assert_eq!((mac.os.as_str(), mac.arch.as_str()), ("darwin", "amd64"));
+        store.put_entry(&set, &mac, b"mac".to_vec()).expect("entry");
         assert_eq!(
             candidates(&store, &agent("darwin", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
         assert_eq!(
+            offered(&store, Some(&set), &agent("darwin", "amd64", &[])),
             [("otelcol".to_string(), "1.0.0".to_string())]
         );
     }
@@ -1387,6 +1783,8 @@ mod tests {
         let set = stored_set(&store, "otelcol", "1.2.3", b"bytes");
         let offer = store
             .offer_for_assigned(
+                Some(&set),
+                Some(&channel(&set)),
                 Some(&agent("linux", "amd64", &[])),
                 "https://fleet.example",
                 None,
@@ -1399,6 +1797,7 @@ mod tests {
             .download_url;
         assert_eq!(
             url,
+            "https://fleet.example/api/v1/packages/otelcol/1.2.3/file?os=linux&arch=amd64"
         );
     }
 
@@ -1409,13 +1808,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let v1 = stored_set(&store, "otelcol", "1.0.0", b"v1");
+        let before = store.assigned_hash_for(Some(&v1), Some(&agent("linux", "amd64", &[])));
         assert!(!before.is_empty());
         assert!(store
+            .assigned_hash_for(Some(&v1), Some(&agent("windows", "amd64", &[])))
             .is_empty());
         assert!(store
+            .assigned_hash_for(None, Some(&agent("linux", "amd64", &[])))
             .is_empty());
 
         let v2 = stored_set(&store, "otelcol", "2.0.0", b"v2");
+        let after = store.assigned_hash_for(Some(&v2), Some(&agent("linux", "amd64", &[])));
         assert_ne!(before, after, "a new assigned version moves the aggregate");
     }
 
@@ -1425,7 +1828,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = id("otelcol", "1.0.0");
+        store.create(&set).expect("create");
         store
+            .put_entry(&set, &linux(), b"bytes".to_vec())
             .expect("entry");
         assert!(store.total_bytes() > 0);
         assert!(store.delete_entry(&set, &linux()).expect("delete entry"));
@@ -1445,7 +1850,9 @@ mod tests {
         let set = id("otelcol", "1.0.0");
         {
             let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+            store.create(&set).expect("create");
             store
+                .put_entry(&set, &linux(), b"good bytes".to_vec())
                 .expect("entry");
         }
         std::fs::write(
@@ -1468,6 +1875,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = id("otelcol", "1.0.0");
+        store.create(&set).expect("create");
         assert_eq!(
             std::fs::metadata(dir.path())
                 .expect("meta")
@@ -1477,6 +1885,7 @@ mod tests {
             0o700
         );
         assert_eq!(
+            std::fs::metadata(dir.path().join(set.to_string()).join("package.json"))
                 .expect("meta")
                 .permissions()
                 .mode()
@@ -1485,22 +1894,58 @@ mod tests {
         );
     }
 
+    /// There is no migration and no legacy reader: a store holding what an older layout wrote is
+    /// **named at startup**, never skipped (ADR-0028 point 19). Skipping is the dangerous half — a
+    /// store that merely looks empty offers nothing and says nothing about why, which an operator
+    /// reads as "nothing uploaded yet".
+    ///
+    /// Both shapes an older Server left behind are covered: the loose files of a pre-ADR-0028
+    /// store, and the `<name>@<version>@<type>/set.json` directories of an ADR-0028 one.
     #[test]
+    fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
+        // Pre-ADR-0028: loose files in the store root.
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("otelcol.json"),
+            serde_json::json!({"name": "otelcol", "service_name": "otelcol"}).to_string(),
         )
+        .expect("write a pre-ADR-0028 rollout file");
+        let error = PackageStore::open(dir.path().to_path_buf())
+            .map(|_| ())
+            .expect_err("an older layout is refused, never read as an empty store");
         assert!(
+            error.contains("otelcol.json"),
+            "the error must name what an operator has to move aside, got: {error}"
         );
 
+        // ADR-0028: a Set directory holding `set.json`.
         let dir = tempfile::tempdir().expect("tempdir");
+        let set = dir.path().join("otelcol@1.0.0@otelcol");
+        std::fs::create_dir_all(&set).expect("set dir");
+        std::fs::write(set.join("set.json"), "{}").expect("set.json");
+        let error = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
+            .expect_err("a Set directory is refused too");
+        assert!(
+            error.contains("otelcol@1.0.0@otelcol"),
+            "the error must name the directory, got: {error}"
+        );
+
+        // But the Deployments live here on purpose, and the loader steps over them.
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(DEPLOYMENTS_DIR)).expect("deployments dir");
+        PackageStore::open(dir.path().to_path_buf()).expect("the channel store is not a stray");
     }
 
     /// The identity grammar keeps the triple a safe directory name and an unambiguous parse:
     /// `@` and path separators are refused.
     #[test]
     fn identity_tokens_are_bounded() {
+        assert!(PackageId::new("otelcol", "1.2.3-rc.1+abc").is_ok());
+        assert!(PackageId::new("a@b", "1.0.0").is_err());
+        assert!(PackageId::new("otelcol", "1.0.0/../evil").is_err());
+        assert!(PackageId::new("", "1.0.0").is_err());
+        assert!(PackageId::new("not a type", "1.0.0").is_err());
+        assert!(PackageId::new(&"x".repeat(65), "1.0.0").is_err());
     }
 }
