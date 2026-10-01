@@ -284,6 +284,7 @@ mod tests {
     }
 
     /// The distinction the pre-release exists for (ADR-0013), kept at the gate that can enforce it.
+    // Verifies: ADR-0013
     #[test]
     fn a_development_build_is_not_the_release_it_heads_for() {
         assert!(!same_release("0.1.1", "0.1.1-dev+799e36a"));
@@ -353,6 +354,7 @@ mod tests {
 
     /// The baked string has the shape ADR-0013 prescribes — and, now that both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
+    // Verifies: ADR-0013
     #[test]
     fn the_baked_version_has_the_adr_0013_shape() {
         let full = current();

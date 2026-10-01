@@ -2501,6 +2501,7 @@ mod tests {
     /// The gatewayed case, which is why this exists: the connection is up — it is the Gateway's —
     /// and the Agent behind it has stopped talking. Both facts are reported, neither overwrites
     /// the other (ADR-0026).
+    // Verifies: ADR-0026
     #[test]
     fn an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up() {
         let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
@@ -2677,6 +2678,7 @@ mod tests {
 
     /// ADR-0026: the fleet survives a restart — the record is restored with everything the Agent
     /// reported, shown honestly as disconnected until live evidence says otherwise.
+    // Verifies: ADR-0026
     #[test]
     fn the_fleet_is_restored_disconnected_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -2764,6 +2766,7 @@ mod tests {
 
     /// ADR-0026: a heartbeat exists to change nothing, and it reaches no storage backend — the
     /// stored record still carries the durable state's write, not the heartbeat's.
+    // Verifies: ADR-0026
     #[test]
     fn a_heartbeat_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -2863,6 +2866,7 @@ mod tests {
 
     /// ADR-0027: saving proposes, the acts assign — and an Agent that appears after the bulk act
     /// waits for one of its own (point 6).
+    // Verifies: ADR-0027
     #[test]
     fn rollout_acts_assign_and_a_late_agent_waits() {
         let dir = tempfile::tempdir().expect("tempdir").keep();

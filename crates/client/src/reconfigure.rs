@@ -621,6 +621,7 @@ mod tests {
 
     /// The write replaces exactly the `[[supervisor]]` blocks. Everything the operator wrote —
     /// comments, ordering, unrelated sections — survives byte for byte (ADR-0022 point 11).
+    // Verifies: ADR-0022
     #[test]
     fn the_write_replaces_blocks_and_keeps_the_operators_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -735,6 +736,7 @@ mod tests {
     /// ADR-0022: the purge deletes exactly the removed Supervisor's directory — whole, identity
     /// included — leaves the neighbours untouched, and a directory that never materialized is
     /// nothing to report.
+    // Verifies: ADR-0022
     #[test]
     fn the_purge_deletes_exactly_the_removed_supervisors_directory() {
         let dir = tempfile::tempdir().expect("tempdir");

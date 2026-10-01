@@ -508,6 +508,7 @@ mod tests {
     }
 
     /// ADR-0016: the type fit runs before the Selector and independent of it.
+    // Verifies: ADR-0016
     #[test]
     fn a_typed_revision_reaches_only_agents_of_its_type() {
         let otelcol = description(&[("service.name", "otelcol"), ("os.type", "linux")]);
@@ -584,6 +585,7 @@ mod tests {
     /// ADR-0027 point 2: a rollout pins a snapshot. Editing the saved revision afterwards changes
     /// nothing for an Agent assigned the pinned one, and the candidate hash moves so the fleet
     /// view can show a newer save waiting.
+    // Verifies: ADR-0027
     #[test]
     fn an_assignment_pins_a_snapshot_and_later_edits_wait() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -794,6 +796,7 @@ mod tests {
     /// configuration identical to the one it already runs. The same pin guards ADR-0016, ADR-0027
     /// and ADR-0027: neither the type, nor a revision split, nor the assignment model may enter
     /// the hash.
+    // Verifies: ADR-0016
     #[test]
     fn an_empty_role_leaves_the_hash_where_it_was() {
         let dir = tempfile::tempdir().expect("tempdir");

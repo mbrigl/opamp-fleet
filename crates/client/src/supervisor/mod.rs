@@ -575,6 +575,7 @@ mod tests {
     /// And a block that states one anyway is refused, naming what supplies it now — the pattern
     /// `package` and `accepts_packages` already run (ADR-0015 clause 13). Silently preferring one
     /// of the two is how a host quietly differs from what the fleet believes.
+    // Verifies: ADR-0015
     #[test]
     fn a_wrapped_block_that_restates_a_derived_value_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -605,6 +606,7 @@ mod tests {
     /// type is stated, the timing comes from the fleet, and the kind's own strict parse accepts an
     /// empty table. Icinga adds only its enrolment, and stands here without it as a standalone
     /// node.
+    // Verifies: ADR-0015
     #[test]
     fn every_wrapped_kinds_block_is_two_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -623,6 +625,7 @@ mod tests {
     /// A Client says which kinds it carries, one key per kind (ADR-0015 clause 18), so a Selector
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
+    // Verifies: ADR-0015
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
         let reported = kind_attributes(BTreeMap::new());
@@ -759,6 +762,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
+    // Verifies: ADR-0022
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");

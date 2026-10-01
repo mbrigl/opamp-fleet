@@ -661,6 +661,7 @@ mod tests {
         assert!(verify_staged(&path, &staged, &right, None).is_ok());
     }
 
+    // Verifies: ADR-0019
     #[test]
     fn signature_policy_is_enforced() {
         let rng = ring::rand::SystemRandom::new();

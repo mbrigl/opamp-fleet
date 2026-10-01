@@ -114,6 +114,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
+// Verifies: ADR-0019
 #[tokio::test]
 async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed() {
     // The artifact is the stub binary itself — a real executable that stays up when swapped in.

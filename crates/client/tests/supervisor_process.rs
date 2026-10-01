@@ -540,6 +540,7 @@ async fn a_declared_reload_applies_without_a_restart() {
 /// `reload-or-restart` (ADR-0015): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
+// Verifies: ADR-0015
 #[cfg(unix)]
 #[tokio::test]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
@@ -956,6 +957,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let _ = harness.task.await;
 }
 
+// Verifies: ADR-0019
 #[tokio::test]
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1017,6 +1019,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
 /// ADR-0019: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
+// Verifies: ADR-0019
 #[tokio::test]
 async fn a_program_that_keeps_crashing_is_held_not_looped() {
     let dir = tempfile::tempdir().expect("tempdir");

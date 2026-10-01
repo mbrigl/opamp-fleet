@@ -103,6 +103,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
 
 /// ADR-0016: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
 /// Configuration without one leaves the field unset.
+// Verifies: ADR-0016
 #[tokio::test]
 async fn a_configuration_role_reaches_the_agent_verbatim() {
     let server = spawn().await;

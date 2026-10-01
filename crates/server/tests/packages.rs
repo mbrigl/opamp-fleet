@@ -915,6 +915,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
 /// refuse to move a host backwards — or to move it nowhere at all. The assignment path is
 /// deliberately exempt: an installed package stays in the Agent's offer, or the Agent would be
 /// told the package is no longer wanted.
+// Verifies: ADR-0027
 #[tokio::test]
 async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     let (server, _scratch) = spawn_with_packages().await;

@@ -252,7 +252,7 @@ different Windows layout.
   `the_withdrawal_condition_reads_both_spellings_of_off`
   ([`tests/msi_exe_command.rs`](../../crates/client/tests/msi_exe_command.rs)).
 - The real service manager's restart: `the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop`
-  in [`tests/service_smoke.rs`](../../crates/client/tests/service_smoke.rs), nightly on Windows via
+  in [`tests/service_smoke.rs`](../../crates/client/tests/service_smoke.rs), weekly on Windows via
   [`service-smoke.yml`](../../.github/workflows/service-smoke.yml).
 
 **Not mechanically decidable:** the non-atomic Windows pointer switch is a window no test can hit

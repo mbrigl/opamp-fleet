@@ -21,11 +21,6 @@ link further are collected — as a backlog, not as decisions — in
 
 > For agent instructions, see [`AGENTS.md`](AGENTS.md) — the single source of truth for all coding agents.
 
-> [!NOTE]
-> **This project still carries its template setup.** The one-time steps that turn the scaffold
-> into your own project are in [`TEMPLATE-SETUP.md`](TEMPLATE-SETUP.md). Delete that file and this
-> note once you are through them.
-
 ## Overview
 
 A telemetry fleet is a heap of agents on a heap of machines, each configured by a local file. That
@@ -166,9 +161,6 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 - Docker / Podman (rootless) available on the host
 
 ## Getting Started
-
-> Setting the project up for the first time? The one-time steps are in
-> [`TEMPLATE-SETUP.md`](TEMPLATE-SETUP.md). Delete this paragraph together with that file.
 
 1. Open the repository in VS Code and choose **Reopen in Container**. The Dev Container and the
    preconfigured agent extensions build automatically, and the container enables the repository's
@@ -372,7 +364,6 @@ service that will not start.
 ## Project Layout
 
 ```
-TEMPLATE-SETUP.md     # one-time template setup; delete it when the project is yours
 README.md             # overview & setup for humans
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents

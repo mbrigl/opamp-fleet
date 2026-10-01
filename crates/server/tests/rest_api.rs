@@ -556,6 +556,7 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
 /// ADR-0026, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
+// Verifies: ADR-0026
 #[tokio::test]
 async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
     // A zero budget makes the Agent silent the moment the clock ticks past its last report; the
@@ -766,6 +767,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
 
 /// The crux (ADR-0026 point 18): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
+// Verifies: ADR-0026
 #[tokio::test]
 async fn a_label_may_not_restate_what_the_agent_reports() {
     let server = spawn().await;

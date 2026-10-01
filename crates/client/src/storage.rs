@@ -475,6 +475,7 @@ mod tests {
     /// ADR-0016: a roled entry is written like any other — it has to be on disk for a
     /// `${file:...}` reference to resolve — but it is not among the files the process is
     /// configured with.
+    // Verifies: ADR-0016
     #[test]
     fn a_roled_entry_is_written_but_not_offered_as_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");

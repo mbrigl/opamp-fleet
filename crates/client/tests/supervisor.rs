@@ -214,6 +214,7 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
 
 /// ADR-0016: supplementary content is on disk next to the configuration — that is what makes a
 /// `${file:...}` reference resolve — but it is never handed to the Collector as `--config`.
+// Verifies: ADR-0016
 #[test]
 fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags() {
     let dir = tempfile::tempdir().expect("tempdir");

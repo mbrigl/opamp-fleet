@@ -1477,6 +1477,7 @@ mod tests {
 
     /// One shape (ADR-0022): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
+    // Verifies: ADR-0022
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");

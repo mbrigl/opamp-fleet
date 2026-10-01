@@ -248,55 +248,57 @@ Use these exact words in code, comments, documentation, and ADRs.
 
 ## Goals / Success Criteria
 
-1. **The loop closes.** A configuration change made on the Server reaches a connected Agent without it
-   asking for it, and the Agent reports it as applied.
-2. **The Server knows the fleet's state.** For every connected Agent it can report: its identity, its
-   health, the configuration it holds, and whether it accepted or rejected it — including the error
-   when it rejected it.
-3. **No redundant reconfiguration.** An Agent that already runs the intended configuration is not sent
-   it again; the config-hash comparison gates every push.
-4. **A rejected configuration is visible.** An Agent that refuses a configuration surfaces the reason
-   rather than failing silently.
-5. **Any UI can drive the fleet.** The OpenAPI-described REST API exposes fleet state and configuration
-   as a stable contract; an external UI or portal reads the fleet and changes what it runs entirely
-   through that API. The Server bundles only a rudimentary UI of its own.
-6. **One Client runs many supervisors.** A single Client process runs multiple Supervisor instances
-   concurrently, each appearing to the Server as its own independent Agent.
-7. **An agent the project was never built for is managed like any other.** A Foreign Agent placed under
-   a Custom Supervisor written for its kind is configured, reports health, and reports back through the
-   same control loop, and appears in the fleet indistinguishably from a Collector.
-8. **A new process type is a new plugin.** Adding support for another kind of Managed Process is done
-   by writing a Plugin against the existing ports, without changing the supervision domain core.
-9. **A configuration can target a subset of the fleet.** The Server can direct a configuration at a
-   selected subset of Agents via a Selector; the matching Agents apply it and every Agent outside the
-   target keeps running what it already runs, so a change can be rolled out gradually rather than all
-   at once.
-10. **The Server updates an agent's software, not only its configuration.** Via OpAMP package delivery
-    the Server can update an agent's binary — the Collector's, and the Client's own — verifying each
-    Package before it is applied, reporting the outcome, and rolling back on failure. A failed update is
-    reported, not silent.
-11. **The Client runs and updates itself as an OS service, on every platform.** The Client installs and
-    runs as a native operating-system service on Linux, macOS, and Windows, and can replace its own
-    binary in place — a self-update that survives the service restart and is rolled back on failure.
-    The Server runs on Linux.
-12. **Protocol coverage is on the record.** [`CONFORMANCE.md`](CONFORMANCE.md) states, for every
-    capability of both ends, whether it is implemented, its upstream maturity, and whether it is
-    required or optional — and the matrix matches what the code actually does.
-13. **The protocol stays in step with upstream.** The Protocol Baseline is visible in the repository
-    and a divergence from upstream is detected automatically rather than noticed by chance.
-14. **n Agents over m connections.** Several Supervisors either share one connection to the Server or
-    spread across several, as configured; the Server tells them apart solely by `instance_uid` and
-    behaves identically either way.
-15. **A Gateway scales connections, not identities.** Many Clients reaching the Server through a Client
-    in Gateway Mode appear as their own Agents, fully manageable, while sharing a small Connection
-    Pool — and the Gateway itself makes no authentication decisions.
-16. **A Collector reports through its own OpAMP client.** A Collector carrying the `opampextension`
-    connects to its Supervisor's Supervisor Endpoint, which relays its description, health, and
-    effective configuration upstream — so the Collector's own reporting, rather than external
-    observation, is what makes it visible in the fleet.
-17. **The connection is secured and the Agent is identified.** Client-to-Server traffic is
-    TLS-protected on both ends, mutual TLS is supported, and the Server accepts only authenticated
-    Agent identities.
+1. **G-1** — **The loop closes.** A configuration change made on the Server reaches a connected
+   Agent without it asking for it, and the Agent reports it as applied.
+2. **G-2** — **The Server knows the fleet's state.** For every connected Agent it can report: its
+   identity, its health, the configuration it holds, and whether it accepted or rejected it —
+   including the error when it rejected it.
+3. **G-3** — **No redundant reconfiguration.** An Agent that already runs the intended configuration
+   is not sent it again; the config-hash comparison gates every push.
+4. **G-4** — **A rejected configuration is visible.** An Agent that refuses a configuration surfaces
+   the reason rather than failing silently.
+5. **G-5** — **Any UI can drive the fleet.** The OpenAPI-described REST API exposes fleet state and
+   configuration as a stable contract; an external UI or portal reads the fleet and changes what it
+   runs entirely through that API. The Server bundles only a rudimentary UI of its own.
+6. **G-6** — **One Client runs many supervisors.** A single Client process runs multiple Supervisor
+   instances concurrently, each appearing to the Server as its own independent Agent.
+7. **G-7** — **An agent the project was never built for is managed like any other.** A Foreign Agent
+   placed under a Custom Supervisor written for its kind is configured, reports health, and reports
+   back through the same control loop, and appears in the fleet indistinguishably from a Collector.
+8. **G-8** — **A new process type is a new plugin.** Adding support for another kind of Managed
+   Process is done by writing a Plugin against the existing ports, without changing the supervision
+   domain core.
+9. **G-9** — **A configuration can target a subset of the fleet.** The Server can direct a
+   configuration at a selected subset of Agents via a Selector; the matching Agents apply it and
+   every Agent outside the target keeps running what it already runs, so a change can be rolled out
+   gradually rather than all at once.
+10. **G-10** — **The Server updates an agent's software, not only its configuration.** Via OpAMP
+    package delivery the Server can update an agent's binary — the Collector's, and the Client's own
+    — verifying each Package before it is applied, reporting the outcome, and rolling back on
+    failure. A failed update is reported, not silent.
+11. **G-11** — **The Client runs and updates itself as an OS service, on every platform.** The
+    Client installs and runs as a native operating-system service on Linux, macOS, and Windows, and
+    can replace its own binary in place — a self-update that survives the service restart and is
+    rolled back on failure. The Server runs on Linux.
+12. **G-12** — **Protocol coverage is on the record.** [`CONFORMANCE.md`](CONFORMANCE.md) states,
+    for every capability of both ends, whether it is implemented, its upstream maturity, and whether
+    it is required or optional — and the matrix matches what the code actually does.
+13. **G-13** — **The protocol stays in step with upstream.** The Protocol Baseline is visible in the
+    repository and a divergence from upstream is detected automatically rather than noticed by
+    chance.
+14. **G-14** — **n Agents over m connections.** Several Supervisors either share one connection to
+    the Server or spread across several, as configured; the Server tells them apart solely by
+    `instance_uid` and behaves identically either way.
+15. **G-15** — **A Gateway scales connections, not identities.** Many Clients reaching the Server
+    through a Client in Gateway Mode appear as their own Agents, fully manageable, while sharing a
+    small Connection Pool — and the Gateway itself makes no authentication decisions.
+16. **G-16** — **A Collector reports through its own OpAMP client.** A Collector carrying the
+    `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays its description,
+    health, and effective configuration upstream — so the Collector's own reporting, rather than
+    external observation, is what makes it visible in the fleet.
+17. **G-17** — **The connection is secured and the Agent is identified.** Client-to-Server traffic
+    is TLS-protected on both ends, mutual TLS is supported, and the Server accepts only
+    authenticated Agent identities.
 
 ## Non-Goals
 

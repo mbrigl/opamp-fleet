@@ -344,7 +344,7 @@ buys precision without control. Stage 1 is the prerequisite, not the warm-up.
 
 A hardening measure is the kind of change that looks done as soon as code exists, because the thing
 it prevents was already not happening in any test. So each one below states the observable that
-proves it — and the rule for all of them is the project's own ([`AGENTS.md`](../AGENTS.md) §5): **the check
+proves it — and the rule for all of them is the project's own ([`AGENTS.md` §5](../AGENTS.md#5-quality-bar--definition-of-done)): **the check
 must fail before the change and pass after**. A test that passes today verifies nothing about a
 measure that has not been taken.
 

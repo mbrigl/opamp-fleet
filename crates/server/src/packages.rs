@@ -1514,6 +1514,7 @@ mod tests {
     /// trade are asserted here rather than only the convenient one — including that a Managed
     /// Process numbered below its Set can now be moved backwards, which is the cost the ADR
     /// records under Consequences.
+    // Verifies: ADR-0027
     #[test]
     fn the_version_an_agent_runs_wins_over_the_version_it_claims() {
         let dir = tempfile::tempdir().expect("tempdir");

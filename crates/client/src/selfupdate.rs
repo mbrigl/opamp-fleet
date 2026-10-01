@@ -756,6 +756,7 @@ mod tests {
 
     /// ADR-0013, and the failure that prompted it: a package is uploaded under the release number,
     /// while the binary in it reports the commit it was built from. Those are the same release.
+    // Verifies: ADR-0013
     #[cfg(unix)]
     #[test]
     fn the_probe_ignores_the_commit_a_build_came_from() {

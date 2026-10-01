@@ -1565,6 +1565,7 @@ mod tests {
     /// excluded whole — the MAC of one too — an unspecified MAC not an answer, everything
     /// deduplicated and sorted so the description is stable across enumeration order, IPv6 in
     /// RFC 5952 form and the MAC in IEEE RA hyphenated uppercase.
+    // Verifies: ADR-0024
     #[test]
     fn host_addresses_follow_the_conventions() {
         use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1751,6 +1752,7 @@ mod tests {
     /// built with, and folding that in used to overwrite the operator's name for the Supervisor —
     /// so every Collector of one distribution collapsed onto one name in the fleet view. Both
     /// values must survive, each in its own key, each won by the side that actually knows it.
+    // Verifies: ADR-0024
     #[test]
     fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1876,6 +1878,7 @@ mod tests {
 
     /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
     /// second way to set the two attributes the Supervisor itself owns.
+    // Verifies: ADR-0024
     #[test]
     fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2363,6 +2366,7 @@ mod tests {
     /// and a record about a binary that is gone must not swallow the offer that would replace it:
     /// the Server offers because the Agent reports running something older, and a Client that
     /// answered "in sync" from its record would strand the host exactly where ADR-0027 found it.
+    // Verifies: ADR-0027
     #[test]
     fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2547,6 +2551,7 @@ mod tests {
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
     /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
     /// than installed over the process they were meant to extend, and the refusal is reported.
+    // Verifies: ADR-0019
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
