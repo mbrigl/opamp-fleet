@@ -46,6 +46,8 @@
   // Runs inside the container once it is created. Git does not version its hooks, so the
   // repository keeps them under .githooks/ and this points git at them: pre-commit refuses a
   // commit on main, pre-push runs the checks first (AGENTS.md §5 and §6). Outside the container,
+  // run the same command once per clone (README → "Getting Started"). It is the first command of
+  // `postCreateCommand` below, which also installs the system packages listed there.
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
@@ -60,11 +62,17 @@
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
+  // System packages the base image does not carry, installed once when the container is created.
   //
   // The one below is *developer tooling* — nothing shipped depends on it, which is why it does
   // not need an ADR (AGENTS.md §3.6) — and it earns its place:
   //
+  //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
+  //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
+  //             ordinary local run, so a Windows-only compile error reaches CI instead of the
+  //             author. See README → "Build, Test & Run".
   "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm",
+
   "customizations": {
     // VS Code extensions installed inside the container
     "vscode": {
