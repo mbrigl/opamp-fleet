@@ -15,6 +15,11 @@ explicit and reviewable. How much of the protocol each end implements is tracked
 link further are collected — as a backlog, not as decisions — in
 [`docs/HARDENING.md`](docs/HARDENING.md).
 
+> **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
+> start it, and every configuration key, split into [Server](docs/manual/server.md) and
+> [Client](docs/manual/client.md).
+
+> For agent instructions, see [`AGENTS.md`](AGENTS.md) — the single source of truth for all coding agents.
 
 > [!NOTE]
 > **This project still carries its template setup.** The one-time steps that turn the scaffold
@@ -176,16 +181,28 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 ## Build, Test & Run
 
 The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
+with four crates — `opamp` (shared library), `server`, `client` (the Client, in all its modes), and
+`package-tools` (the operator command-line tools, ADR-0025). 
 This section is the single source for build/test/run commands — both humans and agents rely on 
 it (AGENTS.md links here).
 
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Check the Windows build:**
+  `cargo xwin clippy -p client --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
+  (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
+  Container carries the `llvm-lib` it requires). Worth running whenever a change touches
+  platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
+  `#[cfg(unix)]` mistake compiles perfectly well on Linux.
 - **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
 - **Run the Server:** `cargo run -p server -- --config config/server.toml`
 - **Run the Client:** `cargo run -p client -- --config config/supervisor.toml`
+- **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
+  and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
+  sign an artifact out of any program) — both documented in
+  [the manual](docs/manual/tools.md); an installed release ships them beside the Client.
 
 Both binaries read a TOML configuration file ([ADR-0025](docs/adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
@@ -219,6 +236,11 @@ ready package artifact: the same file an operator downloads is the one a fleet i
 [self-update](docs/manual/client.md#updating-the-client-itself).
 
 ## Usage
+
+This section is a tour. The complete operator reference — every option and every configuration key
+of both ends — is the **[User Manual](docs/manual/README.md)**:
+[Server](docs/manual/server.md) · [Client](docs/manual/client.md) ·
+[Command-line tools](docs/manual/tools.md).
 
 A minimal closed control loop on one machine:
 
@@ -354,6 +376,7 @@ TEMPLATE-SETUP.md     # one-time template setup; delete it when the project is y
 README.md             # overview & setup for humans
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
+docs/manual/         # the user manual: Server, Client, and the operator tools, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/GLOSSARY.md      # the vocabulary everyone uses, kept current inline
 docs/CONVENTIONS.md   # how this project writes what no check decides, kept current inline
@@ -361,6 +384,7 @@ docs/ARCHITECTURE.md  # the system as it currently stands
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
+crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks

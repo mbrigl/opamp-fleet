@@ -69,6 +69,7 @@ async fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0023): ring, never a system library.
+    server::tls::install_ring_provider();
 
     let config_path = parse_args();
     let config = match ServerConfig::load(&config_path) {
@@ -145,12 +146,16 @@ async fn main() {
                 // ADR-0018.
                 info!("offering software packages to the fleet");
             }
+            match server::fleet::PackageOffering::new(
                 store,
                 config.advertised_url.clone().unwrap_or_default(),
+            ) {
+                Ok(offering) => Some(offering),
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
+            }
         }
         Err(e) => {
             eprintln!("{e}");

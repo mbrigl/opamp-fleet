@@ -9,6 +9,7 @@ pub mod ca;
 pub mod config;
 pub mod configs;
 pub mod credentials;
+pub mod deployments;
 pub mod fleet;
 pub mod labels;
 pub mod listen;

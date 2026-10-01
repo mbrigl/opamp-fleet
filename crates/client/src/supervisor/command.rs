@@ -107,6 +107,9 @@ impl Plugin for CommandPlugin {
         let version_probe = settings.version_args.clone().map(|args| VersionProbe {
             program: command.clone(),
             args,
+            // A Foreign Agent's version flag is its own convention, and so is its banner: the
+            // strict SemVer read stays the default here (ADR-0016).
+            parse: None,
         });
         // The same arguments, asked of the *staged* program before the running one is stopped
         // (ADR-0016). This kind knows no argument of its own to be safe to run — but an operator
@@ -161,6 +164,8 @@ impl Plugin for CommandPlugin {
                     env: env.clone(),
                     // The program's own directory (ADR-0010), resolved at the spawn.
                     working_dir: None,
+                    // Whatever the operator points this at is supervised as one process.
+                    own_process_group: false,
                     // Nothing: this kind knows no agent, so it knows no directory an
                     // agent of it would write into. An operator whose Foreign Agent needs one
                     // states the path in its own configuration, where the agent can make it.
