@@ -171,7 +171,7 @@ no console has nowhere else to write and stderr is not somewhere you can go and 
 **`service.version` is best-effort here.** The probe accepts strict SemVer only, and GLPI Agent
 releases are usually two-component (`1.15`), so the field will mostly stay absent; a
 three-component release (`1.7.1`) reports one. The package's own version is reported either way, so
-the fleet view always knows which Set is installed.
+the fleet view always knows which Package is installed.
 
 **Never `glpi-agent.bat`.** It does not come up as a choice any more — the kind names the program —
 but it is why: the batch file is a wrapper, so the supervised child would be `cmd.exe` and the Perl
@@ -223,16 +223,16 @@ rolled-out Configuration then lands in `config/` with nothing reading it.
 |---|---|
 | `service_name` | `glpi-agent` — aim Configurations (and Selectors) at this. |
 | `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. |
-| `packages` | `Installed` with the Set's version once the tree is in place, or `InstallFailed` with the reason the artifact would not run here. |
-| `service_version` | Usually absent — see the note on `service.version` in [step 3](#3-the-block). The Set's version above says which release is installed. |
+| `packages` | `Installed` with the Package's version once the tree is in place, or `InstallFailed` with the reason the artifact would not run here. |
+| `service_version` | Usually absent — see the note on `service.version` in [step 3](#3-the-block). The Package's version above says which release is installed. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |
 | `remote_config_status`, `effective_config` | The `glpi-agent-conf` round trip: `APPLIED` once the restarted agent survives `apply_grace_secs`. |
 
 ## Updating
 
-The ordinary act: a new version is a new Set, uploaded and rolled out, health-gated on the host
+The ordinary act: a new version is a new Package, uploaded and rolled out, health-gated on the host
 and rolled back if the new tree will not stay up
-([walkthrough step 8](rollout.md#8-ship-an-update)). The agent's state survives, because
+([walkthrough step 9](rollout.md#9-ship-an-update)). The agent's state survives, because
 `--vardir` keeps it outside the tree that gets replaced.
 
 **The block may be rolled out from the Server too.** Bare-named programs are the one shape a
@@ -264,6 +264,6 @@ as that account, and two things follow:
 | *"Can't write in …"* in the agent's log | The `--vardir` directory is not writable by the Client's service account — see [the account section](#running-under-an-account-that-is-not-root-or-localsystem). It is no longer ever *missing*: the Client makes it before every spawn. |
 | The host is inventoried twice, or the agent logs that port 62354 is in use | The native autostart is still active beside the Supervisor — [step 1](#1-hand-over-the-autostart) was skipped or a package upgrade re-enabled the service. |
 | Windows: the process exits immediately, log says *"Can't locate … in @INC"* | The `-I` paths do not match the delivered tree — the package's layout differs from `perl/…` under `program/tree`. Check what the artifact actually holds, and fix all five paths in the block together. |
-| `service_version` is empty | Expected for two-component GLPI releases; not a fault. `packages[].version` says which Set is installed and is the field to read instead. |
+| `service_version` is empty | Expected for two-component GLPI releases; not a fault. `packages[].version` says which Package is installed and is the field to read instead. |
 | The agent starts, but the GLPI server shows a new asset after every update | An old block still pointed `--vardir` inside `program/tree`, so the `deviceid` was discarded with the replaced tree. The kind now puts it at `${supervisor_dir}/agent-state`; let the GLPI server merge the duplicate. |
 | The configuration is `APPLIED` but the agent still contacts the old GLPI server | The block runs without `--conf-file` (the static-`--server` variant), so the written entry is never read. |

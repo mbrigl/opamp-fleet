@@ -266,6 +266,61 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.task.await.expect("join");
 }
 
+/// A program named by a **relative** path still starts — which it did not, once ADR-0091 had the
+/// process begin in its own directory.
+///
+/// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
+/// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
+/// default makes this the ordinary case rather than a corner — `state_dir = "client-state"` is
+/// relative, so every Managed Process under a default configuration failed to spawn, with a bare
+/// `No such file or directory` naming a file that was plainly there.
+#[tokio::test]
+async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() {
+    // **Under** this test's working directory, so the relative path is a plain descent with no
+    // `..` in it — which is what a Client's own `state_dir = "client-state"` looks like, and what
+    // makes the fixture mean the same thing on every platform. Counting `..` to the root does not:
+    // it is drive-relative on Windows, and the first version of this test accidentally used
+    // exactly as many as the new working directory was deep, so the path climbed back out to the
+    // same file and passed against the unfixed code.
+    let here = std::env::current_dir().expect("cwd");
+    let dir = tempfile::tempdir_in(&here).expect("tempdir under the working directory");
+    let program_dir = dir.path().join("a/b/c/d/program");
+    std::fs::create_dir_all(&program_dir).expect("program dir");
+    let program = program_dir.join(program_name("stub_agent"));
+    std::fs::copy(stub_agent(), &program).expect("copy the stub");
+
+    let relative = program
+        .strip_prefix(&here)
+        .expect("the fixture lives under the working directory")
+        .to_path_buf();
+    assert!(relative.is_relative());
+    assert!(
+        !program_dir.join(&relative).exists(),
+        "the test must stage the failure: resolved from the program's own directory this path has \
+         to point at nothing, or it passes for the wrong reason"
+    );
+
+    let marker = dir.path().join("started");
+    let mut harness = start({
+        let (relative, marker) = (relative.clone(), marker.clone());
+        move || {
+            Some(ProcessSpec {
+                program: relative.clone(),
+                args: vec!["--touch".to_string(), marker.display().to_string()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }
+    });
+    let _ = next_health(&mut harness.events).await;
+    wait_until_started(&marker).await;
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    harness.task.await.expect("join");
+}
+
 // ── The version probe ────────────────────────────────────────────────────────
 
 #[tokio::test]

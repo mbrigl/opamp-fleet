@@ -37,7 +37,9 @@ use crate::labels::LabelError;
     tags(
         (name = "fleet", description = "The fleet as the Server sees it"),
         (name = "configurations", description = "Selector-targeted Configurations"),
-        (name = "packages", description = "Software packages the Server delivers (ADR-0015)")
+        (name = "packages", description = "Software packages the Server delivers (ADR-0015)"),
+        (name = "deployments", description = "What reaches a channel of hosts — the only thing \
+                                              rolled out (ADR-0096)")
     )
 )]
 struct ApiDoc;
@@ -96,9 +98,16 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
         // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
-        .routes(routes!(put_package_set_selector))
-        .routes(routes!(rollout_package_set))
         .routes(routes!(put_package_entry_source))
+        .routes(routes!(list_deployments))
+        .routes(routes!(get_deployment, put_deployment, delete_deployment))
+        .routes(routes!(put_deployment_selector))
+        .routes(routes!(put_deployment_package, delete_deployment_package))
+        .routes(routes!(
+            put_deployment_signature,
+            delete_deployment_signature
+        ))
+        .routes(routes!(rollout_deployment))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -138,7 +147,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
 pub fn download_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(
-            "/api/v1/packages/{name}/{agent_type}/{version}/file",
+            "/api/v1/packages/{agent_type}/{version}/file",
             get(download_package),
         )
         .with_state(state)
@@ -278,7 +287,7 @@ struct LabelsBody {
     request_body = LabelsBody,
     description = "Replace this Agent's labels (ADR-0042). A label is an operator's key/value pair \
                    that joins what a Selector matches — for Configurations and for packages alike — \
-                   so a rollout ring is a Server-side decision instead of an edit to supervisor.toml on \
+                   so a rollout channel is a Server-side decision instead of an edit to supervisor.toml on \
                    the host. An empty map clears them. Labels never travel to the Agent, and they \
                    outlive it: forgetting an Agent does not clear them. A key the Agent already \
                    reports is refused, because reported attributes decide which artifact fits the \
@@ -329,22 +338,19 @@ struct AgentRolloutSpec {
     /// Release this Configuration — its saved revision, pinned as of this press.
     #[serde(default)]
     configuration: Option<String>,
-    /// Release this Set. Any Set that fits and aims at the Agent may be named — an older version
-    /// too, which is the rollback.
+    /// Release this Agent's Deployment — the Package it holds for the Agent's type, pinned as of
+    /// this press.
+    ///
+    /// It must be the Deployment that actually claims this Agent. Naming another is refused, and
+    /// so is naming one while a second Deployment also claims the Agent: an operator who names one
+    /// has said which they mean, but honouring that would sidestep the conflict for good instead
+    /// of fixing it, and make this path the way into a state the fleet-wide act forbids
+    /// (ADR-0096 point 9).
     #[serde(default)]
-    package: Option<PackageRef>,
+    deployment: Option<String>,
 }
 
-/// A Set's identity, as a rollout body names it.
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-struct PackageRef {
-    name: String,
-    agent_type: String,
-    version: String,
-}
-
-/// Rolls a Configuration or a package Set out to **this Agent** (ADR-0061) — or, with an empty
+/// Rolls a Configuration or this Agent's Deployment out to **this Agent** (ADR-0061) — or, with an empty
 /// body, everything the fleet view shows as waiting for it. The operator's press is the only
 /// thing that distributes: saving, publishing-like states, Selector edits and label moves all
 /// merely change what is *proposed* here.
@@ -358,7 +364,7 @@ struct PackageRef {
         (status = 200, description = "Rolled out; the Agent with its new assignments", body = AgentView),
         (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such Agent, Configuration, or Set", body = ErrorBody),
+        (status = 404, description = "No such Agent, Configuration, or Deployment", body = ErrorBody),
         (status = 409, description = "The named resource does not fit or aim at this Agent", body = ErrorBody)
     )
 )]
@@ -375,21 +381,15 @@ async fn rollout_to_agent(
         );
     };
     let spec = body.map(|Json(spec)| spec).unwrap_or_default();
-    let target =
-        match (spec.configuration, spec.package) {
-            (Some(_), Some(_)) => return error(
-                StatusCode::BAD_REQUEST,
-                "name a configuration or a package, not both — or neither for everything waiting",
-            ),
-            (Some(name), None) => RolloutTarget::Configuration(name),
-            (None, Some(package)) => {
-                match set_id(&package.name, &package.agent_type, &package.version) {
-                    Ok(id) => RolloutTarget::Package(id),
-                    Err(e) => return error(StatusCode::BAD_REQUEST, e),
-                }
-            }
-            (None, None) => RolloutTarget::Everything,
-        };
+    let target = match (spec.configuration, spec.deployment) {
+        (Some(_), Some(_)) => return error(
+            StatusCode::BAD_REQUEST,
+            "name a configuration or a deployment, not both — or neither for everything waiting",
+        ),
+        (Some(name), None) => RolloutTarget::Configuration(name),
+        (None, Some(deployment)) => RolloutTarget::Deployment(deployment),
+        (None, None) => RolloutTarget::Everything,
+    };
     match state.rollout_to_agent(&uid, &target) {
         Ok(()) => match state
             .snapshot()
@@ -652,38 +652,23 @@ async fn delete_configuration(
 /// and which Agents run it is answered per Agent by `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct PackageSetView {
-    name: String,
-    /// The Agent type this Set is built for, matched raw against the `service.name` an Agent
-    /// reports before any Selector is considered (ADR-0034). Part of the Set's identity.
-    service_name: String,
-    /// The version every entry of this Set shares. Part of the Set's identity.
+    /// The Agent type this Package is built for, matched raw against the `service.name` an Agent
+    /// reports before anything else is considered (ADR-0034). Half its identity — and the name it
+    /// carries on the wire, which is why it never holds the version.
+    agent_type: String,
+    /// The version every entry of this Package shares. The other half of its identity.
     version: String,
-    /// Whom a rollout act would release this Set to (ADR-0017): equality pairs that must all
-    /// match an attribute the Agent reported. Empty targets every Agent of this Set's type.
-    /// Always editable — it steers the next act, never a running offer.
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
-    /// `true` for an addon, `false` for a top-level package (a Managed Process's binary).
-    #[serde(default)]
-    addon: bool,
-    /// One entry per platform. An Agent is offered the one built for the machine it reported,
-    /// and never another (ADR-0031).
+    /// What an operator reads: the Agent type and the version together. Derived, never stored.
+    display_name: String,
+    /// One entry per platform. An Agent is offered the one built for the machine it reported, and
+    /// never another (ADR-0031).
     entries: Vec<PackageEntryView>,
-    /// How many Agents in the fleet this Set **would** reach — fitted by type and platform, aimed
-    /// by Selector, held to an upgrade over what each Agent reports installed (ADR-0076), and
-    /// resolved against its sibling versions.
+    /// The Deployments that hold this Package, in name order.
     ///
-    /// This is what a rollout act would change. Read it together with `matching_agents`: `0` here
-    /// with a non-zero `matching_agents` means every Agent this Set aims at already runs this
-    /// version or a newer one — nothing to do, and nothing wrong.
-    targeted_agents: usize,
-    /// How many Agents this Set fits and aims at, whatever they run — type, platform and Selector
-    /// only.
-    ///
-    /// **`0` is the value worth looking at.** A Set aims at nobody when its type is misspelled,
-    /// when no entry matches any reported platform, or when its Selector matches no Agent — and
-    /// none of those is a rejected upload, so nothing else would say so.
-    matching_agents: usize,
+    /// This is where "whom does it reach" is answered now, and it is a different question than it
+    /// used to be: a Package aims at nobody by itself (ADR-0095), so an empty list means it is
+    /// stored and unreachable — the state that used to be a Selector matching no one.
+    deployments: Vec<String>,
 }
 
 /// One platform's entry of a Set: an uploaded artifact or a source reference (ADR-0018).
@@ -695,24 +680,28 @@ struct PackageEntryView {
     arch: String,
     /// The artifact's size in bytes; `0` for a referenced one, whose bytes this Server never holds.
     size: u64,
+    /// The artifact's SHA-256, hex — **the exact value the Agent verifies what it downloaded
+    /// against** (ADR-0095). Reading it is how an operator answers "did this host take my bytes"
+    /// without trusting a status field: it is the same string the Agent reports back in its
+    /// `PackageStatuses`, and the same one `opamp-package-sign sha256` prints locally.
+    content_hash: String,
+    /// The per-package hash this entry is offered under, hex. An Agent echoes it once it is in
+    /// sync, and the Server stops re-offering while the two agree — so a rollout that seems not to
+    /// travel is answered here rather than by reading logs.
+    package_hash: String,
     /// Where Agents fetch the artifact when this Server does not hold it (ADR-0018). Absent for an
     /// uploaded one, which is served from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_url: Option<String>,
-    /// Whether the operator supplied an Ed25519 signature for this entry.
-    signed: bool,
 }
 
 impl PackageSetView {
-    fn of(summary: crate::packages::SetSummary, reach: crate::fleet::SetReach) -> Self {
+    fn of(summary: crate::packages::PackageSummary, deployments: Vec<String>) -> Self {
         PackageSetView {
-            targeted_agents: reach.targeted,
-            matching_agents: reach.aiming,
-            name: summary.name,
-            service_name: summary.service_name,
+            display_name: format!("{} {}", summary.agent_type, summary.version),
+            agent_type: summary.agent_type,
             version: summary.version,
-            selector: summary.selector,
-            addon: summary.addon,
+            deployments,
             entries: summary
                 .entries
                 .into_iter()
@@ -720,8 +709,9 @@ impl PackageSetView {
                     os: entry.os,
                     arch: entry.arch,
                     size: entry.size,
+                    content_hash: entry.content_hash,
+                    package_hash: entry.package_hash,
                     source_url: entry.source_url,
-                    signed: entry.signed,
                 })
                 .collect(),
         }
@@ -746,32 +736,6 @@ impl PlatformQuery {
     }
 }
 
-/// The writable part of a Set — the body of `PUT /api/v1/packages/{name}/{agent_type}/{version}`.
-/// Everything else about a Set is either its identity (the path) or set through its own
-/// sub-resource (`…/publication`), or belongs to an entry.
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-struct PackageSetSpec {
-    /// Equality pairs an Agent's reported attributes must all match; empty targets every Agent of
-    /// this Set's type.
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
-    /// `true` marks an addon; the default is a top-level package (a Managed Process's binary).
-    /// Frozen with the bytes while the Set is published.
-    #[serde(default)]
-    addon: bool,
-}
-
-/// The writable Selector of a Set — the body of `PUT …/selector`.
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-struct PackageSelectorSpec {
-    /// Equality pairs an Agent's reported attributes must all match; empty targets every Agent of
-    /// this Set's type.
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
-}
-
 /// The query parameters of an entry upload: everything but the artifact, which is the body — and
 /// the platform, which is the path.
 #[derive(Deserialize, IntoParams)]
@@ -782,21 +746,20 @@ struct EntryUpload {
 }
 
 /// The identity triple as every Set route carries it in its path.
-fn set_id(name: &str, agent_type: &str, version: &str) -> Result<crate::packages::SetId, String> {
-    crate::packages::SetId::new(name, agent_type, version)
+fn package_id(agent_type: &str, version: &str) -> Result<crate::packages::PackageId, String> {
+    crate::packages::PackageId::new(agent_type, version)
 }
 
 /// A stored Set as the API answers with it, read back from the store rather than assembled from
 /// whatever the handler happened to be given — so every response describes the Set as it now is.
-fn set_response(state: &AppState, id: &crate::packages::SetId) -> Response {
+fn set_response(state: &AppState, id: &crate::packages::PackageId) -> Response {
     match state.packages().and_then(|store| store.summary(id)) {
         Some(summary) => {
-            let reach = state
-                .package_reach()
-                .get(&id.to_string())
-                .copied()
+            let deployments = state
+                .deployments_holding()
+                .remove(&id.to_string())
                 .unwrap_or_default();
-            Json(PackageSetView::of(summary, reach)).into_response()
+            Json(PackageSetView::of(summary, deployments)).into_response()
         }
         None => error(StatusCode::NOT_FOUND, format!("no package set {id}")),
     }
@@ -832,16 +795,14 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
         Some(store) => {
             let summaries = store.list();
             // One pass over the fleet for the whole list, rather than one per Set.
-            let reach = state.package_reach();
+            let holding = state.deployments_holding();
             Json(
                 summaries
                     .into_iter()
                     .map(|summary| {
-                        let key = format!(
-                            "{}@{}@{}",
-                            summary.name, summary.version, summary.service_name
-                        );
-                        PackageSetView::of(summary, reach.get(&key).copied().unwrap_or_default())
+                        let key = format!("{}@{}", summary.agent_type, summary.version);
+                        let deployments = holding.get(&key).cloned().unwrap_or_default();
+                        PackageSetView::of(summary, deployments)
                     })
                     .collect::<Vec<_>>(),
             )
@@ -857,7 +818,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
 /// One stored Set.
 #[utoipa::path(
     get,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}",
+    path = "/api/v1/packages/{agent_type}/{version}",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name (ADR-0010 grammar)"),
@@ -872,9 +833,9 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
 )]
 async fn get_package_set(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
+    Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    match set_id(&name, &agent_type, &version) {
+    match package_id(&agent_type, &version) {
         Ok(id) => set_response(&state, &id),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
@@ -885,14 +846,13 @@ async fn get_package_set(
 /// the whole identity: a new version is a new Set, never a mutation of an old one.
 #[utoipa::path(
     put,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}",
+    path = "/api/v1/packages/{agent_type}/{version}",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name (ADR-0010 grammar)"),
         ("agent_type" = String, Path, description = "The Agent type the Set is built for, compared raw against the `service.name` Agents report"),
         ("version" = String, Path, description = "The Set's version — every entry shares it")
     ),
-    request_body = PackageSetSpec,
     responses(
         (status = 200, description = "The stored Set", body = PackageSetView),
         (status = 400, description = "Invalid identity or body", body = ErrorBody),
@@ -903,14 +863,13 @@ async fn get_package_set(
 )]
 async fn put_package_set(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
-    Json(spec): Json<PackageSetSpec>,
+    Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match state.create_package_set(&id, spec.selector, spec.addon) {
+    match state.create_package_set(&id) {
         Ok(()) => set_response(&state, &id),
         Err(e) => package_error(e),
     }
@@ -921,7 +880,7 @@ async fn put_package_set(
 /// (ADR-0017).
 #[utoipa::path(
     delete,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}",
+    path = "/api/v1/packages/{agent_type}/{version}",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name"),
@@ -937,9 +896,9 @@ async fn put_package_set(
 )]
 async fn delete_package_set(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
+    Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -956,7 +915,7 @@ async fn delete_package_set(
 /// Agent — an assigned Set's bytes are immutable.
 #[utoipa::path(
     put,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}",
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name"),
@@ -979,26 +938,26 @@ async fn delete_package_set(
 )]
 async fn put_package_entry(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+    Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
     Query(upload): Query<EntryUpload>,
     body: Body,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    let signature = match upload.signature.as_deref() {
-        Some(hex) => match hex::decode(hex) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid signature hex: {e}"),
-                )
-            }
-        },
-        None => None,
-    };
+    if upload.signature.is_some() {
+        // Named rather than ignored: a signature dropped on the floor here is an unsigned rollout
+        // nobody notices, which is the one failure mode this whole gate exists to prevent.
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a signature belongs to the deployment that offers these bytes, not to the \
+                 artifact (ADR-0096) — upload the artifact without it, then \
+                 PUT /api/v1/deployments/<name>/signatures/{agent_type}/{version}/{os}/{arch}"
+            ),
+        );
+    }
     let platform = match crate::packages::Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
@@ -1049,7 +1008,7 @@ async fn put_package_entry(
             ),
         );
     }
-    match state.put_package_entry(&id, &platform, signature, &staged) {
+    match state.put_package_entry(&id, &platform, &staged) {
         Ok(()) => {
             info!(set = %id, bytes = written, "package entry stored from the API");
             set_response(&state, &id)
@@ -1063,7 +1022,7 @@ async fn put_package_entry(
 /// is a normal state, and deleting the Set is its own act.
 #[utoipa::path(
     delete,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}",
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name"),
@@ -1082,9 +1041,9 @@ async fn put_package_entry(
 )]
 async fn delete_package_entry(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+    Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1113,7 +1072,8 @@ struct EntrySourceSpec {
     /// The artifact's SHA-256, hex, as published in the release's checksums file. Required: for a
     /// referenced entry nothing here ever sees the bytes, so this is what protects every Agent.
     sha256: String,
-    /// Hex Ed25519 signature over the artifact, checked by the Agent against its configured key.
+    /// Retired (ADR-0096): the signature belongs to the Deployment that offers these bytes.
+    /// Supplying it here is refused by name rather than ignored.
     #[serde(default)]
     signature: Option<String>,
     /// Headers the Agents send with the download — a token for a private source. Two things to know
@@ -1135,7 +1095,7 @@ struct EntrySourceSpec {
 /// nothing about the Agents'.
 #[utoipa::path(
     put,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/entries/{os}/{arch}/source",
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source",
     tag = "packages",
     params(
         ("name" = String, Path, description = "The package name"),
@@ -1155,10 +1115,10 @@ struct EntrySourceSpec {
 )]
 async fn put_package_entry_source(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+    Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
     Json(spec): Json<EntrySourceSpec>,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1170,18 +1130,14 @@ async fn put_package_entry_source(
         Ok(bytes) => bytes,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid sha256: {e}")),
     };
-    let signature = match spec.signature.as_deref() {
-        Some(hex) => match hex::decode(hex) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid signature hex: {e}"),
-                )
-            }
-        },
-        None => None,
-    };
+    if spec.signature.is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "a signature belongs to the deployment that offers these bytes, not to the source \
+             record (ADR-0096) — put it on the deployment instead"
+                .to_string(),
+        );
+    }
     if let Err(e) = probe(&spec.url, &spec.headers).await {
         return error(StatusCode::BAD_REQUEST, e);
     }
@@ -1189,7 +1145,7 @@ async fn put_package_entry_source(
         url: spec.url.clone(),
         headers: spec.headers.clone(),
     };
-    match state.set_package_entry_source(&id, &platform, content_hash, signature, source) {
+    match state.set_package_entry_source(&id, &platform, content_hash, source) {
         Ok(()) => {
             info!(set = %id, url = %spec.url, "package entry source stored from the API");
             set_response(&state, &id)
@@ -1316,105 +1272,16 @@ fn is_v4_internal(v4: std::net::Ipv4Addr) -> bool {
         || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
-/// Sets which Agents a rollout act would release this Set to (ADR-0017). An empty Selector
-/// targets every Agent of the Set's type; every pair must equal an attribute the Agent reported,
-/// exactly as for a Configuration. **Always editable, and never distributing** (ADR-0061):
-/// widening a Selector only widens what the fleet view proposes and whom the next act reaches.
-///
-/// Where several Sets of one name match an Agent, the most specific Selector wins the candidate,
-/// and among equally specific ones the greater version (ADR-0052). A tie the version comparison
-/// cannot break leaves that Agent with no proposal, and the fleet view says so
-/// (`package_conflict`).
-#[utoipa::path(
-    put,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/selector",
-    tag = "packages",
-    params(
-        ("name" = String, Path, description = "The package name"),
-        ("agent_type" = String, Path, description = "The Agent type"),
-        ("version" = String, Path, description = "The version")
-    ),
-    request_body = PackageSelectorSpec,
-    responses(
-        (status = 200, description = "The Set, with its Selector", body = PackageSetView),
-        (status = 400, description = "Invalid identity", body = ErrorBody),
-        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
-        (status = 500, description = "The Selector could not be persisted", body = ErrorBody)
-    )
-)]
-async fn put_package_set_selector(
-    State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
-    Json(spec): Json<PackageSelectorSpec>,
-) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
-        Ok(id) => id,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e),
-    };
-    match state.set_package_selector(&id, spec.selector.clone()) {
-        Ok(_) => {
-            info!(set = %id, pairs = spec.selector.len(), "package selector set");
-            set_response(&state, &id)
-        }
-        Err(e) => package_error(e),
-    }
-}
-
-/// Rolls a Set out to **every Agent it currently fits and its Selector aims at** (ADR-0061).
-///
-/// **This is the moment the fleet changes.** The Set is written into each matching Agent's
-/// assignment, replacing any other version of the same name — and, for a top-level Set, any
-/// other top-level assignment: an Agent has one binary to replace. An Agent that enrols — or
-/// starts matching — later is *not* included: it surfaces in the fleet view as waiting, for its
-/// own act. Rolling out a Set with **no entries** is refused: a Set contains one or more entries.
-///
-/// Rollback is the same act pointed at the older version. Nothing is ever uninstalled by an
-/// assignment change; an Agent keeps running what it installed (ADR-0017).
-#[utoipa::path(
-    post,
-    path = "/api/v1/packages/{name}/{agent_type}/{version}/rollout",
-    tag = "packages",
-    params(
-        ("name" = String, Path, description = "The package name"),
-        ("agent_type" = String, Path, description = "The Agent type"),
-        ("version" = String, Path, description = "The version")
-    ),
-    responses(
-        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
-        (status = 400, description = "Invalid identity", body = ErrorBody),
-        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Set holds no entries and cannot be rolled out", body = ErrorBody)
-    )
-)]
-async fn rollout_package_set(
-    State(state): State<Arc<AppState>>,
-    _csrf: SameOrigin,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
-) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
-        Ok(id) => id,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e),
-    };
-    match state.rollout_package(&id) {
-        Ok(assigned_agents) => {
-            info!(set = %id, agents = assigned_agents, "package rolled out from the API");
-            Json(RolloutOutcome { assigned_agents }).into_response()
-        }
-        Err(e) => rollout_error(e),
-    }
-}
-
 /// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
 ///
 /// `200` with the bytes, `400` for a missing or invalid platform or identity, `404` for a Set
 /// without an uploaded artifact for that platform.
 async fn download_package(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version)): Path<(String, String, String)>,
+    Path((agent_type, version)): Path<(String, String)>,
     Query(query): Query<PlatformQuery>,
 ) -> Response {
-    let id = match set_id(&name, &agent_type, &version) {
+    let id = match package_id(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1440,10 +1307,10 @@ async fn download_package(
     let file = match tokio::fs::File::open(&path).await {
         Ok(file) => file,
         Err(e) => {
-            warn!(package = %name, error = %e, "cannot open the stored artifact");
+            warn!(package = %id, error = %e, "cannot open the stored artifact");
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the artifact of {name:?} cannot be read"),
+                format!("the artifact of {id} cannot be read"),
             );
         }
     };
@@ -1457,7 +1324,7 @@ async fn download_package(
         .unwrap_or_else(|e| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cannot serve the artifact of {name:?}: {e}"),
+                format!("cannot serve the artifact of {id}: {e}"),
             )
         })
 }
@@ -1511,4 +1378,466 @@ fn read_chunks(
             Err(e) => Some((Err(e), file)),
         }
     })
+}
+
+// -------------------------------------------------------------------------------------------
+// Deployments (ADR-0096): the aim, the signature, and the act — everything a Package gave up.
+// -------------------------------------------------------------------------------------------
+
+/// One Deployment as the REST API shows it.
+#[derive(Serialize, ToSchema)]
+struct DeploymentView {
+    /// The operator's name for this channel, and the path segment that addresses it.
+    name: String,
+    /// Equality pairs that must all match an attribute the Agent reported, labels included
+    /// (ADR-0012). **Never empty**: there is no fleet-wide default, because an Agent belongs to at
+    /// most one Deployment and an empty Selector would match every Agent in every other channel.
+    selector: std::collections::BTreeMap<String, String>,
+    /// At most one Package per Agent type — an Agent has one binary to replace.
+    packages: Vec<DeploymentPackageView>,
+    /// Agents this channel claims, and no other does.
+    ///
+    /// **Zero is the value worth looking at**: a channel aims at nobody when its Selector names an
+    /// attribute no Agent reports, or a value none of them carries — and neither is a rejected
+    /// write, so nothing else would say so.
+    claiming_agents: usize,
+    /// Of those, the Agents a rollout act would actually move — this channel holds a Package for what
+    /// they report and it is an upgrade (ADR-0083). Zero here with a non-zero `claiming_agents`
+    /// means everyone in the channel already runs it: nothing to do, and nothing wrong.
+    targeted_agents: usize,
+    /// Agents this channel matches that **another Deployment matches too**. They are offered nothing
+    /// new until an operator narrows a Selector, and they are not in `claiming_agents`.
+    conflicting_agents: usize,
+}
+
+/// One Package a Deployment holds, and how much of it is signed.
+#[derive(Serialize, ToSchema)]
+struct DeploymentPackageView {
+    /// The Agent type this Package is built for — also the key under which this Deployment holds
+    /// it, and the name it carries on the wire.
+    agent_type: String,
+    version: String,
+    /// What an operator reads: the Agent type and the version together.
+    display_name: String,
+    /// The platforms whose artifact this Deployment holds a signature for, as `os/arch`.
+    ///
+    /// Read it against the Package's own entries: a platform listed there and missing here is one
+    /// an Agent will be offered **unsigned**. The Server does not refuse that — an unsigned fleet
+    /// is a legitimate policy (ADR-0015) — so it reports it, which is the only thing left to do.
+    signed_platforms: Vec<String>,
+}
+
+impl DeploymentView {
+    fn of(
+        deployment: crate::deployments::Deployment,
+        reach: crate::fleet::DeploymentReach,
+    ) -> Self {
+        let mut packages: Vec<DeploymentPackageView> = deployment
+            .packages
+            .values()
+            .map(|id| DeploymentPackageView {
+                agent_type: id.agent_type.clone(),
+                version: id.version.clone(),
+                display_name: id.display_name(),
+                signed_platforms: deployment
+                    .signatures
+                    .keys()
+                    .filter(|(held, _)| held == id)
+                    .map(|(_, platform)| format!("{}/{}", platform.os, platform.arch))
+                    .collect(),
+            })
+            .collect();
+        packages.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+        DeploymentView {
+            name: deployment.name,
+            selector: deployment.selector,
+            packages,
+            claiming_agents: reach.claiming,
+            targeted_agents: reach.targeted,
+            conflicting_agents: reach.conflicting,
+        }
+    }
+}
+
+/// The writable part of a Deployment — the body of `PUT /api/v1/deployments/{name}`.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct DeploymentSpec {
+    /// The channel this Deployment aims at. Required and never empty.
+    selector: std::collections::BTreeMap<String, String>,
+}
+
+/// One artifact's Ed25519 signature, as the operator supplies it.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct SignatureSpec {
+    /// The signature over the artifact's bytes, hex-encoded — what `opamp-package-sign` prints.
+    signature: String,
+}
+
+/// Maps a store refusal onto the status code that says the same thing.
+fn deployment_error(refusal: crate::deployments::DeploymentError) -> Response {
+    use crate::deployments::DeploymentError as E;
+    let text = refusal.to_string();
+    match refusal {
+        E::Invalid(_) => error(StatusCode::BAD_REQUEST, text),
+        E::NotFound => error(StatusCode::NOT_FOUND, text),
+        E::TypeTaken { .. } | E::Conflict(_) => error(StatusCode::CONFLICT, text),
+        E::Storage(_) => error(StatusCode::INTERNAL_SERVER_ERROR, text),
+    }
+}
+
+/// The Deployment store, or the `404` that says package delivery is not armed on this Server.
+fn deployments(state: &AppState) -> Result<&crate::deployments::DeploymentStore, Refusal> {
+    state.deployment_store().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "package delivery is not configured on this Server (packages_dir)".to_string(),
+        )
+    })
+}
+
+/// A status and what to say with it — carried instead of a whole `Response` so a helper's error
+/// path stays small (the response is built once, at the handler that returns it).
+type Refusal = (StatusCode, String);
+
+/// Every Deployment, in name order.
+#[utoipa::path(
+    get,
+    path = "/api/v1/deployments",
+    tag = "deployments",
+    responses((status = 200, body = [DeploymentView]))
+)]
+async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
+    match deployments(&state) {
+        Ok(store) => {
+            let reach = state.deployment_reach();
+            Json(
+                store
+                    .list()
+                    .into_iter()
+                    .map(|deployment| {
+                        let counts = reach.get(&deployment.name).copied().unwrap_or_default();
+                        DeploymentView::of(deployment, counts)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_response()
+        }
+        Err((status, why)) => error(status, why),
+    }
+}
+
+/// One Deployment.
+#[utoipa::path(
+    get,
+    path = "/api/v1/deployments/{name}",
+    tag = "deployments",
+    params(("name" = String, Path, description = "the Deployment's name")),
+    responses((status = 200, body = DeploymentView), (status = 404))
+)]
+async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    let store = match deployments(&state) {
+        Ok(store) => store,
+        Err((status, why)) => return error(status, why),
+    };
+    match store.get(&name) {
+        Some(deployment) => deployment_response(&state, deployment),
+        None => error(StatusCode::NOT_FOUND, format!("no deployment {name:?}")),
+    }
+}
+
+/// Creates a Deployment, or replaces the channel it aims at.
+///
+/// **This distributes nothing** (ADR-0061). Saving is saving; the rollout act is its own press,
+/// and until it happens no Agent is offered anything new.
+///
+/// The Selector must name at least one pair. There is deliberately no fleet-wide default: an Agent
+/// belongs to at most one Deployment, so an empty Selector would collide with every other channel the
+/// moment a second one exists — and it is what a forgotten field looks like. Channels are a partition
+/// over an attribute every Agent carries (`channel = "stable"`), set at provisioning or as a Server
+/// label (ADR-0042), because a Selector is equality and cannot express "not".
+#[utoipa::path(
+    put,
+    path = "/api/v1/deployments/{name}",
+    tag = "deployments",
+    params(("name" = String, Path, description = "the Deployment's name")),
+    request_body = DeploymentSpec,
+    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+)]
+async fn put_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<DeploymentSpec>,
+) -> Response {
+    let store = match deployments(&state) {
+        Ok(store) => store,
+        Err((status, why)) => return error(status, why),
+    };
+    match store.put(&name, spec.selector) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Deletes a Deployment. What was rolled out through it is withdrawn as an offer; nothing is
+/// uninstalled (ADR-0061 point 7's rule, unchanged).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/deployments/{name}",
+    tag = "deployments",
+    params(("name" = String, Path, description = "the Deployment's name")),
+    responses((status = 204), (status = 404))
+)]
+async fn delete_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let store = match deployments(&state) {
+        Ok(store) => store,
+        Err((status, why)) => return error(status, why),
+    };
+    match store.delete(&name) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no deployment {name:?}")),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Re-aims a Deployment. Editable in every state — aim is not bytes, and moving a channel is how a
+/// rollout proceeds. It changes whom the *next* act would reach, never a running offer.
+#[utoipa::path(
+    put,
+    path = "/api/v1/deployments/{name}/selector",
+    tag = "deployments",
+    params(("name" = String, Path, description = "the Deployment's name")),
+    request_body = DeploymentSpec,
+    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+)]
+async fn put_deployment_selector(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(spec): Json<DeploymentSpec>,
+) -> Response {
+    let store = match deployments(&state) {
+        Ok(store) => store,
+        Err((status, why)) => return error(status, why),
+    };
+    if store.get(&name).is_none() {
+        return error(StatusCode::NOT_FOUND, format!("no deployment {name:?}"));
+    }
+    match store.put(&name, spec.selector) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Puts a Package into a Deployment.
+///
+/// At most one per Agent type: a second is refused `409` naming what is already held, because two
+/// would collide on the wire map key *and* fit the same Agent. Writing the same one again is the
+/// same request arriving twice and succeeds; `?replace=true` is how an operator says they mean to
+/// swap the version this channel runs.
+#[utoipa::path(
+    put,
+    path = "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("agent_type" = String, Path, description = "the Package's Agent type"),
+        ("version" = String, Path, description = "the Package's version"),
+        ("replace" = Option<bool>, Query, description = "swap the Package held for this Agent type")
+    ),
+    responses((status = 200, body = DeploymentView), (status = 404), (status = 409))
+)]
+async fn put_deployment_package(
+    State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version)): Path<(String, String, String)>,
+    Query(replace): Query<ReplaceQuery>,
+) -> Response {
+    let id = match package_id(&agent_type, &version) {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    // A channel cannot offer what the store does not hold: the artifacts are what the Deployment
+    // signs and hands out, so a reference to a Package that is not there is a mistake, not a
+    // reservation for one uploaded later.
+    match state.packages() {
+        Some(packages) if packages.summary(&id).is_some() => {}
+        _ => {
+            return error(
+                StatusCode::NOT_FOUND,
+                format!("no package {id} — upload it before a deployment can offer it"),
+            )
+        }
+    }
+    match state.put_deployment_package(&name, &id, replace.replace.unwrap_or(false)) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Takes a Package out of a Deployment, and every signature that named it.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("agent_type" = String, Path, description = "the Package's Agent type"),
+        ("version" = String, Path, description = "the Package's version")
+    ),
+    responses((status = 200, body = DeploymentView), (status = 404))
+)]
+async fn delete_deployment_package(
+    State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version)): Path<(String, String, String)>,
+) -> Response {
+    let id = match package_id(&agent_type, &version) {
+        Ok(id) => id,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match state.remove_deployment_package(&name, &id) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Records the Ed25519 signature of one artifact this Deployment offers (ADR-0096 point 7).
+///
+/// The signature lives here rather than on the artifact because what an operator signs off on is a
+/// release to a set of machines. The same Package in two Deployments is therefore signed in each.
+/// Generate it with `opamp-package-sign`.
+#[utoipa::path(
+    put,
+    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("agent_type" = String, Path, description = "the Package's Agent type"),
+        ("version" = String, Path, description = "the Package's version"),
+        ("os" = String, Path, description = "the artifact's operating system"),
+        ("arch" = String, Path, description = "the artifact's architecture")
+    ),
+    request_body = SignatureSpec,
+    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+)]
+async fn put_deployment_signature(
+    State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+    Json(spec): Json<SignatureSpec>,
+) -> Response {
+    let (id, platform) = match deployment_artifact(&agent_type, &version, &os, &arch) {
+        Ok(pair) => pair,
+        Err((status, why)) => return error(status, why),
+    };
+    let signature = match hex::decode(spec.signature.trim()) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("the signature must be hex, as `opamp-package-sign` prints it: {e}"),
+            )
+        }
+    };
+    match state.put_deployment_signature(&name, &id, &platform, signature) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Takes one artifact's signature away. The Package stays; what it is offered with changes.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("agent_type" = String, Path, description = "the Package's Agent type"),
+        ("version" = String, Path, description = "the Package's version"),
+        ("os" = String, Path, description = "the artifact's operating system"),
+        ("arch" = String, Path, description = "the artifact's architecture")
+    ),
+    responses((status = 200, body = DeploymentView), (status = 404))
+)]
+async fn delete_deployment_signature(
+    State(state): State<Arc<AppState>>,
+    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+) -> Response {
+    let (id, platform) = match deployment_artifact(&agent_type, &version, &os, &arch) {
+        Ok(pair) => pair,
+        Err((status, why)) => return error(status, why),
+    };
+    match state.remove_deployment_signature(&name, &id, &platform) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// The `(Package, Platform)` a signature route addresses, or the `400` that says which half of it
+/// does not parse.
+fn deployment_artifact(
+    agent_type: &str,
+    version: &str,
+    os: &str,
+    arch: &str,
+) -> Result<(crate::packages::PackageId, crate::packages::Platform), Refusal> {
+    let id = package_id(agent_type, version).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let platform =
+        crate::packages::Platform::new(os, arch).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok((id, platform))
+}
+
+/// `?replace=true` on putting a Package into a Deployment.
+#[derive(Deserialize, IntoParams)]
+struct ReplaceQuery {
+    replace: Option<bool>,
+}
+
+/// Rolls a Deployment out to **every Agent it claims** (ADR-0061 point 5, ADR-0096 point 8).
+///
+/// **This is the moment the fleet changes.** Each claimed Agent's assignment is written with this
+/// channel and the Package it holds for what that Agent reports, pinned as of this press. An Agent
+/// that enrols — or is labelled into the channel — later is *not* included: it surfaces in the fleet
+/// view as waiting, for its own act.
+///
+/// An Agent some **other** Deployment also claims is skipped rather than counted. Its conflict is
+/// reported on the Agent, and a press that quietly resolved it here would be the ranking this
+/// model removed wearing a different hat. Nothing is ever uninstalled by an assignment change; an
+/// Agent keeps running what it installed.
+#[utoipa::path(
+    post,
+    path = "/api/v1/deployments/{name}/rollout",
+    tag = "deployments",
+    params(("name" = String, Path, description = "the Deployment's name")),
+    responses(
+        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Deployment holds no packages", body = ErrorBody)
+    )
+)]
+async fn rollout_deployment(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(name): Path<String>,
+) -> Response {
+    match state.rollout_deployment(&name) {
+        Ok(assigned_agents) => {
+            info!(deployment = %name, agents = assigned_agents, "deployment rolled out from the API");
+            Json(RolloutOutcome { assigned_agents }).into_response()
+        }
+        Err(e) => rollout_error(e),
+    }
+}
+
+/// One Deployment as the API answers with it, with the reach counts read from the fleet — so every
+/// response says whom this channel reaches as of now, and not as of whenever it was written.
+fn deployment_response(state: &AppState, deployment: crate::deployments::Deployment) -> Response {
+    let reach = state
+        .deployment_reach()
+        .get(&deployment.name)
+        .copied()
+        .unwrap_or_default();
+    Json(DeploymentView::of(deployment, reach)).into_response()
 }

@@ -285,6 +285,7 @@
            not only from the one that holds the list. -->
       <nav class="tabs">
         <button class="tab" data-tab="agents">Agents<span class="num" id="count">0</span></button>
+        <button class="tab" data-tab="deployments">Deployments<span class="num" id="deployment-count">0</span></button>
         <button class="tab" data-tab="packages">Packages<span class="num" id="package-count">0</span></button>
         <button class="tab" data-tab="configurations">Configurations<span class="num" id="config-count">0</span></button>
       </nav>
@@ -322,7 +323,7 @@
       <div class="card filters" style="align-items: center; gap: 12px;">
         <button id="set-create" class="btn btn-primary"
                 title="Define a new Set: name, agent type, and version — its identity — plus a Selector. Saved only: nothing reaches any agent until a rollout act names the Set.">＋ Create</button>
-        <span class="sub">A package defines a <b>Set</b>, identified by name, agent type, and version. Each Set holds one entry per platform — an uploaded artifact or a source URL with its sha256, optionally signed — and reaches an agent only through a <b>rollout act</b>: per agent on the Agents tab, or the row's button for all matching. Select a row to inspect or edit it.</span>
+        <span class="sub">A <b>package</b> is what an agent type runs at a version — its identity, and one entry per platform: an uploaded artifact or a source URL with its sha256. Nothing else. It aims at nobody by itself and is never rolled out; a <b>deployment</b> holds it, signs it, and reaches the channel it names. Select a row to inspect or edit it.</span>
         <span id="sets-result" class="sub"></span>
         <span id="sets-error" class="err"></span>
       </div>
@@ -331,13 +332,11 @@
         <table>
           <thead>
             <tr>
-              <th style="width: 18%">Name</th>
               <th style="width: 18%">Agent type</th>
+              <th style="width: 18%">Package</th>
               <th style="width: 110px">Version</th>
-              <th style="width: 90px">Kind</th>
               <th>Platforms</th>
-              <th>Selector</th>
-              <th style="width: 140px">Reach</th>
+              <th>In deployments</th>
             </tr>
           </thead>
           <tbody id="sets"></tbody>
@@ -347,31 +346,22 @@
 
       <!-- The detail form: exactly as capable as the API, one rule (the Server's), rendered. The
            identity fields are writable only while creating; on an existing Set they are the frozen
-           identity. Entries are editable while the Set is assigned to nobody; the Selector
-           always. OK and Cancel persist or discard the form; the rollout act stays its own button
+           identity. Entries are editable while the package is assigned to nobody. OK and Cancel persist or discard the form; the rollout act stays its own button
            (ADR-0061: the press that changes the fleet is never the press that carries the bytes). -->
       <section id="set-detail" class="card config" style="display: none">
         <h2 id="set-detail-title">Package set</h2>
         <div class="config-fields">
-          <input id="set-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
-                 title="The package name on the wire (ADR-0010 grammar). Part of the Set's identity — frozen once created." />
           <input id="set-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib)" autocomplete="off"
-                 title="Matched for equality against the service.name an agent reports (ADR-0034). Part of the Set's identity — frozen once created. While it is empty, choosing an artifact file fills it from the file's name; correct it here when the package is named for the rollout rather than the type (a canary, an addon)." />
+                 title="Matched for equality against the service.name an agent reports (ADR-0034), and half this package's identity together with the version (ADR-0095) — frozen once created. It is also the name the package carries on the wire, which is why it never holds the version. While it is empty, choosing an artifact file fills it from the file's name." />
           <input id="set-version" class="narrow" placeholder="version (e.g. 1.2.3)" autocomplete="off"
                  title="The version every entry of this Set shares. Part of the Set's identity — a new version is a new Set." />
         </div>
         <div class="config-fields">
-          <input id="set-selector" placeholder="selector: key=value, key=value … (empty targets every agent of that type)" autocomplete="off"
-                 title="Whom a rollout act would release this Set to (ADR-0017). Always editable, never distributing (ADR-0061): it steers the next act. Among Sets of one name the most specific Selector wins the proposal; among equally specific ones the greater version." />
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
-          <label class="sub" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;"
-                 title="The Baseline's package kind. Frozen with the bytes while the Set is assigned to an agent.">
-            <input type="checkbox" id="set-addon" /> addon (default: top-level, a Managed Process's binary)
-          </label>
           <span id="set-state" class="sub"></span>
         </div>
-        <h2>Entries — one per platform, no duplicates; a file upload or a source URL with its sha256. Editable until the Set is assigned to an agent; frozen from then on.</h2>
+        <h2>Entries — one per platform, no duplicates; a file upload or a source URL with its sha256. Editable until the package is assigned to an agent; frozen from then on. Signatures live on the deployment that offers the bytes.</h2>
         <div id="set-entries" class="chips" style="margin-bottom: 10px"></div>
         <div id="entry-editor">
         <div class="config-fields">
@@ -379,8 +369,6 @@
                  title="The operating system this entry is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
           <input id="entry-arch" class="narrow" placeholder="arch: amd64, arm64" autocomplete="off"
                  title="The architecture, as the agent reports host.arch. Other spellings (x86_64, aarch64) are accepted and stored canonically." />
-          <input id="entry-signature" placeholder="signature: hex Ed25519 (optional)" autocomplete="off"
-                 title="Hex-encoded Ed25519 signature over the artifact, checked by every agent against its configured verification key before it installs." />
         </div>
         <div class="config-fields">
           <input id="entry-url" placeholder="source url: https://… — the agents fetch it from there; this server never downloads it" autocomplete="off" />
@@ -405,6 +393,78 @@
                   title="Discard the form's changes: back to the stored state, or close the form when it was creating a new Set.">Cancel</button>
           <button id="set-ok" class="btn btn-primary"
                   title="Save the form: creates the Set or updates its Selector — and, when a file or source url is given above, stores that entry too. Nothing is distributed by this press (ADR-0061).">OK</button>
+        </div>
+      </section>
+      </div>
+
+
+      <!-- Deployments (ADR-0096): what reaches a channel of hosts, and the only thing rolled out. The
+           table is the master, the form the detail; while nothing is current the form is not on
+           screen. The rollout press sits on the row, never in the form — ADR-0061's seam: the
+           press that changes the fleet is never the press that saves. -->
+      <div id="panel-deployments" class="tab-panel">
+      <div class="card filters" style="align-items: center; gap: 12px;">
+        <button id="dep-create" class="btn btn-primary"
+                title="Define a new deployment: a name and the channel it aims at. Saved only — nothing reaches any agent until the row's rollout press.">＋ Create</button>
+        <span class="sub">A <b>deployment</b> is a name, the channel it aims at, one package per agent type, and the signature of each artifact. An agent belongs to <b>at most one</b>: two matching the same agent is a conflict, and that agent is offered nothing new until a selector is narrowed. There is no fleet-wide default — a selector is equality and cannot say "not", so channels are a partition over an attribute every agent carries (<code>channel = stable</code>), set at provisioning or as a label on the Agents tab.</span>
+        <span id="dep-result" class="sub"></span>
+        <span id="deps-error" class="err"></span>
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 18%">Name</th>
+              <th>Selector</th>
+              <th>Packages</th>
+              <th style="width: 170px">Reach</th>
+            </tr>
+          </thead>
+          <tbody id="deps"></tbody>
+        </table>
+        <div id="deps-empty" class="empty">No deployments yet. Create one — a package reaches nobody without a channel to hold it.</div>
+      </div>
+
+      <section id="dep-detail" class="card config" style="display: none">
+        <h2 id="dep-detail-title">Deployment</h2>
+        <div class="config-fields">
+          <input id="dep-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                 title="The operator's name for this channel, and the path segment that addresses it. Frozen once created." />
+          <input id="dep-selector" placeholder="selector: channel=stable — required, and never empty" autocomplete="off"
+                 title="Equality pairs that must all match an attribute the agent reported, labels included. It may not be empty: an empty selector matches every agent, so it would collide with every other channel. Always editable — re-aiming distributes nothing by itself." />
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <span id="dep-state" class="sub"></span>
+        </div>
+        <h2>Packages — at most one per agent type, because an agent has one binary to replace</h2>
+        <div id="dep-packages" class="chips" style="margin-bottom: 10px"></div>
+        <div class="config-fields">
+          <select id="dep-package-pick" style="flex: 1"></select>
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <button id="dep-package-add" class="btn btn-ghost btn-sm"
+                  title="Put this package into the channel. A second package of an agent type this channel already holds is refused, naming the one in the way; adding the same one again is the same request arriving twice.">＋ Add package</button>
+          <span class="sub">a package already here for that agent type is <b>replaced</b> — which is how the version a channel runs is changed</span>
+        </div>
+        <h2>Signatures — one per artifact, because what an operator signs off on is a release to a set of machines</h2>
+        <div class="config-fields">
+          <input id="dep-sig-package" class="quarter" placeholder="agent type@version (a package above)" autocomplete="off" />
+          <input id="dep-sig-os" class="narrow" placeholder="os" autocomplete="off" />
+          <input id="dep-sig-arch" class="narrow" placeholder="arch" autocomplete="off" />
+          <input id="dep-sig-hex" placeholder="hex Ed25519 signature — what opamp-package-sign prints" autocomplete="off" />
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <button id="dep-sig-add" class="btn btn-ghost btn-sm"
+                  title="Record this artifact's signature on the channel. A platform left unsigned is offered unsigned — a client with a verification key refuses it, which is the operator's policy meeting their omission.">＋ Add signature</button>
+        </div>
+        <div class="config-actions">
+          <button id="dep-delete" class="btn btn-ghost"
+                  title="Delete this deployment. The offers it released are withdrawn; nothing is uninstalled — an agent keeps running what it took.">Delete</button>
+          <span id="dep-error" class="err" style="flex: 1"></span>
+          <button id="dep-cancel" class="btn btn-ghost" style="margin-left: auto">Cancel</button>
+          <button id="dep-ok" class="btn btn-primary"
+                  title="Save the form: creates the deployment or re-aims it. Nothing is distributed by this press — the rollout is the row's button.">OK</button>
         </div>
       </section>
       </div>
@@ -494,7 +554,7 @@
       // rather than in storage — unlike the theme it is a place, not a preference, so a reload
       // comes back to the same tab and a link can point a colleague straight at #packages. An
       // unknown hash falls back to Agents, the tab the fleet is watched from.
-      const TABS = ["agents", "packages", "configurations"];
+      const TABS = ["agents", "deployments", "packages", "configurations"];
       function showTab(name) {
         if (!TABS.includes(name)) name = "agents";
         document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -673,7 +733,7 @@
         // the rule and says no with a reason — one place to be right instead of two to drift.
         chips.push(`<span class="chip clickable forget-btn" data-uid="${esc(a.instance_uid)}" title="Forget this Agent: the Server drops what it knows and the row goes away. Nothing happens on the host — a Client that is still running comes back.">✕ forget</span>`);
         // The operator's labels (ADR-0042): matched by Selectors exactly like a reported attribute,
-        // which is what makes a rollout ring a Server-side decision instead of an edit on the host.
+        // which is what makes a rollout channel a Server-side decision instead of an edit on the host.
         for (const [key, value] of Object.entries(a.labels || {})) {
           const dead = (a.shadowed_labels || []).includes(key);
           chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
@@ -710,14 +770,24 @@
         for (const n of a.assigned_configurations || []) {
           chips.push(`<span class="chip" title="rolled out to this agent — the pinned revision it is offered">${esc(n)}</span>`);
         }
-        for (const s of a.assigned_packages || []) {
-          chips.push(`<span class="chip" title="rolled out to this agent">pkg ${esc(s)}</span>`);
+        if (a.assigned_package) {
+          chips.push(`<span class="chip" title="rolled out to this agent through deployment ${esc(a.assigned_deployment)} — pinned as of that act, so re-aiming the channel or putting a newer package in it changes nothing here">pkg ${esc(a.assigned_package)} · ${esc(a.assigned_deployment)}</span>`);
+        }
+        // Four states that would otherwise be the same empty cell, and the operator's next move
+        // differs in each (ADR-0096 point 4). Calm, not alarming: a freshly enrolled host is in no
+        // channel yet, which is the ordinary state and not a fault.
+        if (!a.package_conflict && (a.capabilities || []).includes("AcceptsPackages")) {
+          if (!a.deployment) {
+            chips.push(`<span class="pill gray" title="no deployment's selector matches this agent, so nothing aims at it — give it a channel: a label here, or a channel attribute at provisioning. This is the ordinary state right after an enrolment.">in no deployment</span>`);
+          } else if (!a.assigned_package && !(a.pending_packages || []).length) {
+            chips.push(`<span class="pill gray" title="deployment ${esc(a.deployment)} claims this agent but holds nothing it can take — no package for the type it reports, or none built for its platform">${esc(a.deployment)}: nothing for this agent</span>`);
+          }
         }
         for (const p of a.pending_configurations || []) {
           chips.push(`<span class="pill amber" title="${p.change === "update" ? "a newer save of this configuration waits for a rollout act" : "this configuration matches the agent and waits for its first rollout act"}">⏳ ${esc(p.name)}${p.change === "update" ? " ✎" : ""}</span>`);
         }
         for (const p of a.pending_packages || []) {
-          chips.push(`<span class="pill amber" title="${p.change === "update" ? "another version of this package waits for a rollout act" : "this package fits the agent and waits for its first rollout act"}">⏳ pkg ${esc(p.name)} ${esc(p.version)}${p.change === "update" ? " ✎" : ""}</span>`);
+          chips.push(`<span class="pill amber" title="${p.change === "update" ? "another version of this package waits for a rollout act" : "this package fits the agent and waits for its first rollout act"}">⏳ pkg ${esc(p.display_name)} · ${esc(p.deployment)}${p.change === "update" ? " ✎" : ""}</span>`);
         }
         const waiting = (a.pending_configurations || []).length + (a.pending_packages || []).length;
         if (waiting) {
@@ -730,7 +800,7 @@
       function matches(a) {
         if (!filterText) return true;
         // Labels are searched beside the reported attributes, in the same `key=value` spelling:
-        // the filter promises "or label", and a rollout ring is exactly what an operator narrows
+        // the filter promises "or label", and a rollout channel is exactly what an operator narrows
         // the fleet by (ADR-0042).
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .concat(Object.entries(a.labels || {}))
@@ -1024,7 +1094,6 @@
         const name = $("config-name").value.trim();
         const type = $("config-type").value.trim();
         const role = $("config-role").value.trim();
-        let selector;
         try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
         const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
           method: "PUT",
@@ -1114,9 +1183,9 @@
       let creatingSet = false;  // the form is defining a new Set: identity fields writable
       let setFormDirty = false; // an edit in flight — the periodic refresh must not overwrite it
 
-      const setKey = (p) => `${p.name}@${p.version}@${p.service_name}`;
-      const setPath = (name, type, version) =>
-        `/api/v1/packages/${encodeURIComponent(name)}/${encodeURIComponent(type)}/${encodeURIComponent(version)}`;
+      const setKey = (p) => `${p.agent_type}@${p.version}`;
+      const setPath = (type, version) =>
+        `/api/v1/packages/${encodeURIComponent(type)}/${encodeURIComponent(version)}`;
       const currentSetView = () => packages.find((p) => setKey(p) === currentSet) || null;
       const fmtBytes = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KiB` : `${n} B`;
 
@@ -1127,15 +1196,15 @@
       // rides on the act it aims, and is a button only where it is a count the act can reach.
       // Zero has two meanings since ADR-0076, and only one of them is a mistake: a set that aims
       // at nobody is the amber warning, a set everyone already runs is a plain statement.
-      function reachCell(p) {
-        if (typeof p.targeted_agents !== "number") return "";
-        if (p.targeted_agents === 0) {
-          if (!p.matching_agents) {
-            return `<span class="pill amber" title="this set aims at no agent at all — check the type, the platforms, and the selector">⚠ 0</span>`;
-          }
-          return `<span class="pill gray" title="the ${p.matching_agents} agent(s) this set aims at already run this version or a newer one, so a rollout act would change nothing (ADR-0076)">${p.matching_agents} up to date</span>`;
+      // A package aims at nobody by itself since ADR-0095: what answers "whom would this reach"
+      // is the channels that hold it, and an empty list is the state that used to be a selector
+      // matching no one — stored, and unreachable.
+      function ringsCell(p) {
+        const channels = p.deployments || [];
+        if (!channels.length) {
+          return `<span class="pill amber" title="no deployment holds this package, so it reaches nobody — put it in one on the Deployments tab (ADR-0096)">in no deployment</span>`;
         }
-        return `<button class="btn btn-ok rollout-set-btn" data-key="${esc(setKey(p))}" title="Roll this set out to the ${p.targeted_agents} agent(s) it would upgrade (ADR-0061) — the press that changes the fleet. A set only reaches an agent it moves forward (ADR-0076); agents that appear later wait on the Agents tab. Refused while the set holds no entries.">Roll out (${p.targeted_agents})</button>`;
+        return channels.map((r) => `<span class="pill">${esc(r)}</span>`).join(" ");
       }
 
       function renderSets() {
@@ -1144,17 +1213,15 @@
         $("sets").innerHTML = packages.map((p) => {
           const key = setKey(p);
           const entries = (p.entries || []).map((e) =>
-            `<span class="chip" title="${e.source_url ? "referenced from " + esc(e.source_url) : fmtBytes(e.size)}${e.signed ? " · signed" : ""}">${esc(e.os)}-${esc(e.arch)}${e.source_url ? " ↗" : ""}</span>`
+            `<span class="chip" title="${e.source_url ? "referenced from " + esc(e.source_url) : fmtBytes(e.size)}">${esc(e.os)}-${esc(e.arch)}${e.source_url ? " ↗" : ""}</span>`
           ).join("");
           return `
           <tr class="agent${key === currentSet ? " current" : ""}" data-key="${esc(key)}">
-            <td><a class="name" href="#">${esc(p.name)}</a></td>
-            <td><span class="sub" style="font-size: 13px">${esc(p.service_name)}</span></td>
+            <td><a class="name" href="#">${esc(p.agent_type)}</a></td>
+            <td><span class="sub" style="font-size: 13px">${esc(p.display_name)}</span></td>
             <td class="num">${esc(p.version)}</td>
-            <td>${p.addon ? "addon" : "top-level"}</td>
             <td><div class="chips">${entries || `<span class="chip">no entries yet</span>`}</div></td>
-            <td>${esc(selectorText(p.selector)) || `<span class="sub">every agent of the type</span>`}</td>
-            <td>${reachCell(p)}</td>
+            <td>${ringsCell(p)}</td>
           </tr>`;
         }).join("");
       }
@@ -1165,8 +1232,8 @@
       function renderSetEntries(p) {
         const entries = p ? p.entries || [] : [];
         $("set-entries").innerHTML = entries.map((e) =>
-          `<span class="chip">${esc(e.os)}-${esc(e.arch)} · ${e.source_url ? "↗ " + esc(e.source_url) : fmtBytes(e.size)}${e.signed ? " · signed" : ""}&nbsp;<span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it). Refused while the set is assigned to an agent.">✕</span></span>`
-        ).join("") || `<span class="chip">no entries yet — a set needs at least one before it can be rolled out</span>`;
+          `<span class="chip">${esc(e.os)}-${esc(e.arch)} · ${e.source_url ? "↗ " + esc(e.source_url) : fmtBytes(e.size)}&nbsp;<span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it). Refused while the set is assigned to an agent.">✕</span></span>`
+        ).join("") || `<span class="chip">no entries yet — a package needs one for a host to take it</span>`;
       }
 
       // Fills (or hides) the detail form from the current Set. With no current Set and nothing
@@ -1181,22 +1248,19 @@
         $("set-detail").style.display = "block";
         $("set-detail-title").textContent = creatingSet
           ? "New package set — saved, distributed by a rollout act"
-          : `Package set ${p.name} · ${p.version} · ${p.service_name}`;
+          : `Package ${p.display_name}`;
         // The identity: writable only while creating. Afterwards it *is* the Set (ADR-0052),
         // and another version is another Create.
-        for (const [id, value] of [["set-name", p ? p.name : ""], ["set-type", p ? p.service_name : ""], ["set-version", p ? p.version : ""]]) {
+        for (const [id, value] of [["set-type", p ? p.agent_type : ""], ["set-version", p ? p.version : ""]]) {
           $(id).value = value;
           $(id).disabled = !creatingSet;
         }
-        $("set-selector").value = p ? selectorText(p.selector) : "";
-        $("set-addon").checked = !!(p && p.addon);
-        $("set-addon").disabled = false;
         $("set-state").textContent = !p
           ? "will be saved — nothing reaches an agent until a rollout act names it"
           : "saved — distributed only by a rollout act; entries freeze while the set is assigned to an agent";
         $("set-delete").disabled = creatingSet;
         renderSetEntries(p);
-        for (const id of ["entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256", "entry-file"]) {
+        for (const id of ["entry-os", "entry-arch", "entry-url", "entry-sha256", "entry-file"]) {
           $(id).disabled = false;
         }
         $("entry-add").disabled = creatingSet;
@@ -1204,7 +1268,7 @@
       }
 
       function clearEntryEditor() {
-        for (const id of ["entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256"]) $(id).value = "";
+        for (const id of ["entry-os", "entry-arch", "entry-url", "entry-sha256"]) $(id).value = "";
         $("entry-file").value = "";
       }
 
@@ -1222,7 +1286,7 @@
       // The entry the editor holds, sent to a Set that now exists: a chosen file becomes an
       // uploaded entry, a url + sha256 a referenced one (ADR-0018). Nothing in the editor is
       // nothing to send. Returns the message to show, "" when it went through or was empty.
-      async function sendPendingEntry(name, type, version) {
+      async function sendPendingEntry(type, version) {
         const file = $("entry-file").files[0];
         const url = $("entry-url").value.trim();
         const sha256 = $("entry-sha256").value.trim();
@@ -1230,20 +1294,18 @@
         const os = $("entry-os").value.trim();
         const arch = $("entry-arch").value.trim();
         if (!os || !arch) return "an entry needs an os and an arch — it is only ever offered to machines that match";
-        const base = `${setPath(name, type, version)}/entries/${encodeURIComponent(os)}/${encodeURIComponent(arch)}`;
-        const signature = $("entry-signature").value.trim();
+        const base = `${setPath(type, version)}/entries/${encodeURIComponent(os)}/${encodeURIComponent(arch)}`;
+        // No signature here: it belongs to the deployment that offers these bytes (ADR-0096), and
+        // the Server refuses it on this route by name rather than dropping it.
         let failed;
         if (file) {
-          const params = signature ? `?${new URLSearchParams({ signature })}` : "";
-          failed = await put(`${base}${params}`, {
+          failed = await put(base, {
             headers: { "content-type": "application/octet-stream" },
             body: await file.arrayBuffer(),
           });
         } else {
           if (!url || !sha256) return "a source needs both a url and the artifact's sha256 — that checksum is the whole of what an agent has to verify it against";
-          const body = { url, sha256 };
-          if (signature) body.signature = signature;
-          failed = await putJson(`${base}/source`, body);
+          failed = await putJson(`${base}/source`, { url, sha256 });
         }
         if (!failed) clearEntryEditor();
         return failed;
@@ -1255,12 +1317,9 @@
         currentSet = null;
         renderSets();
         $("set-detail").style.display = "block";
-        for (const id of ["set-name", "set-type", "set-version"]) { $(id).value = ""; $(id).disabled = false; }
-        $("set-selector").value = "";
-        $("set-addon").checked = false;
-        $("set-addon").disabled = false;
+        for (const id of ["set-type", "set-version"]) { $(id).value = ""; $(id).disabled = false; }
         clearEntryEditor();
-        for (const id of ["entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256", "entry-file"]) $(id).disabled = false;
+        for (const id of ["entry-os", "entry-arch", "entry-url", "entry-sha256", "entry-file"]) $(id).disabled = false;
         $("entry-add").disabled = true; // the set does not exist yet — OK creates it, entry and all
         $("set-detail-title").textContent = "New package set — saved, distributed by a rollout act";
         $("set-state").textContent = "will be saved — nothing reaches an agent until a rollout act names it";
@@ -1270,35 +1329,10 @@
         setFormDirty = false;
       });
 
-      // Selecting a row makes its Set current and shows it in the form; selecting it again lets
-      // it go, and the form leaves the screen with it. The rollout button on the row is the one
-      // exception: it acts on its Set without selecting it — the rollout is a decision about the
-      // fleet, not part of inspecting the record.
+      // Selecting a row makes its Package current and shows it in the form; selecting it again
+      // lets it go, and the form leaves the screen with it. There is no rollout button here any
+      // more: a Package is not rolled out (ADR-0095), its Deployment is.
       $("sets").addEventListener("click", async (e) => {
-        const act = e.target.closest(".rollout-set-btn");
-        if (act) {
-          const p = packages.find((x) => setKey(x) === act.dataset.key);
-          if (!p) return;
-          let res;
-          try {
-            res = await fetch(`${setPath(p.name, p.service_name, p.version)}/rollout`, { method: "POST" });
-          } catch (err) {
-            $("sets-error").textContent = err.message;
-            return;
-          }
-          if (!res.ok) {
-            // A refusal is a normal answer here — an empty set cannot be rolled out — so it is
-            // shown beside the table the press happened in.
-            $("sets-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
-          } else {
-            const outcome = await res.json();
-            $("sets-error").textContent = "";
-            $("sets-result").textContent = `${p.name} ${p.version}: rolled out to ${outcome.assigned_agents} agent(s)`;
-          }
-          await refreshPackages();
-          refreshAgents();
-          return;
-        }
         const tr = e.target.closest("tr.agent");
         if (!tr) return;
         e.preventDefault();
@@ -1310,29 +1344,25 @@
         showSetDetail();
       });
 
-      // OK: persist what the form says — create the Set or update its Selector and kind, then
-      // store the entry the editor holds, if any. Never a release: the rollout act stays its own
-      // press (ADR-0061).
+      // OK: create the Package if it is new, then store the entry the editor holds, if any. The
+      // identity is all a Package has, so there is nothing else to persist — and never a release:
+      // the rollout act belongs to a Deployment (ADR-0096).
       $("set-ok").addEventListener("click", async () => {
         $("set-error").textContent = "";
-        const name = $("set-name").value.trim();
         const type = $("set-type").value.trim();
         const version = $("set-version").value.trim();
-        if (!name || !type || !version) {
-          $("set-error").textContent = "a set is identified by its name, agent type, and version — all three are required";
+        if (!type || !version) {
+          $("set-error").textContent = "a package is identified by its agent type and its version — both are required";
           return;
         }
-        let selector;
-        try { selector = parseSelector($("set-selector").value); }
-        catch (e) { $("set-error").textContent = e.message; return; }
-        const failed = await putJson(setPath(name, type, version), { selector, addon: $("set-addon").checked });
+        const failed = await putJson(setPath(type, version), {});
         if (failed) { $("set-error").textContent = failed; return; }
-        const entryError = await sendPendingEntry(name, type, version);
+        const entryError = await sendPendingEntry(type, version);
         creatingSet = false;
         // OK concludes the form: the current row is let go and the form leaves the screen. Only
         // a failed entry keeps the Set current, so the message is read next to the fields it is
         // about.
-        currentSet = entryError ? `${name}@${version}@${type}` : null;
+        currentSet = entryError ? `${type}@${version}` : null;
         await refreshPackages();
         refreshAgents();
         renderSets();
@@ -1356,7 +1386,7 @@
       $("set-delete").addEventListener("click", async () => {
         const p = currentSetView();
         if (!p) return;
-        const res = await fetch(setPath(p.name, p.service_name, p.version), { method: "DELETE" });
+        const res = await fetch(setPath(p.agent_type, p.version), { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
           $("set-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
@@ -1375,7 +1405,7 @@
         const p = currentSetView();
         if (!p) return;
         const res = await fetch(
-          `${setPath(p.name, p.service_name, p.version)}/entries/${encodeURIComponent(del.dataset.os)}/${encodeURIComponent(del.dataset.arch)}`,
+          `${setPath(p.agent_type, p.version)}/entries/${encodeURIComponent(del.dataset.os)}/${encodeURIComponent(del.dataset.arch)}`,
           { method: "DELETE" }
         );
         $("set-error").textContent = res.ok || res.status === 404
@@ -1397,7 +1427,7 @@
           $("set-error").textContent = "nothing to add — choose a file, or give a source url with its sha256";
           return;
         }
-        const failed = await sendPendingEntry(p.name, p.service_name, p.version);
+        const failed = await sendPendingEntry(p.agent_type, p.version);
         $("set-error").textContent = failed;
         if (!failed) setFormDirty = false;
         await refreshPackages();
@@ -1405,7 +1435,7 @@
       });
 
       // Edits in flight: the periodic refresh must not overwrite a form being typed in.
-      for (const id of ["set-selector", "set-addon", "entry-os", "entry-arch", "entry-signature", "entry-url", "entry-sha256", "entry-file"]) {
+      for (const id of ["entry-os", "entry-arch", "entry-url", "entry-sha256", "entry-file"]) {
         $(id).addEventListener("input", () => { setFormDirty = true; });
       }
 
@@ -1467,7 +1497,6 @@
         $("entry-os").value = parsed.os;
         $("entry-arch").value = parsed.arch;
         if (creatingSet && parsed.name) {
-          if (!$("set-name").value.trim()) $("set-name").value = parsed.name;
           if (!$("set-type").value.trim()) $("set-type").value = parsed.name;
           if (!$("set-version").value.trim() && parsed.version) $("set-version").value = parsed.version;
         }
@@ -1495,6 +1524,212 @@
           ? given.slice(colon + 1).trim()
           : given;
       });
+
+
+      // ── Deployments (ADR-0096) ─────────────────────────────────────────────
+      let deployments = [];
+      let currentDep = null;      // the channel whose detail form is on screen
+      let creatingDep = false;    // the form is defining a new one: the name is writable
+      let depFormDirty = false;   // an edit in flight — the periodic refresh must not overwrite it
+
+      const depPath = (name) => `/api/v1/deployments/${encodeURIComponent(name)}`;
+      const currentDepView = () => deployments.find((d) => d.name === currentDep) || null;
+
+      // Three counts, because zero has three meanings and only the first is a mistake to hunt:
+      // the channel aims at nobody, everyone in it is up to date, or everyone it aims at is claimed
+      // by a second channel as well.
+      function depReachCell(d) {
+        const bits = [];
+        if (d.conflicting_agents) {
+          bits.push(`<span class="pill amber" title="another deployment matches ${d.conflicting_agents} of the agents this one does — an agent belongs to at most one, so they are offered nothing new until a selector is narrowed">⚠ ${d.conflicting_agents} in conflict</span>`);
+        }
+        if (d.targeted_agents) {
+          bits.push(`<button class="btn btn-ok rollout-dep-btn" data-name="${esc(d.name)}" title="Roll this deployment out to the ${d.targeted_agents} agent(s) it would move (ADR-0061) — the press that changes the fleet. Agents that join the channel later wait for their own act on the Agents tab.">Roll out (${d.targeted_agents})</button>`);
+        } else if (d.claiming_agents) {
+          bits.push(`<span class="pill gray" title="the ${d.claiming_agents} agent(s) this channel claims already run what it holds, so a rollout act would change nothing (ADR-0083)">${d.claiming_agents} up to date</span>`);
+        } else if (!d.conflicting_agents) {
+          bits.push(`<span class="pill amber" title="this channel claims no agent at all — its selector names an attribute nobody reports, or a value nobody carries. Not a rejected write, so nothing else would say so.">aims at nobody</span>`);
+        }
+        return bits.join(" ");
+      }
+
+      function renderDeployments() {
+        $("deployment-count").textContent = deployments.length;
+        $("deps-empty").style.display = deployments.length ? "none" : "block";
+        $("deps").innerHTML = deployments.map((d) => {
+          const pkgs = (d.packages || []).map((p) => {
+            const unsigned = (p.signed_platforms || []).length === 0;
+            return `<span class="chip" title="${unsigned ? "no signature on this channel — the artifact is offered unsigned, which a client with a verification key refuses" : "signed for " + (p.signed_platforms || []).join(", ")}">${esc(p.display_name)}${unsigned ? " ⚠" : " 🔏"}</span>`;
+          }).join("");
+          return `
+          <tr class="agent${d.name === currentDep ? " current" : ""}" data-name="${esc(d.name)}">
+            <td><a class="name" href="#">${esc(d.name)}</a></td>
+            <td>${esc(selectorText(d.selector))}</td>
+            <td><div class="chips">${pkgs || `<span class="chip">no packages yet</span>`}</div></td>
+            <td>${depReachCell(d)}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      function showDepDetail() {
+        const d = currentDepView();
+        if (!d && !creatingDep) { $("dep-detail").style.display = "none"; return; }
+        $("dep-detail").style.display = "block";
+        $("dep-detail-title").textContent = creatingDep ? "New deployment — saved, distributed by the row's rollout press" : `Deployment ${d.name}`;
+        $("dep-name").value = d ? d.name : "";
+        $("dep-name").disabled = !creatingDep;
+        $("dep-selector").value = d ? selectorText(d.selector) : "";
+        $("dep-state").textContent = !d
+          ? "will be saved — nothing reaches an agent until the rollout press"
+          : "saved — the rollout press on its row is what distributes; re-aiming it changes only what is proposed";
+        $("dep-delete").disabled = creatingDep;
+        $("dep-packages").innerHTML = d
+          ? ((d.packages || []).map((p) =>
+              `<span class="chip">${esc(p.display_name)} · ${(p.signed_platforms || []).length ? "🔏 " + esc((p.signed_platforms || []).join(" ")) : "⚠ unsigned"}&nbsp;<span class="dep-pkg-del" data-type="${esc(p.agent_type)}" data-version="${esc(p.version)}" style="cursor: pointer; font-weight: 700;" title="Take this package out of the channel — its signatures go with it. Nothing is uninstalled.">✕</span></span>`
+            ).join("") || `<span class="chip">no packages yet — a channel with none cannot be rolled out</span>`)
+          : "";
+        // The picker offers what the store holds; the Server refuses a package nobody uploaded.
+        $("dep-package-pick").innerHTML = packages.map((p) =>
+          `<option value="${esc(p.agent_type)}@${esc(p.version)}">${esc(p.display_name)}</option>`
+        ).join("") || `<option value="">no packages uploaded yet</option>`;
+      }
+
+      $("deps").addEventListener("click", async (e) => {
+        const act = e.target.closest(".rollout-dep-btn");
+        if (act) {
+          e.preventDefault();
+          $("deps-error").textContent = "";
+          const res = await fetch(`${depPath(act.dataset.name)}/rollout`, { method: "POST" });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) $("deps-error").textContent = body.error || `HTTP ${res.status}`;
+          else $("dep-result").textContent = `${act.dataset.name}: rolled out to ${body.assigned_agents} agent(s)`;
+          await refreshDeployments();
+          refreshAgents();
+          return;
+        }
+        const tr = e.target.closest("tr.agent");
+        if (!tr) return;
+        e.preventDefault();
+        creatingDep = false;
+        currentDep = currentDep === tr.dataset.name ? null : tr.dataset.name;
+        $("dep-error").textContent = "";
+        renderDeployments();
+        showDepDetail();
+      });
+
+      $("dep-create").addEventListener("click", () => {
+        creatingDep = true;
+        currentDep = null;
+        renderDeployments();
+        showDepDetail();
+        $("dep-name").value = "";
+        $("dep-name").disabled = false;
+        $("dep-selector").value = "";
+        depFormDirty = true;
+      });
+
+      $("dep-ok").addEventListener("click", async () => {
+        $("dep-error").textContent = "";
+        const name = $("dep-name").value.trim();
+        if (!name) { $("dep-error").textContent = "a deployment needs a name"; return; }
+        let selector;
+        try { selector = parseSelector($("dep-selector").value); }
+        catch (e) { $("dep-error").textContent = e.message; return; }
+        const failed = await putJson(depPath(name), { selector });
+        if (failed) { $("dep-error").textContent = failed; return; }
+        creatingDep = false;
+        currentDep = null;
+        depFormDirty = false;
+        await refreshDeployments();
+        refreshAgents();
+      });
+
+      $("dep-cancel").addEventListener("click", () => {
+        creatingDep = false;
+        currentDep = null;
+        depFormDirty = false;
+        $("dep-error").textContent = "";
+        renderDeployments();
+        showDepDetail();
+      });
+
+      $("dep-delete").addEventListener("click", async () => {
+        const d = currentDepView();
+        if (!d) return;
+        const res = await fetch(depPath(d.name), { method: "DELETE" });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          $("dep-error").textContent = body.error || `HTTP ${res.status}`;
+          return;
+        }
+        currentDep = null;
+        depFormDirty = false;
+        await refreshDeployments();
+        refreshAgents();
+      });
+
+      $("dep-package-add").addEventListener("click", async () => {
+        const d = currentDepView();
+        if (!d) { $("dep-error").textContent = "save the deployment first — a package goes into a channel that exists"; return; }
+        const pick = $("dep-package-pick").value;
+        if (!pick) { $("dep-error").textContent = "no package to add"; return; }
+        const [type, version] = pick.split("@");
+        // `replace`: pointing a channel at another version of a type it already holds is the ordinary
+        // act, and it is what an operator means by pressing Add on a package they chose.
+        const res = await fetch(`${depPath(d.name)}/packages/${encodeURIComponent(type)}/${encodeURIComponent(version)}?replace=true`, { method: "PUT" });
+        const body = await res.json().catch(() => ({}));
+        $("dep-error").textContent = res.ok ? "" : (body.error || `HTTP ${res.status}`);
+        await refreshDeployments();
+        showDepDetail();
+      });
+
+      $("dep-packages").addEventListener("click", async (e) => {
+        const del = e.target.closest(".dep-pkg-del");
+        const d = currentDepView();
+        if (!del || !d) return;
+        const res = await fetch(`${depPath(d.name)}/packages/${encodeURIComponent(del.dataset.type)}/${encodeURIComponent(del.dataset.version)}`, { method: "DELETE" });
+        const body = await res.json().catch(() => ({}));
+        $("dep-error").textContent = res.ok ? "" : (body.error || `HTTP ${res.status}`);
+        await refreshDeployments();
+        showDepDetail();
+      });
+
+      $("dep-sig-add").addEventListener("click", async () => {
+        const d = currentDepView();
+        if (!d) return;
+        const pick = $("dep-sig-package").value.trim();
+        const [type, version] = pick.split("@");
+        const os = $("dep-sig-os").value.trim();
+        const arch = $("dep-sig-arch").value.trim();
+        const signature = $("dep-sig-hex").value.trim();
+        if (!type || !version || !os || !arch || !signature) {
+          $("dep-error").textContent = "a signature names the package, the platform, and the hex signature";
+          return;
+        }
+        const failed = await putJson(
+          `${depPath(d.name)}/signatures/${encodeURIComponent(type)}/${encodeURIComponent(version)}/${encodeURIComponent(os)}/${encodeURIComponent(arch)}`,
+          { signature });
+        $("dep-error").textContent = failed || "";
+        if (!failed) { $("dep-sig-hex").value = ""; }
+        await refreshDeployments();
+        showDepDetail();
+      });
+
+      for (const id of ["dep-name", "dep-selector"]) {
+        $(id).addEventListener("input", () => { depFormDirty = true; });
+      }
+
+      async function refreshDeployments() {
+        try {
+          const res = await fetch("/api/v1/deployments");
+          deployments = res.ok ? await res.json() : [];
+        } catch { return; }
+        renderDeployments();
+        if (!depFormDirty && (currentDep || !creatingDep)) {
+          if (currentDep) showDepDetail();
+          else if (!creatingDep) $("dep-detail").style.display = "none";
+        }
+      }
 
       async function refreshPackages() {
         try {
@@ -1527,10 +1762,12 @@
 
       refreshConfigs();
       refreshPackages();
+      refreshDeployments();
       refreshAgents();
       setInterval(refreshAgents, 2000);
       setInterval(refreshConfigs, 5000);
       setInterval(refreshPackages, 5000);
+      setInterval(refreshDeployments, 5000);
     </script>
   </body>
 </html>

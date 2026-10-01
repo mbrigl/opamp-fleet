@@ -405,6 +405,25 @@ async fn the_openapi_document_describes_the_contract() {
     let document: serde_json::Value = response.json().await.expect("json");
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
+    // Deployments are part of the contract from the moment they exist (ADR-0096) — a portal
+    // generates against this document, and a route it cannot see is a route it cannot call.
+    for route in [
+        "/api/v1/deployments",
+        "/api/v1/deployments/{name}",
+        "/api/v1/deployments/{name}/selector",
+        "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
+        "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+    ] {
+        assert!(paths.contains_key(route), "{route} is described");
+    }
+    // And the retired package paths are gone rather than lingering as a promise (ADR-0095).
+    assert!(
+        !paths
+            .keys()
+            .any(|path| path.starts_with("/api/v1/packages/{name}/")),
+        "no package route still carries a name segment: {:?}",
+        paths.keys().collect::<Vec<_>>()
+    );
     // Forgetting an Agent is part of the contract a portal generates against (ADR-0039), and the
     // description is where the "reaches no host" caveat has to be readable.
     let forget = &paths["/api/v1/agents/{instance_uid}"]["delete"];

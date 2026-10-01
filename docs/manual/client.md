@@ -195,12 +195,13 @@ seam between the two ran through every decision that touched packages.
 **Packages.** The Server decides which artifact an Agent is offered; the Client fetches it, verifies
 it by hash and — where a key is configured — by signature, unpacks it beside the running program,
 swaps it in by rename, and watches whether it stays up. If it does not, the predecessor comes back.
-The unit is a versioned Set, immutable once published, and publishing is not the same act as rolling
-out. In full: [Package updates](#package-updates).
+The unit is a versioned **Package** — the Agent type it is built for and its version — held by a
+**Deployment** that aims it at a channel and carries its signature; only that deployment is rolled out,
+and a Package assigned to any Agent is immutable. In full: [Package updates](#package-updates).
 
 **Versions.** An Agent reports two numbers that can disagree — the version its package record claims
-and the version the program says it is. A Set must move the Agent forward from the **lower** of the
-two and never below what the record claims, so each number is used only in the direction it is
+and the version the program says it is. A Package must move the Agent forward from the **lower** of
+the two and never below what the record claims, so each number is used only in the direction it is
 trustworthy for. A version that cannot be ordered blocks nothing on its own.
 
 **Updating itself.** The same machinery, with two differences that exist because the thing being
@@ -829,7 +830,7 @@ archive_key = "the key an encrypted .7z was packed with"
 
 | Key | Meaning |
 |---|---|
-| `verification_key` | With a key set, every Server-offered package **must** carry a valid Ed25519 signature over its artifact. Without it, an unsigned package installs on its content hash alone and a **signed** one is refused. Generate the key with `opamp-package-sign keygen` (see [the Server](server.md#packages-distributing-software)). |
+| `verification_key` | With a key set, every Server-offered package **must** carry a valid Ed25519 signature over its artifact. Without it, an unsigned package installs on its content hash alone and a **signed** one is refused. Generate the key with `opamp-package-sign keygen` (see [the Server](server.md#packages-and-deployments-distributing-software)). |
 | `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent — and never the `[auth]` credential, which the Server may rotate on its own: a rotation would leave every archive unopenable. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
 
 Note what is *not* here: which artifact a Supervisor receives is the Server's decision, expressed as
@@ -846,7 +847,7 @@ package = "supervisor"             # the default: this Client's own Agent type
 See [Updating the Client itself](#updating-the-client-itself). **An absent section is the consent**
 (ADR-0075): a Client the fleet cannot update is the one program on the host left to patch by hand.
 What bounds it is the name — an offer under any other is refused and reported, never applied — and
-the default name is the product's own, which is what the release artifact and therefore the Set
+the default name is the product's own, which is what the release artifact and therefore the Package
 carrying this Client is named. Not the Agent type: since ADR-0077 the two are different strings, and
 a default taken from the type would narrow the consent to a package nobody publishes.
 
@@ -1352,7 +1353,7 @@ package = "supervisor"
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
 another Agent type either, and this Client's type is the constant `supervisor` — the same string,
-which is why the Set that carries the Client is named and typed alike.
+which is why the Package that carries the Client is typed with it — since ADR-0095 the Agent type *is* the name it carries on the wire, so the two cannot drift apart.
 Neither guard replaces the other — an operator who types a Collector artifact as `supervisor` gets
 past the Server, and this name is what is left.
 
@@ -1371,8 +1372,8 @@ restart.
 
 **What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
 an `.rpm`, an MSI or a hand did. It reports that under the name `[self_update]` consents to from its
-very first report, which is what lets the Server hold a Set against it: since
-[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) a Set reaches an Agent only as
+very first report, which is what lets the Server hold a Package against it: since
+[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) a Package reaches an Agent only as
 an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
 The practical consequence: a Client installed by hand is not taken over by the fleet's package the
 moment one is published at the version it already is — it comes under package management with the
@@ -1385,7 +1386,7 @@ does not name the version the running binary *is* is discarded at startup, with 
 both versions. The Client then reports the version it actually runs, the Server sees its published
 package as the upgrade it now is, and the host is updated back to it. To hold a host on an older
 Client, retract the package on the Server first
-([`publication`](server.md#packages-distributing-software)) — retracting withdraws the offer and
+([`publication`](server.md#packages-and-deployments-distributing-software)) — retracting withdraws the offer and
 uninstalls nothing.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
@@ -1393,7 +1394,7 @@ uninstalls nothing.
 ([ADR-0078](../adr/0078-a-release-is-named-after-the-set-it-becomes.md)) — and that file *is* a
 package artifact: it holds the Client under the name the install layout gives it, so it is uploaded
 exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing
-repacks it. The files are named after the **Set** they become, not after the product inside them:
+repacks it. The files are named after the **Package** they become, not after the product inside them:
 the member is `supervisor`, which is what a Client looks for, while the file says which
 package it is. The fields are separated by `_` because two of them carry `-` — a package name and a
 prerelease version (`1.2.3-dev`) — so the last two fields are the platform and can be read off the
@@ -1412,8 +1413,10 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 
 The second call is what arms the package: until a type is set it is offered to nobody, so
 an artifact uploaded and left untyped reaches no Client at all. For this one the type is the
-Client's own, `supervisor` — and so is the Set's name, which is what `[self_update] package` above
-consents to. The *file* keeps its published name; the Set is a label the Server holds.
+Client's own, `supervisor` — and that type **is** the name `[self_update] package` above consents
+to, because since ADR-0095 a Package carries its Agent type on the wire and has no separate name.
+Setting that key to anything else therefore refuses every offer this Client will ever get, visibly,
+on its fleet row. The *file* keeps its published name.
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the
 build came from — `1.2.3` and `1.2.3+a1b2c3d` are the same release, and the content hash is what

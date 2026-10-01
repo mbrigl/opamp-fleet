@@ -22,6 +22,34 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use server::fleet::{AgentView, AppState, PackageOffering};
 use server::packages::{PackageStore, Platform};
 
+/// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
+/// name. Aim belongs to the Deployment now (ADR-0096): a Package reaches nobody by itself, so a
+/// test that wants one delivered has to say which ring the host is in — which is the model.
+/// The same, recording the artifact's signature on the ring — where a signature lives since
+/// ADR-0096. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
+/// ring is what has to carry it.
+fn ring_holding_signed(
+    state: &server::fleet::AppState,
+    id: &server::packages::PackageId,
+    signature: Option<(&server::packages::Platform, Vec<u8>)>,
+) -> String {
+    let deployments = state.deployment_store().expect("deployments are armed");
+    let selector =
+        std::collections::BTreeMap::from([("service.name".to_string(), id.agent_type.clone())]);
+    deployments.put("stable", selector).expect("ring");
+    // `replace`: a ring holds one Package per Agent type, so pointing it at another
+    // version is a swap, which is exactly what a test walking through versions is doing.
+    deployments
+        .put_package("stable", id, true)
+        .expect("package into the ring");
+    if let Some((platform, bytes)) = signature {
+        deployments
+            .put_signature("stable", id, platform, bytes)
+            .expect("signature onto the ring");
+    }
+    "stable".to_string()
+}
+
 struct ClientUnderTest(Child);
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
@@ -169,19 +197,19 @@ async fn a_package_rollout_reaches_a_polling_client() {
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    let set = server::packages::SetId::new("myagent", "managed-agent", "2.0.0").expect("set id");
+    let set = server::packages::PackageId::new("managed-agent", "2.0.0").expect("package id");
+    store.create(&set).expect("create package");
     store
-        .create_or_update(&set, Default::default(), false)
-        .expect("create set");
-    store
-        .put_entry(&set, &this_host(), Some(signature), artifact.clone())
+        .put_entry(&set, &this_host(), artifact.clone())
         .expect("put entry");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store, String::new()))),
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
     );
     let app = server::agent_app(state.clone(), server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -228,7 +256,11 @@ async fn a_package_rollout_reaches_a_polling_client() {
 
     wait_until("the rollout act to reach the agent", || {
         state
-            .rollout_package(&set)
+            .rollout_deployment(&ring_holding_signed(
+                &state,
+                &set,
+                Some((&this_host(), signature.clone())),
+            ))
             .ok()
             .filter(|assigned| *assigned >= 1)
             .map(|_| ())
@@ -237,7 +269,9 @@ async fn a_package_rollout_reaches_a_polling_client() {
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        let package = agent.packages.iter().find(|p| p.name == "myagent")?;
+        // The wire name is the Agent type since ADR-0095, and this block states none — so it is
+        // the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
+        let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
     })
     .await;

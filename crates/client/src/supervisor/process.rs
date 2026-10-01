@@ -915,8 +915,6 @@ impl Runner {
                 )));
             }
         }
-        let mut command = Command::new(&spec.program);
-        command.args(&spec.args).envs(spec.env.iter().cloned());
         // The program's own directory where nothing else was said (ADR-0091). A bare relative
         // name — which ADR-0021's path rule does not produce — yields an empty parent, and an
         // empty `current_dir` fails the spawn, so that case keeps inheriting as it did.
@@ -924,7 +922,20 @@ impl Runner {
             .program
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty());
-        if let Some(dir) = spec.working_dir.as_deref().or(derived) {
+        let working_dir = spec.working_dir.as_deref().or(derived);
+        // **The program is made absolute whenever a working directory is set.** `Command` does
+        // `chdir` before `exec` on Unix, so a relative program would be resolved against the
+        // directory it was just moved into — `<dir>/<dir>/<program>`, which is nothing. This is
+        // not a corner: `state_dir` defaults to the relative `client-state`, so every Managed
+        // Process under a default configuration hit it, and the failure arrives as a bare
+        // `No such file or directory` naming a file that is plainly there.
+        let program = match working_dir {
+            Some(_) => crate::config::absolute(&spec.program),
+            None => spec.program.clone(),
+        };
+        let mut command = Command::new(&program);
+        command.args(&spec.args).envs(spec.env.iter().cloned());
+        if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
         // If the runner is dropped without a graceful stop, take the process along.
@@ -997,6 +1008,7 @@ const STABLE_RUN_FLOOR: Duration = Duration::from_secs(10);
 /// Runs `<program> <args>` once and reports the Managed Process's version as a Description
 /// event, if the output contains one. Best effort by design: a missing binary, a hang, or
 /// versionless output is logged and otherwise ignored — probing must never break supervision.
+///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
 pub async fn probe_version(
     program: PathBuf,

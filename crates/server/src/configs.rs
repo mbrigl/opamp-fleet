@@ -194,49 +194,23 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
     matches(&revision.selector, description)
 }
 
-/// A Configuration file written before ADR-0055: the flat `{name, selector, body, role}` shape,
-/// which was both the stored record and the API resource. What it held was in force, so it loads
-/// as saved **and** formerly published — the migration seed for the per-Agent assignments
-/// (ADR-0061 point 9).
-#[derive(Deserialize)]
-struct LegacyFlatConfiguration {
-    name: String,
-    #[serde(flatten)]
-    revision: Revision,
-}
-
-/// A Configuration file written under ADR-0055: two revisions, draft and published. The draft
-/// becomes the saved revision; a published revision is retained and remembered as formerly
-/// published, so existing Agent records can load as "rolled out to what was in force"
-/// (ADR-0061 point 9).
-#[derive(Deserialize)]
-struct LegacyTwoRevisionConfiguration {
-    name: String,
-    draft: Revision,
-    #[serde(default)]
-    published: Option<Revision>,
-}
-
 /// The persistent Configuration store: one JSON file per Configuration under `config_dir`,
 /// written atomically, restored at startup. The in-memory map is the single source the control
 /// loop reads; the files exist so a Server restart does not lose what the fleet should run.
 pub struct ConfigStore {
     dir: PathBuf,
     configs: RwLock<BTreeMap<String, Configuration>>,
-    /// What a pre-ADR-0061 store said was in force — Configuration name to the hash of its
-    /// published revision (the revision itself is in `retained`). Read once by the fleet to seed
-    /// the assignments of Agent records that predate the ADR; empty for a store born under it.
-    formerly_published: BTreeMap<String, String>,
 }
 
 impl ConfigStore {
     /// Opens the store, creating the directory and loading every persisted Configuration. A file
-    /// that does not parse is a startup error — never silently ignored (ADR-0008's principle).
+    /// that does not parse is a startup error — never silently ignored (ADR-0008's principle),
+    /// and that now includes a file in a shape this Server no longer writes: there is no legacy
+    /// reader, so an unreadable file is named rather than guessed at.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let mut configs = BTreeMap::new();
-        let mut formerly_published = BTreeMap::new();
         let entries =
             std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for entry in entries {
@@ -248,38 +222,8 @@ impl ConfigStore {
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let value: serde_json::Value = serde_json::from_str(&text)
+            let config: Configuration = serde_json::from_str(&text)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            let config: Configuration = if value.get("saved").is_some() {
-                serde_json::from_value(value)
-                    .map_err(|e| format!("cannot parse {}: {e}", path.display()))?
-            } else if value.get("draft").is_some() {
-                // ADR-0055 shape. The file is left as it is until the next write, so an Agent
-                // record that has not migrated yet can still be seeded from it on a later start.
-                let legacy: LegacyTwoRevisionConfiguration = serde_json::from_value(value)
-                    .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-                let mut retained = BTreeMap::new();
-                if let Some(published) = legacy.published {
-                    let hash = revision_hash(&published);
-                    formerly_published.insert(legacy.name.clone(), hash.clone());
-                    retained.insert(hash, published);
-                }
-                Configuration {
-                    name: legacy.name,
-                    saved: legacy.draft,
-                    retained,
-                }
-            } else {
-                let legacy: LegacyFlatConfiguration = serde_json::from_value(value)
-                    .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-                let hash = revision_hash(&legacy.revision);
-                formerly_published.insert(legacy.name.clone(), hash.clone());
-                Configuration {
-                    name: legacy.name,
-                    saved: legacy.revision.clone(),
-                    retained: BTreeMap::from([(hash, legacy.revision)]),
-                }
-            };
             validate_name(&config.name)
                 .map_err(|e| format!("invalid configuration name in {}: {e}", path.display()))?;
             configs.insert(config.name.clone(), config);
@@ -287,22 +231,7 @@ impl ConfigStore {
         Ok(ConfigStore {
             dir,
             configs: RwLock::new(configs),
-            formerly_published,
         })
-    }
-
-    /// What a pre-ADR-0061 store said was in force, for seeding the assignments of Agent records
-    /// that predate the ADR: `(name, published revision, its hash)` per formerly published
-    /// Configuration. Empty for a store born under ADR-0061.
-    pub fn formerly_published(&self) -> Vec<(String, Revision, String)> {
-        let configs = self.configs.read().expect("configs lock");
-        self.formerly_published
-            .iter()
-            .filter_map(|(name, hash)| {
-                let revision = configs.get(name)?.retained.get(hash)?.clone();
-                Some((name.clone(), revision, hash.clone()))
-            })
-            .collect()
     }
 
     /// All Configurations, in name order.
@@ -713,58 +642,32 @@ mod tests {
             .expect("collecting an unknown name is a no-op");
     }
 
-    /// ADR-0061 point 9: a flat pre-ADR-0055 file loads as saved **and** formerly published, so
-    /// the fleet can seed old Agent records as "rolled out to what was in force".
+    /// No legacy reader: a file in a shape this Server no longer writes is a startup error that
+    /// names the path, not a file quietly read as something else. Both retired shapes are covered
+    /// — the flat pre-ADR-0055 record and the two-revision ADR-0055 one.
     #[test]
-    fn a_legacy_flat_file_loads_as_formerly_published() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("keeper.json"),
-            r#"{"name":"keeper","selector":{"os.type":"linux"},"body":"receivers: {}\n","role":"supplementary"}"#,
-        )
-        .expect("write the legacy file");
+    fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
+        for (file, body) in [
+            (
+                "flat.json",
+                r#"{"name":"flat","selector":{"os.type":"linux"},"body":"receivers: {}\n"}"#,
+            ),
+            (
+                "staged.json",
+                r#"{"name":"staged","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(file), body).expect("write the retired shape");
 
-        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        let config = store.get("keeper").expect("keeper");
-        assert_eq!(config.saved.role, "supplementary");
-        let formerly = store.formerly_published();
-        assert_eq!(formerly.len(), 1);
-        let (name, revision, hash) = &formerly[0];
-        assert_eq!(name, "keeper");
-        assert_eq!(revision.selector["os.type"], "linux");
-        assert_eq!(config.retained[hash], *revision);
-        assert_eq!(
-            store.matching_names(Some(&description(&[("os.type", "linux")]))),
-            ["keeper"]
-        );
-    }
-
-    /// ADR-0061 point 9, the ADR-0055 shape: the draft becomes the saved revision, the published
-    /// one is retained and reported as formerly published — and a never-published draft seeds no
-    /// assignment at all.
-    #[test]
-    fn a_two_revision_file_loads_with_its_published_revision_retained() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("staged.json"),
-            r#"{"name":"staged","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
-        )
-        .expect("write");
-        std::fs::write(
-            dir.path().join("never.json"),
-            r#"{"name":"never","draft":{"body":"n\n"}}"#,
-        )
-        .expect("write");
-
-        let store = ConfigStore::open(dir.path().to_path_buf()).expect("open");
-        let staged = store.get("staged").expect("staged");
-        assert_eq!(staged.saved.body, "v2\n", "the draft is the saved revision");
-        assert_eq!(staged.retained.len(), 1);
-        let formerly = store.formerly_published();
-        assert_eq!(formerly.len(), 1, "the never-published draft seeds nothing");
-        assert_eq!(formerly[0].0, "staged");
-        assert_eq!(formerly[0].1.body, "v1\n", "what was in force is the seed");
-        assert!(store.get("never").expect("never").retained.is_empty());
+            let error = ConfigStore::open(dir.path().to_path_buf())
+                .map(|_| ())
+                .expect_err("a retired shape is refused, never guessed at");
+            assert!(
+                error.contains(file),
+                "the error must name the file an operator has to deal with, got: {error}"
+            );
+        }
     }
 
     #[test]
@@ -799,11 +702,6 @@ mod tests {
                 .is_empty(),
             "a never-assigned Configuration retains nothing across the reopen"
         );
-        assert!(
-            reopened.formerly_published().is_empty(),
-            "a store born under ADR-0061 seeds no migration"
-        );
-
         assert!(reopened.delete("base").expect("delete"));
         assert!(!reopened
             .delete("base")
