@@ -72,6 +72,8 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
+        // One process, no worker of its own — signalling a group would gain nothing (ADR-0029).
+        own_process_group: false,
         // A Collector writes nothing outside what the install and the config
         // directory already provide.
         ensure_dirs: Vec::new(),
@@ -131,6 +133,8 @@ impl Plugin for CollectorPlugin {
             // The Runner asks at startup and again after every swap; an extension's self-report
             // overwrites the probed value.
             version_probe: Some(VersionProbe {
+                // The Collector's banner is strict SemVer; the default read is the right one.
+                parse: None,
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),

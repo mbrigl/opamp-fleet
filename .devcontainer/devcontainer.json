@@ -46,6 +46,8 @@
   // Runs inside the container once it is created. Git does not version its hooks, so the
   // repository keeps them under .githooks/ and this points git at them: pre-commit refuses a
   // commit on main, pre-push runs the checks first (AGENTS.md §5 and §6). Outside the container,
+  // run the same command once per clone (README → "Getting Started"). It is the first command of
+  // `postCreateCommand` below, which also installs the system packages listed there.
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
   // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
@@ -60,9 +62,20 @@
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
+  // System packages the base image does not carry, installed once when the container is created.
   //
   // The first five are *developer tooling* — nothing shipped depends on them, which is why they
   // need no ADR (AGENTS.md §3.6) — and each earns its place:
+  //
+  //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
+  //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
+  //             ordinary local run, so a Windows-only compile error reaches CI instead of the
+  //             author. See README → "Build, Test & Run".
+  //   msitools  `msiextract`, which unpacks the Icinga 2 Windows MSI payload (ADR-0029).
+  //   osslsigncode  verifies that payload's Authenticode signature and who signed it, since
+  //             Windows artifacts publish no digest to check against (ADR-0029).
+  //   rpm2cpio  the RPM half of the same repack. That path is not built; the tools are here
+  //   cpio      because inspecting the payload is how the decision whether to build it gets made.
   //
   // The Boost and protobuf libraries after them are a different kind of entry: they are not used by
   // anything in this repository, they are what `opamp-package-fetch` *copies into* the Icinga 2
@@ -75,6 +88,7 @@
   //   * `libboost-regex1.74.0` pulls `libicu72` in, so ICU rides along in the artifact. Icinga 2
   //     2.14.6 did not link `boost_regex` at all; 2.16.5 does.
   "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
+
   "customizations": {
     // VS Code extensions installed inside the container
     "vscode": {
