@@ -15,7 +15,7 @@ You may obtain a copy of the License at
 This product bundles the following third-party software, vendored as a static
 asset embedded into the Server binary (ADR-0009):
 
-Redoc (redoc@2.5.3) — crates/server/static/redoc.standalone.js
+Redoc (redoc@2.5.3) — crates/fleet-server/static/redoc.standalone.js
   Copyright (c) Redocly
   Licensed under the MIT License.
   https://github.com/Redocly/redoc

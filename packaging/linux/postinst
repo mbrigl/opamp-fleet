@@ -14,7 +14,7 @@
 # `/usr/bin` entry, and they would if the link were named after the program they share.
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
-# crates/client/src/service/manager.rs), the only roots a packaged install ever uses: this script
+# crates/fleet-agent/src/service/manager.rs), the only roots a packaged install ever uses: this script
 # calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
 # because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
 # state under `/var/lib`, where data belongs (ADR-0021 clause 8, carrying ADR-0021).

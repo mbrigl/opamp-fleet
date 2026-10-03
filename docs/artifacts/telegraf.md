@@ -14,8 +14,8 @@ anybody could get wrong.
 
 | | |
 |---|---|
-| Packed by | `telegraf_plans` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/telegraf.rs` |
+| Packed by | `telegraf_plans` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/telegraf.rs` |
 | Agent type | `telegraf` |
 
 ## 1. Source

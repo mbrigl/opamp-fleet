@@ -36,8 +36,8 @@ Both binaries are built from one Cargo workspace; the build, test, and run comma
 you can run:
 
 ```console
-$ cargo run -p server -- --config config/server.toml
-$ cargo run -p client -- --config config/supervisor.toml
+$ cargo run -p fleet-server -- --config config/server.toml
+$ cargo run -p fleet-agent -- --config config/supervisor.toml
 ```
 
 An installed deployment runs the same two programs under the names `server` and `client`; the
@@ -54,13 +54,13 @@ no configuration file at all, because every setting has a default.
    UI at `/`). The operator half is on loopback because nothing authenticates it yet.
 
    ```console
-   $ cargo run -p server -- --config config/server.toml
+   $ cargo run -p fleet-server -- --config config/server.toml
    ```
 
 2. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself.
 
    ```console
-   $ cargo run -p client -- --config config/supervisor.toml
+   $ cargo run -p fleet-agent -- --config config/supervisor.toml
    ```
 
 3. **Open the UI** at <http://127.0.0.1:4321/>. The Agent is listed as *Connected*, with the

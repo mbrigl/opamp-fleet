@@ -3,7 +3,7 @@
 
   // A Compose project rather than a bare image, so the development observability stack comes up
   // with the container and is reachable from inside it — the Collector on `localhost:4318`, Grafana
-  // on `grafana:3000`, ClickHouse on `clickhouse:9000`. The base image pin, the workspace mount and
+  // on `grafana:3001`, ClickHouse on `clickhouse:9000`. The base image pin, the workspace mount and
   // the published Agent-plane port live in `docker-compose.yml`, which is where a Compose-based Dev
   // Container reads them from; the reasoning sits there with them. Still no host Docker socket
   // (ADR-0002): the compose runs on the host, before VS Code attaches.
