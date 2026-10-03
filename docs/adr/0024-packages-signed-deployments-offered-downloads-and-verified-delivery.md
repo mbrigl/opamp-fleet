@@ -1727,7 +1727,7 @@ Each test of clauses 35–49 carries a `Verifies:` marker citing this decision
   `retention_defaults_globally_and_is_overridable_per_supervisor` in
   [`config.rs`](../../crates/fleet-agent/src/config.rs).
 - Deterministic repack (clause 67): `a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang`
-  in [`opamp-package-fetch.rs`](../../crates/package-tools/src/bin/opamp-package-fetch.rs) — a linked directory's contents under
+  in [`opamp-package-fetch.rs`](../../crates/fleet-tools/src/bin/opamp-package-fetch.rs) — a linked directory's contents under
   both names, a link that names nothing dropped, a cycle that ends, and the packed tree one a
   Client installs.
 - Mandatory signature (clauses 50, 54): `without_a_verification_key_no_agent_takes_packages` in
@@ -1758,5 +1758,5 @@ source that inspects the handshake, so review of every change to
 missing key at startup is a log line in
 [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs) that no test reads. That a
 repack yields the same bytes twice (clause 67) has no test of its own: `pack_tree` in
-[`opamp-package-fetch.rs`](../../crates/package-tools/src/bin/opamp-package-fetch.rs) fixes order, times and ownership, and review
+[`opamp-package-fetch.rs`](../../crates/fleet-tools/src/bin/opamp-package-fetch.rs) fixes order, times and ownership, and review
 of every change to it keeps them.

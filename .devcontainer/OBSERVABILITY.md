@@ -6,7 +6,7 @@ shipped depends on it, it holds no credentials worth having, and it retains 24 h
 volume.
 
 ```
-Agent ──OTLP/HTTP:4318──▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana :3000
+Agent ──OTLP/HTTP:4318──▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana :3001
                                                        otel_traces
                                                        otel_logs
                                                        otel_metrics_gauge
@@ -51,7 +51,7 @@ There is nothing to start. The Dev Container **is** this Compose project
 its four services and these three are the others, so they come up with the container and go down
 with it.
 
-Grafana is on <http://localhost:3000> — anonymous access is enabled, so there is nothing to log in
+Grafana is on <http://localhost:3001> — anonymous access is enabled, so there is nothing to log in
 to (`admin` / `admin` if you want to edit and save). It opens on **Fleet Agents — Overview**.
 
 The first start pulls the ClickHouse datasource plugin, so give Grafana a few seconds longer than
@@ -68,8 +68,8 @@ them by hand, so that list is the on/off switch.
   namespace, so `http://localhost:4318` inside the container is the same endpoint as on the host —
   which is what the refusal below requires. Its ports are published by the `workspace` service for
   the same reason; `otel-collector` is not a resolvable name from the other containers.
-- **Grafana and ClickHouse are ordinary neighbours**, reached by service name: `grafana:3000`,
-  `clickhouse:9000`. From the host's browser Grafana stays on <http://localhost:3000>.
+- **Grafana and ClickHouse are ordinary neighbours**, reached by service name: `grafana:3001`,
+  `clickhouse:9000`. From the host's browser Grafana stays on <http://localhost:3001>.
 
 ### Driving Compose by hand
 
@@ -144,7 +144,7 @@ They describe the *host*, not one Agent: this Client samples its own process and
 Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
 Nothing else from the `AgentDescription`'s non-identifying attributes is sent — not the host's
 addresses, not the operator's own `[attributes]` — see `DESCRIPTIVE_ATTRIBUTES` in
-[`telemetry.rs`](../crates/client/src/telemetry.rs) for why that is a named list rather than a
+[`telemetry.rs`](../crates/fleet-agent/src/telemetry.rs) for why that is a named list rather than a
 filter.
 
 **`service.name` means two different things on the two levels.** On the Resource it is the
@@ -276,6 +276,6 @@ ORDER BY l.Timestamp
 | 4318 | Collector | OTLP/HTTP — what the Client exports to |
 | 4317 | Collector | OTLP/gRPC — for anything else you want to point here |
 | 8888 | Collector | The Collector's own metrics |
-| 3000 | Grafana | The UI |
+| 3001 | Grafana | The UI |
 | 8123 | ClickHouse | HTTP interface — `curl`-able, and what the checks above use |
 | 9000 | ClickHouse | Native protocol — what the Collector and Grafana speak |
