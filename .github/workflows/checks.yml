@@ -125,11 +125,12 @@ jobs:
       # The sensor's own tests run first: a sensor that is wrong reports nothing worth reading.
       - name: Self-test the tests-kept sensor
         run: bash scripts/test-sensor-tests-kept.sh
-      # The base is the pull request's base branch, or the previous tip on a push to main.
+      # The base is the pull request's base branch, or the previous tip on a push to main. A
+      # forced push leaves that tip out of the history the checkout fetches, so it passes none.
       - name: Report test files deleted and skip markers added since the base
         run: bash scripts/sensor-tests-kept.sh "$BASE"
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the revision-due sensor
         run: bash scripts/test-sensor-revision-due.sh
       - name: Report the changes since the last design revision
