@@ -1,8 +1,8 @@
 # ADR-0006: Application code is structured as ports and adapters, with every dependency pointing at the core
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-09-19
-- **Deciders:** NUC maintainer
+- **Deciders:** Markus Brigl
 - **Applies to:** every module of the system's code, the golden path, and the structural test that decides the dependency direction
 
 ## Context

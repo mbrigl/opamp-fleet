@@ -1,9 +1,9 @@
 # ADR-0011: Four crates in one Cargo workspace on tokio and axum, a shared crate by measurement, and TOML configuration
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-08-15
+- **Status:** ⚪ superseded by [ADR-0034](0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)
+- **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
-- **Applies to:** Cargo.toml, crates/opamp/, crates/client/src/lib.rs and main.rs, crates/package-tools/, the bundled UI under crates/server/static/, server.toml and supervisor.toml, and every new crate, module placement or dependency
+- **Applies to:** Cargo.toml, crates/opamp/, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, and every new crate, module placement or dependency
 
 ## Context
 
@@ -40,7 +40,7 @@ the Client a library under a thin binary, keep the operator tools in their own c
 Client, and configure both binaries from strict TOML files.
 
 1. **One workspace, four crates, one lockfile, one toolchain.** `crates/opamp` (the shared wire
-   layer), `crates/server`, `crates/client` and `crates/package-tools`. Versions are pinned once in
+   layer), `crates/fleet-server`, `crates/fleet-agent` and `crates/fleet-tools`. Versions are pinned once in
    `[workspace.dependencies]`; `rust-toolchain.toml` pins the compiler. Every crate is
    `publish = false`. A further crate needs a concrete need a module cannot meet (compile time,
    reuse, a dependency boundary); hexagonal seams live as modules first.
@@ -55,7 +55,7 @@ Client, and configure both binaries from strict TOML files.
    [ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)'s.
 
 4. **The bundled UI is static assets embedded in the Server binary.** Plain HTML, CSS and JS under
-   `crates/server/static/`, embedded with `include_str!`; no frontend toolchain. The REST API is the
+   `crates/fleet-server/static/`, embedded with `include_str!`; no frontend toolchain. The REST API is the
    contract, and the UI is one client of it.
 
 5. **CI enforces the Definition of Done on this stack.** `cargo build`, `cargo test`,
@@ -89,7 +89,7 @@ Client, and configure both binaries from strict TOML files.
    settings, and the Server's `attr_map` (a decision about the REST view). Each exists once. A later
    measurement that finds one written twice moves it under clause 6.
 
-9. **The Client is a library with a thin binary on top.** `crates/client/src/lib.rs` declares the
+9. **The Client is a library with a thin binary on top.** `crates/fleet-agent/src/lib.rs` declares the
    module tree; `src/main.rs` keeps only what starting a process needs: parsing the command line,
    handing off to the daemon or the `service` verbs, and the exit code.
 
@@ -100,13 +100,13 @@ Client, and configure both binaries from strict TOML files.
 
 11. **Tests reach what they test through the library.** Integration tests import constants rather
     than restating them, and tests that spawn a real program spawn the Client's own cross-platform
-    stubs (`stub_agent`, `stub_crasher`, under `crates/client/src/bin/`) instead of a shell, so they
+    stubs (`stub_agent`, `stub_crasher`, under `crates/fleet-agent/src/bin/`) instead of a shell, so they
     run on all three platforms. A `#[cfg(unix)]` gate sits only on what is genuinely a Unix fact,
     such as a file mode. The stubs stay in `client`, because `CARGO_BIN_EXE_*` resolves only inside
     the crate that declares them.
 
 12. **The operator package tools are their own crate, depending on the Client.**
-    `crates/package-tools` produces `opamp-package-fetch` and `opamp-package-sign` and has no library.
+    `crates/fleet-tools` produces `opamp-package-fetch` and `opamp-package-sign` and has no library.
     The arrow points one way: `package-tools` uses `client::archive` and `client::tls` rather than
     restating them, and its tests open what the tools produce with the Client's own unpacker. Nothing
     in `client`, `server` or `opamp` depends on `package-tools`. Tool-only dependencies (the 7z
@@ -189,7 +189,7 @@ tools.
   error rather than a silent mis-targeting.
 - Positive: the Server is one binary embedding its UI. The operations that write to a host (binary
   swap, health gate, rollback, tree install) are tested on all three platforms.
-- Positive: `crates/client` is what runs on a managed host, and its manifest says so.
+- Positive: `crates/fleet-agent` is what runs on a managed host, and its manifest says so.
 - Negative / trade-offs: `tokio` and axum are a deep commitment; reversing them touches every I/O
   boundary. A UI change needs a Server rebuild.
 - Negative / trade-offs: every dependency of `opamp` recompiles both ends. `endpoint` being
@@ -208,16 +208,16 @@ tools.
   `client-platform-check` on Windows and macOS, and `release-build` (clauses 5, 11). The workspace
   manifest lists the four members, and Cargo refuses a dependency cycle, so `client` cannot come to
   depend on `package-tools` (clause 12).
-- [`crates/client/tests/supervisor_process.rs`](../../crates/client/tests/supervisor_process.rs)
+- [`crates/fleet-agent/tests/supervisor_process.rs`](../../crates/fleet-agent/tests/supervisor_process.rs)
   spawns `stub_agent` through `CARGO_BIN_EXE_stub_agent`, and
-  [`crates/client/tests/self_update_e2e.rs`](../../crates/client/tests/self_update_e2e.rs) imports
+  [`crates/fleet-agent/tests/self_update_e2e.rs`](../../crates/fleet-agent/tests/self_update_e2e.rs) imports
   `client::selfupdate::EXIT_RESTART_FOR_UPDATE` (clauses 9, 11).
 - `crates/opamp/src/attributes.rs` `an_empty_string_is_not_a_value`;
   `crates/opamp/src/endpoint.rs` `a_gzip_bomb_buys_no_more_memory_than_a_plain_body_would`,
   `what_is_not_gzip_under_a_gzip_header_is_refused`,
   `an_encoding_this_endpoint_does_not_implement_names_itself`; `crates/opamp/src/pem.rs`
   `a_file_holding_no_certificate_is_an_error` (clause 7).
-- `crates/server/src/config.rs` `rejects_unknown_keys` and `crates/client/src/config.rs`
+- `crates/fleet-server/src/config.rs` `rejects_unknown_keys` and `crates/fleet-agent/src/config.rs`
   `rejects_an_unknown_scheme_and_unknown_keys` (clause 14).
 
 **Not mechanically decidable:** whether a piece of code is implemented identically by both ends

@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/gateway/, crates/client/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state
+- **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state
 
 ## Context
 
@@ -77,7 +77,7 @@ synthesises none.
    `opamp::endpoint` helpers ([ADR-0011](0011-workspace-crates-and-configuration.md) clause 7).
 
 6. **axum serves it, as an ordinary dependency of the Client crate behind no Cargo feature.** The
-   mode lives in `crates/client/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream pool,
+   mode lives in `crates/fleet-agent/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream pool,
    `registry.rs` the downstream routes), beside `supervisor/`. The HTTP engine under axum is linked
    through `reqwest` anyway; axum adds the routing layer. TLS on the downstream hop uses the same
    `axum-server` rustls terminator as the Server.
@@ -200,27 +200,27 @@ material is configured on a Client.
 
 ## Enforcement
 
-- [`crates/client/tests/gateway_e2e.rs`](../../crates/client/tests/gateway_e2e.rs):
+- [`crates/fleet-agent/tests/gateway_e2e.rs`](../../crates/fleet-agent/tests/gateway_e2e.rs):
   `two_agents_reach_the_server_over_one_folded_connection` (clauses 3, 13),
   `one_agent_opens_one_upstream_connection` (clause 8),
   `a_downstream_connection_carries_no_more_than_its_agent_cap` (clause 4),
   `a_downstream_peer_without_the_protobuf_content_type_is_refused`,
   `a_downstream_peer_may_gzip_its_report`, `a_gzip_bomb_is_refused_by_the_gateway` and
   `an_oversized_downstream_message_closes_with_1009` (clause 5).
-- [`crates/client/tests/gateway_tls.rs`](../../crates/client/tests/gateway_tls.rs):
+- [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs):
   `a_downstream_agent_with_a_certificate_reaches_the_server_over_tls`,
   `a_downstream_peer_without_a_certificate_is_refused` and
   `the_tls_endpoint_does_not_answer_plaintext` (clause 11).
-- [`crates/client/tests/gateway_and_supervisor_e2e.rs`](../../crates/client/tests/gateway_and_supervisor_e2e.rs):
+- [`crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs`](../../crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs):
   `a_host_supervises_and_gateways_at_the_same_time`,
   `a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running` and
   `a_gateway_that_cannot_bind_is_loud` (clauses 1, 4).
-- [`crates/server/tests/ws_transport.rs`](../../crates/server/tests/ws_transport.rs)
+- [`crates/fleet-server/tests/ws_transport.rs`](../../crates/fleet-server/tests/ws_transport.rs)
   `two_agents_share_one_connection` and
-  [`crates/client/tests/e2e.rs`](../../crates/client/tests/e2e.rs)
+  [`crates/fleet-agent/tests/e2e.rs`](../../crates/fleet-agent/tests/e2e.rs)
   `a_config_change_reaches_both_supervised_agents_over_one_connection` (clause 3).
-- `crates/client/src/supervisor/endpoint.rs`: `extension_reports_are_folded_into_process_events` and
-  `shutdown_stops_the_endpoint` (clause 2); `crates/client/src/config.rs`:
+- `crates/fleet-agent/src/supervisor/endpoint.rs`: `extension_reports_are_folded_into_process_events` and
+  `shutdown_stops_the_endpoint` (clause 2); `crates/fleet-agent/src/config.rs`:
   `the_gateway_agent_cap_defaults_and_rejects_zero` (clause 4).
 
 **Not mechanically decidable:** that no message is synthesised on an Agent's behalf (clauses 9, 10)

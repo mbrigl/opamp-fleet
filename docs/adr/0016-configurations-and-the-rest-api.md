@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-12
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/server/src/configs.rs, crates/server/src/api.rs, the Configuration routes and the OpenAPI document under /api/v1, config_dir in server.toml, role handling in crates/client/src/storage.rs and the Supervisor plugins
+- **Applies to:** crates/fleet-server/src/configs.rs, crates/fleet-server/src/api.rs, the Configuration routes and the OpenAPI document under /api/v1, config_dir in server.toml, role handling in crates/fleet-agent/src/storage.rs and the Supervisor plugins
 
 ## Context
 
@@ -220,7 +220,7 @@ configuration history and audit.
 
 ## Enforcement
 
-- [`configs.rs`](../../crates/server/src/configs.rs) unit tests:
+- [`configs.rs`](../../crates/fleet-server/src/configs.rs) unit tests:
   `an_empty_selector_matches_everything_even_an_undescribed_agent`,
   `every_selector_pair_must_equal_a_reported_attribute`, `non_identifying_attributes_match_too`,
   `a_typed_revision_reaches_only_agents_of_its_type`,
@@ -230,16 +230,16 @@ configuration history and audit.
   `an_empty_role_leaves_the_hash_where_it_was`, `a_role_survives_a_reopen`,
   `unset_role_and_type_are_absent_from_the_stored_json`,
   `the_store_round_trips_and_survives_a_reopen`, `the_store_rejects_bad_names_and_empty_bodies`.
-- [`rest_api.rs`](../../crates/server/tests/rest_api.rs): `configurations_crud_round_trips`,
+- [`rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs): `configurations_crud_round_trips`,
   `a_configuration_carries_an_optional_role`, `a_typed_configuration_reaches_only_agents_of_its_type`,
   `invalid_configurations_are_rejected_loudly`, `the_openapi_document_describes_the_contract`,
   `configurations_survive_a_server_restart`.
-- [`ws_transport.rs`](../../crates/server/tests/ws_transport.rs):
+- [`ws_transport.rs`](../../crates/fleet-server/tests/ws_transport.rs):
   `selectors_target_a_subset_and_compose_named_entries`,
   `a_configuration_role_reaches_the_agent_verbatim`.
-- Client: [`storage.rs`](../../crates/client/src/storage.rs) unit tests
+- Client: [`storage.rs`](../../crates/fleet-agent/src/storage.rs) unit tests
   `a_roled_entry_is_written_but_not_offered_as_configuration`,
   `an_unknown_role_is_treated_like_supplementary`, `a_roles_value_is_readable_per_entry`,
   `the_state_and_configuration_are_kept_owner_only`; and
-  [`supervisor.rs`](../../crates/client/tests/supervisor.rs)
+  [`supervisor.rs`](../../crates/fleet-agent/tests/supervisor.rs)
   `a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags`.

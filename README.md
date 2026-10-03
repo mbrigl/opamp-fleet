@@ -173,24 +173,30 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 ## Build, Test & Run
 
 The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
-with four crates — `opamp` (shared library), `server`, `client` (the Client, in all its modes), and
-`package-tools` (the operator command-line tools, ADR-0011). 
+with five crates — `opamp` (the OpAMP wire layer, publishable on its own, with an Agent's client
+and a server endpoint behind the `client` and `server` features, ADR-0031),
+`fleet-core` (what both ends share beyond the protocol), `fleet-server` (the Server),
+`fleet-agent` (the Client, in all its modes), and `fleet-tools` (the operator command-line tools, ADR-0011). 
 This section is the single source for build/test/run commands — both humans and agents rely on 
 it (AGENTS.md links here).
 
 - **Build:** `cargo build --workspace`
 - **Test:** `cargo test --workspace`
 - **Lint:** `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
+- **Lint `opamp` per feature:**
+  `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done`
+  — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
+  build of each feature on its own shows that it stands alone (ADR-0031).
 - **Check the Windows build:**
-  `cargo xwin clippy -p client --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
+  `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
   (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
   Container carries the `llvm-lib` it requires). Worth running whenever a change touches
   platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
   `#[cfg(unix)]` mistake compiles perfectly well on Linux.
 - **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
   advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
-- **Run the Server:** `cargo run -p server -- --config config/server.toml`
-- **Run the Client:** `cargo run -p client -- --config config/supervisor.toml`
+- **Run the Server:** `cargo run -p fleet-server -- --config config/server.toml`
+- **Run the Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
   and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
   sign an artifact out of any program) — both documented in
@@ -236,7 +242,7 @@ of both ends — is the **[User Manual](docs/manual/README.md)**:
 
 A minimal closed control loop on one machine:
 
-1. **Start the Server:** `cargo run -p server -- --config config/server.toml` — it serves two
+1. **Start the Server:** `cargo run -p fleet-server -- --config config/server.toml` — it serves two
    planes on two ports ([ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md)).
    The **Agent plane** on `4320`: the OpAMP endpoint at `/v1/opamp` (plain HTTP **and** WebSocket,
    [ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md)) and the package downloads the offers point
@@ -245,7 +251,7 @@ A minimal closed control loop on one machine:
    docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
    with Basic credentials
    ([ADR-0017](docs/adr/0017-admission-and-authentication.md)).
-2. **Start a Client:** `cargo run -p client -- --config config/supervisor.toml` — it connects over
+2. **Start a Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
@@ -348,7 +354,7 @@ The **`Service smoke` workflow** exercises the real thing on an ephemeral runner
 the Agent appearing in the fleet, its process killed and brought back by the manager, an explicit
 stop that stays stopped, uninstall. It runs nightly and on demand rather than per push (it installs
 a system service and waits on timers), currently on Windows, where the restart is the Client's own
-doing and nothing else asserts it. The test is `crates/client/tests/service_smoke.rs`; it is
+doing and nothing else asserts it. The test is `crates/fleet-agent/tests/service_smoke.rs`; it is
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
@@ -375,7 +381,7 @@ docs/ARCHITECTURE.md  # the system as it currently stands
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
 docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
 docs/adr/             # Architecture Decision Records (+ template)
-crates/               # Cargo workspace: opamp (shared) · server · client · package-tools (operator CLIs)
+crates/               # Cargo workspace: opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
@@ -411,13 +417,13 @@ container, and from inside it:
 | Reach                | at                            |
 | -------------------- | ----------------------------- |
 | Collector (OTLP/HTTP)| `http://localhost:4318`       |
-| Grafana              | `http://grafana:3000`         |
+| Grafana              | `http://grafana:3001`         |
 | ClickHouse           | `clickhouse:9000` / `:8123`   |
 
 The Collector answers on `localhost` because it shares the workspace container's network namespace:
 the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0025](docs/adr/0025-own-telemetry.md)),
 so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
-container as on the host. Grafana stays on <http://localhost:3000> from the host's browser.
+container as on the host. Grafana stays on <http://localhost:3001> from the host's browser.
 
 To run without the stack — it wants roughly 2 GB — remove the services from `runServices` in
 [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json); there is no daemon inside the

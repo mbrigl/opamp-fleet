@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-13
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/packages.rs, crates/client/src/archive.rs, crates/client/src/install.rs, crates/client/src/supervisor/process.rs, the package handling in crates/client/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`
+- **Applies to:** crates/fleet-agent/src/packages.rs, crates/fleet-agent/src/archive.rs, crates/fleet-agent/src/install.rs, crates/fleet-agent/src/supervisor/process.rs, the package handling in crates/fleet-agent/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`
 
 ## Context
 
@@ -327,28 +327,28 @@ the archive key or the verification key; keeping more than one predecessor.
   `download_refuses_to_stage_a_traversing_name`, `the_cap_triggers_only_past_the_limit`,
   `the_download_source_drops_whatever_authorises_it`,
   `a_download_never_debug_prints_its_header_values` in
-  [`packages.rs`](../../crates/client/src/packages.rs);
+  [`packages.rs`](../../crates/fleet-agent/src/packages.rs);
   `a_body_too_large_by_its_content_length_is_refused`,
   `a_chunked_body_is_stopped_once_it_crosses_the_ceiling`,
   `a_download_follows_a_redirect_to_the_mirror`, `a_download_carries_the_headers_the_offer_named`,
   `an_offered_header_does_not_follow_a_redirect_to_another_origin`,
   `an_unusable_offered_header_fails_the_download_by_name`,
   `the_staging_directory_is_kept_owner_only` in
-  [`tests/packages_download.rs`](../../crates/client/tests/packages_download.rs);
+  [`tests/packages_download.rs`](../../crates/fleet-agent/tests/packages_download.rs);
   `the_artifact_size_limit_defaults_is_configurable_and_rejects_zero` in
-  [`config.rs`](../../crates/client/src/config.rs); end to end,
+  [`config.rs`](../../crates/fleet-agent/src/config.rs); end to end,
   `a_signed_package_is_downloaded_verified_swapped_and_reported_installed` in
-  [`tests/packages_e2e.rs`](../../crates/client/tests/packages_e2e.rs).
+  [`tests/packages_e2e.rs`](../../crates/fleet-agent/tests/packages_e2e.rs).
 - Offer and status: `an_addon_package_is_refused_instead_of_overwriting_the_binary`,
   `a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over`,
   `a_package_offer_hands_its_download_headers_to_the_transport`,
   `a_failed_package_reports_installed_failed_and_keeps_the_old_version` in
-  [`supervisor/agent.rs`](../../crates/client/src/supervisor/agent.rs);
+  [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs);
   `every_supervisor_declares_package_acceptance` in
-  [`supervisor/mod.rs`](../../crates/client/src/supervisor/mod.rs);
+  [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs);
   `a_slow_download_is_reported_as_downloading_with_progress` in
-  [`transport/mod.rs`](../../crates/client/src/transport/mod.rs).
-- Containers, single file and tree: in [`archive.rs`](../../crates/client/src/archive.rs) the
+  [`transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs).
+- Containers, single file and tree: in [`archive.rs`](../../crates/fleet-agent/src/archive.rs) the
   detection tests (`detects_gzip_by_its_leading_bytes_and_anything_else_as_raw`,
   `detects_a_7z_by_its_signature`, `detects_a_zip_by_its_signature_and_an_empty_one_too`),
   `an_encrypted_7z_opens_with_the_key_and_not_without_it`,
@@ -365,9 +365,9 @@ the archive key or the verification key; keeping more than one predecessor.
   `a_tree_keeps_the_modes_the_archive_carried`, `a_hostile_zip_member_refuses_the_archive`;
   `a_program_path_must_stay_inside_the_package` and
   `a_tree_spawns_from_the_path_written_inside_the_package` in
-  [`config.rs`](../../crates/client/src/config.rs).
+  [`config.rs`](../../crates/fleet-agent/src/config.rs).
 - Swap, rollback, hold and retention: in
-  [`tests/supervisor_process.rs`](../../crates/client/tests/supervisor_process.rs)
+  [`tests/supervisor_process.rs`](../../crates/fleet-agent/tests/supervisor_process.rs)
   `apply_package_swaps_the_binary_and_acknowledges_installed`,
   `a_package_delivered_as_a_tar_gz_is_unpacked_and_installed`,
   `an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds`,
@@ -378,8 +378,8 @@ the archive key or the verification key; keeping more than one predecessor.
   `a_tree_package_lands_whole_and_replaces_the_one_before_it`,
   `a_tree_that_will_not_stay_up_is_rolled_back_whole`,
   `a_tree_missing_the_configured_program_is_refused_and_changes_nothing`; in
-  [`supervisor/process.rs`](../../crates/client/src/supervisor/process.rs)
+  [`supervisor/process.rs`](../../crates/fleet-agent/src/supervisor/process.rs)
   `a_retained_backup_is_swept_only_after_its_deadline`,
   `a_sweep_leaves_an_unmarked_backup_alone`, `dropping_a_backup_clears_its_marker`;
   `retention_defaults_globally_and_is_overridable_per_supervisor` in
-  [`config.rs`](../../crates/client/src/config.rs).
+  [`config.rs`](../../crates/fleet-agent/src/config.rs).

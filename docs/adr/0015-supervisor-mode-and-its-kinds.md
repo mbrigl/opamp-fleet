@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/supervisor/ (core, ports, process runner, endpoint, every kind), the `[[supervisor]]` and `[supervisors]` sections of supervisor.toml, docs/artifacts/
+- **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner, endpoint, every kind), the `[[supervisor]]` and `[supervisors]` sections of supervisor.toml, docs/artifacts/
 
 ## Context
 
@@ -323,7 +323,7 @@ where a Supervisor's directory lies and how its set changes
 
 ## Enforcement
 
-- Registry, defaults and refusals, in `crates/client/src/supervisor/mod.rs`:
+- Registry, defaults and refusals, in `crates/fleet-agent/src/supervisor/mod.rs`:
   `a_wrapped_block_needs_neither_a_program_nor_a_type`,
   `a_wrapped_block_that_restates_a_derived_value_is_refused`, `every_wrapped_kinds_block_is_two_lines`,
   `an_unwrapped_kind_still_says_everything_itself`, `a_client_reports_the_kinds_it_was_compiled_with`,
@@ -331,17 +331,17 @@ where a Supervisor's directory lies and how its set changes
   `the_fleets_timing_reaches_a_supervisor_that_says_nothing`.
 - Two-stage parse and retired keys: `supervisor_blocks_split_common_keys_from_plugin_settings`,
   `a_supervisor_block_needs_type_and_a_valid_name`, `duplicate_supervisor_names_are_rejected`,
-  `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent` (`crates/client/src/config.rs`);
+  `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent` (`crates/fleet-agent/src/config.rs`);
   `settings_parse_strictly` and `the_retired_keys_are_refused_by_name` in `command.rs`,
   `settings_parse_strictly` in `collector.rs`, the `the_recipes_keys_are_refused_by_name` tests of
   `glpi.rs` and `telegraf.rs`, `a_retired_key_is_refused_by_name_and_says_what_supplies_it_now` in
   `icinga2.rs`; `an_unreadable_configuration_resolves_the_update_in_flight`
-  (`crates/client/src/service/runtime.rs`).
+  (`crates/fleet-agent/src/service/runtime.rs`).
 - Agents over one connection and the Endpoint: `poll_reports_carries_every_agent_with_distinct_identities`,
-  `a_reply_reaches_only_the_agent_its_uid_names` (`crates/client/src/engine.rs`);
+  `a_reply_reaches_only_the_agent_its_uid_names` (`crates/fleet-agent/src/engine.rs`);
   `extension_reports_are_folded_into_process_events` (`supervisor/endpoint.rs`);
-  `a_config_change_reaches_both_supervised_agents_over_one_connection` (`crates/client/tests/e2e.rs`).
-- Process management and the lifecycle vocabulary, in `crates/client/tests/supervisor_process.rs`:
+  `a_config_change_reaches_both_supervised_agents_over_one_connection` (`crates/fleet-agent/tests/e2e.rs`).
+- Process management and the lifecycle vocabulary, in `crates/fleet-agent/tests/supervisor_process.rs`:
   `an_exiting_process_turns_unhealthy_and_is_restarted`,
   `a_process_surviving_the_apply_grace_is_acknowledged_applied`,
   `a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised`,
@@ -353,12 +353,12 @@ where a Supervisor's directory lies and how its set changes
   `a_program_named_by_a_relative_path_still_starts_in_its_own_directory`; and
   `retiring_uninstalls_the_removed_and_only_stops_the_changed` (`engine.rs`),
   `a_collector_supervisor_passes_each_config_entry_as_a_config_flag`,
-  `sigterm_stops_the_managed_process_and_the_client_cleanly` (`crates/client/tests/supervisor.rs`),
+  `sigterm_stops_the_managed_process_and_the_client_cleanly` (`crates/fleet-agent/tests/supervisor.rs`),
   `a_two_line_telegraf_block_runs_reports_and_applies` and
-  `a_two_line_glpi_block_runs_reports_and_applies` (`crates/client/tests/wrapped_supervisors.rs`).
+  `a_two_line_glpi_block_runs_reports_and_applies` (`crates/fleet-agent/tests/wrapped_supervisors.rs`).
 - Artifact documents (clause 20): the kind side is `the_defaults_are_the_artifacts` in `glpi.rs`,
   `telegraf.rs` and `icinga2.rs`; the packing side is `glpi_finds_both_zip_spellings_and_repacks_only_linux`,
   `telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names` and
   `icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher` in
-  `crates/package-tools/src/bin/opamp-package-fetch.rs`. Each names its document.
+  `crates/fleet-tools/src/bin/opamp-package-fetch.rs`. Each names its document.
 

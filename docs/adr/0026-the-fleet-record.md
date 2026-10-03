@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/server/src/fleet.rs, crates/server/src/agent_store.rs, crates/server/src/labels.rs, the /api/v1/agents routes, stale_after_secs in server.toml, the agents/ and labels/ directories under config_dir
+- **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs, crates/fleet-server/src/labels.rs, the /api/v1/agents routes, stale_after_secs in server.toml, the agents/ and labels/ directories under config_dir
 
 ## Context
 
@@ -294,7 +294,7 @@ filters); bulk labelling.
 
 ## Enforcement
 
-- [`fleet.rs`](../../crates/server/src/fleet.rs) unit tests:
+- [`fleet.rs`](../../crates/fleet-server/src/fleet.rs) unit tests:
   `an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up`,
   `an_agent_inside_its_budget_is_not_stale`, `an_agent_that_promised_no_heartbeat_never_goes_stale`,
   `an_offered_heartbeat_interval_sets_the_budget`, `a_disconnected_agent_is_forgotten`,
@@ -305,17 +305,17 @@ filters); bulk labelling.
   `a_restored_agent_is_not_demanded_a_full_report`, `a_heartbeat_writes_nothing`,
   `forgetting_an_agent_removes_its_stored_record`, `a_rekeyed_agent_moves_its_stored_record`,
   `a_queued_restart_survives_a_restart`.
-- [`agent_store.rs`](../../crates/server/src/agent_store.rs) unit tests:
+- [`agent_store.rs`](../../crates/fleet-server/src/agent_store.rs) unit tests:
   `a_record_survives_the_round_trip`, `a_heartbeat_does_not_change_the_durable_digest`,
   `remove_deletes_and_tolerates_absence`, `rekey_moves_the_record`,
   `a_corrupt_record_fails_the_load_by_name`.
-- [`labels.rs`](../../crates/server/src/labels.rs) unit tests:
+- [`labels.rs`](../../crates/fleet-server/src/labels.rs) unit tests:
   `a_label_is_matched_like_a_reported_attribute`, `a_label_never_overrides_what_the_agent_reports`,
   `an_agent_that_reported_nothing_can_still_be_labelled`, `empty_keys_and_values_are_refused`,
   `labels_survive_a_reopen_and_an_empty_set_clears_them`.
-- [`rest_api.rs`](../../crates/server/tests/rest_api.rs):
+- [`rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
   `forgetting_an_agent_that_is_still_reporting_is_refused`,
   `a_silent_agent_is_forgotten_and_returns_as_a_stranger`, `forgetting_what_is_not_there_is_reported`,
   `a_label_moves_an_agent_into_a_rollout_ring`, `a_label_may_not_restate_what_the_agent_reports`,
-  `forgetting_an_agent_keeps_its_labels`; [`packages.rs`](../../crates/server/tests/packages.rs)
+  `forgetting_an_agent_keeps_its_labels`; [`packages.rs`](../../crates/fleet-server/tests/packages.rs)
   `a_label_aims_a_set_at_part_of_the_fleet`.

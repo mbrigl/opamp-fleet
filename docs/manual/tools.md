@@ -19,7 +19,7 @@ signing lives, which `opamp-package-fetch` deliberately does not do.
 
 ## Running them
 
-Both live in their own crate, `package-tools`, so neither is part of what runs on a managed host
+Both live in their own crate, `fleet-tools`, so neither is part of what runs on a managed host
 ([ADR-0011](../adr/0011-workspace-crates-and-configuration.md)). From a source
 checkout:
 
@@ -28,7 +28,7 @@ $ cargo run --bin opamp-package-fetch -- --agent telegraf --no-upload
 $ cargo run --bin opamp-package-sign -- pack --out promtail-3.0.0.tar.gz ./promtail
 ```
 
-`--bin` resolves across the workspace, so naming the crate is optional; `-p package-tools` is
+`--bin` resolves across the workspace, so naming the crate is optional; `-p fleet-tools` is
 there when you want to be explicit.
 
 **A release does not ship them.** The `.tar.gz` artifacts and the `.deb`/`.rpm`/`.msi` installers

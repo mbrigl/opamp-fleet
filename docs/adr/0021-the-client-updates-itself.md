@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/selfupdate.rs, the Client's own Agent in crates/client/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property
+- **Applies to:** crates/fleet-agent/src/selfupdate.rs, the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property
 
 ## Context
 
@@ -226,33 +226,33 @@ different Windows layout.
 
 ## Enforcement
 
-- [`tests/self_update_e2e.rs`](../../crates/client/tests/self_update_e2e.rs), with the real Server
+- [`tests/self_update_e2e.rs`](../../crates/fleet-agent/tests/self_update_e2e.rs), with the real Server
   and Client binaries: `the_client_installs_a_version_of_itself_and_reports_it_installed`,
   `managed_processes_stop_cleanly_on_the_self_update_restart`,
   `a_set_at_the_running_version_reaches_nobody`,
   `a_package_under_another_name_is_refused_and_the_client_keeps_running`.
-- [`selfupdate.rs`](../../crates/client/src/selfupdate.rs): `install_refuses_a_downgrade`,
+- [`selfupdate.rs`](../../crates/fleet-agent/src/selfupdate.rs): `install_refuses_a_downgrade`,
   `install_refuses_a_version_that_would_escape_the_layout`, the `the_probe_refuses_*` tests,
   `the_probe_ignores_the_commit_a_build_came_from`,
   `taking_over_needs_the_binary_to_be_the_version_the_marker_names`,
   `the_old_version_finding_a_marker_reports_the_update_as_failed`,
   `committing_replaces_the_marker_with_an_installed_outcome`; and
   `an_unreadable_configuration_resolves_the_update_in_flight` in
-  [`service/runtime.rs`](../../crates/client/src/service/runtime.rs).
+  [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs).
 - The consent: `self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name` and
   `an_empty_self_update_package_is_refused_while_the_consent_stands`
-  ([`config.rs`](../../crates/client/src/config.rs)),
+  ([`config.rs`](../../crates/fleet-agent/src/config.rs)),
   `the_self_agent_refuses_a_package_it_was_not_configured_to_take`
-  ([`supervisor/agent.rs`](../../crates/client/src/supervisor/agent.rs)),
+  ([`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)),
   `install_carries_the_self_update_answer_without_a_terminal`
-  ([`cli.rs`](../../crates/client/src/cli.rs)),
+  ([`cli.rs`](../../crates/fleet-agent/src/cli.rs)),
   `declined_sections_are_absent_rather_than_empty_and_the_consent_is_always_written`
-  ([`config_init.rs`](../../crates/client/src/config_init.rs)),
+  ([`config_init.rs`](../../crates/fleet-agent/src/config_init.rs)),
   `the_self_update_answer_rides_both_register_actions` and
   `the_withdrawal_condition_reads_both_spellings_of_off`
-  ([`tests/msi_exe_command.rs`](../../crates/client/tests/msi_exe_command.rs)).
+  ([`tests/msi_exe_command.rs`](../../crates/fleet-agent/tests/msi_exe_command.rs)).
 - The real service manager's restart: `the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop`
-  in [`tests/service_smoke.rs`](../../crates/client/tests/service_smoke.rs), weekly on Windows via
+  in [`tests/service_smoke.rs`](../../crates/fleet-agent/tests/service_smoke.rs), weekly on Windows via
   [`service-smoke.yml`](../../.github/workflows/service-smoke.yml).
 
 **Not mechanically decidable:** the non-atomic Windows pointer switch is a window no test can hit

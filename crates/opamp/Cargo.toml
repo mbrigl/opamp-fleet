@@ -1,28 +1,58 @@
 [package]
 name = "opamp"
-description = "Shared OpAMP wire layer: generated protobuf types and WebSocket framing (ADR-0010)"
-version.workspace = true
+description = "The OpAMP wire layer: protobuf types generated from the specification, WebSocket framing, and the endpoint's body rules"
+# The Baseline's MAJOR.MINOR, and a patch number of the crate's own (ADR-0031) — not the product's
+# release number in `[workspace.package]`. A test fails when it disagrees with `BASELINE`.
+version = "0.20.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = true
+repository = "https://github.com/mbrigl/opamp-fleet"
+readme = "README.md"
+keywords = ["opamp", "opentelemetry", "protobuf", "agent-management"]
+categories = ["network-programming", "encoding"]
+include = ["build.rs", "src/**", "proto/**", "README.md", "LICENSE", "NOTICE"]
+
+# Neither side is on by default: without features this is the wire layer alone, and a program that
+# wants only the types pulls no web framework (ADR-0031).
+[features]
+client = ["dep:tokio", "dep:tracing", "dep:ring", "dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest"]
+server = ["dep:tokio", "dep:tracing", "dep:axum"]
 
 [dependencies]
 prost.workspace = true
 uuid.workspace = true
-# ADR-0011: the endpoint's gzip MUST and the PEM readers, each written once for both ends. All
-# three are already workspace dependencies of both binaries, so nothing new is linked into either.
+# ADR-0011: the endpoint's gzip MUST, written once for both ends.
 flate2.workspace = true
-rustls.workspace = true
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# The reconnect jitter's randomness — the `ring` both ends already link (ADR-0012).
+ring = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
-# Generating a certificate and key for the PEM tests, rather than pasting a fixture that expires.
-rcgen.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+
+[[test]]
+name = "server_endpoint"
+required-features = ["server"]
+
+# docs.rs shows every part, each marked with the feature it needs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [build-dependencies]
 prost-build.workspace = true
 protox.workspace = true
-# Resolving the baked version from the repository's tags (ADR-0013). A build dependency only: it is
-# linked into no artifact, and it sits here rather than in each binary so that both ends report a
-# version computed by one implementation.
-git2.workspace = true

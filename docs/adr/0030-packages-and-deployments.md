@@ -1,9 +1,9 @@
 # ADR-0030: A Package is what an Agent type runs at a version, and a Deployment aims Packages at a channel, signs them, and is the only thing rolled out — an Agent belongs to at most one
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-08-23
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-01
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/server/src/packages.rs`, `crates/server/src/deployments.rs`, the package and deployment routes of `crates/server/src/api.rs`, the package assignment in `crates/server/src/fleet.rs` and `crates/server/src/agent_store.rs`, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md`
+- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package and deployment routes of `crates/fleet-server/src/api.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md`
 
 ## Context
 
@@ -154,7 +154,10 @@ with an Agent belonging to at most one.
     on that Package (removing it) are refused (`409`). The re-offer gate is the package hash, which
     does not cover the signature: a changed signature would never reach an Agent installing against
     the old one, and a removed one would silently turn a signed rollout unsigned for any Agent that
-    has not finished. Everything else stays editable: the Selector always; adding a Package for a
+    has not finished. For the same reason **the Deployment itself cannot be deleted while an
+    Agent's assignment names it** (`409`): the offer would stand without its signatures. Rolling
+    those Agents out through another Deployment, or deleting the Package, ends the offer first.
+    Everything else stays editable: the Selector always; adding a Package for a
     type the channel does not hold; and **swapping the version a channel holds** — the Agents
     already released keep their pinned Package, the new version shows as waiting, and the next press
     moves them. That is how a rollout proceeds.
@@ -268,18 +271,17 @@ this object is called a Deployment.
 
 ## Enforcement
 
-- `crates/server/src/deployments.rs`:
+- `crates/fleet-server/src/deployments.rs`:
   `two_deployments_matching_one_agent_are_a_conflict_that_names_them`,
   `a_narrower_selector_does_not_win_over_a_wider_one`, `an_agent_no_ring_claims_is_not_a_conflict`,
   `a_deployment_must_name_the_ring_it_aims_at`, `a_deployment_holds_one_package_per_agent_type`,
   `a_signature_needs_its_package_and_leaves_with_it`, `a_deployment_survives_a_reopen`,
   `the_selector_stays_editable_and_keeps_what_the_ring_holds`,
   `an_unreadable_file_fails_the_open_and_names_it`, `the_store_and_its_files_are_owner_only`.
-- `crates/server/src/packages.rs`: `only_the_package_its_ring_holds_is_a_candidate`,
-  `an_agent_without_a_ring_is_offered_no_candidate`,
+- `crates/fleet-server/src/packages.rs`: `only_the_package_its_ring_holds_is_a_candidate`,
   `a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way`,
   `identity_tokens_are_bounded`.
-- `crates/server/tests/packages.rs`: `a_selector_aims_a_rollout_at_part_of_the_fleet`,
+- `crates/fleet-server/tests/packages.rs`: `a_selector_aims_a_rollout_at_part_of_the_fleet`,
   `a_canary_ring_is_a_selector_aim_and_two_acts`,
   `an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why`,
   `a_label_aims_a_set_at_part_of_the_fleet`, `a_deployment_without_a_selector_is_refused`,
@@ -290,11 +292,12 @@ this object is called a Deployment.
   `a_signature_on_the_artifact_upload_is_refused_by_name`,
   `a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing`,
   `the_per_agent_act_refuses_to_pick_a_side`, `a_ring_freezes_what_it_has_released`,
+  `a_deployment_that_released_a_package_refuses_to_be_deleted`,
   `a_packages_entry_shows_the_hash_an_agent_verifies_against`,
   `the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_agent`,
   `a_set_says_how_many_agents_it_reaches`.
-- `crates/server/tests/rest_api.rs`: `the_openapi_document_describes_the_contract` (the Deployment
+- `crates/fleet-server/tests/rest_api.rs`: `the_openapi_document_describes_the_contract` (the Deployment
   routes are in the contract, and no Selector or rollout route on a Package is).
-- `crates/server/src/fleet.rs`: `a_record_without_assignments_loads_assigned_to_nothing`;
-  `crates/server/src/agent_store.rs`: `a_pre_adr_0067_record_restores_with_no_assignments`.
-- `crates/client/src/supervisor/agent.rs`: `an_addon_package_is_refused_instead_of_overwriting_the_binary`.
+- `crates/fleet-server/src/fleet.rs`: `a_record_without_assignments_loads_assigned_to_nothing`;
+  `crates/fleet-server/src/agent_store.rs`: `a_pre_adr_0027_record_restores_with_no_assignments`.
+- `crates/fleet-agent/src/supervisor/agent.rs`: `an_addon_package_is_refused_instead_of_overwriting_the_binary`.

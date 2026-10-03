@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/server/src/transport.rs` and `crates/client/src/transport/`, TLS in `crates/server/src/tls.rs` and `crates/client/src/tls.rs`, how the Server binds and serves in `crates/server/src/listen.rs` and `main.rs`, and the `listen`, `[rest]` and `[tls]` keys of `server.toml`
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, how the Server binds and serves in `crates/fleet-server/src/listen.rs` and `main.rs`, and the `listen`, `[rest]` and `[tls]` keys of `server.toml`
 
 ## Context
 
@@ -133,7 +133,7 @@ plane — each built in one place that bounds connection setup.
     `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and sets
     `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s — hyper's own default, and what axum applies
     once it installs the timer itself). The timeout is a parameter of the serving function so a test
-    can drive it short. `hyper-util` is a direct dependency of `crates/server` for this.
+    can drive it short. `hyper-util` is a direct dependency of `crates/fleet-server` for this.
 
 12. **The TLS handshake deadline is stated, not inherited.** `TLS_HANDSHAKE_TIMEOUT` is 10 seconds
     on both planes' acceptors — `axum_server`'s default value, named in this code so it reads as a
@@ -263,31 +263,31 @@ Endpoint — which this bound does not cover.
 
 ## Enforcement
 
-- [`crates/server/tests/http_transport.rs`](../../crates/server/tests/http_transport.rs) —
+- [`crates/fleet-server/tests/http_transport.rs`](../../crates/fleet-server/tests/http_transport.rs) —
   `gzip_request_bodies_are_accepted`, `an_oversized_request_body_is_refused_with_413`,
   `a_gzip_body_that_inflates_past_the_limit_is_refused_with_413`,
   `transport_detection_rejects_a_missing_protobuf_content_type` (clauses 1, 3).
-- [`crates/server/tests/ws_transport.rs`](../../crates/server/tests/ws_transport.rs) —
+- [`crates/fleet-server/tests/ws_transport.rs`](../../crates/fleet-server/tests/ws_transport.rs) —
   `a_framed_report_is_answered`, `an_oversized_frame_closes_the_connection_with_1009` (clauses 1, 3).
-- [`crates/client/src/config.rs`](../../crates/client/src/config.rs) —
+- [`crates/fleet-agent/src/config.rs`](../../crates/fleet-agent/src/config.rs) —
   `scheme_selects_the_transport`, `rejects_an_unknown_scheme_and_unknown_keys` (clause 2);
-  [`crates/client/tests/http_transport_e2e.rs`](../../crates/client/tests/http_transport_e2e.rs) —
+  [`crates/fleet-agent/tests/http_transport_e2e.rs`](../../crates/fleet-agent/tests/http_transport_e2e.rs) —
   `a_configuration_rollout_reaches_a_polling_client` (clause 2).
-- [`crates/client/src/transport/mod.rs`](../../crates/client/src/transport/mod.rs) —
+- [`crates/fleet-agent/src/transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs) —
   `backoff_doubles_and_caps_within_its_jittered_bounds`, `two_backoffs_do_not_produce_the_same_ladder`
   (clause 4).
 - Clause 5: reqwest's `rustls-no-provider` feature refuses to build a client without the
   process-wide `ring` provider, and a dependency pulling `aws-lc-rs` fails to build in the Dev
-  Container, which has no cmake; [`crates/server/tests/mutual_tls.rs`](../../crates/server/tests/mutual_tls.rs)
+  Container, which has no cmake; [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs)
   exercises the rustls stack on both ends.
-- [`crates/server/src/config.rs`](../../crates/server/src/config.rs) —
+- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
   `the_operator_plane_defaults_to_loopback_and_is_configurable`, `two_planes_on_one_address_are_refused`
   (clauses 6, 7, 10).
-- [`crates/server/tests/packages.rs`](../../crates/server/tests/packages.rs) —
+- [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs) —
   `the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane`;
-  [`crates/server/tests/auth.rs`](../../crates/server/tests/auth.rs) —
+  [`crates/fleet-server/tests/auth.rs`](../../crates/fleet-server/tests/auth.rs) —
   `the_rest_api_stays_open_on_its_own_listener_when_the_opamp_endpoint_is_guarded` (clauses 6, 8).
-- [`crates/server/tests/connection_setup.rs`](../../crates/server/tests/connection_setup.rs) —
+- [`crates/fleet-server/tests/connection_setup.rs`](../../crates/fleet-server/tests/connection_setup.rs) —
   `a_connection_that_never_finishes_its_headers_is_hung_up_on`,
   `an_established_session_outlives_the_header_bound` (clauses 11, 14).
 

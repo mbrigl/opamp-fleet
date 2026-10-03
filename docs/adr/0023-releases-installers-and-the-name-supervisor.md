@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
-- **Applies to:** .github/workflows/release.yml, packaging/, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of crates/client/Cargo.toml, the program, Agent type and configuration-file names of the Client, `service install --endpoint`
+- **Applies to:** .github/workflows/release.yml, packaging/, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of crates/fleet-agent/Cargo.toml, the program, Agent type and configuration-file names of the Client, `service install --endpoint`
 
 ## Context
 
@@ -47,7 +47,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
 ### The name
 
 1. **The Agent type is `supervisor`** — the constant `CLIENT_AGENT_TYPE` every Client reports as
-   `service.name` ([`agent.rs`](../../crates/client/src/supervisor/agent.rs)), the same on every
+   `service.name` ([`agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)), the same on every
    host, because every Client in a fleet is the same kind of thing.
 
 2. **The package that carries the Client is `supervisor` too.** `[self_update] package` defaults to
@@ -58,7 +58,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
    ([ADR-0022](0022-a-supervisors-directory-program-and-set.md)) is typed `supervisor` as well.
 
 3. **The program is `supervisor`.** `supervisor.exe` on Windows: the binary Cargo builds
-   (`[[bin]] name = "supervisor"` in the package `client`), the file in every version directory
+   (`[[bin]] name = "supervisor"` in the package `fleet-agent`), the file in every version directory
    (`supervisor-<MAJOR.MINOR.PATCH>-<hash>`), the member a package artifact carries, the payload file
    under `/usr/libexec/<PRODUCT_NAME>/`, the log file, the self-check token and the CLI's own name.
    The configuration file is **`supervisor.toml`**, and the `--config` default with it. What names
@@ -67,7 +67,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
    ([ADR-0014](0014-the-client-as-an-installed-service.md) clauses 2–4). The program's name is not
    derived from the product's, so one published package serves every variant build: the member a
    self-update extracts is the same in all of them. Two names deliberately stay where they are: the
-   Cargo package `client`, a build-time identifier that never leaves the repository, and the OTLP
+   Cargo package `fleet-agent`, a build-time identifier that never leaves the repository, and the OTLP
    instrumentation scope `opamp-fleet-client`, which names the library a signal came from —
    renaming it would move every operator's dashboards.
 
@@ -277,7 +277,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
     | `.rpm` | `cargo-generate-rpm`, no `rpmbuild` needed | both Linux runners, natively |
     | `.msi` | WiX Toolset 6 as the `wix` .NET tool, with its UI extension | the Windows runner |
 
-    Package metadata lives in `crates/client/Cargo.toml` under `[package.metadata.deb]` and
+    Package metadata lives in `crates/fleet-agent/Cargo.toml` under `[package.metadata.deb]` and
     `[package.metadata.generate-rpm]`, reading the workspace's version, licence and description;
     `cargo-deb` derives `Depends` from what the binary links (`$auto`). The RPM `Release` is `1` and
     stays `1`, and no epoch or `~` mangling is needed, because a version is released once and is
@@ -419,26 +419,26 @@ the fleet; publishing variant builds.
   `rpm -qp --scripts` that `service install`, `service uninstall`, `ln -sfn`, the layout-root and
   data-root removals are in the package, and that the RPM's architecture is the ecosystem's
   (clauses 8, 12, 14).
-- [`supervisor/agent.rs`](../../crates/client/src/supervisor/agent.rs):
+- [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs):
   `the_clients_own_agent_type_is_the_one_name_this_program_has`,
   `the_clients_own_agent_reports_its_type_and_its_configured_name_separately` (clauses 1, 3, 4).
-- [`config.rs`](../../crates/client/src/config.rs):
+- [`config.rs`](../../crates/fleet-agent/src/config.rs):
   `the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted` (clause 5).
-- [`service/layout.rs`](../../crates/client/src/service/layout.rs):
+- [`service/layout.rs`](../../crates/fleet-agent/src/service/layout.rs):
   `the_directory_name_is_base_plus_hash_never_the_prerelease`,
   `restaging_identical_bytes_leaves_the_staged_binary_untouched` (clauses 3, 14).
-- [`tests/msi_exe_command.rs`](../../crates/client/tests/msi_exe_command.rs) parses the WiX source's
+- [`tests/msi_exe_command.rs`](../../crates/fleet-agent/tests/msi_exe_command.rs) parses the WiX source's
   command lines as the C runtime will: `register_service_with_endpoint_survives_the_crt`,
   `register_service_survives_the_crt`,
   `the_msi_names_no_root_so_no_directory_property_reaches_a_command_line`,
   `stop_and_unregister_survive_the_crt` (clauses 12, 15) and
   `endpoint_prefill_is_the_development_server_and_interactive_only` (clause 16).
 - `--endpoint` (clause 18): `install_takes_an_endpoint_without_a_terminal` and
-  `an_endpoint_and_interactive_are_refused_together` in [`cli.rs`](../../crates/client/src/cli.rs);
+  `an_endpoint_and_interactive_are_refused_together` in [`cli.rs`](../../crates/fleet-agent/src/cli.rs);
   `an_endpoint_given_is_written_and_loads`, `a_bad_endpoint_is_refused_before_anything_is_written`,
   `an_endpoint_given_never_overwrites_an_existing_file` and
   `an_endpoint_is_validated_by_the_loaders_own_rule` in
-  [`config_init.rs`](../../crates/client/src/config_init.rs).
+  [`config_init.rs`](../../crates/fleet-agent/src/config_init.rs).
 
 **Not mechanically decidable:** what `dpkg`, `rpm` and Windows Installer do with the maintainer
 scripts and the MSI tables on a real host — the upgrade fall-through, the rpm `%posttrans` ordering,

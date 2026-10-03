@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/server/src/packages.rs`, the package routes and the download route of `crates/server/src/api.rs`, `packages_dir` and the package limits in `crates/server/src/config.rs`, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages tab of the bundled UI
+- **Applies to:** `crates/fleet-server/src/packages.rs`, the package routes and the download route of `crates/fleet-server/src/api.rs`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages tab of the bundled UI
 
 ## Context
 
@@ -283,7 +283,7 @@ signatures; a retention policy for superseded packages.
 
 ## Enforcement
 
-- `crates/server/src/packages.rs` unit tests: `a_set_survives_a_reopen`,
+- `crates/fleet-server/src/packages.rs` unit tests: `a_set_survives_a_reopen`,
   `fit_is_mandatory_platform_and_type`, `both_sides_of_the_comparison_are_canonicalised`,
   `the_offer_carries_a_download_url_naming_the_identity`, `deletion_frees_entries_and_sets`,
   `a_corrupt_artifact_fails_reopen`, `the_store_and_its_metadata_are_owner_only`,
@@ -291,7 +291,7 @@ signatures; a retention policy for superseded packages.
 - `crates/opamp/src/attributes.rs`: `folds_the_spellings_this_project_does_not_control`,
   `what_rust_calls_this_machine_folds_onto_a_canonical_token`,
   `an_unknown_token_passes_through_unchanged`.
-- `crates/server/tests/packages.rs`: `an_uploaded_set_is_offered_downloaded_and_gated`,
+- `crates/fleet-server/tests/packages.rs`: `an_uploaded_set_is_offered_downloaded_and_gated`,
   `the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane`,
   `no_offer_without_the_capability`, `an_entry_needs_its_set_first`,
   `an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact`,
@@ -299,11 +299,11 @@ signatures; a retention policy for superseded packages.
   `a_referenced_entry_is_offered_from_its_source_and_not_from_here`,
   `a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not`,
   `a_source_url_aimed_at_an_internal_address_is_refused`, `a_set_reaches_only_agents_of_its_type`.
-- `crates/server/src/labels.rs`: `a_label_never_overrides_what_the_agent_reports`.
-- `crates/client/src/config.rs`: `the_retired_package_keys_are_refused`.
-- `crates/client/tests/packages_e2e.rs` and `crates/client/tests/self_update_e2e.rs` run the real
+- `crates/fleet-server/src/labels.rs`: `a_label_never_overrides_what_the_agent_reports`.
+- `crates/fleet-agent/src/config.rs`: `the_retired_package_keys_are_refused`.
+- `crates/fleet-agent/tests/packages_e2e.rs` and `crates/fleet-agent/tests/self_update_e2e.rs` run the real
   Server and Client against one store across the reported Platform.
 
 **Not mechanically decidable:** that the Server never opens an artifact (clause 6) is an absence —
 no test can show a code path that does not exist; review of every change touching
-`crates/server/src/packages.rs` and `crates/server/src/api.rs` keeps it.
+`crates/fleet-server/src/packages.rs` and `crates/fleet-server/src/api.rs` keeps it.

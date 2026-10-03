@@ -236,12 +236,19 @@ Use these exact words in code, comments, documentation, and ADRs.
   differ from the remote configuration (it may merge in local configuration, or have rejected the
   remote one).
 - **Health** — an Agent's self-reported liveness and status.
-- **Selector** — the rule by which the Server addresses a **subset** of the fleet for a configuration,
-  so a change reaches the matching Agents and leaves the rest running what they already run. It is how
-  a configuration is rolled out to part of the fleet rather than all of it.
-- **Package** — a versioned, downloadable software artifact an Agent installs, verified against a
-  content hash (and optionally a signature). The Server offers Packages; an Agent reports the status of
-  each. This is how the Server updates an agent's software, not only its configuration.
+- **Selector** — the rule by which the Server addresses a **subset** of the fleet for a Configuration
+  or a Deployment, so a change reaches the matching Agents and leaves the rest running what they
+  already run. One mechanism with two subjects, not two mechanisms.
+- **Package** — a versioned, downloadable software artifact an Agent installs, identified by the
+  **Agent type it is built for and its version**; its display name is derived from the two. It is
+  verified against a content hash, and against a signature where one is configured — the signature
+  travelling with the Deployment that offers it rather than with the artifact record. The Server
+  offers Packages; an Agent reports the status of each. This is how the Server updates an agent's
+  software, not only its configuration.
+- **Deployment** — a named set of Packages, aimed at a subset of the Fleet by a Selector and
+  carrying the signature of each Package's artifact. It is the only thing that is rolled out. An
+  Agent belongs to **at most one**: two Deployments matching one Agent is a conflict, and that
+  Agent is offered nothing new until it is resolved.
 - **Updater** — the separate process that applies a Package: it stops the target (the Managed Process,
   or the Client itself), replaces its binary, restarts it, and rolls back on failure. A running process
   cannot reliably replace its own binary, so this work is handed off across a process boundary.

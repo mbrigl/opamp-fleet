@@ -16,14 +16,14 @@ is a conformance question: the Baseline requires none of it.
 ## Scope
 
 The link this document is about is **Client ↔ Server**. In this project's vocabulary a Supervisor
-lives *inside* the Client ([`crates/client/src/supervisor/`](../crates/client/src/supervisor/)) and
+lives *inside* the Client ([`crates/fleet-agent/src/supervisor/`](../crates/fleet-agent/src/supervisor/)) and
 does not speak to the Server itself — the Client carries every Supervisor's Agent over its one
 connection (ADR-0009, ADR-0015). Where other OpAMP material says "Supervisor ↔ Server", this is the
 link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
 protocol: the **Supervisor Endpoint**, the loopback WebSocket each Supervisor serves for a Managed
-Process's `opampextension` ([`endpoint.rs`](../crates/client/src/supervisor/endpoint.rs)). It is
+Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs)). It is
 treated separately at the end.
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
@@ -48,7 +48,7 @@ has:
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
-  powers of a CA ([`ca.rs`](../crates/server/src/ca.rs)).
+  powers of a CA ([`ca.rs`](../crates/fleet-server/src/ca.rs)).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **Connection setup bounded on both of the Server's planes** (ADR-0012): a peer has 30 seconds to
@@ -195,7 +195,7 @@ the configuration file altogether.
 ⚪ **H8 — Confirm the file mode of issued key material.** *(verify first — see
 [Unverified claims](#unverified-claims))*
 The Client writes its configuration with mode `0600`
-([`reconfigure.rs`](../crates/client/src/reconfigure.rs)). Whether the private key obtained through
+([`reconfigure.rs`](../crates/fleet-agent/src/reconfigure.rs)). Whether the private key obtained through
 the CSR flow and the cache of rotated credentials get the same treatment in the state directory has
 not been established. If they do, this item disappears; if they do not, it is the cheapest fix in
 the document.
@@ -208,7 +208,7 @@ The listener split this measure asked for is **done**: the REST API and the UI h
 listener (ADR-0012, superseding ADR-0011 on that point), and the OpAMP endpoint no longer shares a
 port with a browser. What has *not* changed is the verifier: client authentication is still
 *optional* at the TLS layer and required on the route
-([`tls.rs`](../crates/server/src/tls.rs)) — and the reason is now a different one. The Agent plane
+([`tls.rs`](../crates/fleet-server/src/tls.rs)) — and the reason is now a different one. The Agent plane
 also serves the **package download**, which a Client fetches presenting no certificate (the artifact
 is protected by its hash and signature, ADR-0019), so requiring one in the handshake today would
 break every rollout.
@@ -367,7 +367,7 @@ measure that has not been taken.
 | H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
 | H16 | Connections past the configured cap are refused while the ones already established keep working, and the cap is reached by opening sockets that send nothing — the same peer ADR-0012 hangs up on, in quantity. |
 | H17 | An HTTP/2 peer that opens streams past `max_concurrent_streams` is refused, and one that stops answering keep-alive pings is dropped. Neither happens today, which is what the check must first show. |
-| H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
+| H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/fleet-server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
 
 Two further points hold across the table. **H3 and H9 belong in the interoperability suite**, not only
 in this project's own tests: both concern what the Server does with a peer it did not write, and

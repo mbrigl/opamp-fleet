@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/client/src/cli.rs`, `crates/client/src/main.rs`, `crates/client/src/service/`, `crates/client/src/config_init.rs`, `crates/client/src/logging.rs`, `crates/client/src/product.rs`, `crates/client/build.rs`, and every path, name or account an installed Client uses
+- **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, and every path, name or account an installed Client uses
 
 ## Context
 
@@ -60,12 +60,12 @@ and may run under an operator-named account that owns what it rewrites.
    file-configured ([ADR-0011](0011-workspace-crates-and-configuration.md)) and a registered
    service carries the configuration's *path*, never its content. clap's `version` is wired to
    `opamp::version::current()` ([ADR-0013](0013-versions.md) clause 5). The daemon code lives in
-   `crates/client/src/service/` (`runtime`, `layout`, `manager`, `run_as`, and the Windows-only
+   `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, and the Windows-only
    `windows`, `windows_config`, `windows_rights`), behind the narrow `ServiceControl` seam
    (`start`, `stop`, `state`) that the self-update depends on. Errors are `Result<_, String>`.
 
 2. **`PRODUCT_NAME` is a build-time constant.** Default **`opamp-fleet`**, overridable with
-   `OPAMP_FLEET_PRODUCT_NAME` for a variant build. `crates/client/build.rs` validates it against
+   `OPAMP_FLEET_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against
    the intersection of the systemd-unit, launchd-label, SCM-name and directory-name grammars —
    lowercase `[a-z0-9-]`, 1–32 characters, no leading or trailing `-`, never a Windows reserved
    device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`) — and **fails the build**
@@ -464,28 +464,28 @@ reload on `SIGHUP`; `Type=notify` integration.
 
 ## Enforcement
 
-- `crates/client/build.rs` fails the build on a `PRODUCT_NAME` outside the grammar or a blank
-  display name; `crates/client/src/product.rs` `product_name_satisfies_the_grammar`,
+- `crates/fleet-agent/build.rs` fails the build on a `PRODUCT_NAME` outside the grammar or a blank
+  display name; `crates/fleet-agent/src/product.rs` `product_name_satisfies_the_grammar`,
   `display_name_is_prose`.
-- `crates/client/src/service/manager.rs`: `every_backend_renders_the_same_name`,
+- `crates/fleet-agent/src/service/manager.rs`: `every_backend_renders_the_same_name`,
   `the_service_is_named_after_the_product_not_the_program`, `the_service_name_carries_no_suffix`,
   `the_names_a_human_reads`, `the_installed_command_line_is_the_marker_plus_absolute_paths`,
   `both_platforms_restart_after_the_same_delay`,
   `the_default_root_is_one_level_named_after_the_product`,
   `the_linux_system_layout_executes_from_opt`, `no_other_platform_splits`.
-- `crates/client/src/cli.rs`: `instance_is_not_a_flag_any_more`, `both_roots_can_be_named`,
+- `crates/fleet-agent/src/cli.rs`: `instance_is_not_a_flag_any_more`, `both_roots_can_be_named`,
   `service_verbs_parse_with_scope_and_root`, `the_installed_command_line_parses`,
   `install_is_not_interactive_unless_asked`, `bare_invocation_has_no_subcommand`.
-- `crates/client/src/service/layout.rs`: `the_directory_name_is_base_plus_hash_never_the_prerelease`,
+- `crates/fleet-agent/src/service/layout.rs`: `the_directory_name_is_base_plus_hash_never_the_prerelease`,
   `set_current_points_and_repoints`, `stage_writes_binary_manifest_and_pointer`,
   `restaging_identical_bytes_leaves_the_staged_binary_untouched`,
   `restaging_replaces_a_staged_binary_with_different_bytes`,
   `a_torn_pointer_is_healed_a_correct_one_left_alone`,
   `the_layout_is_found_from_the_pointer_the_service_was_registered_against`.
-- `crates/client/src/service/run_as.rs`: `windows_forms_are_the_passwordless_ones`,
+- `crates/fleet-agent/src/service/run_as.rs`: `windows_forms_are_the_passwordless_ones`,
   `a_missing_account_is_refused_with_the_way_out`,
   `the_handover_walks_the_tree_and_skips_what_is_missing`.
-- `crates/client/src/config_init.rs`: `an_existing_file_is_never_overwritten`,
+- `crates/fleet-agent/src/config_init.rs`: `an_existing_file_is_never_overwritten`,
   `run_keeps_an_existing_file_without_asking`,
   `an_endpoint_given_never_overwrites_an_existing_file`,
   `interactive_without_a_terminal_fails_instead_of_blocking`,
@@ -493,15 +493,15 @@ reload on `SIGHUP`; `Type=notify` integration.
   `a_private_ca_is_only_asked_about_where_tls_applies`,
   `the_rendered_file_loads_as_what_was_answered`,
   `a_bad_endpoint_is_refused_before_anything_is_written`.
-- Logging: `crates/client/tests/logging.rs` (`a_service_run_writes_a_log_file`,
-  `a_foreground_run_writes_no_log_file`); `crates/client/src/config.rs`
-  `the_log_file_is_on_by_default_and_its_retention_is_not_optional`; `crates/client/src/logging.rs`
+- Logging: `crates/fleet-agent/tests/logging.rs` (`a_service_run_writes_a_log_file`,
+  `a_foreground_run_writes_no_log_file`); `crates/fleet-agent/src/config.rs`
+  `the_log_file_is_on_by_default_and_its_retention_is_not_optional`; `crates/fleet-agent/src/logging.rs`
   `the_writer_discards_until_a_file_is_opened`, `the_log_directory_hangs_off_the_state_directory`.
-- `crates/client/tests/shutdown.rs` `sigterm_shuts_the_client_down_cleanly`;
-  `crates/client/tests/service_smoke.rs`
+- `crates/fleet-agent/tests/shutdown.rs` `sigterm_shuts_the_client_down_cleanly`;
+  `crates/fleet-agent/tests/service_smoke.rs`
   `the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop`, run with
   `--ignored` by the `service-smoke` workflow on an ephemeral runner.
-- `crates/client/tests/msi_exe_command.rs`
+- `crates/fleet-agent/tests/msi_exe_command.rs`
   `the_msi_names_no_root_so_no_directory_property_reaches_a_command_line`; the `.rpm` scriptlet
   assertions in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) require the
   removal to take the layout root and the purge the data root.

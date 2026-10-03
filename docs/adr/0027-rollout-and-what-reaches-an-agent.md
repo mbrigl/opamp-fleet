@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
-- **Applies to:** the assignments and rollout acts in `crates/server/src/fleet.rs`, the saved and retained revisions in `crates/server/src/configs.rs`, the matching and offer functions of `crates/server/src/packages.rs`, the rollout routes of `crates/server/src/api.rs`, the persisted Agent record, the rollout column of the bundled UI, the Client's check of an offer for its own package
+- **Applies to:** the assignments and rollout acts in `crates/fleet-server/src/fleet.rs`, the saved and retained revisions in `crates/fleet-server/src/configs.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the rollout routes of `crates/fleet-server/src/api.rs`, the persisted Agent record, the rollout column of the bundled UI, the Client's check of an offer for its own package
 
 ## Context
 
@@ -271,13 +271,13 @@ Server-driven downgrade.
 
 ## Enforcement
 
-- `crates/server/src/configs.rs`: `a_saved_configuration_reaches_nobody_without_an_assignment`,
+- `crates/fleet-server/src/configs.rs`: `a_saved_configuration_reaches_nobody_without_an_assignment`,
   `an_assignment_pins_a_snapshot_and_later_edits_wait`, `retain_only_collects_unreferenced_revisions`,
   `candidates_follow_the_fit_and_none_means_nothing_to_roll_out`.
-- `crates/server/src/fleet.rs`: `rollout_acts_assign_and_a_late_agent_waits`.
-- `crates/server/tests/rest_api.rs`: `a_configuration_waits_until_it_is_rolled_out`,
+- `crates/fleet-server/src/fleet.rs`: `rollout_acts_assign_and_a_late_agent_waits`.
+- `crates/fleet-server/tests/rest_api.rs`: `a_configuration_waits_until_it_is_rolled_out`,
   `an_agent_that_appears_later_waits`, `a_label_moves_an_agent_into_a_rollout_ring`.
-- `crates/server/src/packages.rs`: `a_saved_set_reaches_nobody_without_an_assignment`,
+- `crates/fleet-server/src/packages.rs`: `a_saved_set_reaches_nobody_without_an_assignment`,
   `fits_agent_checks_fit_but_neither_aim_nor_the_ranking`,
   `fits_agent_refuses_what_is_not_an_upgrade`, `a_set_that_is_no_upgrade_is_no_candidate`,
   `a_set_is_held_against_the_version_an_agent_reports_running`,
@@ -286,10 +286,10 @@ Server-driven downgrade.
   `a_claim_above_the_set_no_longer_holds_it_back_either`,
   `a_program_version_nothing_can_order_leaves_the_set_reaching`,
   `the_aggregate_hash_is_per_agent_and_follows_the_assignment`.
-- `crates/server/tests/packages.rs`: `a_set_reaches_an_agent_only_as_an_upgrade`,
+- `crates/fleet-server/tests/packages.rs`: `a_set_reaches_an_agent_only_as_an_upgrade`,
   `a_set_waits_until_rolled_out_and_is_immutable_while_assigned`,
   `the_act_names_the_version_it_releases`,
   `the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered`.
-- `crates/client/src/supervisor/agent.rs`:
+- `crates/fleet-agent/src/supervisor/agent.rs`:
   `the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash`;
-  `crates/client/src/selfupdate.rs`: `install_refuses_a_downgrade`.
+  `crates/fleet-agent/src/selfupdate.rs`: `install_refuses_a_downgrade`.

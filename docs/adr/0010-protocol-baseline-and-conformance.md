@@ -100,7 +100,7 @@ both ends against `opamp-go` in a pinned, separately scheduled CI job.
 
 14. **It runs like the service smoke test.** An `#[ignore]`d Rust test drives the scenarios, and a
     dedicated workflow runs it on a schedule and on demand, never on every push, as
-    `crates/client/tests/service_smoke.rs` and
+    `crates/fleet-agent/tests/service_smoke.rs` and
     [`service-smoke.yml`](../../.github/workflows/service-smoke.yml) do. `cargo test --workspace`
     stays self-contained.
 
