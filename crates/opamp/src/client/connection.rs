@@ -12,12 +12,12 @@ use std::time::Duration;
 use prost::Message as _;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue};
-use tracing::warn;
 
 use super::{http, ws, Ended, Session, StopSignal};
+use crate::endpoint::check_url;
 use crate::endpoint::PROTOBUF_CONTENT_TYPE;
 use crate::proto::AgentToServer;
-use crate::tls::{certificates, private_key, root_store, Identity};
+use crate::tls::{certificates, client_builder, private_key, root_store, Identity};
 
 /// How long one plain-HTTP exchange, and the probe, may take.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,15 +33,14 @@ pub struct ClientTls {
 }
 
 impl ClientTls {
-    /// The rustls configuration for `wss://`, or `None` when nothing is configured and the
-    /// transport's own defaults — the web roots, no client certificate — are exactly right.
+    /// The rustls configuration for `wss://`, always built here — never the transport's default,
+    /// which would take whatever provider the process happens to have, TLS 1.2 included
+    /// (ADR-0036). Nothing configured means the web roots and no client certificate. Always
+    /// `Some`; the `Option` keeps the callers' shape.
     ///
     /// # Errors
     /// Returns an error naming the part — CA, certificate or key — that cannot be used.
     pub fn rustls_config(&self) -> Result<Option<Arc<rustls::ClientConfig>>, String> {
-        if self.ca_pem.is_none() && self.identity.is_none() {
-            return Ok(None);
-        }
         let roots = match &self.ca_pem {
             Some(pem) => root_store(pem).map_err(|e| format!("the CA: {e}"))?,
             // An identity does not imply a private CA: presenting a client certificate to a
@@ -50,7 +49,7 @@ impl ClientTls {
                 roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
             },
         };
-        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+        let builder = client_builder().with_root_certificates(roots);
         let config = match &self.identity {
             None => builder.with_no_client_auth(),
             Some(identity) => builder
@@ -70,6 +69,8 @@ impl ClientTls {
     /// # Errors
     /// Returns an error when the CA cannot be parsed.
     pub fn trust(&self, builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
+        // The floor holds even should a process provider other than `tls::provider` be installed.
+        let builder = builder.tls_version_min(reqwest::tls::Version::TLS_1_3);
         let Some(pem) = &self.ca_pem else {
             return Ok(builder);
         };
@@ -163,28 +164,16 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Connection {
-    /// Whether the credential would cross the network in cleartext: one is set, the scheme is
-    /// `ws://` or `http://`, and the host is not the loopback. Basic and Bearer credentials are
-    /// readable to anyone on the path then. It is the operator's choice, so it is warned about and
-    /// never refused.
-    #[must_use]
-    pub fn sends_credentials_in_cleartext(&self) -> bool {
-        if self.authorization.is_none() {
-            return false;
-        }
-        let Some((scheme, rest)) = self.endpoint.split_once("://") else {
-            return false;
-        };
-        if scheme == "wss" || scheme == "https" {
-            return false;
-        }
-        let host_port = rest.split(['/', '?']).next().unwrap_or("");
-        // A bracketed IPv6 host keeps its brackets; only a trailing `:port` is cut off.
-        let host = match host_port.strip_prefix('[') {
-            Some(v6) => v6.split(']').next().unwrap_or(""),
-            None => host_port.split(':').next().unwrap_or(""),
-        };
-        !matches!(host, "localhost" | "127.0.0.1" | "::1")
+    /// The transport this connection may use. `ws://` and `http://` are refused unless the host is
+    /// the loopback literal `127.0.0.1` or `::1` (specification Q-1): off the loopback everything
+    /// is TLS 1.3, and a host name never counts as loopback.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown scheme, or for plaintext off the loopback.
+    pub fn scheme(&self) -> Result<Scheme, String> {
+        let scheme = Scheme::of(&self.endpoint)?;
+        check_url(&self.endpoint).map_err(|e| format!("refusing {e}"))?;
+        Ok(scheme)
     }
 
     /// The headers of a WebSocket upgrade: the credential, marked sensitive so that no `Debug` of
@@ -241,6 +230,7 @@ impl Connection {
     /// # Errors
     /// Returns an error when the material cannot be used or the server cannot be reached.
     pub async fn connect_websocket(&self) -> Result<ws::Socket, String> {
+        self.scheme()?;
         ws::connect(
             &self.endpoint,
             &self.headers()?,
@@ -249,15 +239,6 @@ impl Connection {
         )
         .await
         .map_err(|e| format!("cannot reach {}: {e}", self.endpoint))
-    }
-
-    fn warn_if_cleartext(&self) {
-        if self.sends_credentials_in_cleartext() {
-            warn!(
-                endpoint = %self.endpoint,
-                "sending credentials unencrypted beyond the loopback — use wss:// or https://"
-            );
-        }
     }
 }
 
@@ -271,9 +252,7 @@ pub async fn run<S: Session, X: StopSignal>(
     session: &mut S,
     stop: &mut X,
 ) -> Result<Ended, String> {
-    let scheme = Scheme::of(&connection.endpoint)?;
-    connection.warn_if_cleartext();
-    match scheme {
+    match connection.scheme()? {
         Scheme::WebSocket => {
             let settings = ws::Settings {
                 endpoint: connection.endpoint.clone(),
@@ -306,7 +285,7 @@ pub async fn probe(
     connection: &Connection,
     report: impl FnOnce() -> Option<AgentToServer>,
 ) -> Result<(), String> {
-    match Scheme::of(&connection.endpoint)? {
+    match connection.scheme()? {
         Scheme::WebSocket => {
             let mut socket = connection.connect_websocket().await?;
             let _ = futures_util::SinkExt::close(&mut socket).await;
@@ -358,21 +337,41 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0036
+    /// Verifies: ADR-0036, ADR-0038
     #[test]
-    fn only_a_credential_in_cleartext_beyond_the_loopback_is_flagged() {
-        let flagged = |endpoint, auth| connection(endpoint, auth).sends_credentials_in_cleartext();
-        assert!(flagged(
+    fn plaintext_is_refused_off_the_loopback_literals() {
+        let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
+        assert_eq!(
+            allowed("ws://127.0.0.1:4320/v1/opamp"),
+            Ok(Scheme::WebSocket)
+        );
+        assert_eq!(allowed("http://[::1]:4320/v1/opamp"), Ok(Scheme::Http));
+        assert_eq!(
+            allowed("wss://fleet.example/v1/opamp"),
+            Ok(Scheme::WebSocket)
+        );
+        assert_eq!(allowed("https://10.0.0.1/v1/opamp"), Ok(Scheme::Http));
+        for endpoint in [
             "ws://fleet.example:4320/v1/opamp",
-            Some("Bearer t")
-        ));
-        assert!(flagged("http://10.0.0.1/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("wss://fleet.example/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("https://fleet.example/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("ws://localhost:4320/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("ws://127.0.0.1/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("ws://[::1]:4320/v1/opamp", Some("Bearer t")));
-        assert!(!flagged("ws://fleet.example/v1/opamp", None));
+            "http://10.0.0.1/v1/opamp",
+            "ws://localhost:4320/v1/opamp",
+            "http://127.0.0.1.evil.example/v1/opamp",
+            "http://user@10.0.0.1/v1/opamp",
+        ] {
+            assert!(allowed(endpoint).is_err(), "{endpoint} was allowed");
+        }
+        // Without a credential plaintext is no less readable, and no more allowed.
+        assert!(connection("ws://fleet.example/v1/opamp", None)
+            .scheme()
+            .is_err());
+    }
+
+    /// Verifies: ADR-0036, ADR-0038
+    #[tokio::test]
+    async fn plaintext_off_the_loopback_is_refused_before_connecting() {
+        let refused = connection("ws://192.0.2.1:9/v1/opamp", None);
+        let error = probe(&refused, || None).await.expect_err("refused");
+        assert!(error.starts_with("refusing"), "{error}");
     }
 
     #[test]
@@ -395,12 +394,18 @@ mod tests {
         assert!(!shown.contains("secret"), "{shown}");
     }
 
+    /// Verifies: ADR-0036
     #[test]
-    fn no_tls_material_leaves_the_transport_defaults() {
-        assert!(ClientTls::default()
+    fn no_tls_material_still_offers_tls_1_3_alone() {
+        let config = ClientTls::default()
             .rustls_config()
             .expect("config")
-            .is_none());
+            .expect("always built here");
+        assert!(config
+            .crypto_provider()
+            .cipher_suites
+            .iter()
+            .all(|suite| suite.version() == &rustls::version::TLS13));
     }
 
     #[test]

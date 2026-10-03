@@ -106,7 +106,7 @@ async fn get_text(client: &reqwest::Client, port: u16) -> reqwest::Result<String
 
 /// A peer that sends a request line and then falls silent is hung up on, rather than holding the
 /// connection for as long as it likes.
-/// Verifies: ADR-0036, ADR-0012
+/// Verifies: ADR-0036, ADR-0038
 #[tokio::test]
 async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
     let bound = Duration::from_secs(1);
@@ -198,4 +198,112 @@ fn unusable_material_names_the_part() {
     .rustls_config()
     .expect_err("no key");
     assert!(error.starts_with("the TLS key:"), "{error}");
+}
+
+/// A client that offers TLS 1.2 alone never completes the handshake: the listener speaks TLS 1.3
+/// and nothing older. The client is built from the full ring provider, which still has its TLS 1.2
+/// suites, so the refusal is the listener's.
+/// Verifies: ADR-0036, ADR-0038, ADR-0040, Q-3
+#[tokio::test]
+async fn a_client_offering_only_tls_1_2_is_refused() {
+    let pki = Pki::new();
+    let port = spawn_tls(&pki, ClientAuth::None);
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in opamp::tls::certificates(pki.ca_pem.as_bytes()).expect("ca") {
+        roots.add(cert).expect("anchor");
+    }
+    let old = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS12])
+    .expect("tls 1.2")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connected = tokio_tungstenite::connect_async_tls_with_config(
+        format!("wss://localhost:{port}/"),
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            old,
+        ))),
+    )
+    .await;
+    let error = connected
+        .expect_err("a TLS 1.2 client was accepted")
+        .to_string();
+    assert!(
+        error.contains("version") || error.contains("Version") || error.contains("alert"),
+        "{error}"
+    );
+}
+
+/// A listener at its cap closes the next connection on accept, keeps the ones it holds, and takes
+/// a new one once a held one has gone.
+/// Verifies: ADR-0038
+#[tokio::test]
+async fn connections_past_the_cap_are_refused_while_established_ones_keep_working() {
+    opamp::tls::install_ring_provider();
+    let (listener, port) = bind();
+    spawn(Listener::new(listener, Handle::new()).with_max_connections(2));
+
+    let first = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("first");
+    let second = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("second");
+    // Give the listener time to accept both before the third arrives.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut third = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("third");
+    let mut buffer = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), third.read_to_end(&mut buffer)).await;
+    assert!(closed.is_ok(), "a connection past the cap was held open");
+
+    // A held connection still answers.
+    let mut held = first;
+    held.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("request");
+    let mut answer = Vec::new();
+    held.read_to_end(&mut answer).await.expect("answer");
+    assert!(
+        answer.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    drop(second);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Both slots are free again, so a new peer is served.
+    let text = reqwest::get(format!("http://127.0.0.1:{port}/"))
+        .await
+        .expect("a freed slot serves")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(text, "certificate=false peer=127.0.0.1");
+}
+
+/// A listener without TLS on an address other than the loopback literals is refused before it
+/// accepts anything: plaintext is for the loopback alone.
+/// Verifies: ADR-0038, Q-1
+#[tokio::test]
+async fn a_plaintext_listener_off_the_loopback_is_refused() {
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("bind");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        Listener::new(listener, Handle::new()).serve(router()),
+    )
+    .await
+    .expect("serve returns rather than listening")
+    .expect_err("a plaintext listener off the loopback was served");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    assert!(error.to_string().contains("without TLS"), "{error}");
 }

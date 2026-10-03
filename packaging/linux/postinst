@@ -1,9 +1,9 @@
 #!/bin/sh
-# Post-install for the `.deb` and the `.rpm` alike (ADR-0023 clauses 12 and 13).
+# Post-install for the `.deb` and the `.rpm` alike (ADR-0047 clauses 12 and 13).
 #
 # The package delivered `/usr/libexec/opamp-fleet/supervisor` and nothing else. The install itself —
 # the versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
-# `service install` (ADR-0014), which is all this calls. No package ships a unit file: one that did
+# `service install` (ADR-0046), which is all this calls. No package ships a unit file: one that did
 # would know nothing of ADR-0014's service name or ADR-0021's restart policy, and there would be two
 # registrations disagreeing about which is the real one.
 #
@@ -58,15 +58,24 @@ fi
 
 cat <<'EOF'
 
-The service is registered and stopped. Not starting it is deliberate: a Client with no
-configuration dials the development default and manages nothing (ADR-0014). Two steps remain:
+The service is registered and stopped. Not starting it is deliberate: a Client without the fleet
+credential and a client certificate refuses to start (ADR-0039, ADR-0047). Two steps remain:
 
-  opamp-fleet service install --endpoint wss://<server>/v1/opamp
+  opamp-fleet service install --interactive
   systemctl start opamp-fleet
 
-Run `opamp-fleet service install --interactive` instead to be asked for the credential too.
+The first asks for the endpoint, the fleet credential, the client certificate — a bootstrap
+certificate to enrol with, or one already issued — and the package verification key, and writes
+supervisor.toml. To write it yourself instead, give it at least:
 
-The configuration that step writes lets the Server update this Client itself (ADR-0021) — the
-fleet then patches its own agent like any other program. Append --no-self-update to keep that
-one update manual, or write `enabled = false` under [self_update] in supervisor.toml later.
+  endpoint = "wss://<server>/v1/opamp"
+  [auth]
+  bearer_token = "<the fleet credential>"
+  [tls]
+  cert_file = "<client or bootstrap certificate>"
+  key_file = "<its key>"
+
+The configuration lets the Server update this Client itself (ADR-0044), from signed packages only
+— the fleet then patches its own agent like any other program. Write `enabled = false` under
+[self_update] in supervisor.toml to keep that one update manual.
 EOF

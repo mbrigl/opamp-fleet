@@ -19,7 +19,8 @@
 #   scripts/seed_test_configs.sh [server-url]
 #       PUTs each Configuration to a running Server's REST API and rolls it out — the act that
 #       assigns it to the matching Agents (ADR-0027); a PUT alone reaches nobody.
-#       (default server-url: http://127.0.0.1:4321).
+#       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (ADR-0038); the
+#       CA curl trusts is $SEED_CACERT, or .dev-pki/ca.pem when scripts/dev-pki.sh made one.
 #   scripts/seed_test_configs.sh --offline [config-dir]
 #       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
 #       format, loaded at its next start; no running Server needed. Default config-dir is
@@ -55,7 +56,13 @@ if [ "${1:-}" = "--offline" ]; then
     config_dir="${2:-$examples/../../fleet-configs}"
     mkdir -p "$config_dir"
 else
-    server="${1:-http://127.0.0.1:4321}"
+    server="${1:-https://127.0.0.1:4321}"
+fi
+
+curl_tls=()
+cacert="${SEED_CACERT:-$(dirname "$0")/../.dev-pki/ca.pem}"
+if [ -f "$cacert" ]; then
+    curl_tls=(--cacert "$cacert")
 fi
 
 # seed <name> <file> <selector-json> [service_name]
@@ -76,9 +83,9 @@ seed() {
         jq --arg name "$name" '{name: $name} + .' <<<"$spec" >"$config_dir/$name.json"
         echo "staged $name.json ($aimed_at)"
     else
-        curl -fsS -X PUT -H 'Content-Type: application/json' -d @- \
+        curl -fsS "${curl_tls[@]}" -X PUT -H 'Content-Type: application/json' -d @- \
             "$server/api/v1/configurations/$name" <<<"$spec" >/dev/null
-        curl -fsS -X POST "$server/api/v1/configurations/$name/rollout" >/dev/null
+        curl -fsS "${curl_tls[@]}" -X POST "$server/api/v1/configurations/$name/rollout" >/dev/null
         echo "PUT and rolled out $name ($aimed_at)"
     fi
 }
@@ -95,5 +102,5 @@ seed icinga2-zones "$examples/icinga2-zones.conf" '{}' icinga2
 if [ "$mode" = stage ]; then
     echo "Done — the Server holds these Configurations from its next start; roll them out to assign them."
 else
-    echo "Done — inspect with: curl $server/api/v1/configurations"
+    echo "Done — inspect with: curl ${curl_tls[*]} $server/api/v1/configurations"
 fi

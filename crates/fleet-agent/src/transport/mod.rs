@@ -507,6 +507,7 @@ mod tests {
 
     /// And a destination this Client refuses is reported `FAILED` naming the reason, on the same
     /// offer — not warned to a log while the Server is told everything applied.
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
         opamp::tls::install_ring_provider();
@@ -552,11 +553,23 @@ mod tests {
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
+    /// Verifies: ADR-0042
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
         opamp::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
+        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0042).
+        let keypair = {
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair")
+        };
+        let signature = keypair.sign(&artifact).as_ref().to_vec();
+        let public = {
+            use ring::signature::KeyPair as _;
+            keypair.public_key().as_ref().to_vec()
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -592,8 +605,14 @@ mod tests {
         state.accept_packages();
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
+        // A Client that takes packages holds a key and allows the source (ADR-0042).
         let config = ClientConfig {
             state_dir: dir.path().to_path_buf(),
+            packages: Some(crate::config::PackagesConfig {
+                allowed_sources: vec![format!("http://{addr}/")],
+                ..Default::default()
+            }),
+            package_key: Some(public),
             ..ClientConfig::default()
         };
 
@@ -608,6 +627,7 @@ mod tests {
                         file: Some(DownloadableFile {
                             download_url: format!("http://{addr}/otelcol"),
                             content_hash: content_hash.clone(),
+                            signature: signature.clone(),
                             ..Default::default()
                         }),
                         hash: b"pkg-hash".to_vec(),

@@ -1,6 +1,6 @@
 # ADR-0030: A Package is what an Agent type runs at a version, and a Deployment aims Packages at a channel, signs them, and is the only thing rolled out — an Agent belongs to at most one
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0045](0045-packages-and-deployments-that-sign-every-package.md)
 - **Date:** 2026-10-01
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package and deployment routes of `crates/fleet-server/src/api.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md`

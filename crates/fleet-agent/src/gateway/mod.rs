@@ -54,11 +54,11 @@ struct Forwarding {
 
 /// Serves the downstream endpoint until `shutdown` fires.
 ///
-/// Mutual TLS is per hop (ADR-0017, ADR-0009): with a `[gateway.tls]` section the downstream hop is
-/// encrypted and, when a `client_ca_file` is configured, every downstream Agent must present a
-/// certificate that chains to it — the access-control boundary the section exists for. Without the
-/// section the hop is plaintext, which a fleet still bootstrapping may want but which also carries
-/// the `Authorization` credential in the clear, so it is announced rather than assumed.
+/// Mutual TLS is per hop (ADR-0040): the downstream hop serves TLS 1.3 from `[gateway.tls]`, and
+/// every downstream Agent must present a certificate that chains to its `client_ca_file` — the
+/// access-control boundary of the hop. Both are required; a Gateway without them does not start.
+/// Downstream Agents travel upstream under this Gateway's own member certificate, so that CA must
+/// be the fleet's client CA and never a bootstrap CA.
 ///
 /// # Errors
 /// Returns an error when the configured address cannot be bound — at startup, so a taken port is
@@ -103,28 +103,17 @@ pub async fn run_on(
     let app = opamp::server::router(handler, Settings::new(config.max_message_size_bytes));
 
     let upstream_cap = gateway.upstream_connections;
+    // Mutual TLS 1.3 and nothing less (ADR-0040); the load refused a Gateway without it.
+    let tls = gateway
+        .tls
+        .as_ref()
+        .ok_or("[gateway.tls] is required — a Gateway admits Agents over mutual TLS only")?;
+    let config = server_tls(tls)?
+        .rustls_config()
+        .map_err(|e| format!("the gateway endpoint: {e}"))?;
     let handle = Handle::new();
-    let mut downstream = Listener::new(listener, handle.clone());
-    match &gateway.tls {
-        Some(tls) => {
-            let config = server_tls(tls)?
-                .rustls_config()
-                .map_err(|e| format!("the gateway endpoint: {e}"))?;
-            downstream = downstream.with_tls(config);
-            let mutual_tls = tls.client_ca_file.is_some();
-            info!(%listen, upstream_cap, mutual_tls, "gateway listening over TLS");
-        }
-        // Documented for a bootstrapping fleet, but the hop then carries the `Authorization`
-        // credential in the clear, so say so loudly.
-        None => {
-            warn!(
-                %listen,
-                "the gateway endpoint is serving plaintext — configure [gateway.tls] to encrypt \
-                 the downstream hop and gate it with a client CA"
-            );
-            info!(%listen, upstream_cap, "gateway listening");
-        }
-    }
+    let downstream = Listener::new(listener, handle.clone()).with_tls(config);
+    info!(%listen, upstream_cap, "gateway listening over mutual TLS");
     // The listener drains rather than drops: on shutdown in-flight exchanges finish, up to the
     // grace, instead of every downstream connection being torn down mid-message.
     let mut shutdown = shutdown;
@@ -138,17 +127,16 @@ pub async fn run_on(
         .map_err(|e| format!("the gateway endpoint stopped: {e}"))
 }
 
-/// The material the downstream endpoint serves with (ADR-0009). A configured `client_ca_file`
-/// makes a client certificate **mandatory** — unlike the Server, whose Agent plane also serves
-/// the package download to peers without one. This endpoint speaks only OpAMP, so a configured CA
-/// is an access-control boundary, not a hint. Its absence keeps the hop server-authenticated only,
-/// which a bootstrapping fleet uses.
+/// The material the downstream endpoint serves with (ADR-0040): a client certificate that chains
+/// to `client_ca_file` is **mandatory** in the handshake. The Gateway trusts the fleet's client CA
+/// and never a bootstrap CA, so a host enrols with the Server directly (ADR-0039 clause 25).
 fn server_tls(tls: &GatewayTlsConfig) -> Result<ServerTls, String> {
-    let client_auth = match &tls.client_ca_file {
-        Some(ca_file) => ClientAuth::Required {
-            ca_pem: crate::tls::certificates_file(ca_file)?,
-        },
-        None => ClientAuth::None,
+    let ca_file = tls
+        .client_ca_file
+        .as_ref()
+        .ok_or("[gateway.tls] client_ca_file is required")?;
+    let client_auth = ClientAuth::Required {
+        ca_pem: crate::tls::certificates_file(ca_file)?,
     };
     Ok(ServerTls {
         identity: Identity {

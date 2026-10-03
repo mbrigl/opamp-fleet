@@ -1,6 +1,6 @@
 # ADR-0023: The fleet's own agent is called `supervisor`, and a release ships it as `.tar.gz` archives and native installers that run its own install
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0047](0047-releases-installers-and-the-name-supervisor-secure-by-default.md)
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 - **Applies to:** .github/workflows/release.yml, packaging/, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of crates/fleet-agent/Cargo.toml, the program, Agent type and configuration-file names of the Client, `service install --endpoint`

@@ -1,6 +1,6 @@
 # ADR-0018: The Server offers connection settings in the Baseline's classes under one hash, the Client proves only what it can and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0041](0041-connection-settings-offered-securely-and-server-capabilities.md)
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`

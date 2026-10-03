@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opamp::attributes;
@@ -26,6 +26,7 @@ use tracing::{info, warn};
 use crate::agent_store::{AgentStore, PersistedAgent};
 use crate::configs::{self, ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{deployment_for, Deployment, DeploymentError, DeploymentStore};
+use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
 
@@ -412,6 +413,9 @@ pub struct AppState {
     /// The authority that signs Agent CSRs (ADR-0017); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
+    /// The enrolment window and its queue (ADR-0039); `None` while `[enrolment]` is not set, and no
+    /// host enrols.
+    enrolment: Option<Arc<Enrolment>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
@@ -484,6 +488,7 @@ impl AppState {
             connection_offer: None,
             packages: None,
             client_ca: None,
+            enrolment: None,
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -623,6 +628,64 @@ impl AppState {
         self
     }
 
+    /// Arms enrolment (ADR-0039): a host with a bootstrap certificate may ask for its first one,
+    /// and an operator decides.
+    #[must_use]
+    pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
+        self.enrolment = enrolment;
+        self
+    }
+
+    /// The enrolment window and its queue, while `[enrolment]` is set.
+    pub fn enrolment(&self) -> Option<&Arc<Enrolment>> {
+        self.enrolment.as_ref()
+    }
+
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0039 clause 22).
+    ///
+    /// # Errors
+    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
+    /// [`DecisionError::Sign`] when no CA is configured or it refuses the request.
+    pub fn approve_enrolment(&self, id: &str) -> Result<(), DecisionError> {
+        let enrolment = self.enrolment.as_ref().ok_or(DecisionError::NotFound)?;
+        let signer = self.client_ca.as_deref().ok_or_else(|| {
+            DecisionError::Sign("this Server issues no client certificates".into())
+        })?;
+        enrolment.approve(id, signer)
+    }
+
+    /// What an enrolment connection is told (ADR-0039 clause 21): the capabilities that say it may
+    /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
+    /// connection-settings offer with no private key in it.
+    pub fn enrolment_answer(
+        &self,
+        instance_uid: &[u8],
+        certificate: Option<String>,
+    ) -> ServerToAgent {
+        let mut capabilities = ServerCapabilities::AcceptsStatus as u64;
+        if self.client_ca.is_some() {
+            capabilities |= ServerCapabilities::AcceptsConnectionSettingsRequest as u64
+                | ServerCapabilities::OffersConnectionSettings as u64;
+        }
+        ServerToAgent {
+            instance_uid: instance_uid.to_vec(),
+            capabilities,
+            connection_settings: certificate.map(|cert| {
+                compose_settings_offer(
+                    Some(OpAmpConnectionSettings {
+                        certificate: Some(TlsCertificate {
+                            cert: cert.into_bytes(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    TelemetryOffer::default(),
+                )
+            }),
+            ..Default::default()
+        }
+    }
+
     /// Arms package delivery (ADR-0019); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
@@ -760,6 +823,7 @@ impl AppState {
                         )))
                     }
                 };
+                refuse_unsigned(store, &deployment)?;
                 let id = deployment
                     .package_for(
                         crate::packages::reported_agent_type(
@@ -882,6 +946,7 @@ impl AppState {
                 "deployment {name:?} holds no packages — put one in it before rolling it out"
             )));
         }
+        refuse_unsigned(store, deployment)?;
         let mut assigned = 0usize;
         for (uid, record) in fleet.iter_mut() {
             let effective = record.effective_description().map(Cow::into_owned);
@@ -2539,6 +2604,23 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
         .join("\n")
 }
 
+/// Refuses a rollout of a Deployment that lacks a signature for any entry of any Package it holds,
+/// naming each such Package and its platforms; nothing is released (ADR-0045).
+fn refuse_unsigned(
+    store: &crate::packages::PackageStore,
+    deployment: &Deployment,
+) -> Result<(), RolloutError> {
+    let unsigned = store.unsigned_in(deployment);
+    if unsigned.is_empty() {
+        return Ok(());
+    }
+    Err(RolloutError::NotApplicable(format!(
+        "deployment {:?} carries no signature for {} — sign every artifact before rolling it out",
+        deployment.name,
+        unsigned.join("; ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2599,6 +2681,7 @@ mod tests {
 
     /// The offered interval wins over the configured default: it is the period this Server actually
     /// asked for, so it is the one silence should be measured against.
+    /// Verifies: ADR-0041
     #[test]
     fn an_offered_heartbeat_interval_sets_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2896,6 +2979,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment fields loads as **assigned nothing** —
     /// the Server never invents a rollout at startup — and what it could receive shows up as
     /// waiting instead, which is the one thing an operator has to act on.
+    /// Verifies: ADR-0045
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();

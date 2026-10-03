@@ -307,6 +307,7 @@ mod tests {
     /// ADR-0014's whole mechanism: a label with no qualifier and no organization renders the
     /// same through *both* of the crate's functions, so systemd, launchd, and the SCM show one
     /// name. A dot anywhere in it would split the label again and undo that.
+    /// Verifies: ADR-0046
     #[test]
     fn every_backend_renders_the_same_name() {
         let label = label();
@@ -325,6 +326,7 @@ mod tests {
     /// The service carries the **product's** name and the program carries its own (ADR-0014
     /// clause 9). They are separate constants holding different strings, and the day someone
     /// derives one from the other, one published package Set stops serving every variant.
+    /// Verifies: ADR-0046
     #[test]
     fn the_service_is_named_after_the_product_not_the_program() {
         assert_eq!(service_name(), PRODUCT_NAME);
@@ -339,6 +341,7 @@ mod tests {
 
     /// No suffix, on any platform: one build installs one service, so there is no second one to
     /// tell apart and nothing for a verb to look up (ADR-0014 clauses 3 and 6).
+    /// Verifies: ADR-0046
     #[test]
     fn the_service_name_carries_no_suffix() {
         assert!(!service_name().contains('-') || service_name() == PRODUCT_NAME);
@@ -352,6 +355,7 @@ mod tests {
     /// The display name is prose and the service name is a slug; neither is derived from the
     /// other, because no rule that produces `OpAMP Fleet Agent` from `opamp-fleet` would still
     /// read correctly for the next variant build (ADR-0014 clause 2).
+    /// Verifies: ADR-0046
     #[test]
     fn the_names_a_human_reads() {
         assert_eq!(display_name(), PRODUCT_DISPLAY_NAME);
@@ -374,6 +378,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0046
     #[test]
     fn the_installed_command_line_is_the_marker_plus_absolute_paths() {
         let spec = InstallSpec {
@@ -402,6 +407,7 @@ mod tests {
     /// `service-manager` (see `windows_config`), so the two could drift into disagreeing about
     /// how long a failed Client waits before it comes back. They read one constant; this is what
     /// says so.
+    /// Verifies: ADR-0046
     #[test]
     fn both_platforms_restart_after_the_same_delay() {
         match RESTART_POLICY {
@@ -419,6 +425,7 @@ mod tests {
 
     /// One level under the platform's base, named after the product — no `client` level asserting
     /// a name the file contradicts, and no level holding the constant `default` (ADR-0014).
+    /// Verifies: ADR-0046
     #[cfg(target_os = "linux")]
     #[test]
     fn the_default_root_is_one_level_named_after_the_product() {
@@ -441,6 +448,7 @@ mod tests {
     /// first start with `status=203/EXEC` on every enforcing host. The executable layout defaults
     /// to `/opt`; the data root stays under `/var/lib`, so an upgrade re-registers and moves no
     /// state. User scope has no such constraint and keeps one root for both.
+    /// Verifies: ADR-0046
     #[cfg(target_os = "linux")]
     #[test]
     fn the_linux_system_layout_executes_from_opt() {
@@ -461,6 +469,7 @@ mod tests {
     /// Linux at system scope is the *only* split (ADR-0014 clause 8). Windows keeps one root
     /// however it was installed, because a layout the daemon rewrites cannot live in the tree the
     /// installer owns — see clause 12 and the `--run-as` hand-over.
+    /// Verifies: ADR-0046
     #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn no_other_platform_splits() {

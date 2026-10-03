@@ -95,6 +95,50 @@ pub fn decode_body(
     }
 }
 
+/// Checks the specification's transport rule on a URL (Q-1): `wss://` and `https://` anywhere,
+/// `ws://` and `http://` only to a loopback literal, any other scheme never.
+///
+/// # Errors
+/// Returns a sentence naming the URL and what to use instead.
+pub fn check_url(url: &str) -> Result<(), String> {
+    match url.split_once("://").map(|(scheme, _)| scheme) {
+        Some("wss" | "https") => Ok(()),
+        Some("ws" | "http") if is_loopback_literal(host_of(url)) => Ok(()),
+        Some("ws" | "http") => Err(format!(
+            "{url}: plaintext is for 127.0.0.1 and ::1 alone — use wss:// or https://"
+        )),
+        _ => Err(format!(
+            "{url} must start with wss:// or https:// (ws:// or http:// only to 127.0.0.1 or ::1)"
+        )),
+    }
+}
+
+/// The host of `url`, without credentials or port; a bracketed IPv6 host keeps its brackets off.
+#[must_use]
+pub fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host_port.split(':').next().unwrap_or(""),
+    }
+}
+
+/// Whether `host` — as it appears in a URL or a listen address — is a loopback literal, the one
+/// place plaintext is allowed (specification Q-1). Only `127.0.0.1` and `::1` count; a host name
+/// never does, not even `localhost`, because a name can be made to resolve anywhere.
+#[must_use]
+pub fn is_loopback_literal(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(
+        host.parse::<std::net::IpAddr>(),
+        Ok(ip) if ip == std::net::Ipv4Addr::LOCALHOST || ip == std::net::Ipv6Addr::LOCALHOST
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +182,7 @@ mod tests {
 
     /// The rule this module exists for: a small gzip that decompresses past the limit is refused,
     /// and decompression stops at the limit rather than running to completion first.
+    /// Verifies: ADR-0037
     #[test]
     fn a_gzip_bomb_buys_no_more_memory_than_a_plain_body_would() {
         let body = gzipped(&vec![b'a'; 10 * 1024 * 1024]);
@@ -151,6 +196,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0037
     #[test]
     fn what_is_not_gzip_under_a_gzip_header_is_refused() {
         assert_eq!(
@@ -165,6 +211,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0037
     #[test]
     fn an_encoding_this_endpoint_does_not_implement_names_itself() {
         assert_eq!(
@@ -175,5 +222,48 @@ mod tests {
             decode_body(b"...", "br", 1024).unwrap_err().to_string(),
             "unsupported Content-Encoding: br"
         );
+    }
+
+    /// Verifies: ADR-0036, ADR-0038
+    #[test]
+    fn only_the_loopback_literals_are_loopback() {
+        for host in ["127.0.0.1", "::1", "[::1]"] {
+            assert!(is_loopback_literal(host), "{host}");
+        }
+        for host in [
+            "localhost",
+            "127.0.0.2",
+            "0.0.0.0",
+            "::",
+            "10.0.0.1",
+            "example.org",
+            "",
+        ] {
+            assert!(!is_loopback_literal(host), "{host}");
+        }
+    }
+
+    /// Verifies: ADR-0036
+    #[test]
+    fn plaintext_urls_are_accepted_on_the_loopback_literals_alone() {
+        for url in [
+            "wss://fleet.example/v1/opamp",
+            "https://10.0.0.1/x",
+            "ws://127.0.0.1:4320/v1/opamp",
+            "http://[::1]:4318/v1/metrics",
+        ] {
+            assert_eq!(check_url(url), Ok(()), "{url}");
+        }
+        for url in [
+            "ws://fleet.example/v1/opamp",
+            "http://localhost:4318/v1/metrics",
+            "http://192.168.1.5/x",
+            "http://127.0.0.1.evil.example/x",
+            "http://user@10.0.0.1/x",
+            "ftp://127.0.0.1/x",
+            "127.0.0.1:4320",
+        ] {
+            assert!(check_url(url).is_err(), "{url} was accepted");
+        }
     }
 }

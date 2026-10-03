@@ -66,7 +66,7 @@ Debian 12 artifact is built in it directly:
 
 ```console
 $ cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.5 --distro bookworm \
-      --platform linux/amd64 --server http://127.0.0.1:4321
+      --platform linux/amd64 --server https://127.0.0.1:4321
   reading https://packages.icinga.com/debian/dists/icinga-bookworm/main/binary-amd64/Packages.gz …
   reading https://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.gz …
   this build needs glibc >= 2.34 on every host it is rolled out to
@@ -110,7 +110,7 @@ container also needs Icinga's runtime libraries installed once — see the refus
 The tree carries the daemon, the template library, **the check plugins**
 (`monitoring-plugins`, 47 of them, with the libraries they need), and the vendor copyright files.
 For Icinga 2 2.16.5 on Debian 12 that is 140 files and 75 MB unpacked — well inside the limits a
-package tree is held to ([ADR-0019](../adr/0019-package-delivery-on-the-agent.md)).
+package tree is held to ([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)).
 
 The plugins come from the distribution rather than from Icinga, and one of them needs a word: Debian
 ships `check_http` through `update-alternatives`, so it exists only after a package is *installed* —
@@ -200,19 +200,22 @@ manager installed; nothing supervises it.
 
 ## 3. Enrolment: the ticket
 
-The Icinga master stays the certificate authority — the fleet Server signs nothing and never sees a
-private key ([ADR-0029](../adr/0029-icinga-2.md)).
-What the fleet transports is the **ticket**, which the master computes for one node name:
+The Icinga master stays the certificate authority for Icinga — the fleet Server signs no Icinga
+certificate and never sees an Icinga private key ([ADR-0029](../adr/0029-icinga-2.md)).
+What the fleet transports is the **ticket**, which the master computes for one node name. The
+calls below go to the Operator plane over TLS; `--cacert ca.pem` names the CA that signed the
+Server's certificate, and `-u` carries the [`[rest.auth]`](server.md#the-operator-plane-restauth)
+credential:
 
 ```console
 $ icinga2 pki ticket --cn edge-01.example.com          # on the Icinga master
 d9c8…
 
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "icinga2", "role": "supplementary",
             "selector": {"service.instance.name": "edge-01"},
             "body": "d9c8…"}' \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
 ```
 
 `role = "supplementary"` writes it as a file the Supervisor reads and nothing else consumes, and the
@@ -237,8 +240,8 @@ against the including file, so the delivered entries can reference each other by
 knowing any absolute path:
 
 ```console
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
-       -d @icinga2-conf.json http://127.0.0.1:4321/api/v1/configurations/icinga2-conf
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d @icinga2-conf.json https://127.0.0.1:4321/api/v1/configurations/icinga2-conf
 ```
 
 with a body along the lines of [`config/examples/icinga2-conf.conf`](../../config/examples/icinga2-conf.conf):
@@ -258,12 +261,25 @@ the cluster protocol, into `DataDir/api/zones`.
 
 ## 5. Roll it out
 
+The Package reaches hosts through a Deployment that holds it and signs every entry
+([step 5 of the walkthrough](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)):
+
 ```console
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/packages/icinga2/icinga2/2.16.4/rollout
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d '{"selector": {"channel": "stable"}}' https://127.0.0.1:4321/api/v1/deployments/stable
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT \
+       https://127.0.0.1:4321/api/v1/deployments/stable/packages/icinga2/2.16.5
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/stable/signatures/icinga2/2.16.5/linux/amd64
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/deployments/stable/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
 ```
+
+`$sig` is the artifact's signature from `opamp-package-sign sign`. A Client takes the package only
+with `[packages] verification_key` set.
 
 ## What to expect in the fleet view
 

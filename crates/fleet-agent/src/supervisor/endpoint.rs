@@ -203,6 +203,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     /// A fake `opampextension`: connects, reports, and expects the capability echo.
+    /// Verifies: ADR-0040
     #[tokio::test]
     async fn extension_reports_are_folded_into_process_events() {
         let (event_tx, mut events) = mpsc::channel(16);
@@ -281,6 +282,7 @@ mod tests {
         assert_eq!(decoded.capabilities, ENDPOINT_CAPABILITIES);
     }
 
+    /// Verifies: ADR-0040
     #[tokio::test]
     async fn shutdown_stops_the_endpoint() {
         let (event_tx, _events) = mpsc::channel(16);

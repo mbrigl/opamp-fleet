@@ -11,11 +11,13 @@ pub mod config;
 pub mod configs;
 pub mod credentials;
 pub mod deployments;
+pub mod enrolment;
 pub mod fleet;
 pub mod fs;
 pub mod labels;
 pub mod listen;
 pub mod packages;
+pub mod throttle;
 pub mod tls;
 pub mod transport;
 
@@ -78,16 +80,19 @@ impl PackageOffering {
     }
 }
 
-/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0017),
-/// and the package download route beside it — outside that guard, because a downloading Client
-/// presents neither credential nor certificate and the artifact's hash and signature are what
-/// protect it (ADR-0019).
+/// The **Agent plane** (ADR-0038): the OpAMP endpoint, guarded by Admission (ADR-0039), and the
+/// package download route beside it — outside the credential check, behind the same handshake, and
+/// reached only with a certificate of the fleet (ADR-0039 clause 23).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
 /// `download_url` is resolved against the Agent's own endpoint.
 pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    transport::router(state.clone(), admission).merge(api::download_router(state))
+    let guard = admission.download_guard();
+    transport::router(state.clone(), admission).merge(transport::guard_download(
+        api::download_router(state),
+        guard,
+    ))
 }
 
 /// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the

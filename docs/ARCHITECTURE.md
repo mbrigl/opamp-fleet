@@ -60,11 +60,20 @@ core module names an adapter or a technology, and when a module has no role.
   core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
   `PackageOffering::with_deployments` — and `lib.rs` wires the filesystem adapters in
   `AppState::new`, `PackageStore::open` and `PackageOffering::new`.
-- **Server listeners** — `tls` reads the `[tls]` files into the material `opamp`'s listener
-  serves with, and `listen` serves both planes on one handle with one drain
-  ([ADR-0012](adr/0012-transports-tls-and-the-servers-two-planes.md)).
+- **Server listeners** — `tls` reads the `[tls]` and `[enrolment]` files into the material each
+  plane serves with — the Agent plane requiring a client certificate in the handshake, the
+  Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
+  issuer. `listen` serves both planes on one handle with one drain and a connection cap each
+  ([ADR-0038](adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).
+- **Server admission** — `transport::Admission` requires the fleet credential and the client
+  certificate on every request to `/v1/opamp`, admits a bootstrap certificate only while the
+  enrolment window is open, and guards the package download with the same certificate. Two core
+  modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
+  requests an operator approves through `api`, and `throttle`, the per-address back-off after
+  repeated failures, which both planes use
+  ([ADR-0039](adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow ([ADR-0017](adr/0017-admission-and-authentication.md)), and
+  implements for the CSR flow ([ADR-0039](adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
   `[telemetry_offer]` sections become the fleet's offers in `config`.
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
@@ -80,7 +89,7 @@ core module names an adapter or a technology, and when a module has no role.
   `storage::Storage` implements on the state directory, and `HostFacts`, which `host::SystemHost`
   implements from the platform.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
-  ([ADR-0011](adr/0011-workspace-crates-and-configuration.md)); `config_file` reads it from disk, makes its
+  ([ADR-0037](adr/0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)); `config_file` reads it from disk, makes its
   directories absolute, and finds the identity the state directory holds.
 - **Client connection** — `tls` decides which CA and which identity are in force, and `transport`
   describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
@@ -88,10 +97,10 @@ core module names an adapter or a technology, and when a module has no role.
   and the Supervisor Endpoint use the same `opamp` building blocks
   ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0009](adr/0009-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
+  ([ADR-0040](adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client self-update** — `update` is the Client updating itself
-  ([ADR-0021](adr/0021-the-client-updates-itself.md)). It owns the port `SelfUpdater` and
+  ([ADR-0044](adr/0044-the-client-updates-itself-from-a-signed-package.md)). It owns the port `SelfUpdater` and
   `SelfUpdate`, the state the Engine keeps about it: armed or not, probation committed, restart
   due. `update::installer` implements the port on the version directories and holds the start-up
   check of the process that follows an install.

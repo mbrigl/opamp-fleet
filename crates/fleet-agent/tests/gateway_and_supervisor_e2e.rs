@@ -7,6 +7,8 @@
 //! ADR-0009 — a gateway task that is restarted when a verified offer moves the endpoint, while the
 //! Supervisors carry on. So the real Client binary runs here with both armed at once.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -16,7 +18,89 @@ use fleet_server::fleet::{AgentView, AppState};
 use futures_util::SinkExt;
 use opamp::proto::{AgentCapabilities, AgentToServer};
 use opamp::uid::InstanceUid;
+use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+/// The downstream hop's PKI (ADR-0040): a Gateway admits Agents over mutual TLS only, so one CA
+/// signs the Gateway's server certificate and the client certificate a downstream peer presents.
+struct Pki {
+    ca_pem: String,
+    client_cert_pem: String,
+    client_key_pem: String,
+    dir: tempfile::TempDir,
+}
+
+impl Pki {
+    fn new() -> Self {
+        opamp::tls::install_ring_provider();
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "opamp-fleet-gateway-e2e-ca");
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = params.self_signed(&ca_key).expect("ca");
+        let issuer = Issuer::from_ca_cert_pem(&ca.pem(), ca_key).expect("issuer");
+
+        let issue = |name: &str| {
+            let key = KeyPair::generate().expect("key");
+            let mut params = CertificateParams::new(vec![name.to_string()]).expect("params");
+            params.distinguished_name.push(DnType::CommonName, name);
+            let cert = params.signed_by(&key, &issuer).expect("signed");
+            (cert.pem(), key.serialize_pem())
+        };
+        let (server_cert, server_key) = issue("127.0.0.1");
+        let (client_cert_pem, client_key_pem) = issue("edge-agent");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("gateway-cert.pem"), server_cert).expect("write cert");
+        std::fs::write(dir.path().join("gateway-key.pem"), server_key).expect("write key");
+        std::fs::write(dir.path().join("ca.pem"), ca.pem()).expect("write ca");
+        Pki {
+            ca_pem: ca.pem(),
+            client_cert_pem,
+            client_key_pem,
+            dir,
+        }
+    }
+
+    /// The `[gateway.tls]` section, with all three files a Gateway requires.
+    fn section(&self) -> String {
+        let path = |name: &str| self.dir.path().join(name).display().to_string();
+        format!(
+            "[gateway.tls]\ncert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
+            path("gateway-cert.pem"),
+            path("gateway-key.pem"),
+            path("ca.pem"),
+        )
+    }
+
+    /// A WebSocket downstream peer over TLS, presenting the client certificate.
+    async fn ws(
+        &self,
+        port: u16,
+    ) -> Result<
+        WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        let config = opamp::tls::client_builder()
+            .with_root_certificates(opamp::tls::root_store(self.ca_pem.as_bytes()).expect("roots"))
+            .with_client_auth_cert(
+                opamp::tls::certificates(self.client_cert_pem.as_bytes()).expect("cert"),
+                opamp::tls::private_key(self.client_key_pem.as_bytes()).expect("key"),
+            )
+            .expect("client config");
+        let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+            format!("wss://127.0.0.1:{port}/v1/opamp"),
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+        )
+        .await?;
+        Ok(socket)
+    }
+}
 
 struct ClientUnderTest(Child);
 
@@ -103,6 +187,7 @@ fn install_stub(state_dir: &Path, supervisor: &str) -> String {
     name.to_string()
 }
 
+/// Verifies: ADR-0040
 #[tokio::test]
 async fn a_host_supervises_and_gateways_at_the_same_time() {
     let (addr, state, dir) = spawn_server().await;
@@ -110,6 +195,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
     let marker = dir.path().join("stub-marker");
     let gateway_port = free_port();
 
+    let pki = Pki::new();
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -118,7 +204,8 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
             "heartbeat_interval_secs = 1\n\n",
             "[gateway]\n",
             "listen = \"127.0.0.1:{gateway_port}\"\n",
-            "upstream_connections = 4\n\n",
+            "upstream_connections = 4\n",
+            "{gateway_tls}\n",
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
@@ -128,11 +215,13 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
         addr = addr,
         state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
+        gateway_tls = pki.section(),
         stub = install_stub(&state_dir, "local-agent"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // Supervisor Mode first: the Client's own Agent and the one it supervises.
@@ -153,10 +242,10 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
     // Now a third Client arrives *through* the Gateway on the same host. It is a plain OpAMP peer;
     // nothing about it knows it is being carried.
     let downstream = InstanceUid::default();
-    let (mut socket, _) =
-        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{gateway_port}/v1/opamp"))
-            .await
-            .expect("connect to the gateway on this host");
+    let mut socket = pki
+        .ws(gateway_port)
+        .await
+        .expect("connect to the gateway on this host");
     let report = AgentToServer {
         instance_uid: downstream.as_bytes().to_vec(),
         sequence_num: 1,
@@ -195,6 +284,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 /// settings offer ends the transport run, and the gateway task is restarted with the new
 /// configuration (ADR-0009) — because the pool dials the endpoint an offer can move. The
 /// Supervisors must live straight through it, and the Gateway must come back serving.
+/// Verifies: ADR-0040, ADR-0041
 #[tokio::test]
 async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -225,13 +315,15 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     let marker = dir.path().join("stub-marker");
     let gateway_port = free_port();
     let state_dir = dir.path().join("client-state");
+    let pki = Pki::new();
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
             "name = \"edge-host\"\n",
             "state_dir = {state:?}\n",
             "[gateway]\n",
-            "listen = \"127.0.0.1:{gateway_port}\"\n\n",
+            "listen = \"127.0.0.1:{gateway_port}\"\n",
+            "{gateway_tls}\n",
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"local-agent\"\n",
@@ -241,11 +333,13 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         addr = addr,
         state = state_dir.to_string_lossy(),
         gateway_port = gateway_port,
+        gateway_tls = pki.section(),
         stub = install_stub(&state_dir, "local-agent"),
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // The offer is applied and acknowledged — which is what ends the transport run and restarts the
@@ -276,10 +370,8 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     // The Gateway is serving again on the same address, after having been torn down and rebuilt.
     let downstream = InstanceUid::default();
     let deadline = Instant::now() + Duration::from_secs(30);
-    let (mut socket, _) = loop {
-        match tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{gateway_port}/v1/opamp"))
-            .await
-        {
+    let mut socket = loop {
+        match pki.ws(gateway_port).await {
             Ok(connected) => break connected,
             Err(e) if Instant::now() >= deadline => {
                 panic!("the gateway did not come back up: {e}")
@@ -313,12 +405,14 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
 
 /// The Gateway binding a port must not take the Supervisors with it when it cannot: a Client whose
 /// gateway address is already taken fails loudly at startup rather than half-starting.
+/// Verifies: ADR-0040
 #[tokio::test]
 async fn a_gateway_that_cannot_bind_is_loud() {
     let (addr, state, dir) = spawn_server().await;
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
     let port = occupied.local_addr().expect("addr").port();
 
+    let pki = Pki::new();
     let toml = format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -326,13 +420,16 @@ async fn a_gateway_that_cannot_bind_is_loud() {
             "state_dir = {state:?}\n",
             "[gateway]\n",
             "listen = \"127.0.0.1:{port}\"\n",
+            "{gateway_tls}",
         ),
         addr = addr,
         state = dir.path().join("client-state").to_string_lossy(),
         port = port,
+        gateway_tls = pki.section(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
     // The Client itself still reaches the Server: Gateway Mode failing to bind is loud in the log

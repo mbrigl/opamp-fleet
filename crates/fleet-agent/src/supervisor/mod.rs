@@ -99,7 +99,9 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     // Consenting to be updated names the package it will take — anything else is refused rather
     // than written over this binary (ADR-0021). Since ADR-0021 the consent stands unless the file
     // withdraws it, so this is the ordinary path rather than the opted-into one.
-    if let Some(package) = config.self_update_package() {
+    // And only from a signed package: without a verification key the consent is kept, but nothing
+    // is declared (ADR-0044) — the startup notice names the key.
+    if let (Some(package), Some(_)) = (config.self_update_package(), config.package_key()) {
         self_state.accept_packages_named(package.to_string());
     }
     // The self-Agent's effective configuration is its own file — `supervisor.toml` is what this
@@ -262,12 +264,17 @@ pub fn start_supervisor(
     // What the target itself needs — for a tree that is its root and nothing below it, since the
     // live tree arrives by renaming a directory over that name (ADR-0019).
     install.prepare()?;
-    state.accept_packages();
-    info!(
-        supervisor = %block.name,
-        program = %program.path.display(),
-        "packages accepted: the program is this supervisor's own"
-    );
+    // Only a Client holding the operator's verification key takes packages: there is no unsigned
+    // posture (ADR-0042). Without it the program stays as installed, and the startup notice says
+    // why.
+    if config.package_key().is_some() {
+        state.accept_packages();
+        info!(
+            supervisor = %block.name,
+            program = %program.path.display(),
+            "packages accepted: the program is this supervisor's own"
+        );
+    }
 
     // Each Supervisor stops on its own channel (ADR-0022): the Client-wide shutdown is forwarded
     // into it, and retiring the Supervisor fires it alone — its Endpoint releases the port and
@@ -335,6 +342,13 @@ mod tests {
                 .map(|d| format!("supervisor_dir = {:?}\n", d.to_string_lossy()))
                 .unwrap_or_default(),
         )
+    }
+
+    /// A configuration as `ClientConfig::load` leaves it when `[packages] verification_key` is set:
+    /// the decoded key is what decides whether anything takes packages (ADR-0042).
+    fn keyed(mut config: ClientConfig) -> ClientConfig {
+        config.package_key = Some(vec![7u8; 32]);
+        config
     }
 
     /// A block of a wrapped kind, as ADR-0015 means one to be written.
@@ -569,14 +583,14 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    // Verifies: ADR-0022
+    /// Verifies: ADR-0022, ADR-0042
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
 
         let owned: ClientConfig =
-            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+            keyed(toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse"));
         let mut engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             accepts_packages(&mut engine),
@@ -601,6 +615,30 @@ mod tests {
         assert!(err.contains("only programs it installs"), "{err}");
     }
 
+    /// Without the operator's verification key, no Agent of this Client takes packages — neither a
+    /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
+    /// installed unsigned (ADR-0042, ADR-0044).
+    /// Verifies: ADR-0042, ADR-0044, Q-1
+    #[tokio::test]
+    async fn without_a_verification_key_no_agent_takes_packages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let unkeyed: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let mut engine = build_engine(&unkeyed, &shutdown).expect("build");
+        assert!(
+            !engine.installs_packages(),
+            "something takes packages without a key"
+        );
+        for report in engine.poll_reports() {
+            assert_eq!(
+                report.capabilities & AgentCapabilities::AcceptsPackages as u64,
+                0,
+                "an Agent declares AcceptsPackages without a key"
+            );
+        }
+    }
+
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
     /// (ADR-0019) agrees with the `AcceptsPackages` capability an Agent actually declares.
     #[tokio::test]
@@ -609,7 +647,7 @@ mod tests {
         let (_tx, shutdown) = shutdown_channel();
 
         let owned: ClientConfig =
-            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+            keyed(toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse"));
         let engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             engine.installs_packages(),
@@ -633,7 +671,7 @@ mod tests {
         // The Client's own Agent consents by default (ADR-0021), so a Client with no Supervisor at
         // all still installs packages — its own.
         let bare: ClientConfig =
-            toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse");
+            keyed(toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse"));
         let engine = build_engine(&bare, &shutdown).expect("build");
         assert!(
             engine.installs_packages(),
@@ -655,7 +693,7 @@ mod tests {
              program_path = \"bin/fluent-bit\"\n",
             state = dir.path().join("state").to_string_lossy(),
         );
-        let parsed: ClientConfig = toml::from_str(&config).expect("parse");
+        let parsed: ClientConfig = keyed(toml::from_str(&config).expect("parse"));
         let mut engine = build_engine(&parsed, &shutdown).expect("build");
 
         assert!(

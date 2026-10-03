@@ -1395,6 +1395,7 @@ mod tests {
 
     /// ADR-0019: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
+    /// Verifies: ADR-0042
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1419,6 +1420,7 @@ mod tests {
 
     /// A backup with no marker is not something this Runner retained (the pre-ADR-0019 immediate
     /// drop, or a half-finished install), so a sweep leaves it alone.
+    /// Verifies: ADR-0042
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1430,6 +1432,7 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
+    /// Verifies: ADR-0042
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");

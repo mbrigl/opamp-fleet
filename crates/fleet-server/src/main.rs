@@ -79,17 +79,31 @@ async fn main() {
         }
     };
 
-    // A credential-bearing offer with no [auth] in front of it hands that credential to anyone who
-    // connects (ADR-0017/0018/0025). Open by default is intentional; leaking a backend token by
-    // default is not — so it is surfaced loudly rather than gated, which would break zero-config.
-    let unguarded = config.unauthenticated_secret_offers();
-    if !unguarded.is_empty() {
-        tracing::warn!(
-            offers = %unguarded.join(", "),
-            "these offers hand a credential to any Agent that connects, but [auth] is unset so the \
-             OpAMP endpoint admits anyone — set [auth] to gate credential delivery (ADR-0017)"
-        );
-    }
+    // The TLS material first: a Server that cannot serve it does not start, and admission needs
+    // to know which CA issued what (ADR-0038, ADR-0039).
+    let planes = match config
+        .tls
+        .as_ref()
+        .ok_or_else(|| "[tls] is required".to_string())
+        .and_then(|tls| fleet_server::tls::server_tls(tls, config.enrolment.as_ref()))
+        .and_then(|planes| {
+            let agent = planes.agent.rustls_config()?;
+            let operator = planes.operator.rustls_config()?;
+            Ok((agent, operator, planes.issuers))
+        }) {
+        Ok(planes) => planes,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
+    let enrolment = config.enrolment.as_ref().map(|_| {
+        // ADR-0039: closed until an operator opens it.
+        info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
+        Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()))
+    });
+    let limits = config.admission_throttle.limits();
 
     let connection_offer = match config
         .connection_offer
@@ -162,6 +176,7 @@ async fn main() {
             state
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
+                .with_enrolment(enrolment.clone())
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
@@ -175,46 +190,33 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // Both proofs, always (ADR-0039): the configuration was refused at load without either.
     let auth = config
         .auth
         .as_ref()
         .map(fleet_server::transport::OpampAuth::from_config);
-    if auth.is_some() {
-        // ADR-0017.
-        info!("the OpAMP endpoint requires authentication");
-    }
-    // Mutual TLS is on when the listener has a CA to verify client certificates against; the
-    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0017).
-    let mutual_tls = config
-        .tls
-        .as_ref()
-        .is_some_and(|tls| tls.client_ca_file.is_some());
-    if mutual_tls {
-        info!("the OpAMP endpoint requires a client certificate");
-    }
-    // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
+    info!("the OpAMP endpoint requires the fleet credential and a client certificate");
+    // Two planes, two listeners (ADR-0038): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
+    let (agent_tls, operator_tls, issuers) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
-        fleet_server::transport::Admission::new(auth, mutual_tls),
+        fleet_server::transport::Admission::new(auth, true)
+            .with_enrolment(issuers, enrolment)
+            .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
+                limits,
+                clock.clone(),
+            ))),
     );
-    let operator_auth = config
-        .rest
-        .auth
-        .as_ref()
-        .map(fleet_server::api::OperatorAuth::from_config);
+    let operator_auth = config.rest.auth.as_ref().map(|auth| {
+        fleet_server::api::OperatorAuth::from_config(auth).with_throttle(Arc::new(
+            fleet_server::throttle::Throttle::new(limits, clock.clone()),
+        ))
+    });
     if operator_auth.is_some() {
-        // ADR-0017.
+        // ADR-0039. Both planes serve TLS, so the password never crosses a network in clear
+        // (ADR-0038).
         info!("the REST API and the UI require authentication");
-        // Basic puts a reusable password on the wire on every request. On loopback that stays on
-        // the host; published in cleartext it does not, and the operator should hear so once.
-        if config.tls.is_none() && !config.rest.listen.ip().is_loopback() {
-            tracing::warn!(
-                listen = %config.rest.listen,
-                "[rest.auth] sends its password in the clear on a listener that is not loopback — \
-                 add [tls], or put a TLS-terminating proxy in front (ADR-0017)"
-            );
-        }
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
@@ -232,28 +234,23 @@ async fn main() {
         }
     });
 
-    // Both planes serve with the same certificate and key (ADR-0012). Only the OpAMP route reads
-    // the peer certificate the listener carries into each request (ADR-0017).
-    let tls = match config.tls.as_ref().map(fleet_server::tls::server_tls) {
-        None => None,
-        Some(Ok(material)) => match material.rustls_config() {
-            Ok(rustls_config) => Some(rustls_config),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        },
-        Some(Err(e)) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    let over = if tls.is_some() { " over TLS" } else { "" };
-    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads{over}");
-    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI{over}");
+    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
+    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
     let (agents, operators) = tokio::join!(
-        listen::plane(agent_listener, tls.clone(), handle.clone()).serve(agents),
-        listen::plane(operator_listener, tls, handle).serve(operators),
+        listen::plane(
+            agent_listener,
+            Some(agent_tls),
+            config.max_connections,
+            handle.clone()
+        )
+        .serve(agents),
+        listen::plane(
+            operator_listener,
+            Some(operator_tls),
+            config.rest.max_connections,
+            handle
+        )
+        .serve(operators),
     );
     agents.expect("serve the Agent plane");
     operators.expect("serve the Operator plane");

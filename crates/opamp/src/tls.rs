@@ -4,18 +4,59 @@
 //! which certificate to present is the application's policy, so the application reads the files
 //! and hands the bytes here. Where a file is meant, the application wraps the error with its path.
 
+use std::sync::Arc;
+
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::SupportedProtocolVersion;
 
-/// Installs the process-wide rustls provider — ring, never a system library (ADR-0012) — once;
-/// later calls are no-ops. A binary calls it at startup. A test that builds an HTTP client calls
-/// it itself: reqwest's `rustls-no-provider` feature refuses to build one without a process
-/// provider, which is the guarantee that keeps aws-lc-rs and its cmake out of the build.
-pub fn install_ring_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        // A concurrent second install can still lose the race; losing to the same provider is fine.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+/// The one protocol version either side speaks (specification Q-3).
+pub const PROTOCOL_VERSIONS: &[&SupportedProtocolVersion] = &[&rustls::version::TLS13];
+
+/// The ring provider with the three TLS 1.3 suites and nothing else (ADR-0036). A provider without
+/// a TLS 1.2 suite cannot negotiate TLS 1.2, whoever builds the configuration from it.
+#[must_use]
+pub fn provider() -> CryptoProvider {
+    use rustls::crypto::ring::cipher_suite::{
+        TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
+    };
+    CryptoProvider {
+        cipher_suites: vec![
+            TLS13_AES_256_GCM_SHA384,
+            TLS13_AES_128_GCM_SHA256,
+            TLS13_CHACHA20_POLY1305_SHA256,
+        ],
+        ..rustls::crypto::ring::default_provider()
     }
+}
+
+/// Installs [`provider`] as the process-wide rustls provider — ring, never a system library
+/// (ADR-0012) — once; later calls are no-ops. A binary calls it at startup, before anything builds
+/// a TLS client. reqwest's `rustls-no-provider` feature refuses to build a client without a process
+/// provider, which is the guarantee that keeps aws-lc-rs and its cmake out of the build; and since
+/// reqwest builds its own configuration from this provider, it speaks TLS 1.3 alone too.
+pub fn install_ring_provider() {
+    if CryptoProvider::get_default().is_none() {
+        // A concurrent second install can still lose the race; losing to the same provider is fine.
+        let _ = provider().install_default();
+    }
+}
+
+/// A server configuration builder pinned to [`provider`] and [`PROTOCOL_VERSIONS`].
+#[must_use]
+pub fn server_builder() -> rustls::ConfigBuilder<rustls::ServerConfig, rustls::WantsVerifier> {
+    rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+        .with_protocol_versions(PROTOCOL_VERSIONS)
+        .expect("the ring provider supports TLS 1.3")
+}
+
+/// A client configuration builder pinned to [`provider`] and [`PROTOCOL_VERSIONS`].
+#[must_use]
+pub fn client_builder() -> rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier> {
+    rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+        .with_protocol_versions(PROTOCOL_VERSIONS)
+        .expect("the ring provider supports TLS 1.3")
 }
 
 /// A certificate chain and its private key, as PEM — what one side presents to the other.
@@ -118,7 +159,7 @@ mod tests {
     }
 
     /// Fail closed: a file with no certificate in it is not an empty trust store.
-    /// Verifies: ADR-0036
+    /// Verifies: ADR-0036, ADR-0037
     #[test]
     fn a_file_holding_no_certificate_is_an_error() {
         assert!(certificates(b"").is_err());
@@ -138,6 +179,17 @@ mod tests {
             key_pem: key_pem.into_bytes(),
         };
         assert!(!format!("{identity:?}").contains("PRIVATE KEY"));
+    }
+
+    /// Verifies: ADR-0036, ADR-0038, ADR-0041, Q-3
+    #[test]
+    fn the_provider_offers_tls_1_3_suites_alone() {
+        let provider = provider();
+        assert_eq!(provider.cipher_suites.len(), 3);
+        assert!(provider
+            .cipher_suites
+            .iter()
+            .all(|suite| suite.version() == &rustls::version::TLS13));
     }
 
     #[test]

@@ -100,11 +100,19 @@ only as the protocol and its agents actually allow.
   foreign agent — one whose configuration format, lifecycle, and health nothing here already knows —
   and translates all three into OpAMP toward the Server, so heterogeneous agents share one control
   loop and appear in the fleet like any other Agent.
-- **Secure the connection and know who is on it.** Traffic between Client and Server is TLS-protected
-  on both ends, optionally with mutual TLS, and the Server accepts only authenticated Agent
-  identities. This is done with the protocol's own means — connection headers, client certificates,
-  and the `ConnectionSettings` offers that let the Server rotate a Client's credentials — never
-  through a private side channel.
+- **Security before convenience.** A fleet manager puts configuration and software onto every host
+  it reaches, so a flaw in it is a flaw on all of them at once. Where security and convenience
+  conflict, security wins, and the operator meets a refusal that says what to fix, not a warning.
+  Every connection that leaves the host is TLS 1.3; plaintext is accepted on the loopback alone. An
+  Agent proves fleet membership twice, with a client certificate in the TLS handshake and with a
+  fleet credential, and it obtains its certificate in a separate enrolment that is time-limited and
+  approved. This is done with the protocol's own means — connection headers, client certificates,
+  the CSR flow, and the `ConnectionSettings` offers that let the Server rotate a Client's
+  credentials — never through a private side channel. Software is installed only when it is signed
+  with a key the operator holds and fetched from a source the operator allowed. No vulnerability can
+  be ruled out, so the project shrinks the chance of one and the damage it can do: every input from
+  the network is bounded before it is parsed, the parsers are fuzzed, and the dependencies are
+  checked before they are merged.
 - **Close the loop before widening it.** A working control loop — configure, apply, report back — for
   one managed process comes first. Targeting a subset of the fleet and updating an agent's software
   are core goals, built on top of that loop once it holds, not before it.
@@ -241,8 +249,9 @@ Use these exact words in code, comments, documentation, and ADRs.
   already run. One mechanism with two subjects, not two mechanisms.
 - **Package** — a versioned, downloadable software artifact an Agent installs, identified by the
   **Agent type it is built for and its version**; its display name is derived from the two. It is
-  verified against a content hash, and against a signature where one is configured — the signature
-  travelling with the Deployment that offers it rather than with the artifact record. The Server
+  verified against a content hash and against a signature, and an Agent installs nothing that fails
+  either — the signature travelling with the Deployment that offers it rather than with the
+  artifact record. The Server
   offers Packages; an Agent reports the status of each. This is how the Server updates an agent's
   software, not only its configuration.
 - **Deployment** — a named set of Packages, aimed at a subset of the Fleet by a Selector and
@@ -304,8 +313,22 @@ Use these exact words in code, comments, documentation, and ADRs.
     health, and effective configuration upstream — so the Collector's own reporting, rather than
     external observation, is what makes it visible in the fleet.
 17. **G-17** — **The connection is secured and the Agent is identified.** Client-to-Server traffic
-    is TLS-protected on both ends, mutual TLS is supported, and the Server accepts only
+    is TLS-protected on both ends, mutual TLS is required, and the Server accepts only
     authenticated Agent identities.
+
+## Quality Goals
+
+1. **Q-1** — **Secure by default.** Whatever its configuration, neither end sends a credential, a
+   configuration or a package unencrypted beyond the loopback, admits an Agent onto the Server
+   or a Gateway without both a client certificate and a fleet credential, or installs a package
+   without a valid signature. A
+   configuration that would do any of these is refused at startup, naming the setting.
+2. **Q-2** — **Untrusted input is bounded and fuzzed.** Every parser that reads bytes from the
+   network or from a downloaded artifact enforces its size limit before it allocates, and has a fuzz
+   target that runs in CI.
+3. **Q-3** — **The supply chain is checked before it is merged.** No change merges while a
+   dependency carries a known vulnerability, an unapproved licence, or a source outside the
+   registry, or while the TLS stack accepts a protocol version below 1.3.
 
 ## Non-Goals
 

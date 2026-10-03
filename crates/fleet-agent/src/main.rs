@@ -195,10 +195,10 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
-        // service starts, dials the development default, and manages nothing.
+        // service refuses to start.
         println!(
-            "warning: no configuration at {} — the Client will run on defaults until it exists \
-             (write it, or re-run with --interactive)",
+            "warning: no configuration at {} — the Client refuses to start until it exists with \
+             a fleet credential and a client identity (write it, or re-run with --interactive)",
             config_path.display()
         );
     }
@@ -206,6 +206,16 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
     let config = ClientConfig::load(&config_path)?;
+    // And held to what the Client needs at startup. A packaged install registers the service even
+    // so — it has an endpoint and no terminal to ask for a secret — but never starts it, and the
+    // service refuses to run until the file is complete (ADR-0046, ADR-0047). Said loudly here.
+    if let Err(e) = config.check_admission() {
+        println!(
+            "warning: {}: {e}. The service is registered, and refuses to start until this is set \
+             (or re-run with --interactive).",
+            config_path.display()
+        );
+    }
 
     let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;

@@ -18,6 +18,12 @@ pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// The private key of [`ISSUED_CERT_FILE`]. Generated on this host and never sent anywhere: what
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
+/// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
+/// certificate in force keeps its own key until the new one is proved (ADR-0039 clause 11).
+pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
+/// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
+/// request by its public key (ADR-0039 clause 21).
+pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.
 ///
@@ -42,7 +48,14 @@ pub fn client_tls_for(
         Some(cert) => {
             // An offered certificate belongs to the key this Client generated for its request;
             // without that key there is nothing to prove possession with.
-            let key = config.state_dir.join(ISSUED_KEY_FILE);
+            // The key of the request in flight, or — for a certificate offered over a key already in
+            // force — that one.
+            let pending = config.state_dir.join(PENDING_KEY_FILE);
+            let key = if pending.exists() {
+                pending
+            } else {
+                config.state_dir.join(ISSUED_KEY_FILE)
+            };
             if !key.exists() {
                 return Err(format!(
                     "an offered certificate has no key to go with it — {} is missing",

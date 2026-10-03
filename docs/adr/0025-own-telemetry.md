@@ -1,6 +1,6 @@
 # ADR-0025: An Agent reports its own telemetry over OTLP/HTTP to the destinations the Server names
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0048](0048-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/telemetry.rs, the telemetry half of crates/fleet-agent/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, update and Supervisor modules, the Server's `[telemetry_offer]` (crates/fleet-server/src/config.rs, crates/fleet-server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml

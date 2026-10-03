@@ -38,6 +38,7 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
     ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode")
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() {
     let server = spawn_with(None, Some(offer())).await;
@@ -60,6 +61,7 @@ async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() 
     assert_eq!(header.value, "Bearer rotated-token");
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn no_offer_without_the_capability_or_without_a_configured_section() {
     let armed = spawn_with(None, Some(offer())).await;
@@ -83,6 +85,7 @@ async fn no_offer_without_the_capability_or_without_a_configured_section() {
     );
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn the_reported_hash_gates_reoffering() {
     let server = spawn_with(None, Some(offer())).await;

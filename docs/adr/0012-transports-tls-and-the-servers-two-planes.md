@@ -1,6 +1,6 @@
 # ADR-0012: Both OpAMP transports on both ends over rustls, and a Server on two listeners split by audience with bounded connection setup
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 - **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, how the Server binds and serves in `crates/fleet-server/src/listen.rs` and `main.rs`, and the `listen`, `[rest]` and `[tls]` keys of `server.toml`

@@ -79,6 +79,8 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "json"] }
 # TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (ADR-0012).
 # The provider is installed once at each binary's startup.
+# `tls12` stays enabled because reqwest requires it; TLS 1.3 alone is enforced where the provider and
+# every configuration are built (`opamp::tls`, ADR-0036).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Ed25519 verification of downloaded package artifacts (ADR-0019) — the same ring already vendored
 # for TLS, used directly, so no new crypto backend enters the build.

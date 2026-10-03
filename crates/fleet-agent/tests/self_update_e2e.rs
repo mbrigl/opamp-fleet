@@ -17,6 +17,8 @@
 //! while the Client is running through it. A test that only ever moved the symlink would leave the
 //! platform whose mechanism is the unusual one entirely unasserted.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -38,19 +40,39 @@ fn this_host() -> Platform {
 use fleet_agent::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 use fleet_agent::update::EXIT_RESTART_FOR_UPDATE;
 
-/// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
-/// name. Aim belongs to the Deployment now (ADR-0030): a Package reaches nobody by itself, so a
-/// test that wants one delivered has to say which ring the host is in — which is the model.
+/// The operator's signing key for these tests, and its public half in hex as `[packages]
+/// verification_key` takes it. A Client updates itself only from a signed package (ADR-0044).
+fn signing_key() -> &'static (ring::signature::Ed25519KeyPair, String) {
+    static KEY: std::sync::OnceLock<(ring::signature::Ed25519KeyPair, String)> =
+        std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        use ring::signature::KeyPair as _;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+        let public = hex::encode(keypair.public_key().as_ref());
+        (keypair, public)
+    })
+}
+
+/// Puts a Package into a ring aimed at the Agent type it is built for, signed with
+/// [`signing_key`], and hands back the ring's name. A Package reaches nobody by itself, so a test
+/// that wants one delivered has to say which ring the host is in — which is the model.
 fn ring_holding(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
 ) -> String {
-    ring_holding_signed(state, id, None)
+    let path = state
+        .packages()
+        .expect("packages are armed")
+        .artifact_path(id, &this_host())
+        .expect("the artifact is stored");
+    let artifact = std::fs::read(path).expect("read the artifact");
+    let signature = signing_key().0.sign(&artifact).as_ref().to_vec();
+    ring_holding_signed(state, id, Some((&this_host(), signature)))
 }
 
-/// The same, recording the artifact's signature on the ring — where a signature lives since
-/// ADR-0030. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
-/// ring is what has to carry it.
+/// The same with the signature given — where a signature lives (ADR-0045).
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
@@ -427,11 +449,14 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
             "name = \"self-updating-client\"\n",
             "state_dir = {state:?}\n",
             "heartbeat_interval_secs = 1\n\n",
+            "[packages]\n",
+            "verification_key = \"{key}\"\n\n",
             "[self_update]\n",
             "package = \"{package}\"\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
+        key = signing_key().1,
         package = package,
     )
 }
@@ -439,6 +464,7 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 /// The whole loop: the Server offers the Client a version of itself, the Client stages it beside
 /// the running one, proves it with `self-check`, moves `current`, and asks to be restarted — and
 /// whatever comes up afterwards owes the Server a terminal status, which must be `Installed`.
+/// Verifies: ADR-0044
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -468,7 +494,11 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let program = install_layout(&root, &client);
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("supervisor.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
+    std::fs::write(
+        &config,
+        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+    )
+    .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -542,6 +572,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 /// a service manager that does not reap the process group the Collector was orphaned and the next
 /// Client spawned a duplicate. Here every managed process that ran before a restart is dead
 /// afterwards. Linux-only: it reads `/proc/<pid>` to tell a process apart from its successor.
+/// Verifies: ADR-0044
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
@@ -588,6 +619,8 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
                 "name = \"self-updating-client\"\n",
                 "state_dir = {state:?}\n",
                 "heartbeat_interval_secs = 1\n\n",
+                "[packages]\n",
+                "verification_key = \"{key}\"\n\n",
                 "[self_update]\n",
                 "package = \"supervisor\"\n\n",
                 "[[supervisor]]\n",
@@ -598,9 +631,10 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
             ),
             addr = addr,
             state = state_dir.to_string_lossy(),
+            key = signing_key().1,
             stub = stub,
             marker = marker.to_string_lossy(),
-        ),
+        ) + &common::credentials(dir.path()),
     )
     .expect("write config");
 
@@ -662,6 +696,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 /// nothing and the fourth test had nothing to measure against. It now reports the version it runs —
 /// which is what this asserts across the process boundary, together with what the Server then does
 /// with it: an equal Set and an older one reach nobody, a greater one reaches this Client.
+/// Verifies: ADR-0044
 #[tokio::test]
 async fn a_set_at_the_running_version_reaches_nobody() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -693,7 +728,11 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     let program = install_layout(&root, &client);
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("supervisor.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "supervisor")).expect("write config");
+    std::fs::write(
+        &config,
+        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+    )
+    .expect("write config");
 
     // A Client installed the way a package manager installs one: a layout, a binary, and no record
     // of any package ever having been installed over it.
@@ -760,6 +799,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
 /// its Consequences: `[self_update] package` set to something that is *not* this Client's Agent
 /// type. The Client then refuses every offer it will ever get, visibly, on its fleet row — which
 /// is the behaviour that has to be observable, since nothing else would say so.
+/// Verifies: ADR-0044
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -788,7 +828,11 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
     let state_dir = dir.path().join("client-state");
     let config = dir.path().join("supervisor.toml");
-    std::fs::write(&config, config_toml(addr, &state_dir, "otelcol")).expect("write config");
+    std::fs::write(
+        &config,
+        config_toml(addr, &state_dir, "otelcol") + &common::credentials(dir.path()),
+    )
+    .expect("write config");
 
     let mut service = Supervised::start(&program, &config);
 
@@ -848,4 +892,81 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
         previous,
         "nothing was pointed anywhere else"
     );
+}
+
+/// A self-update whose signature does not verify against `[packages] verification_key` fails with
+/// `InstallFailed` naming the signature, nothing is staged, and the Client keeps running the
+/// version it runs. The Server never offers an unsigned Package (ADR-0045), so a signature over
+/// other bytes is the case that reaches the Client.
+/// Verifies: ADR-0044
+#[tokio::test]
+async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client_keeps_running() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
+
+    let artifact = std::fs::read(&client).expect("read the client binary");
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    let set =
+        fleet_server::packages::PackageId::new("supervisor", NEWER_VERSION).expect("package id");
+    store.create(&set).expect("create package");
+    store
+        .put_entry(&set, &this_host(), artifact)
+        .expect("put entry");
+
+    let (addr, state) = spawn_server(store).await;
+    let root = dir.path().join("install");
+    let program = install_layout(&root, &client);
+    let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
+    let state_dir = dir.path().join("client-state");
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+    )
+    .expect("write config");
+
+    let mut service = Supervised::start(&program, &config);
+
+    // Signed with the operator's key, over bytes that are not the artifact.
+    let signature = signing_key().0.sign(b"another artifact").as_ref().to_vec();
+    let ring = ring_holding_signed(&state, &set, Some((&this_host(), signature)));
+    wait_until("the rollout act to reach the agent", || {
+        service.tend();
+        state
+            .rollout_deployment(&ring)
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
+
+    let error = wait_until("the self-update to be reported InstallFailed", || {
+        service.tend();
+        let snapshot = state.snapshot();
+        let agent = view(&snapshot, "self-updating-client")?;
+        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+        (package.status == "InstallFailed").then(|| package.error.clone())
+    })
+    .await;
+    assert!(
+        error.contains("signature"),
+        "the failure names the signature: {error:?}"
+    );
+    assert!(
+        service.exits.is_empty(),
+        "a refused package is not a reason to restart: exits {:?}",
+        service.exits
+    );
+    assert_eq!(
+        std::fs::canonicalize(root.join("current")).expect("current resolves"),
+        previous,
+        "nothing was pointed anywhere else"
+    );
+    let staged: Vec<_> = std::fs::read_dir(root.join("versions"))
+        .expect("versions")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(NEWER_VERSION))
+        .collect();
+    assert!(staged.is_empty(), "nothing was staged: {staged:?}");
 }

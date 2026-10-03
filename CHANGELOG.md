@@ -18,6 +18,55 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Changed
 
+- **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
+  ([ADR-0038](docs/adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).
+  `ws://` and `http://` are accepted only to `127.0.0.1` or `::1` — not to `localhost`, not to a
+  private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
+  ([ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md)), a
+  referenced package `url`
+  ([ADR-0043](docs/adr/0043-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md))
+  and an own-telemetry destination
+  ([ADR-0048](docs/adr/0048-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). A
+  peer that speaks only TLS 1.2 can no longer connect. **What to do:** move every such URL to
+  `wss://` or `https://`, and put TLS 1.3 in front of any Collector or mirror that lacks it.
+- **The Server requires `[tls]` and listens on the loopback by default.** Without `[tls]` it does
+  not start; `listen` defaults to `127.0.0.1:4320`, and the Operator plane serves TLS too.
+  `[rest] listen` off the loopback now requires `[rest.auth]`. **What to do:** add `[tls]`
+  (`scripts/dev-pki.sh` makes a development set), set `listen = "0.0.0.0:4320"` to serve the
+  fleet, and point clients of the REST API at `https://`.
+- **The Client's default endpoint is `wss://127.0.0.1:4320/v1/opamp`**, and so is the MSI's
+  prefill ([ADR-0047](docs/adr/0047-releases-installers-and-the-name-supervisor-secure-by-default.md)).
+  **What to do:** a Client that relied on the old `ws://` default needs `[tls] ca_file` for the
+  Server's certificate.
+- **Nothing is installed without a signature**
+  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md),
+  [ADR-0044](docs/adr/0044-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0045](docs/adr/0045-packages-and-deployments-that-sign-every-package.md)). A Client without
+  `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
+  its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
+  entry. A download goes only to the Server's own origin or to an https prefix in `[packages]
+  allowed_sources`, every redirect hop included. **What to do:** set `verification_key` on every
+  Client, sign every entry of every Deployment before rolling it out, and list any mirror in
+  `allowed_sources`.
+- **Every Agent proves itself twice, and a new host is approved by an operator**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md),
+  [ADR-0040](docs/adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md),
+  [ADR-0046](docs/adr/0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
+  The Server requires `[auth]` and `[tls] client_ca_file`, and asks for the client certificate in
+  the TLS handshake — the package download included. A fresh host enrols with a bootstrap
+  certificate from `[enrolment] bootstrap_ca_file`, only while an operator holds the enrolment
+  window open (`POST /api/v1/enrolment/window`), and only once an operator approves its request
+  (`POST /api/v1/enrolments/<id>/approve`). Repeated admission failures from one address are
+  answered `429` (`[admission_throttle]`). A Gateway requires `[gateway.tls]` with
+  `client_ca_file`. The Client refuses to start without `[auth]` and a client certificate.
+  **What to do:** give the Server `[auth]`, `client_ca_file`, `[client_ca]` and, to enrol hosts,
+  `[enrolment]`; give every Client its credential and a certificate — an issued one, or a
+  bootstrap certificate to enrol with — and every Gateway its client CA.
+- **Connection caps:** `max_connections` (10 000) and `[rest] max_connections` (256) bound each
+  plane; HTTP/2 is limited to 100 concurrent streams per connection and pings a silent peer away.
+  **What to do:** raise `max_connections` for a larger fleet, together with the file-descriptor
+  limit.
+
 - **Deleting a Deployment that has released a package is refused** (`409`). Its Agents' offer
   travels with that Deployment's signatures, and deleting it used to leave them offered the
   package unsigned. Roll those Agents out through another Deployment, or delete the package,

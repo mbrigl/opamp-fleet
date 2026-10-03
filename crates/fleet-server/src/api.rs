@@ -43,7 +43,10 @@ use crate::packages::{PackageId, PackageSummary, Platform, Source};
         (name = "configurations", description = "Selector-targeted Configurations"),
         (name = "packages", description = "Software packages the Server delivers (ADR-0019)"),
         (name = "deployments", description = "What reaches a channel of hosts — the only thing \
-                                              rolled out (ADR-0030)")
+                                              rolled out (ADR-0030)"),
+        (name = "enrolment", description = "How a host gets its first certificate: a window an \
+                                            operator opens, and requests an operator decides \
+                                            (ADR-0039)")
     )
 )]
 struct ApiDoc;
@@ -52,21 +55,41 @@ struct ApiDoc;
 /// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
 /// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
 /// page and a session.
-pub struct OperatorAuth(Credentials);
+pub struct OperatorAuth(Credentials, Option<Arc<crate::throttle::Throttle>>);
 
 impl OperatorAuth {
     pub fn from_config(auth: &RestAuthConfig) -> Self {
-        OperatorAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
+        OperatorAuth(
+            Credentials::new(auth.accepted_headers(), auth.challenge()),
+            None,
+        )
+    }
+
+    /// Counts this plane's failures in a table of its own (ADR-0039 clause 24).
+    #[must_use]
+    pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
+        self.1 = Some(throttle);
+        self
     }
 }
 
-/// Refuses every request that carries no configured credential, before any handler sees it.
+/// Refuses every request that carries no configured credential, before any handler sees it, and
+/// a peer address that has failed too often before its credential is compared.
 async fn authenticate(
     State(auth): State<Arc<OperatorAuth>>,
     request: Request,
     next: Next,
 ) -> Response {
+    let peer = crate::transport::peer_ip(&request);
+    if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
+        if let Some(wait) = throttle.retry_after(peer) {
+            return crate::transport::throttled(wait);
+        }
+    }
     if !auth.0.permits(request.headers()) {
+        if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
+            throttle.failed(peer);
+        }
         // The challenge is what turns this into a browser prompt rather than a dead end.
         return (
             StatusCode::UNAUTHORIZED,
@@ -112,6 +135,14 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
             delete_deployment_signature
         ))
         .routes(routes!(rollout_deployment))
+        .routes(routes!(
+            get_enrolment_window,
+            open_enrolment_window,
+            close_enrolment_window
+        ))
+        .routes(routes!(list_enrolments))
+        .routes(routes!(approve_enrolment))
+        .routes(routes!(reject_enrolment))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -1423,6 +1454,9 @@ async fn probe(
         return Err(reason);
     }
     let client = match reqwest::Client::builder()
+        .use_rustls_tls()
+        // TLS 1.3 alone, as every connection of this Server (ADR-0038, ADR-0043).
+        .tls_version_min(reqwest::tls::Version::TLS_1_3)
         .timeout(std::time::Duration::from_secs(10))
         // Never chase a redirect: a public URL that 3xx-bounces to `169.254.169.254` or an internal
         // host would otherwise walk the probe straight past the check above.
@@ -1678,8 +1712,7 @@ struct DeploymentPackageView {
     /// The platforms whose artifact this Deployment holds a signature for, as `os/arch`.
     ///
     /// Read it against the Package's own entries: a platform listed there and missing here is one
-    /// an Agent will be offered **unsigned**. The Server does not refuse that — an unsigned fleet
-    /// is a legitimate policy (ADR-0019) — so it reports it, which is the only thing left to do.
+    /// no Agent is offered, and it keeps the channel from being rolled out (ADR-0045).
     signed_platforms: Vec<String>,
 }
 
@@ -2080,4 +2113,214 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
         .copied()
         .unwrap_or_default();
     Json(DeploymentView::of(deployment, reach)).into_response()
+}
+
+/// The enrolment window as the API answers with it (ADR-0039 clause 20).
+#[derive(Serialize, ToSchema)]
+struct EnrolmentWindow {
+    /// Whether a host with a bootstrap certificate may enrol now.
+    open: bool,
+    /// When the window closes, in milliseconds since the Unix epoch; absent while it is closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_ms: Option<u64>,
+}
+
+/// How long to open the enrolment window for.
+#[derive(Deserialize, ToSchema)]
+struct OpenWindow {
+    /// From 1 to 86400 seconds.
+    open_for_secs: u64,
+}
+
+/// One enrolment request waiting for an operator (ADR-0039 clause 22).
+#[derive(Serialize, ToSchema)]
+struct PendingEnrolment {
+    /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
+    id: String,
+    arrived_ms: u64,
+    /// The address the request came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
+    /// The subject the request asks for.
+    subject: String,
+    /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
+    /// so an operator can match a request to a host.
+    key_fingerprint: String,
+    /// The bootstrap certificate the connection carried.
+    bootstrap_subject: String,
+    bootstrap_fingerprint: String,
+}
+
+fn enrolment_off() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "enrolment is not configured — set [enrolment] bootstrap_ca_file",
+    )
+}
+
+fn window_view(until_ms: Option<u64>) -> Response {
+    Json(EnrolmentWindow {
+        open: until_ms.is_some(),
+        until_ms,
+    })
+    .into_response()
+}
+
+/// Whether hosts may enrol now, and until when.
+#[utoipa::path(
+    get,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    responses(
+        (status = 200, body = EnrolmentWindow),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
+    match state.enrolment() {
+        Some(enrolment) => window_view(enrolment.window()),
+        None => enrolment_off(),
+    }
+}
+
+/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default and
+/// lives in memory only, so a Server restart closes it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    request_body = OpenWindow,
+    responses(
+        (status = 200, body = EnrolmentWindow),
+        (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn open_enrolment_window(
+    State(state): State<Arc<AppState>>,
+    Json(spec): Json<OpenWindow>,
+) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    match enrolment.open(spec.open_for_secs) {
+        Ok(until) => {
+            info!(secs = spec.open_for_secs, "enrolment window opened");
+            window_view(Some(until))
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Closes the enrolment window now: every enrolling connection ends, and every pending request
+/// expires.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    responses(
+        (status = 204, description = "Closed"),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    enrolment.close();
+    info!("enrolment window closed");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The enrolment requests waiting for an operator, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/enrolments",
+    tag = "enrolment",
+    responses(
+        (status = 200, body = Vec<PendingEnrolment>),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    let pending: Vec<PendingEnrolment> = enrolment
+        .pending()
+        .into_iter()
+        .map(|p| PendingEnrolment {
+            id: p.id,
+            arrived_ms: p.arrived_ms,
+            peer: p.requester.peer.map(|ip| ip.to_string()),
+            subject: p.subject,
+            key_fingerprint: p.key_fingerprint,
+            bootstrap_subject: p.requester.bootstrap_subject,
+            bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
+        })
+        .collect();
+    Json(pending).into_response()
+}
+
+/// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolments/{id}/approve",
+    tag = "enrolment",
+    params(("id" = String, Path, description = "the request's id")),
+    responses(
+        (status = 204, description = "Approved and signed"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request", body = ErrorBody)
+    )
+)]
+async fn approve_enrolment(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    match state.approve_enrolment(&id) {
+        Ok(()) => {
+            info!(request = %id, "enrolment request approved");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(crate::enrolment::DecisionError::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            format!("no pending enrolment request {id:?}"),
+        ),
+        Err(crate::enrolment::DecisionError::Sign(e)) => error(StatusCode::CONFLICT, e),
+    }
+}
+
+/// Rejects one enrolment request; its connection is closed.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolments/{id}/reject",
+    tag = "enrolment",
+    params(("id" = String, Path, description = "the request's id")),
+    responses(
+        (status = 204, description = "Rejected"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn reject_enrolment(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    match enrolment.reject(&id) {
+        Ok(()) => {
+            info!(request = %id, "enrolment request rejected");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => error(
+            StatusCode::NOT_FOUND,
+            format!("no pending enrolment request {id:?}"),
+        ),
+    }
 }

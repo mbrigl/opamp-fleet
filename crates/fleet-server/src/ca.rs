@@ -6,9 +6,9 @@
 //! proxies the CSR to a CA". This is the first of those; proxying to an external CA is future work
 //! and would sit behind the same `[client_ca]` seam.
 //!
-//! Nothing here decides *who* may enrol. Admission does that, before a message reaches this module
-//! (`transport::Admission`): a CSR that arrives has already proved everything the endpoint asks of
-//! any other message, and that is the approval the specification's flow calls for.
+//! Nothing here decides *who* may enrol. A CSR from an Agent holding a certificate of the client
+//! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
+//! approves it ([`crate::enrolment`], ADR-0039).
 
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -63,7 +63,10 @@ impl ClientCa {
     pub fn sign(&self, csr_pem: &str) -> Result<String, String> {
         let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
-        request.params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+        // The life starts now, less a few minutes for clocks that disagree: a start in the past
+        // would put a fresh certificate into its renewal window at once (ADR-0039 clause 11), and
+        // would lengthen what a stolen one is good for.
+        request.params.not_before = time::OffsetDateTime::now_utc() - CLOCK_SKEW;
         request.params.not_after = not_after(self.validity_days)?;
         // Never trust the request for the certificate's powers: force a client-auth leaf.
         request.params.is_ca = IsCa::ExplicitNoCa;
@@ -81,12 +84,52 @@ impl ClientCa {
     }
 }
 
+/// How far an issued certificate's life starts before the moment it is signed, so an Agent whose
+/// clock runs a little behind the Server's does not hold a certificate that is not yet valid.
+const CLOCK_SKEW: time::Duration = time::Duration::minutes(5);
+
 /// `now + validity_days`, in the time type rcgen speaks.
 fn not_after(validity_days: u32) -> Result<time::OffsetDateTime, String> {
     let seconds = i64::from(validity_days) * 24 * 60 * 60;
     time::OffsetDateTime::now_utc()
         .checked_add(time::Duration::seconds(seconds))
         .ok_or_else(|| format!("validity_days = {validity_days} is out of range"))
+}
+
+/// What an enrolment request says about itself (ADR-0039 clause 22): its subject and the SHA-256
+/// fingerprint of the public key it asks to be certified, by which the queue knows a re-sent
+/// request.
+///
+/// # Errors
+/// Returns an error when the request does not parse or its signature does not verify.
+pub fn enrolment_request(csr_pem: &str) -> Result<crate::enrolment::Request, String> {
+    use rcgen::PublicKeyData as _;
+    use sha2::{Digest, Sha256};
+    let request = CertificateSigningRequestParams::from_pem(csr_pem)
+        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let subject = match request
+        .params
+        .distinguished_name
+        .get(&rcgen::DnType::CommonName)
+    {
+        Some(value) => format!("CN={}", dn_text(value)),
+        None => String::new(),
+    };
+    Ok(crate::enrolment::Request {
+        csr_pem: csr_pem.to_string(),
+        subject,
+        key_fingerprint: hex::encode(Sha256::digest(request.public_key.der_bytes())),
+    })
+}
+
+/// A distinguished-name value as text, whatever string type the request chose.
+fn dn_text(value: &rcgen::DnValue) -> String {
+    match value {
+        rcgen::DnValue::Utf8String(s) => s.clone(),
+        rcgen::DnValue::PrintableString(s) => s.as_str().to_string(),
+        rcgen::DnValue::Ia5String(s) => s.as_str().to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 impl crate::fleet::CertificateSigner for ClientCa {
@@ -149,6 +192,7 @@ mod tests {
             .expect("csr pem")
     }
 
+    /// Verifies: ADR-0039
     #[test]
     fn signs_a_request_into_a_certificate() {
         let issued = client_ca(90).sign(&csr("edge-01")).expect("issued");
@@ -160,6 +204,7 @@ mod tests {
     /// A CSR asking for CA powers is signed into a plain client-auth leaf: the request does not get
     /// to choose the certificate's powers (a CA cert chaining to the fleet CA could mint more). The
     /// issued certificate must be non-CA, carry only `clientAuth`, and none of the CSR's SANs.
+    /// Verifies: ADR-0039
     #[test]
     fn the_request_cannot_dictate_the_certificates_powers() {
         let issued = client_ca(90).sign(&hostile_csr()).expect("issued");
@@ -189,8 +234,32 @@ mod tests {
         );
     }
 
+    /// An issued certificate's life is `validity_days` from now — not from a date long past, which
+    /// would put it into its renewal window the moment it is issued and loop the Client into
+    /// asking again and again.
+    #[test]
+    fn an_issued_certificate_lives_validity_days_from_now() {
+        let issued = client_ca(90).sign(&csr("edge-01")).expect("issued");
+        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
+        let cert = pem.parse_x509().expect("der");
+        let now = time::OffsetDateTime::now_utc();
+        let not_before = cert.validity().not_before.to_datetime();
+        let not_after = cert.validity().not_after.to_datetime();
+        assert!(
+            now - not_before <= time::Duration::minutes(6),
+            "{not_before}"
+        );
+        assert!(not_before <= now, "valid from the moment it is issued");
+        let life = not_after - not_before;
+        assert!(
+            life >= time::Duration::days(90)
+                && life <= time::Duration::days(90) + time::Duration::minutes(6)
+        );
+    }
+
     /// The Baseline makes this a MUST on the Server: a request it cannot act on is answered with a
     /// `BadRequest` error response, which is what the caller does with this `Err`.
+    /// Verifies: ADR-0039
     #[test]
     fn refuses_a_request_that_does_not_parse() {
         let error = client_ca(90)

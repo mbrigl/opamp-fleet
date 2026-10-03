@@ -1,7 +1,8 @@
-//! Server-offered packages (ADR-0019): resolving a download URL, downloading the artifact, and
-//! **verifying it before it is applied** — the content hash always, the Ed25519 signature when the
-//! operator configured a verification key. What protects an installed binary is verification, not
-//! transport secrecy, so this is where the security of the feature lives.
+//! Server-offered packages (ADR-0042): resolving a download URL, downloading the artifact from an
+//! allowed source over TLS 1.3, and **verifying it before it is applied** — the content hash and the
+//! Ed25519 signature, both always. What protects an installed binary is verification; what the
+//! source rules protect is what a download exposes — the offered headers and this Client's
+//! certificate.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,6 +71,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// and hashed as it arrives, never assembled in memory. Only a signature check reads it back,
 /// because Ed25519 verifies over the whole message. `staging_dir` is the receiving Agent's own
 /// (ADR-0022), so the install that follows is a rename inside one filesystem.
+/// Verifies: ADR-0042
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
@@ -79,33 +81,14 @@ pub async fn download_and_verify(
     // First, before any URL is resolved or a byte is written: the staged path is built from this
     // name, and a name that could escape the staging directory is refused outright.
     ensure_safe_package_name(&package.name)?;
+    // Refused before a byte is fetched: no key, or no signature to check with it (ADR-0042).
+    let key = signature_policy(&package.signature, config.package_key())?;
     let url = resolve_url(&package.download_url, &config.endpoint)?;
-    let mut builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        // Unlike the OpAMP endpoint, an artifact URL may legitimately redirect — a mirror
-        // (ADR-0019) is often a CDN that bounces the download to signed storage — so redirects are
-        // allowed but bounded to a small chain. Integrity does not rest on where the bytes come
-        // from: the content hash (always) and the signature (when a key is configured) are checked
-        // after the download, so a redirect cannot substitute a malicious artifact.
-        //
-        // With offered headers in play the chain is walked by hand instead (`send_download`), so
-        // the policy here is what applies to a download that carries none.
-        .redirect(if package.headers.is_empty() {
-            reqwest::redirect::Policy::limited(MAX_REDIRECTS)
-        } else {
-            reqwest::redirect::Policy::none()
-        })
-        // Per-operation timeouts, not one for the whole transfer: a large artifact over a modest
-        // link legitimately takes minutes, and a total timeout would abort it forever while a
-        // stalled connection is what actually needs cutting.
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60));
-    // Trust only, never this Client's certificate: a `download_url` may point at a mirror
-    // (ADR-0019), and an identity belongs to the Server rather than to whoever hosts an artifact.
-    builder = crate::tls::trust(config)?.trust(builder)?;
-    let client = builder
-        .build()
-        .map_err(|e| format!("cannot build the download client: {e}"))?;
+    let sources = Sources::new(config)?;
+    // Two clients, one per kind of host: this Client's certificate goes to its own Server's origin
+    // and to nobody else (ADR-0042), so a mirror never learns the fleet identity.
+    let anonymous = download_client(crate::tls::trust(config)?)?;
+    let identified = download_client(crate::tls::client_tls(config)?)?;
     // A count, never a key and never a value — and the source without whatever authorises reaching
     // it. This line goes to the log file, and through the bridge to the destination the Server named
     // (ADR-0025), which is the same reason the span below carries the redacted form: a pre-signed
@@ -113,7 +96,7 @@ pub async fn download_and_verify(
     let source = source_of(&url);
     info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
     let download = tracing::info_span!("download", source = %source);
-    let mut response = send_download(&client, &url, &package.headers)
+    let mut response = send_download(&sources, &anonymous, &identified, &url, &package.headers)
         .instrument(download.clone())
         .await?;
     if !response.status().is_success() {
@@ -159,7 +142,7 @@ pub async fn download_and_verify(
     // on and "it failed to install" must be able to say which of the two.
     drop(download);
     let verify = tracing::info_span!("verify", bytes = staged.len).entered();
-    if let Err(e) = verify_staged(&path, &staged, package, config.package_key()) {
+    if let Err(e) = verify_staged(&path, &staged, package, key) {
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
@@ -168,35 +151,137 @@ pub async fn download_and_verify(
     Ok(path)
 }
 
-/// How many redirects an artifact download will follow, whoever follows them.
+/// How many redirects an artifact download will follow.
 const MAX_REDIRECTS: usize = 5;
 
-/// Sends the download request, carrying the headers the offer named.
+/// A download client over `tls`: TLS 1.3, no redirect of its own — every hop is checked here
+/// (`send_download`) — and per-operation timeouts rather than one for the whole transfer, since a
+/// large artifact over a modest link legitimately takes minutes.
+fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60));
+    tls.apply(builder)?
+        .build()
+        .map_err(|e| format!("cannot build the download client: {e}"))
+}
+
+/// Where a download may go (ADR-0042): the Server's own origin always, and the prefixes of
+/// `[packages] allowed_sources`. Every URL is held to the transport rule first — `https://`, and
+/// `http://` only to `127.0.0.1` or `::1`.
+pub struct Sources {
+    server: reqwest::Url,
+    allowed: Vec<reqwest::Url>,
+}
+
+impl Sources {
+    /// # Errors
+    /// Returns an error when the endpoint or an allowed source cannot be parsed.
+    pub fn new(config: &ClientConfig) -> Result<Self, String> {
+        let server = resolve_url("/", &config.endpoint)?;
+        let server =
+            reqwest::Url::parse(&server).map_err(|e| format!("cannot parse {server}: {e}"))?;
+        let allowed = config
+            .packages
+            .as_ref()
+            .map(|p| p.allowed_sources.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| parse_source(entry))
+            .collect::<Result<_, _>>()?;
+        Ok(Sources { server, allowed })
+    }
+
+    fn is_server(&self, url: &reqwest::Url) -> bool {
+        same_origin(&self.server, url)
+    }
+
+    /// Whether a download may go to `url`, and why not when it may not.
+    fn permit(&self, url: &reqwest::Url) -> Result<(), String> {
+        opamp::endpoint::check_url(url.as_str())
+            .map_err(|e| format!("refusing {}: {e}", source_of(url.as_str())))?;
+        if self.is_server(url) || self.allowed.iter().any(|prefix| below(prefix, url)) {
+            return Ok(());
+        }
+        Err(format!(
+            "{} is not an allowed download source — add its https:// prefix to \
+             [packages] allowed_sources",
+            origin_label(url)
+        ))
+    }
+}
+
+/// An `allowed_sources` entry, held to the rules of ADR-0042: an `https://` URL (`http://` only to
+/// a loopback literal) with no credentials, query or fragment.
 ///
-/// Without offered headers this is one `GET` and the client follows redirects itself. With them the
-/// chain is walked here, and a header is re-attached only while the scheme, host and port are the
-/// ones it was given for. The reason is narrow and worth stating: `reqwest` strips only
-/// `Authorization`, `Cookie` and `Proxy-Authorization` when a redirect crosses origins, so a custom
-/// credential — `X-JFrog-Art-Api`, `PRIVATE-TOKEN`, whatever the source wants — would be re-sent to
-/// wherever a mirror points it. An operator names a credential for *one* host; a mirror must not be
-/// able to harvest it by bouncing the download. Integrity is unaffected either way, since the
-/// content hash and the signature are checked after the bytes land — this protects the credential,
-/// not the artifact.
+/// # Errors
+/// Returns a sentence naming the entry.
+pub fn parse_source(entry: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(entry)
+        .map_err(|e| format!("[packages] allowed_sources entry {entry:?} is not a URL: {e}"))?;
+    if !matches!(url.scheme(), "https" | "http") {
+        return Err(format!(
+            "[packages] allowed_sources entry {entry:?} must be https://"
+        ));
+    }
+    opamp::endpoint::check_url(entry)
+        .map_err(|e| format!("[packages] allowed_sources entry {e}"))?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "[packages] allowed_sources entry {entry:?} must carry no credentials, query or fragment"
+        ));
+    }
+    Ok(url)
+}
+
+/// Whether `url` lies below `prefix`: the same origin, and a path that begins with the prefix's at
+/// a `/` boundary, so `https://m.example/a` admits `/a/x` but not `/ab`.
+fn below(prefix: &reqwest::Url, url: &reqwest::Url) -> bool {
+    if !same_origin(prefix, url) {
+        return false;
+    }
+    let base = prefix.path().trim_end_matches('/');
+    let path = url.path();
+    path == base || base.is_empty() || path.starts_with(&format!("{base}/"))
+}
+
+/// The scheme, host and port of a URL, for a message.
+fn origin_label(url: &reqwest::Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+/// Sends the download request, walking every redirect by hand.
+///
+/// Each hop is checked against [`Sources`] before it is requested, so a mirror cannot bounce the
+/// download to a host the operator did not allow, or onto plaintext. This Client's certificate goes
+/// only to the Server's own origin. The offered headers go only to an allowed hop on the origin they
+/// were given for: `reqwest` strips only `Authorization`, `Cookie` and `Proxy-Authorization` when a
+/// redirect crosses origins, so a custom credential — `X-JFrog-Art-Api`, `PRIVATE-TOKEN` — would
+/// otherwise be re-sent to wherever a mirror points it. Integrity is unaffected either way, since
+/// the content hash and the signature are checked after the bytes land.
 async fn send_download(
-    client: &reqwest::Client,
+    sources: &Sources,
+    anonymous: &reqwest::Client,
+    identified: &reqwest::Client,
     url: &str,
     headers: &[(String, String)],
 ) -> Result<reqwest::Response, String> {
-    if headers.is_empty() {
-        return client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("cannot download {url}: {e}"));
-    }
-    let origin = reqwest::Url::parse(url).map_err(|e| format!("cannot parse {url}: {e}"))?;
+    let origin =
+        reqwest::Url::parse(url).map_err(|e| format!("cannot parse {}: {e}", source_of(url)))?;
     let mut current = origin.clone();
     for _ in 0..=MAX_REDIRECTS {
+        sources.permit(&current)?;
+        let client = if sources.is_server(&current) {
+            identified
+        } else {
+            anonymous
+        };
         let mut request = client.get(current.clone());
         if same_origin(&origin, &current) {
             request = with_headers(request, headers)?;
@@ -385,39 +470,30 @@ fn verify_staged(
     path: &Path,
     staged: &Staged,
     package: &PackageDownload,
-    key: Option<&[u8]>,
+    key: &[u8],
 ) -> Result<(), String> {
     if staged.content_hash != package.content_hash {
         return Err("the downloaded artifact does not match its content hash".to_string());
     }
-    if !signature_required(&package.signature, key)? {
-        return Ok(());
-    }
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    check_signature(&bytes, &package.signature, key.unwrap_or_default())
+    check_signature(&bytes, &package.signature, key)
 }
 
-/// The signature half of the verification policy (ADR-0019): the content hash must always match.
-/// If a verification key is configured, the artifact MUST carry a valid signature — an unsigned or
-/// badly signed artifact is refused. If no key is configured, a signature that was nonetheless
-/// offered is refused (it cannot be checked); an unsigned artifact is accepted on its content hash
-/// alone.
-///
-/// Decided without touching the artifact, so the file is only read back when it must be: `Ok(true)`
-/// means a
-/// signature must now be checked, `Ok(false)` that the content hash was the whole of it, `Err`
-/// that the pairing of key and signature is refused outright.
-fn signature_required(signature: &[u8], key: Option<&[u8]>) -> Result<bool, String> {
-    match (key, signature.is_empty()) {
-        (Some(_), false) => Ok(true),
-        (Some(_), true) => {
-            Err("a verification key is configured but the artifact is unsigned".to_string())
-        }
-        (None, false) => {
-            Err("the artifact is signed but no verification key is configured".to_string())
-        }
-        (None, true) => Ok(false),
+/// The signature policy (ADR-0042): there is no unsigned posture. An offer is refused before
+/// anything is downloaded when this Client holds no verification key, or when the offer carries no
+/// signature to check with it. `Ok` is the key the signature is then checked against.
+fn signature_policy<'a>(signature: &[u8], key: Option<&'a [u8]>) -> Result<&'a [u8], String> {
+    let Some(key) = key else {
+        return Err(
+            "refusing the package: [packages] verification_key is not set, and nothing is \
+             installed without a signature"
+                .to_string(),
+        );
+    };
+    if signature.is_empty() {
+        return Err("refusing the package: the offer carries no signature".to_string());
     }
+    Ok(key)
 }
 
 fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), String> {
@@ -433,6 +509,7 @@ mod tests {
 
     /// What labels the download span must not carry what authorises the download: the span goes to
     /// a destination the Server named (ADR-0025 clause 13), and a pre-signed URL is a credential.
+    /// Verifies: ADR-0042, ADR-0048
     #[test]
     fn the_download_source_drops_whatever_authorises_it() {
         assert_eq!(
@@ -490,6 +567,7 @@ mod tests {
 
     /// A header value is a credential, and this struct travels inside a `Debug`-deriving type that
     /// a log line could one day print. The key is diagnosable, the value never appears.
+    /// Verifies: ADR-0042
     #[test]
     fn a_download_never_debug_prints_its_header_values() {
         let mut package = offer(vec![0u8; 32], Vec::new());
@@ -530,6 +608,7 @@ mod tests {
     /// A package name is a file-name token, not a path: the safe set mirrors what the Server
     /// validates before it stores one, and anything that could steer the staged file elsewhere —
     /// a separator, a lone `..`, an empty or over-long name — is refused.
+    /// Verifies: ADR-0042
     #[test]
     fn a_traversing_package_name_is_refused() {
         assert!(ensure_safe_package_name("otelcol").is_ok());
@@ -562,6 +641,7 @@ mod tests {
     /// End to end at the sink: a traversing name is refused by `download_and_verify` before any URL
     /// is resolved or a byte is written, so nothing lands outside the staging directory — and the
     /// error is the one the caller reports as a failed package status.
+    /// Verifies: ADR-0042
     #[tokio::test]
     async fn download_refuses_to_stage_a_traversing_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -590,6 +670,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0042
     #[test]
     fn the_cap_triggers_only_past_the_limit() {
         assert!(over_cap(1000, 1024).is_none(), "within the ceiling is fine");
@@ -601,46 +682,115 @@ mod tests {
         assert!(err.contains("max_artifact_size_bytes"), "got {err}");
     }
 
-    #[test]
-    fn content_hash_mismatch_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (path, staged) = stage(&dir, b"artifact");
-
-        let wrong = offer(Sha256::digest(b"other").to_vec(), Vec::new());
-        assert!(verify_staged(&path, &staged, &wrong, None).is_err());
-
-        let right = offer(staged.content_hash.clone(), Vec::new());
-        assert!(verify_staged(&path, &staged, &right, None).is_ok());
-    }
-
-    // Verifies: ADR-0019
-    #[test]
-    fn signature_policy_is_enforced() {
+    fn keypair() -> (ring::signature::Ed25519KeyPair, Vec<u8>) {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
         let public = keypair.public_key().as_ref().to_vec();
+        (keypair, public)
+    }
 
+    /// Verifies: ADR-0042
+    #[test]
+    fn content_hash_mismatch_is_refused() {
+        let (keypair, public) = keypair();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, staged) = stage(&dir, b"artifact");
+        let signature = keypair.sign(b"artifact").as_ref().to_vec();
+
+        let wrong = offer(Sha256::digest(b"other").to_vec(), signature.clone());
+        assert!(verify_staged(&path, &staged, &wrong, &public).is_err());
+
+        let right = offer(staged.content_hash.clone(), signature);
+        assert!(verify_staged(&path, &staged, &right, &public).is_ok());
+    }
+
+    /// There is no unsigned posture: no key, or no signature, is refused before anything is
+    /// downloaded, and a signature that does not verify refuses the artifact. The Client's own
+    /// update takes the same path.
+    /// Verifies: ADR-0042, ADR-0044
+    #[test]
+    fn signature_policy_is_enforced() {
+        let (keypair, public) = keypair();
         let dir = tempfile::tempdir().expect("tempdir");
         let bytes = b"the-binary";
         let (path, staged) = stage(&dir, bytes);
         let hash = staged.content_hash.clone();
         let signature = keypair.sign(bytes).as_ref().to_vec();
 
-        let check = |signature: Vec<u8>, key: Option<&[u8]>| {
-            verify_staged(&path, &staged, &offer(hash.clone(), signature), key)
+        // Before the download: a key and a signature, or nothing at all.
+        assert!(signature_policy(&signature, None).is_err(), "no key");
+        assert!(
+            signature_policy(&[], Some(&public)).is_err(),
+            "no signature"
+        );
+        assert!(signature_policy(&[], None).is_err(), "neither");
+        assert_eq!(
+            signature_policy(&signature, Some(&public)),
+            Ok(public.as_slice())
+        );
+
+        // After it: the signature must verify against the key.
+        let check = |signature: Vec<u8>| {
+            verify_staged(&path, &staged, &offer(hash.clone(), signature), &public)
         };
-        // Valid signature against the configured key: accepted.
-        assert!(check(signature.clone(), Some(&public)).is_ok());
-        // Tampered signature: refused.
-        let mut bad = signature.clone();
+        assert!(check(signature.clone()).is_ok());
+        let mut bad = signature;
         bad[0] ^= 0xff;
-        assert!(check(bad, Some(&public)).is_err());
-        // Key configured but artifact unsigned: refused.
-        assert!(check(Vec::new(), Some(&public)).is_err());
-        // Signed but no key to check it: refused.
-        assert!(check(signature, None).is_err());
-        // Unsigned and no key: accepted on the content hash alone.
-        assert!(check(Vec::new(), None).is_ok());
+        assert!(check(bad).is_err());
+    }
+
+    /// A download goes to the Server's own origin, or below a configured prefix at a `/` boundary,
+    /// and nowhere else; plaintext is held to the loopback literals even there.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_source_is_allowed_only_below_a_prefix_or_at_the_server() {
+        let config = ClientConfig {
+            endpoint: "wss://fleet.example:4320/v1/opamp".to_string(),
+            packages: Some(crate::config::PackagesConfig {
+                allowed_sources: vec!["https://mirror.example/releases".to_string()],
+                ..Default::default()
+            }),
+            ..ClientConfig::default()
+        };
+        let sources = Sources::new(&config).expect("sources");
+        let url = |u: &str| reqwest::Url::parse(u).expect("url");
+        for allowed in [
+            "https://fleet.example:4320/api/v1/packages/x/file",
+            "https://mirror.example/releases/agent.tar.gz",
+            "https://mirror.example/releases",
+        ] {
+            assert_eq!(sources.permit(&url(allowed)), Ok(()), "{allowed}");
+        }
+        for refused in [
+            "https://mirror.example/releases-evil/agent.tar.gz",
+            "https://mirror.example/other/agent.tar.gz",
+            "https://fleet.example:4321/api/v1/packages/x/file",
+            "http://mirror.example/releases/agent.tar.gz",
+            "https://evil.example/releases/agent.tar.gz",
+        ] {
+            assert!(sources.permit(&url(refused)).is_err(), "{refused}");
+        }
+    }
+
+    /// An `allowed_sources` entry is an https prefix and nothing else: plaintext only on a loopback
+    /// literal, never on a host name, and no credentials, query or fragment.
+    /// Verifies: ADR-0042
+    #[test]
+    fn an_allowed_source_must_be_a_plain_https_prefix() {
+        assert!(parse_source("https://mirror.example/releases").is_ok());
+        assert!(parse_source("http://127.0.0.1:8080/").is_ok());
+        assert!(parse_source("http://[::1]:8080/").is_ok());
+        for bad in [
+            "http://mirror.example/releases",
+            "http://localhost:8080/",
+            "ftp://mirror.example/",
+            "https://user:pw@mirror.example/",
+            "https://mirror.example/?token=x",
+            "https://mirror.example/#x",
+            "mirror.example",
+        ] {
+            assert!(parse_source(bad).is_err(), "{bad}");
+        }
     }
 }

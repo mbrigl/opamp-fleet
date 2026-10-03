@@ -194,8 +194,16 @@ it (AGENTS.md links here).
   Container carries the `llvm-lib` it requires). Worth running whenever a change touches
   platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
   `#[cfg(unix)]` mistake compiles perfectly well on Linux.
-- **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
-  advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
+- **Check the supply chain:** `cargo deny check` (needs `cargo install cargo-deny`): advisories,
+  licences, sources and banned crates, as [`deny.toml`](deny.toml) sets them; reviewed advisories
+  are recorded there with a reason
+- **Fuzz a parser:** `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>`
+  (needs `cargo install cargo-fuzz` and a nightly toolchain); the targets are listed in
+  [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
+  downloaded artifact has one (specification Q-2)
+- **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
+  TLS (ADR-0038); it writes a CA, a Server certificate for `127.0.0.1` and an Agent certificate to
+  `.dev-pki/` and prints the lines `server.toml` and `supervisor.toml` need
 - **Run the Server:** `cargo run -p fleet-server -- --config config/server.toml`
 - **Run the Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release

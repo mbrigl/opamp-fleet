@@ -7,6 +7,8 @@
 //! says goodbye, and its directory is purged (ADR-0022) — and `supervisor.toml` is rewritten around
 //! the operator's globals each time.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -112,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0022
+// Verifies: ADR-0022, ADR-0040
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -160,7 +162,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         stub_block = stub_block,
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
     // once rather than waiting for a package (ADR-0022 makes the delivery path owned-only).
