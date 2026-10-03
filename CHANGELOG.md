@@ -6,14 +6,38 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
 `[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
-`version/*` tag from ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md), superseding the
-version-source decision of [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A section
-carries a date once its tag exists.
+`version/*` tag from ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md),
+superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A section carries a date once its tag exists.
 
 > **Where this file starts.** Entries begin with ADR-0032. The work before that point — package
 > delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
+
+## [0.5.0]
+
+### Changed
+
+- **Deleting a Deployment that has released a package is refused** (`409`). Its Agents' offer
+  travels with that Deployment's signatures, and deleting it used to leave them offered the
+  package unsigned. Roll those Agents out through another Deployment, or delete the package,
+  first; the refusal says how many Agents it concerns.
+- **The Cargo packages are renamed:** `client` is `fleet-agent`, `server` is `fleet-server`,
+  `fleet-common` is `fleet-core` and `package-tools` is `fleet-tools`, each in `crates/` under its
+  new name. The programs keep theirs — `supervisor`, `server`, `opamp-package-fetch` and
+  `opamp-package-sign`. **What to do:** nothing, unless you build by package — `cargo build -p
+  client` becomes `-p fleet-agent`, `-p server` becomes `-p fleet-server`.
+- **The Gateway's downstream endpoint and the Supervisor Endpoint bound connection setup** as the
+  Server's two planes do: a peer has 30 seconds to send its request headers, and on a TLS Gateway
+  10 seconds to complete the handshake
+  ([ADR-0024](docs/adr/0024-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)). A
+  plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
+  **What to do:** nothing.
+
+### Fixed
+
+- **A configuration entry named only with dots (`.`, `...`) is stored** as the entry file `config`,
+  as an empty name already was. It used to fail the whole configuration with an I/O error.
 
 ## [0.4.5] - 2026-08-24
 

@@ -1,0 +1,6 @@
+//! What the Server and the Client implement identically that is this project's own rather than
+//! OpAMP's (ADR-0025): the version this build reports and its grammar, and the platform vocabulary. The
+//! protocol and its transport, TLS included, are in the `opamp` crate (ADR-0024).
+
+pub mod platform;
+pub mod version;

@@ -2,7 +2,7 @@
 #
 # This is the continuous, automatic half of dependency hygiene: Dependabot opens PRs to bump
 # dependencies on a schedule and — once "Dependabot security updates" is enabled in the repo's
-# Settings → Advanced Security — raises fix PRs for advisories between the daily cargo-audit runs.
+# Settings → Advanced Security — raises fix PRs for advisories between the weekly cargo-audit runs.
 # It complements .github/workflows/audit.yml, which is the hard gate that fails a build on a
 # vulnerability.
 version: 2

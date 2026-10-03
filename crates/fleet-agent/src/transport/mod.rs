@@ -1,0 +1,656 @@
+//! The Client's upstream connection (ADR-0023, ADR-0024). The connection itself — the transport,
+//! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
+//! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
+//! the session over the [`Engine`], with the flows that follow a reply.
+
+use std::time::Duration;
+
+use opamp::client::{AfterReply, ClientTls, Connection, Ended, ReportSink, Session, StopSignal};
+use opamp::proto::{AgentToServer, ServerToAgent};
+use tracing::Instrument as _;
+
+use crate::config::ClientConfig;
+use crate::engine::Engine;
+use crate::shutdown::Shutdown;
+
+/// How often a download in flight is reported as `Downloading` with its details. The Baseline
+/// leaves the cadence open; this is slow enough to stay a rounding error next to the transfer and
+/// fast enough that an operator watching a rollout sees it move.
+const DOWNLOAD_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+impl StopSignal for Shutdown {
+    fn requested(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        Shutdown::requested(self)
+    }
+}
+
+/// The Client as an `opamp::client` session: the Engine's *n* Agents over one connection, and what
+/// the Client does after a reply.
+pub(crate) struct Upstream<'a> {
+    pub engine: &'a mut Engine,
+    pub config: &'a mut ClientConfig,
+    pub shutdown: Shutdown,
+    pub telemetry: &'a crate::telemetry::Telemetry,
+}
+
+impl Session for Upstream<'_> {
+    fn connected(&mut self) -> Vec<AgentToServer> {
+        self.engine.force_full_all();
+        self.engine.poll_reports()
+    }
+
+    fn routine(&mut self) -> Vec<AgentToServer> {
+        self.engine.poll_reports()
+    }
+
+    fn owed(&mut self) -> Vec<AgentToServer> {
+        self.engine.owed_reports()
+    }
+
+    fn on_reply(&mut self, reply: &ServerToAgent) -> Option<Duration> {
+        self.engine.handle(reply).retry_after
+    }
+
+    async fn after_reply<S: ReportSink>(&mut self, sink: &mut S) -> AfterReply {
+        after_reply(
+            self.engine,
+            self.config,
+            &self.shutdown,
+            self.telemetry,
+            sink,
+        )
+        .await
+    }
+
+    async fn changed(&mut self) {
+        self.engine.changed().await;
+    }
+
+    fn exchange_failed(&mut self) {
+        self.engine.force_full_all();
+    }
+
+    async fn stop(&mut self) {
+        self.engine.shutdown_processes().await;
+    }
+
+    fn goodbyes(&mut self) -> Vec<AgentToServer> {
+        self.engine.disconnect_messages()
+    }
+}
+
+/// Sends what the Engine owes now, unless the sink leaves owed reports to its loop.
+async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<(), ()> {
+    if sink.sends_owed_now() {
+        sink.send(engine.owed_reports()).await
+    } else {
+        Ok(())
+    }
+}
+
+/// The Client's own flows after a reply, the same for both transports (ADR-0024): what the reply
+/// left to do, in one order.
+///
+/// 1. Ask for a certificate, now that the Server's capabilities are known (ADR-0026).
+/// 2. A connection-settings offer (ADR-0027) — verified OpAMP settings end the
+///    connection; an offer applied in place owes its acknowledgement now.
+/// 3. Offered packages are downloaded and verified (ADR-0018).
+/// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
+///    package step just owed is the last thing this version says (ADR-0020). It ends the run, so
+///    `AfterReply::End` means exactly this.
+/// 5. The self-Agent's Supervisor set (ADR-0032), whose retired Agents' goodbyes go out with it.
+pub async fn after_reply<S: ReportSink>(
+    engine: &mut Engine,
+    config: &mut ClientConfig,
+    shutdown: &Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
+    sink: &mut S,
+) -> AfterReply {
+    engine.request_certificate(|| crate::csr::request(config));
+    match process_connection_offer(engine, config, telemetry).await {
+        OfferOutcome::Reconnect => return AfterReply::Reconnect,
+        OfferOutcome::Applied => {
+            if flush_owed(engine, sink).await.is_err() {
+                return AfterReply::ConnectionLost;
+            }
+        }
+        OfferOutcome::None => {}
+    }
+    if process_package_downloads(engine, config, sink).await
+        && flush_owed(engine, sink).await.is_err()
+    {
+        return AfterReply::ConnectionLost;
+    }
+    if engine.restart_for_update() {
+        return AfterReply::End;
+    }
+    if process_self_configuration(engine, config, shutdown, sink).await
+        && flush_owed(engine, sink).await.is_err()
+    {
+        return AfterReply::ConnectionLost;
+    }
+    AfterReply::Continue
+}
+
+/// Downloads, verifies, and applies any package the Engine has queued (ADR-0018). Each is handled
+/// in turn — download and verification are the transport's, the swap is the Supervisor's — and its
+/// outcome (`Installed`/`InstallFailed`) is reported back through the Engine. Returns whether any
+/// package was processed, so the caller flushes the owed status reports.
+///
+/// While an artifact is on the wire, interim `Downloading` reports go out through `sink`. A failed
+/// interim report is not fatal: the download continues, and the terminal status is reported by the
+/// caller on the next exchange.
+pub async fn process_package_downloads<S: ReportSink>(
+    engine: &mut Engine,
+    config: &ClientConfig,
+    sink: &mut S,
+) -> bool {
+    let downloads = engine.take_package_downloads();
+    if downloads.is_empty() {
+        return false;
+    }
+    for (index, package) in downloads {
+        // Taken before the download borrows the offer for as long as it runs.
+        let (name, version, hash) = (
+            package.name.clone(),
+            package.version.clone(),
+            package.hash.clone(),
+        );
+        let progress = crate::packages::Progress::default();
+        let started = std::time::Instant::now();
+        // The install's trace (ADR-0022), opened here because this is where the operation begins:
+        // the download and the verification are this task's, the staging and the swap are the
+        // Supervisor's, and the span travels to it with the artifact so the two are one trace.
+        let span = tracing::info_span!(
+            "package.install",
+            package = %name,
+            version = %version,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        );
+        // Each Agent stages into its own directory (ADR-0032), so the Supervisor's install is a
+        // rename beside the download rather than a copy across filesystems. Keyed by the block
+        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0032).
+        let staging_dir = config.staging_dir_for(engine.block_name(index));
+        let download =
+            crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
+                .instrument(span.clone());
+        tokio::pin!(download);
+        // Poll the download and a ticker together: every tick turns the progress the download has
+        // been writing into a status report, without the download itself knowing about reporting.
+        let result = loop {
+            tokio::select! {
+                result = &mut download => break result,
+                () = tokio::time::sleep(DOWNLOAD_REPORT_INTERVAL) => {
+                    engine.package_downloading(index, progress.details(started));
+                    let _ = sink.send(engine.owed_reports()).await;
+                }
+            }
+        };
+        match result {
+            Ok(staged) => {
+                engine.apply_package(index, staged, version, hash, &span);
+                if engine.restart_for_update() {
+                    // A self-update moved the `current` pointer (ADR-0020). Whatever else was
+                    // queued is moot: this process is about to be replaced, and the caller ends
+                    // the run once the owed `Installing` has gone out.
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(package = %name, error = %e, "package download or verification failed");
+                crate::telemetry::failed(&span, &e);
+                engine.package_download_failed(index, hash, e);
+            }
+        }
+    }
+    true
+}
+
+/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0032) — if one is
+/// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
+/// so the caller flushes the owed status reports.
+pub async fn process_self_configuration<S: ReportSink>(
+    engine: &mut Engine,
+    config: &mut ClientConfig,
+    shutdown: &Shutdown,
+    sink: &mut S,
+) -> bool {
+    let Some(offer) = engine.take_self_config() else {
+        return false;
+    };
+    let goodbyes = crate::reconfigure::apply(engine, config, offer, shutdown).await;
+    if !goodbyes.is_empty() {
+        let _ = sink.send(goodbyes).await;
+    }
+    true
+}
+
+/// What handling a connection-settings offer asks of the transport loop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OfferOutcome {
+    /// No offer was pending.
+    None,
+    /// The offer was applied — or refused — in place. The acknowledgement is owed, and the
+    /// connection stays up. A telemetry-only offer always lands here (ADR-0027 clause 6): no
+    /// destination it names is reached over the OpAMP connection, so there is nothing to reconnect
+    /// for.
+    Applied,
+    /// Verified OpAMP settings took effect (ADR-0027): the caller drops the connection so the
+    /// runtime re-resolves the effective configuration and reconnects with them.
+    Reconnect,
+}
+
+/// Handles a pending connection-settings offer, whichever transport is carrying it.
+///
+/// The two transports differ in how they end a connection, not in what an offer means — so the
+/// meaning lives here, once. Before ADR-0027 both carried a byte-identical copy of this, and both
+/// assumed every offer had to be proved by reconnecting.
+///
+/// The order of the steps is load-bearing:
+///
+/// 1. **The OpAMP half, only when there is one.** It is verified by actually connecting, which is
+///    ADR-0027's MUST and is scoped to this half alone — the Baseline puts that requirement under
+///    `ConnectionSettingsOffers.opamp` and justifies it by not losing access to the *Server*. A
+///    telemetry destination cannot be proved that way and is not: a receiver that is momentarily
+///    down is not an offer that is wrong.
+/// 2. **Persist, then apply telemetry from what was persisted** — never from the raw offer. An
+///    offer that says nothing about telemetry — an endpoint move, a credential rotation, a
+///    certificate — would otherwise compare against `metrics: None, traces: None, logs: None` and
+///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
+///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
+///    ADR-0022 is where the difference is decided.
+/// 3. **One acknowledgement for the whole message** (ADR-0027 clause 7). The Baseline hashes all
+///    settings together, so the Agent answers the message, not its parts: a single status whose
+///    `error_message` names everything dropped across both halves.
+///
+/// A failed verification of the OpAMP half persists and applies **nothing**, telemetry included, and
+/// reports `FAILED`. Half-applying an offer whose other half was rejected would leave the Server
+/// unable to tell what is running.
+pub async fn process_connection_offer(
+    engine: &mut Engine,
+    config: &ClientConfig,
+    telemetry: &crate::telemetry::Telemetry,
+) -> OfferOutcome {
+    let Some(offer) = engine.take_connection_offer() else {
+        return OfferOutcome::None;
+    };
+    // Opened here rather than on the function, which is called once per exchange and would
+    // otherwise trace every poll that had nothing to do (ADR-0022 clause 9). What follows is one
+    // operation with an outcome the Server is told about, which is what a span is for here.
+    //
+    // `reconnect` is a field and not a phase: the reconnection itself happens after this returns,
+    // in the transport loop that owns the connection, so a span for it here would measure nothing.
+    let span = tracing::info_span!(
+        "connection.settings.apply",
+        hash = %hex::encode(&offer.hash),
+        reconnect = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+    );
+    let mut errors: Vec<String> = Vec::new();
+    let mut reconnect = false;
+
+    if let Some(settings) = &offer.opamp {
+        let probe = || engine.probe_report();
+        if let Err(e) = crate::connection::verify(settings, config, probe)
+            .instrument(tracing::info_span!(parent: &span, "verify"))
+            .await
+        {
+            tracing::warn!(error = %e, "offered connection settings failed verification");
+            crate::telemetry::failed(&span, &e);
+            engine.connection_settings_outcome(&offer.hash, Err(&e));
+            return OfferOutcome::Applied;
+        }
+        // The issued certificate is stored only now, after connecting with it proved it works — the
+        // old one stayed in force until here (ADR-0026).
+        if let Some(certificate) = &settings.certificate {
+            if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
+                tracing::warn!(error = %e, "cannot store the issued certificate");
+            } else {
+                tracing::info!("a client certificate was issued and is now in force");
+            }
+        }
+        if let Err(e) = crate::connection::unhonoured(settings) {
+            tracing::warn!(error = %e, "connection settings partly applied");
+            errors.push(e);
+        }
+        reconnect = true;
+    }
+
+    let store = tracing::info_span!(parent: &span, "store").entered();
+    let merged =
+        crate::connection::merge(crate::connection::load(&config.state_dir).as_ref(), &offer);
+    if let Err(e) = crate::connection::store(&config.state_dir, &merged) {
+        tracing::warn!(error = %e, "cannot persist the connection settings");
+    }
+    errors.extend(telemetry.apply(&merged, &engine.self_description(), config));
+    drop(store);
+
+    span.record("reconnect", reconnect);
+    if errors.is_empty() {
+        crate::telemetry::succeeded(&span);
+        engine.connection_settings_outcome(&offer.hash, Ok(()));
+    } else {
+        let error = errors.join("; ");
+        tracing::warn!(error = %error, "connection settings partly applied");
+        crate::telemetry::failed(&span, &error);
+        engine.connection_settings_outcome(&offer.hash, Err(&error));
+    }
+
+    if reconnect {
+        tracing::info!("connection settings verified; reconnecting with them");
+        OfferOutcome::Reconnect
+    } else {
+        tracing::info!("telemetry destinations applied");
+        OfferOutcome::Applied
+    }
+}
+
+/// The upstream connection `supervisor.toml` describes, with the credential and the identity in
+/// force (ADR-0026, ADR-0027).
+///
+/// # Errors
+/// Returns an error when the credential or a TLS file cannot be read.
+pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
+    connection_with(config, crate::tls::client_tls(config)?)
+}
+
+/// The same connection with other TLS material — a candidate certificate under test.
+///
+/// # Errors
+/// Returns an error when the credential cannot be read.
+pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Result<Connection, String> {
+    Ok(Connection {
+        endpoint: config.endpoint.clone(),
+        authorization: config.authorization_value()?,
+        tls,
+        max_message_size: config.max_message_size_bytes,
+        // The heartbeat (ReportsHeartbeat, Baseline default 30 s; 0 disables).
+        heartbeat: (config.heartbeat_interval_secs > 0)
+            .then(|| Duration::from_secs(config.heartbeat_interval_secs)),
+        poll: Duration::from_secs(config.poll_interval_secs.max(1)),
+    })
+}
+
+/// Runs the Engine's Agents over the connection `config` describes, on the transport its endpoint
+/// names, until the run ends.
+///
+/// # Errors
+/// Returns an error when the connection cannot be built.
+pub async fn run(
+    engine: &mut Engine,
+    config: &mut ClientConfig,
+    shutdown: &mut Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
+) -> Result<RunOutcome, String> {
+    let connection = connection(config)?;
+    let mut session = Upstream {
+        engine,
+        config,
+        shutdown: shutdown.clone(),
+        telemetry,
+    };
+    Ok(
+        match opamp::client::connection::run(&connection, &mut session, shutdown).await? {
+            Ended::Stopped => RunOutcome::Shutdown,
+            Ended::Reconnect => RunOutcome::Reconfigured,
+            // The only end the Client asks for is the self-update restart (ADR-0020).
+            Ended::End => RunOutcome::RestartForUpdate,
+        },
+    )
+}
+
+/// Why a transport run ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The operator stopped the Client; processes are down, goodbyes sent.
+    Shutdown,
+    /// Verified connection settings took effect (ADR-0027): the runtime re-resolves the
+    /// effective configuration and reconnects — possibly on the other transport.
+    Reconfigured,
+    /// A self-update installed a new version of the Client and moved the `current` pointer
+    /// (ADR-0020). The run ends here and the process exits asking for a restart; what comes back
+    /// up is the new version, which reports the outcome.
+    RestartForUpdate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::Storage;
+    use crate::supervisor::agent::AgentState;
+    use opamp::proto::{
+        AgentToServer, DownloadableFile, PackageAvailable, PackageStatusEnum, PackagesAvailable,
+        ServerToAgent,
+    };
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// An Engine holding one self-Agent, and the config that goes with it.
+    fn engine_with_state_dir(dir: &tempfile::TempDir) -> (Engine, ClientConfig, Vec<u8>) {
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let state =
+            AgentState::new("self".to_string(), storage, crate::host::SystemHost).expect("agent");
+        let mut engine = Engine::new(vec![state]);
+        let uid = engine.poll_reports()[0].instance_uid.clone();
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        (engine, config, uid)
+    }
+
+    fn telemetry_only_offer(uid: Vec<u8>, endpoint: &str) -> ServerToAgent {
+        ServerToAgent {
+            instance_uid: uid,
+            connection_settings: Some(opamp::proto::ConnectionSettingsOffers {
+                hash: b"telemetry-1".to_vec(),
+                own_metrics: Some(opamp::proto::TelemetryConnectionSettings {
+                    destination_endpoint: endpoint.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0027: an offer carrying only a telemetry destination is applied **in place** — no
+    /// verification by connecting, no reconnect — and acknowledged. Before it, the Client required
+    /// `opamp` to be present and dropped this message whole: no `APPLYING`, no status, no
+    /// exporters, and a Server whose hash gate therefore never closed and re-offered for ever.
+    #[tokio::test]
+    async fn a_telemetry_only_offer_is_applied_without_reconnecting() {
+        opamp::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, config, uid) = engine_with_state_dir(&dir);
+        // Loopback is the cleartext exception (ADR-0022) — nothing leaves the machine.
+        engine.handle(&telemetry_only_offer(
+            uid,
+            "http://127.0.0.1:4318/v1/metrics",
+        ));
+
+        let telemetry = crate::telemetry::Telemetry::new();
+        let outcome = process_connection_offer(&mut engine, &config, &telemetry).await;
+
+        assert_eq!(
+            outcome,
+            OfferOutcome::Applied,
+            "a telemetry destination is not reached over the OpAMP connection, so nothing is \
+             gained by dropping it"
+        );
+        assert!(telemetry.reporting(), "the exporter is in force");
+
+        // Persisted — and honestly: the Server offered no OpAMP settings, so none are claimed.
+        let stored = crate::connection::load(&config.state_dir).expect("settings persisted");
+        assert!(stored.own_metrics.is_some());
+        assert!(
+            stored.opamp.is_none(),
+            "a synthetic empty block would claim an offer that was never made"
+        );
+
+        // And the Server is told, which is what closes its gate.
+        let status = engine.owed_reports()[0]
+            .connection_settings_status
+            .clone()
+            .expect("an acknowledgement is owed");
+        assert_eq!(status.last_connection_settings_hash, b"telemetry-1");
+        assert_eq!(
+            status.status,
+            opamp::proto::ConnectionSettingsStatuses::Applied as i32,
+            "{}",
+            status.error_message
+        );
+        telemetry.shutdown();
+    }
+
+    /// And a destination this Client refuses is reported `FAILED` naming the reason, on the same
+    /// offer — not warned to a log while the Server is told everything applied.
+    #[tokio::test]
+    async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
+        opamp::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, config, uid) = engine_with_state_dir(&dir);
+        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0022).
+        engine.handle(&telemetry_only_offer(
+            uid,
+            "http://collector.example:4318/v1/metrics",
+        ));
+
+        let telemetry = crate::telemetry::Telemetry::new();
+        let outcome = process_connection_offer(&mut engine, &config, &telemetry).await;
+
+        assert_eq!(outcome, OfferOutcome::Applied);
+        assert!(!telemetry.reporting(), "the destination was refused");
+
+        let status = engine.owed_reports()[0]
+            .connection_settings_status
+            .clone()
+            .expect("an acknowledgement is owed");
+        assert_eq!(
+            status.status,
+            opamp::proto::ConnectionSettingsStatuses::Failed as i32
+        );
+        assert!(
+            status.error_message.contains("cleartext"),
+            "the Server must learn *why*: {}",
+            status.error_message
+        );
+    }
+
+    /// A sink that keeps what the transport would have sent.
+    struct Recorder(Vec<AgentToServer>);
+
+    impl ReportSink for Recorder {
+        async fn send(&mut self, reports: Vec<AgentToServer>) -> Result<(), ()> {
+            self.0.extend(reports);
+            Ok(())
+        }
+    }
+
+    /// The Baseline permits interim status reports while a package downloads, and this is what
+    /// they are for: a transfer that takes longer than a moment stays visible instead of looking
+    /// like a stuck install. Driven by a server that trickles the artifact out.
+    #[tokio::test]
+    async fn a_slow_download_is_reported_as_downloading_with_progress() {
+        opamp::tls::install_ring_provider();
+        let artifact = vec![7u8; 3072];
+        let content_hash = Sha256::digest(&artifact).to_vec();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = artifact.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut scratch = [0u8; 1024];
+            let _ = stream.read(&mut scratch).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                served.len()
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            // Three seconds per third: long enough that the reporting tick fires mid-transfer.
+            for chunk in served.chunks(1024) {
+                let _ = stream.write_all(chunk).await;
+                let _ = stream.flush().await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut state = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        state.accept_packages();
+        let mut engine = Engine::new(vec![state]);
+        let uid = engine.poll_reports()[0].instance_uid.clone();
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+
+        // The offer queues the download the transport then runs.
+        engine.handle(&ServerToAgent {
+            instance_uid: uid,
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        version: "2.0.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: format!("http://{addr}/otelcol"),
+                            content_hash: content_hash.clone(),
+                            ..Default::default()
+                        }),
+                        hash: b"pkg-hash".to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg".to_vec(),
+            }),
+            ..Default::default()
+        });
+
+        let mut sink = Recorder(Vec::new());
+        assert!(process_package_downloads(&mut engine, &config, &mut sink).await);
+
+        // At least one interim report went out while the bytes were still arriving, and it says
+        // Downloading — with a percentage that actually moved.
+        let downloading: Vec<_> = sink
+            .0
+            .iter()
+            .filter_map(|report| report.package_statuses.as_ref())
+            .filter_map(|statuses| statuses.packages.get("otelcol"))
+            .filter(|status| status.status == PackageStatusEnum::Downloading as i32)
+            .collect();
+        assert!(
+            !downloading.is_empty(),
+            "a transfer this slow must be reported while it runs, not only when it ends"
+        );
+        let details = downloading[0]
+            .download_details
+            .expect("Downloading carries its details");
+        assert!(
+            details.download_percent > 0.0 && details.download_percent < 100.0,
+            "a partial transfer reports partial progress, got {}",
+            details.download_percent
+        );
+        assert!(details.download_bytes_per_second > 0.0);
+
+        // And the artifact itself arrived intact, verified against its content hash.
+        let staged = dir.path().join("packages").join("otelcol.staged");
+        assert_eq!(
+            std::fs::read(&staged).expect("the staged artifact"),
+            artifact
+        );
+    }
+}

@@ -25,7 +25,7 @@
 #
 # Ports published on the host:
 #   4320 Agent plane, 4317 OTLP/gRPC, 4318 OTLP/HTTP, 8888 Collector self-metrics,
-#   3000 Grafana, 8123 ClickHouse HTTP, 9000 ClickHouse native.
+#   3001 Grafana, 8123 ClickHouse HTTP, 9000 ClickHouse native.
 
 name: opamp-observability
 
@@ -57,7 +57,7 @@ services:
       - "8888:8888"   # the Collector's own Prometheus metrics
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.7.4.58
+    image: clickhouse/clickhouse-server:26.8.15.10
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: otel
@@ -83,7 +83,7 @@ services:
       start_period: 10s
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.159.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
@@ -107,9 +107,12 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:13.2.0
+    image: grafana/grafana:13.2.3
     restart: unless-stopped
     environment:
+      # Not Grafana's default 3000. Set on Grafana itself rather than only on the host side, so
+      # `grafana:3001` inside the Compose network and `localhost:3001` on the host are one port.
+      GF_SERVER_HTTP_PORT: "3001"
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       # Open the stack read-only, so looking at a dashboard costs no login.
@@ -127,7 +130,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
       clickhouse:
         condition: service_healthy

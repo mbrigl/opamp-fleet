@@ -16,14 +16,14 @@ is a conformance question: the Baseline requires none of it.
 ## Scope
 
 The link this document is about is **Client ↔ Server**. In this project's vocabulary a Supervisor
-lives *inside* the Client ([`crates/client/src/supervisor/`](../crates/client/src/supervisor/)) and
+lives *inside* the Client ([`crates/fleet-agent/src/supervisor/`](../crates/fleet-agent/src/supervisor/)) and
 does not speak to the Server itself — the Client carries every Supervisor's Agent over its one
 connection (ADR-0034, ADR-0010). Where other OpAMP material says "Supervisor ↔ Server", this is the
 link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
 protocol: the **Supervisor Endpoint**, the loopback WebSocket each Supervisor serves for a Managed
-Process's `opampextension` ([`endpoint.rs`](../crates/client/src/supervisor/endpoint.rs)). It is
+Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs)). It is
 treated separately at the end.
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
@@ -48,7 +48,7 @@ has:
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
-  powers of a CA ([`ca.rs`](../crates/server/src/ca.rs)).
+  powers of a CA ([`ca.rs`](../crates/fleet-server/src/ca.rs)).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **Connection setup bounded on both of the Server's planes** (ADR-0023): a peer has 30 seconds to
@@ -77,18 +77,18 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
   - ⚠️ the package upload is unbounded in **time** and, by decision, in size (ADR-0025) — the one
     route where that is intended · ❌ H16, H17, H10 as above
-- **Client → Server**, outbound (`transport/http.rs`, `transport/ws.rs`).
+- **Client → Server**, outbound (`opamp::client::connection`, ADR-0024).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0034).
-  - ✅ message size, gzip after decompression, per-hop exchange timeout, `max_carried_agents`
-  - ❌ **no header-read bound**: it runs on `axum::serve` and `axum_server` without a timer, which is
-    exactly the state the Server was in before ADR-0023 (**H18**)
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
+    is served on (ADR-0024) · ✅ message size, gzip after decompression, per-hop exchange timeout,
+    `max_carried_agents`
+  - ⚠️ no test of its own drives the header bound on this surface (**H18**)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
-  - ✅ message size in both directions
-  - ❌ **no handshake bound**, and connections are served one at a time by design: a local process
-    that connects and never completes the WebSocket upgrade holds the endpoint against the Agent it
-    exists for (**H18**)
+  - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
+    ✅ message size in both directions
+  - ⚠️ no test of its own shows a half-finished upgrade leaving the endpoint free (**H18**)
 
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
 which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
@@ -195,7 +195,7 @@ the configuration file altogether.
 ⚪ **H8 — Confirm the file mode of issued key material.** *(verify first — see
 [Unverified claims](#unverified-claims))*
 The Client writes its configuration with mode `0600`
-([`reconfigure.rs`](../crates/client/src/reconfigure.rs)). Whether the private key obtained through
+([`reconfigure.rs`](../crates/fleet-agent/src/reconfigure.rs)). Whether the private key obtained through
 the CSR flow and the cache of rotated credentials get the same treatment in the state directory has
 not been established. If they do, this item disappears; if they do not, it is the cheapest fix in
 the document.
@@ -208,7 +208,7 @@ The listener split this measure asked for is **done**: the REST API and the UI h
 listener (ADR-0023, superseding ADR-0025 on that point), and the OpAMP endpoint no longer shares a
 port with a browser. What has *not* changed is the verifier: client authentication is still
 *optional* at the TLS layer and required on the route
-([`tls.rs`](../crates/server/src/tls.rs)) — and the reason is now a different one. The Agent plane
+([`tls.rs`](../crates/fleet-server/src/tls.rs)) — and the reason is now a different one. The Agent plane
 also serves the **package download**, which a Client fetches presenting no certificate (the artifact
 is protected by its hash and signature, ADR-0018), so requiring one in the handshake today would
 break every rollout.
@@ -255,15 +255,12 @@ an h2 peer is bounded by message size and by nothing else. Cheap to take, but it
 that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0023 says
 "HTTP/1" and not "the transport".
 
-🔴 **H18 — Give the Client's own listeners the bound the Server's have.**
-Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0023:
-the **Gateway** endpoint (ADR-0034), which runs on `axum::serve` and `axum_server` with no timer
-installed and is therefore in exactly the state the Server was in; and the **Supervisor Endpoint**,
-which wraps `accept_async_with_config` in no timeout at all and serves connections one at a time, so
-a half-finished handshake does not merely cost memory — it holds the endpoint against the Managed
-Process it exists for. The Gateway half is the same three lines as ADR-0023 applied to a different
-binary. The Supervisor Endpoint half is a `tokio::time::timeout` around the upgrade, and is the
-cheapest item in this document.
+🟡 **H18 — Give the Client's own listeners the bound the Server's have.**
+Two surfaces on the Client speak the server side of this protocol: the **Gateway** endpoint
+(ADR-0034) and the **Supervisor Endpoint**. Both are served on the listener of `opamp`
+(ADR-0024), which bounds the header read and the TLS handshake on every OpAMP listener, and
+[`server_listen.rs`](../crates/opamp/tests/server_listen.rs) proves the header bound on that
+listener. What is missing is the check per surface in the table below.
 
 ## Stage 5 — The channels that put code on the host
 
@@ -328,9 +325,9 @@ the planning rather than inside it.
 
 ## Suggested order
 
-**H18 first — it is the smallest item here and it closes a gap the Server no longer has.** ADR-0023
-bounded the Server's two planes; leaving the Client's two listeners unbounded means the fleet's
-weakest surface is now the one running on the hosts, and the fix is already written next door.
+**H18 first — it is the smallest item here.** The bound is in force on the Client's two listeners;
+what remains is a check per surface, so that the fleet's weakest surface is proven rather than
+inferred.
 
 **Then H1 + H2 + H10 as one decision, then H3, H9, H12.** That is the largest gain in what the Server
 can actually enforce, for the smallest architectural commitment — and of those, H3, H11, H12, H13,
@@ -344,7 +341,7 @@ buys precision without control. Stage 1 is the prerequisite, not the warm-up.
 
 A hardening measure is the kind of change that looks done as soon as code exists, because the thing
 it prevents was already not happening in any test. So each one below states the observable that
-proves it — and the rule for all of them is the project's own ([`AGENTS.md`](../AGENTS.md) §5): **the check
+proves it — and the rule for all of them is the project's own ([`AGENTS.md` §5](../AGENTS.md#5-quality-bar--definition-of-done)): **the check
 must fail before the change and pass after**. A test that passes today verifies nothing about a
 measure that has not been taken.
 
@@ -367,7 +364,7 @@ measure that has not been taken.
 | H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
 | H16 | Connections past the configured cap are refused while the ones already established keep working, and the cap is reached by opening sockets that send nothing — the same peer ADR-0023 hangs up on, in quantity. |
 | H17 | An HTTP/2 peer that opens streams past `max_concurrent_streams` is refused, and one that stops answering keep-alive pings is dropped. Neither happens today, which is what the check must first show. |
-| H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
+| H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/fleet-server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
 
 Two further points hold across the table. **H3 and H9 belong in the interoperability suite**, not only
 in this project's own tests: both concern what the Server does with a peer it did not write, and

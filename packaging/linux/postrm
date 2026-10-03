@@ -20,7 +20,7 @@
 # means a replacement is installed. Cleaning up there would undo the successor's work.
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
-# crates/client/src/service/manager.rs) — the only roots a packaged install ever uses. An install
+# crates/fleet-agent/src/service/manager.rs) — the only roots a packaged install ever uses. An install
 # rooted elsewhere with `--root` is a manual one and is deliberately not touched.
 #
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path

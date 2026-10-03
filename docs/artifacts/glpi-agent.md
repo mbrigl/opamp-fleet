@@ -15,8 +15,8 @@ moves something inside it is a change both sides have to answer
 
 | | |
 |---|---|
-| Packed by | `glpi_plans` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/glpi.rs` |
+| Packed by | `glpi_plans` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/glpi.rs` |
 | Agent type | `glpi-agent` |
 
 ## 1. Source

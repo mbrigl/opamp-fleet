@@ -581,8 +581,10 @@ stays in the store — but **taking a bad version back is not a rollout**:
 
 **Deleting.** `DELETE /api/v1/packages/otelcol-contrib/0.109.0` removes the Package — its entries,
 artifacts, metadata, and every per-Agent assignment that referenced it; the entry route with a
-platform removes just that one entry. `DELETE` on a Deployment withdraws what it released. Nothing
-is uninstalled by any of them.
+platform removes just that one entry. `DELETE` on a Deployment is refused (`409`) while an Agent's
+assignment still names it, since the offer travels with that channel's signatures: roll those
+Agents out through another Deployment, or delete the Package, first. Nothing is uninstalled by any
+of them.
 
 **Building and signing**. The helper that ships with the Client writes the
 artifact, hashes it, and signs it:
@@ -636,7 +638,7 @@ show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) an
 | `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. |
 | `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
-| `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` withdraws what it released and uninstalls nothing. |
+| `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
 | `PUT /api/v1/deployments/{name}/selector` | Re-aim it. Never distributes. |
 | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Put a Package in the channel. `409` on a second of an Agent type it already holds; `?replace=true` swaps it. `404` for a Package nobody uploaded. |
 | `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out, and its signatures with it. |

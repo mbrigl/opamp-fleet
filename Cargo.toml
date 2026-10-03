@@ -1,12 +1,13 @@
 # Cargo workspace (ADR-0025): the Server and the Client are two binaries sharing one wire layer
-# (`opamp`). One workspace, one lockfile, one pinned toolchain (`rust-toolchain.toml`), so both ends
+# (`opamp`, publishable, with the client and the server behind features — ADR-0024) and
+# the project's own common code (`fleet-core`). One workspace, one lockfile, one pinned toolchain (`rust-toolchain.toml`), so both ends
 # resolve the same compiler and dependency versions and cannot drift apart on the wire format.
 [workspace]
 resolver = "2"
-members = ["crates/opamp", "crates/server", "crates/client", "crates/package-tools"]
+members = ["crates/opamp", "crates/fleet-core", "crates/fleet-server", "crates/fleet-agent", "crates/fleet-tools"]
 
 [workspace.package]
-version = "0.4.6"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -14,7 +15,8 @@ publish = false
 
 # Versions are pinned once here and referenced from each crate with `<dep>.workspace = true`.
 [workspace.dependencies]
-opamp = { path = "crates/opamp" }
+opamp = { path = "crates/opamp", version = "0.20" }
+fleet-core = { path = "crates/fleet-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
 axum = { version = "0.8", features = ["ws"] }
 prost = "0.14"
@@ -52,7 +54,7 @@ flate2 = "1"
 # (ADR-0026).
 # `compress` adds the *writer*, which is behind that one feature in its entirety: it is what lets
 # `opamp-package-sign pack` build the artifact an operator has otherwise no supported way to
-# produce. Only `crates/package-tools` and the Client's own tests ask for it (ADR-0025); the
+# produce. Only `crates/fleet-tools` and the Client's own tests ask for it (ADR-0025); the
 # Client daemon never encodes, and does not enable it.
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256"] }
 # Reading a `.zip` package artifact (ADR-0015) — the container the GLPI Agent's portable Windows

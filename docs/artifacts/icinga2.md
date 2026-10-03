@@ -15,8 +15,8 @@ layout is therefore entirely this project's, and the whole reason this document 
 
 | | |
 |---|---|
-| Packed by | `icinga2_plans` / `windows_plan` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/icinga2.rs` |
+| Packed by | `icinga2_plans` / `windows_plan` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/icinga2.rs` |
 | Agent type | `icinga2` |
 
 ## 1. Source

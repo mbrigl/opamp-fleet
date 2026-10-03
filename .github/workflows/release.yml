@@ -37,7 +37,7 @@ env:
   # The names that are *not* this are the ones that identify an installation rather than a program:
   # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
   # `opamp-fleet` (ADR-0028). Keeping the program's name off the product's is what lets one
-  # published Set serve every variant build. They live in crates/client/Cargo.toml and
+  # published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
 
@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "client") | .version')
+            | jq -r '.packages[] | select(.name == "fleet-agent") | .version')
           echo "Cargo.toml says $version"
           case "$version" in
             "" | *[!0-9.]* ) echo "::error::$version is not a release version (MAJOR.MINOR.PATCH)"; exit 1 ;;
@@ -138,9 +138,9 @@ jobs:
         id: baked
         run: |
           set -euo pipefail
-          # `-p client` is the package (its name is a build-time identifier); the binary it
+          # `-p fleet-agent` is the package (its name is a build-time identifier); the binary it
           # produces is the shipped name (ADR-0029).
-          cargo build -p client --bin supervisor --locked
+          cargo build -p fleet-agent --bin supervisor --locked
           full=$(./target/debug/supervisor --version | awk '{print $NF}')
           echo "the binary reports $full"
           version='${{ steps.read.outputs.version }}'
@@ -182,10 +182,10 @@ jobs:
       - name: Add the target
         run: rustup target add ${{ matrix.target }}
       - name: Build the Client
-        run: cargo build --release -p client --bin supervisor --target ${{ matrix.target }} --locked
+        run: cargo build --release -p fleet-agent --bin supervisor --target ${{ matrix.target }} --locked
       # A host build: it runs here, on this runner, to pack the artifact.
       - name: Build the packer
-        run: cargo build --release -p package-tools --bin opamp-package-sign --locked
+        run: cargo build --release -p fleet-tools --bin opamp-package-sign --locked
       - name: The binary agrees with the name it will be given
         if: matrix.native
         run: |
@@ -235,10 +235,10 @@ jobs:
           # make "the same bytes" a claim rather than a fact. `--no-strip` for the same reason —
           # cargo-deb strips by default, which would leave the `.deb` holding a *different*
           # binary from its sibling archive.
-          cargo deb -p client --no-build --no-strip \
+          cargo deb -p fleet-agent --no-build --no-strip \
             --target ${{ matrix.target }} \
             -o "$STEM.deb"
-          cargo generate-rpm -p crates/client \
+          cargo generate-rpm -p crates/fleet-agent \
             --target ${{ matrix.target }} \
             -o "$STEM.rpm"
 
