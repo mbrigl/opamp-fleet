@@ -405,56 +405,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "client"
-version = "0.4.6"
-dependencies = [
- "async-trait",
- "axum",
- "axum-server",
- "base64 0.22.1",
- "clap",
- "dialoguer",
- "flate2",
- "futures-util",
- "hex",
- "libc",
- "opamp",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-http",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk",
- "prost",
- "rcgen",
- "reqwest",
- "ring",
- "rustls",
- "serde",
- "serde_json",
- "server",
- "service-manager",
- "sevenz-rust2",
- "sha2 0.10.9",
- "sysinfo",
- "tar",
- "tempfile",
- "time",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-appender",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "webpki-roots 1.0.9",
- "windows-service",
- "x509-parser",
- "zip",
-]
-
-[[package]]
 name = "codepage"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -788,6 +738,113 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
+]
+
+[[package]]
+name = "fleet-agent"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "dialoguer",
+ "flate2",
+ "fleet-core",
+ "fleet-server",
+ "futures-util",
+ "hex",
+ "libc",
+ "opamp",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-http",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+ "prost",
+ "rcgen",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "service-manager",
+ "sevenz-rust2",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-appender",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "windows-service",
+ "x509-parser",
+ "zip",
+]
+
+[[package]]
+name = "fleet-core"
+version = "0.5.0"
+dependencies = [
+ "git2",
+]
+
+[[package]]
+name = "fleet-server"
+version = "0.5.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "constant_time_eq",
+ "flate2",
+ "fleet-core",
+ "futures-util",
+ "hex",
+ "opamp",
+ "prost",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-axum",
+ "x509-parser",
+]
+
+[[package]]
+name = "fleet-tools"
+version = "0.5.0"
+dependencies = [
+ "clap",
+ "dialoguer",
+ "flate2",
+ "fleet-agent",
+ "hex",
+ "opamp",
+ "reqwest",
+ "ring",
+ "rustls",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1668,16 +1725,25 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opamp"
-version = "0.4.6"
+version = "0.20.0"
 dependencies = [
+ "axum",
+ "axum-server",
  "flate2",
- "git2",
+ "futures-util",
+ "hyper-util",
  "prost",
  "prost-build",
  "protox",
  "rcgen",
+ "reqwest",
+ "ring",
  "rustls",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -1774,26 +1840,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
-]
-
-[[package]]
-name = "package-tools"
-version = "0.4.6"
-dependencies = [
- "clap",
- "client",
- "dialoguer",
- "flate2",
- "hex",
- "reqwest",
- "ring",
- "rustls",
- "serde_json",
- "sevenz-rust2",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -2438,38 +2484,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "server"
-version = "0.4.6"
-dependencies = [
- "axum",
- "axum-server",
- "base64 0.22.1",
- "constant_time_eq",
- "flate2",
- "futures-util",
- "hex",
- "hyper-util",
- "opamp",
- "prost",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "time",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "toml",
- "tracing",
- "tracing-subscriber",
- "utoipa",
- "utoipa-axum",
- "x509-parser",
 ]
 
 [[package]]
