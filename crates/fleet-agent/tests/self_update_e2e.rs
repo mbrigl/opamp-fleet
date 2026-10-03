@@ -35,8 +35,8 @@ fn this_host() -> Platform {
 // version directory. Imported rather than restated since ADR-0011: both were copied here with a
 // comment saying `client` is a binary crate and a test cannot link it, and a copied constant is a
 // correctness risk that no comment can remove.
-use fleet_agent::selfupdate::EXIT_RESTART_FOR_UPDATE;
 use fleet_agent::service::layout::BINARY_FILENAME as CLIENT_BINARY;
+use fleet_agent::update::EXIT_RESTART_FOR_UPDATE;
 
 /// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
 /// name. Aim belongs to the Deployment now (ADR-0030): a Package reaches nobody by itself, so a

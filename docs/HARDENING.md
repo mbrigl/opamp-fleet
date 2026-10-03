@@ -77,18 +77,18 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
   - ⚠️ the package upload is unbounded in **time** and, by decision, in size (ADR-0011) — the one
     route where that is intended · ❌ H16, H17, H10 as above
-- **Client → Server**, outbound (`transport/http.rs`, `transport/ws.rs`).
+- **Client → Server**, outbound (`opamp::client::connection`, ADR-0036).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0009).
-  - ✅ message size, gzip after decompression, per-hop exchange timeout, `max_carried_agents`
-  - ❌ **no header-read bound**: it runs on `axum::serve` and `axum_server` without a timer, which is
-    exactly the state the Server was in before ADR-0012 (**H18**)
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
+    is served on (ADR-0036) · ✅ message size, gzip after decompression, per-hop exchange timeout,
+    `max_carried_agents`
+  - ⚠️ no test of its own drives the header bound on this surface (**H18**)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
-  - ✅ message size in both directions
-  - ❌ **no handshake bound**, and connections are served one at a time by design: a local process
-    that connects and never completes the WebSocket upgrade holds the endpoint against the Agent it
-    exists for (**H18**)
+  - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
+    ✅ message size in both directions
+  - ⚠️ no test of its own shows a half-finished upgrade leaving the endpoint free (**H18**)
 
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
 which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
@@ -255,15 +255,12 @@ an h2 peer is bounded by message size and by nothing else. Cheap to take, but it
 that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0012 says
 "HTTP/1" and not "the transport".
 
-🔴 **H18 — Give the Client's own listeners the bound the Server's have.**
-Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0012:
-the **Gateway** endpoint (ADR-0009), which runs on `axum::serve` and `axum_server` with no timer
-installed and is therefore in exactly the state the Server was in; and the **Supervisor Endpoint**,
-which wraps `accept_async_with_config` in no timeout at all and serves connections one at a time, so
-a half-finished handshake does not merely cost memory — it holds the endpoint against the Managed
-Process it exists for. The Gateway half is the same three lines as ADR-0012 applied to a different
-binary. The Supervisor Endpoint half is a `tokio::time::timeout` around the upgrade, and is the
-cheapest item in this document.
+🟡 **H18 — Give the Client's own listeners the bound the Server's have.**
+Two surfaces on the Client speak the server side of this protocol: the **Gateway** endpoint
+(ADR-0009) and the **Supervisor Endpoint**. Both are served on the listener of `opamp`
+(ADR-0036), which bounds the header read and the TLS handshake on every OpAMP listener, and
+[`server_listen.rs`](../crates/opamp/tests/server_listen.rs) proves the header bound on that
+listener. What is missing is the check per surface in the table below.
 
 ## Stage 5 — The channels that put code on the host
 
@@ -328,9 +325,9 @@ the planning rather than inside it.
 
 ## Suggested order
 
-**H18 first — it is the smallest item here and it closes a gap the Server no longer has.** ADR-0012
-bounded the Server's two planes; leaving the Client's two listeners unbounded means the fleet's
-weakest surface is now the one running on the hosts, and the fix is already written next door.
+**H18 first — it is the smallest item here.** The bound is in force on the Client's two listeners;
+what remains is a check per surface, so that the fleet's weakest surface is proven rather than
+inferred.
 
 **Then H1 + H2 + H10 as one decision, then H3, H9, H12.** That is the largest gain in what the Server
 can actually enforce, for the smallest architectural commitment — and of those, H3, H11, H12, H13,

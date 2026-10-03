@@ -1064,28 +1064,6 @@ impl ClientConfig {
         self.auth.as_ref().map(|a| a.authorization()).transpose()
     }
 
-    /// Basic and Bearer are cleartext without TLS: sending them beyond the loopback over `ws://`
-    /// or `http://` deserves a warning (ADR-0017) — ultimately the operator's choice, so never
-    /// an error.
-    pub fn sends_credentials_in_cleartext(&self) -> bool {
-        if self.auth.is_none() && self.authorization_override.is_none() {
-            return false;
-        }
-        let Some((scheme, rest)) = self.endpoint.split_once("://") else {
-            return false;
-        };
-        if scheme == "wss" || scheme == "https" {
-            return false;
-        }
-        let host_port = rest.split(['/', '?']).next().unwrap_or("");
-        // A bracketed IPv6 host keeps its brackets; only a trailing `:port` is cut off.
-        let host = match host_port.strip_prefix('[') {
-            Some(v6) => v6.split(']').next().unwrap_or(""),
-            None => host_port.split(':').next().unwrap_or(""),
-        };
-        !matches!(host, "localhost" | "127.0.0.1" | "::1")
-    }
-
     pub fn transport(&self) -> Result<TransportKind, String> {
         match self.endpoint.split("://").next() {
             Some("ws") | Some("wss") => Ok(TransportKind::WebSocket),
@@ -1876,41 +1854,6 @@ mod tests {
             );
         }
         assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
-    }
-
-    #[test]
-    fn cleartext_credentials_are_flagged_beyond_the_loopback() {
-        for (endpoint, cleartext) in [
-            ("ws://fleet.example:4320/v1/opamp", true),
-            ("http://10.0.0.7:4320/v1/opamp", true),
-            ("ws://127.0.0.1:4320/v1/opamp", false),
-            ("http://localhost:4320/v1/opamp", false),
-            ("ws://[::1]:4320/v1/opamp", false),
-            ("wss://fleet.example:4320/v1/opamp", false),
-            ("https://fleet.example:4320/v1/opamp", false),
-        ] {
-            let cfg = ClientConfig {
-                endpoint: endpoint.to_string(),
-                auth: Some(AuthConfig {
-                    bearer_token: Some("tok".to_string()),
-                    username: None,
-                    password: None,
-                }),
-                ..ClientConfig::default()
-            };
-            assert_eq!(
-                cfg.sends_credentials_in_cleartext(),
-                cleartext,
-                "{endpoint}"
-            );
-        }
-
-        // Without [auth] there is nothing to leak.
-        let no_auth = ClientConfig {
-            endpoint: "ws://fleet.example:4320/v1/opamp".to_string(),
-            ..ClientConfig::default()
-        };
-        assert!(!no_auth.sends_credentials_in_cleartext());
     }
 
     #[test]

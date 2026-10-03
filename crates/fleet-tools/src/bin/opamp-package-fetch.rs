@@ -400,7 +400,7 @@ enum Action {
 async fn main() -> ExitCode {
     // reqwest is built with `rustls-no-provider`, which refuses to construct a TLS client until a
     // process-wide provider exists (ADR-0012).
-    fleet_agent::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -3081,7 +3081,7 @@ SHA256: cccc
         use std::io::Write;
 
         // What `main` does before anything builds a client (ADR-0012).
-        fleet_agent::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let server = format!("http://{}", listener.local_addr().expect("addr"));
@@ -3231,7 +3231,7 @@ SHA256: cccc
         use std::io::Write;
         use std::sync::{Arc, Mutex};
 
-        fleet_agent::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let server = format!("http://{}", listener.local_addr().expect("addr"));

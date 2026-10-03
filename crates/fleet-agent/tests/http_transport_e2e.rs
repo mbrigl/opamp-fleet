@@ -4,7 +4,7 @@
 //!
 //! Both transports feed the same Agent state machine and differ only in how bytes travel, which
 //! is exactly why this file has to exist: every other end-to-end test in this crate dials
-//! `ws://`, so the polling loop in `transport/http.rs` — its own loop, its own follow-up order,
+//! `ws://`, so the polling loop in `opamp::client::http` — its own loop, its own follow-up order,
 //! its own `ReportSink` that discards replies — was reachable by no test at all. A regression
 //! there would have been invisible until an operator switched a scheme in `supervisor.toml`.
 //!

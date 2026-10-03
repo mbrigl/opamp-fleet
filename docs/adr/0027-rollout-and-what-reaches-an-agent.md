@@ -292,4 +292,4 @@ Server-driven downgrade.
   `the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered`.
 - `crates/fleet-agent/src/supervisor/agent.rs`:
   `the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash`;
-  `crates/fleet-agent/src/selfupdate.rs`: `install_refuses_a_downgrade`.
+  `crates/fleet-agent/src/update/installer.rs`: `install_refuses_a_downgrade`.

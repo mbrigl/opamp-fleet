@@ -1,4 +1,4 @@
-//! An OpAMP agent's side of the protocol (ADR-0033, ADR-0031): one Agent's state machine, and the
+//! An OpAMP agent's side of the protocol (ADR-0036): one Agent's state machine, and the
 //! connection that carries any number of them to a Server. Behind the `client` feature.
 //!
 //! - [`protocol`] — the state machine, without I/O: which fields a report carries, and what a reply
@@ -6,10 +6,12 @@
 //! - [`ws`] and [`http`] — the two transports, each a driver for one connection: connecting with
 //!   backoff, the heartbeat or poll interval, framing, the message size limit in both directions,
 //!   the 1009 close, throttling, and the goodbye.
+//! - [`connection`] — one connection described once, from which the transport, its TLS, its HTTP
+//!   client and its headers are built; the probe that proves offered settings.
 //!
 //! What the Agents report and what is done with a reply is the application's: it implements
-//! [`Session`], and a driver calls it. TLS, credentials and the rest of a connection's material are
-//! the application's too — it hands a driver what it built.
+//! [`Session`], and a driver calls it. Which material a connection uses is the application's too:
+//! it fills in a [`Connection`], and this module builds the rest.
 
 use std::future::Future;
 use std::time::Duration;
@@ -17,11 +19,13 @@ use std::time::Duration;
 use crate::proto::{AgentToServer, ServerToAgent};
 
 mod backoff;
+pub mod connection;
 pub mod http;
 pub mod protocol;
 pub mod ws;
 
 pub use backoff::Backoff;
+pub use connection::{ClientTls, Connection};
 
 /// The application's side of one connection, carrying any number of Agents. A driver never calls
 /// two of these at once.

@@ -1,6 +1,6 @@
 # ADR-0031: One `opamp` crate — a publishable wire layer always, the client and the server behind features, and what is this project's own in an internal crate
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)
 - **Date:** 2026-10-02
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/opamp/` (its manifest and `[features]`, `build.rs`, the feature gates in `src/lib.rs`, `LICENSE`, `NOTICE` and `README.md`), `crates/fleet-core/`, every item that moves between the two, and the per-feature lint in `.github/workflows/ci.yml` and `README.md`

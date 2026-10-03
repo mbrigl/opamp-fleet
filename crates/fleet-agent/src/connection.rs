@@ -12,8 +12,6 @@ use opamp::proto::{
     AgentToServer, ConnectionSettingsOffers, OpAmpConnectionSettings, TelemetryConnectionSettings,
 };
 use prost::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tracing::warn;
 
 use crate::config::ClientConfig;
@@ -205,69 +203,11 @@ pub async fn verify(
         .map(|certificate| certificate.cert.as_slice())
         .filter(|cert| !cert.is_empty());
 
-    let scheme = endpoint.split("://").next().unwrap_or("");
-    match scheme {
-        "ws" | "wss" => {
-            let mut request = endpoint
-                .as_str()
-                .into_client_request()
-                .map_err(|e| format!("invalid offered endpoint {endpoint}: {e}"))?;
-            if let Some(value) = &authorization {
-                request.headers_mut().insert(
-                    AUTHORIZATION,
-                    value
-                        .parse()
-                        .map_err(|e| format!("offered credentials are not a valid header: {e}"))?,
-                );
-            }
-            let connector = crate::tls::rustls_client_config_for(config, candidate_cert)?
-                .map(tokio_tungstenite::Connector::Rustls);
-            let (mut socket, _) =
-                tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
-                    .await
-                    .map_err(|e| format!("cannot connect to {endpoint}: {e}"))?;
-            let _ = futures_util::SinkExt::close(&mut socket).await;
-            Ok(())
-        }
-        "http" | "https" => {
-            let report = probe_report().ok_or("no agent to build a probe report from")?;
-            let builder = crate::tls::trust_and_identity_for(
-                reqwest::Client::builder()
-                    .use_rustls_tls()
-                    // A candidate OpAMP endpoint (ADR-0018) is verified by connecting to exactly it;
-                    // a redirect would defeat the point, so this probe never follows one.
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(std::time::Duration::from_secs(30)),
-                config,
-                candidate_cert,
-            )?;
-            let client = builder
-                .build()
-                .map_err(|e| format!("cannot build the probe client: {e}"))?;
-            let mut request = client
-                .post(&endpoint)
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    opamp::endpoint::PROTOBUF_CONTENT_TYPE,
-                )
-                .body(report.encode_to_vec());
-            if let Some(value) = &authorization {
-                request = request.header(reqwest::header::AUTHORIZATION, value);
-            }
-            let response = request
-                .send()
-                .await
-                .map_err(|e| format!("cannot reach {endpoint}: {e}"))?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(format!("{endpoint} answered {status}"));
-            }
-            Ok(())
-        }
-        _ => Err(format!(
-            "offered endpoint {endpoint} must start with ws://, wss://, http:// or https://"
-        )),
-    }
+    let tls = crate::tls::client_tls_for(config, candidate_cert)?;
+    let mut candidate = crate::transport::connection_with(config, tls)?;
+    candidate.endpoint = endpoint;
+    candidate.authorization = authorization;
+    opamp::client::connection::probe(&candidate, probe_report).await
 }
 
 #[cfg(test)]

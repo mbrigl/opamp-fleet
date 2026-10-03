@@ -852,7 +852,7 @@ pub type InstalledVersions = BTreeMap<String, String>;
 /// Agent reporting none at all — the claim is the whole test, exactly as ADR-0027 wrote it: strictly
 /// greater to match, and a claim that cannot itself be ordered **refuses** outright. That is the safe
 /// direction for a claim about that very package, and the Client's own
-/// (`selfupdate::install_offer`): what cannot be ordered must not be installed over what is running.
+/// (`update::installer::install`): what cannot be ordered must not be installed over what is running.
 ///
 /// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
 fn upgrades(

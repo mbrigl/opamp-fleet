@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::shutdown::{shutdown_channel, Shutdown};
 
-use crate::config::{ClientConfig, TransportKind};
+use crate::config::ClientConfig;
 use crate::connection;
 use crate::supervisor;
 use crate::transport::{self, RunOutcome};
@@ -85,7 +85,7 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
         // `KeepAlive{SuccessfulExit:false}` are the only "bring it back" either offers, and a
         // clean exit is precisely what tells them not to (ADR-0014, ADR-0021).
         tracing::info!("exiting so the service manager starts the newly installed version");
-        std::process::exit(crate::selfupdate::EXIT_RESTART_FOR_UPDATE);
+        std::process::exit(crate::update::EXIT_RESTART_FOR_UPDATE);
     }
     Ok(())
 }
@@ -185,8 +185,8 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
     tracing::error!(error = %error, state_dir = %state_dir.display(), "cannot read the configuration");
-    match crate::selfupdate::on_start(&state_dir) {
-        Ok(crate::selfupdate::Startup::RolledBack(_)) => Ok(Exit::RestartForUpdate),
+    match crate::update::installer::on_start(&state_dir) {
+        Ok(crate::update::installer::Startup::RolledBack(_)) => Ok(Exit::RestartForUpdate),
         // Counted, or nothing was in flight. Either way this run cannot continue.
         _ => Err(error),
     }
@@ -241,19 +241,19 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
 
     // Resolve any self-update in flight before anything else runs (ADR-0021): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
-    let startup = crate::selfupdate::on_start(&config.state_dir)?;
+    let startup = crate::update::installer::on_start(&config.state_dir)?;
     let (probation, owed_outcome) = match startup {
-        crate::selfupdate::Startup::Ordinary => (None, None),
-        crate::selfupdate::Startup::OnProbation(marker) => (Some(*marker), None),
-        crate::selfupdate::Startup::Outcome(outcome) => (None, Some(*outcome)),
+        crate::update::installer::Startup::Ordinary => (None, None),
+        crate::update::installer::Startup::OnProbation(marker) => (Some(*marker), None),
+        crate::update::installer::Startup::Outcome(outcome) => (None, Some(*outcome)),
         // `current` now names the previous version and this one is not it. Nothing is served
         // from here; the manager restarts and the version it starts reports the failure.
-        crate::selfupdate::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
+        crate::update::installer::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
     };
 
     let mut engine = supervisor::build_engine(&config, &shutdown)?;
     if config.self_update_package().is_some() {
-        engine.arm_self_update(crate::selfupdate::Installer::new(
+        engine.arm_self_update(crate::update::installer::Installer::new(
             config.state_dir.clone(),
             config.packages.as_ref().and_then(|p| p.archive_key.clone()),
             probation,
@@ -280,7 +280,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 Some(error) => Err(error.clone()),
             },
         );
-        crate::selfupdate::clear_outcome(&config.state_dir);
+        crate::update::installer::clear_outcome(&config.state_dir);
     }
     // Own telemetry (ADR-0025) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
@@ -318,18 +318,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // The sampler runs beside the transport, not inside it: process metrics are about the host,
         // and a Client that has lost its connection is exactly when they are worth having.
         let outcome = {
-            let transport = async {
-                match config.transport()? {
-                    TransportKind::WebSocket => {
-                        transport::ws::run(&mut engine, &mut config, &mut shutdown, &telemetry)
-                            .await
-                    }
-                    TransportKind::Http => {
-                        transport::http::run(&mut engine, &mut config, &mut shutdown, &telemetry)
-                            .await
-                    }
-                }
-            };
+            let transport = transport::run(&mut engine, &mut config, &mut shutdown, &telemetry);
             tokio::pin!(transport);
             let mut tick = tokio::time::interval(telemetry.sample_interval());
             tick.tick().await; // the first tick is immediate; sample on the ones after it
@@ -519,7 +508,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).expect("state dir");
-        let marker = crate::selfupdate::UpdateMarker {
+        let marker = crate::update::installer::UpdateMarker {
             previous_dir: dir.path().join("previous"),
             new_dir: dir.path().join("new"),
             version: "9.9.9".to_string(),
@@ -527,7 +516,7 @@ mod tests {
             attempts: 1,
             trace: None,
         };
-        // `selfupdate` owns this file name; the test names it to prove the file was consumed.
+        // `update::installer` owns this file name; the test names it to prove the file was consumed.
         let marker_file = state_dir.join("update-marker.json");
         std::fs::write(
             &marker_file,

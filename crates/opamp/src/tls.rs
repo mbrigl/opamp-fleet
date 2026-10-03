@@ -1,14 +1,55 @@
-//! Reading certificates and a private key out of PEM bytes (ADR-0011).
+//! The TLS both sides of a connection share (ADR-0036). Behind either feature.
 //!
-//! Both ends parse PEM: the Client for its trust file and its own identity, the Server for the
-//! listener's certificate and the client CA that turns mutual TLS on
-//! ([ADR-0017](../../../docs/adr/0017-admission-and-authentication.md)).
-//! The parsing is one thing written twice; what the file *means* is not, so this module takes bytes
-//! and each end keeps its own path-based wrapper — the error naming a trust anchor, a listener's
-//! key or a client CA is written where that is known.
+//! This module turns material into what rustls takes, and opens no file. Which CA to trust and
+//! which certificate to present is the application's policy, so the application reads the files
+//! and hands the bytes here. Where a file is meant, the application wraps the error with its path.
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+/// Installs the process-wide rustls provider — ring, never a system library (ADR-0012) — once;
+/// later calls are no-ops. A binary calls it at startup. A test that builds an HTTP client calls
+/// it itself: reqwest's `rustls-no-provider` feature refuses to build one without a process
+/// provider, which is the guarantee that keeps aws-lc-rs and its cmake out of the build.
+pub fn install_ring_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // A concurrent second install can still lose the race; losing to the same provider is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
+/// A certificate chain and its private key, as PEM — what one side presents to the other.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Identity {
+    /// The certificate, followed by any intermediates.
+    pub cert_pem: Vec<u8>,
+    /// The private key of the first certificate.
+    pub key_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for Identity {
+    /// The key is a secret, so a `Debug` of a connection's material never prints it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Identity")
+            .field("cert_pem", &String::from_utf8_lossy(&self.cert_pem))
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Every certificate of `pem` as the trust anchors of a root store.
+///
+/// # Errors
+/// Returns an error when `pem` holds no certificate, or one that cannot be an anchor.
+pub fn root_store(pem: &[u8]) -> Result<rustls::RootCertStore, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in certificates(pem)? {
+        roots
+            .add(cert)
+            .map_err(|e| format!("cannot trust a certificate: {e}"))?;
+    }
+    Ok(roots)
+}
 
 /// Every certificate in `pem`, in the order it appears — a chain, or a bundle of trust anchors.
 ///
@@ -18,6 +59,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 /// The PEM reader is `rustls-pki-types`' own (the crate `rustls::pki_types` re-exports), which
 /// absorbed `rustls-pemfile` when that was retired (RUSTSEC-2025-0134) — so the parsing stays the
 /// one rustls itself uses, without the unmaintained dependency.
+///
+/// # Errors
+/// Returns an error when `pem` holds no certificate or a malformed one.
 pub fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
     let certs: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(pem).collect();
     let certs = certs.map_err(|e| format!("cannot parse a certificate: {e}"))?;
@@ -31,6 +75,9 @@ pub fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> 
 ///
 /// A file with no key in it is an error, not an absence: the `NoItemsFound` case and a malformed
 /// key both surface as `Err`, which the path-based callers wrap with what the file was meant to be.
+///
+/// # Errors
+/// Returns an error when `pem` holds no key or a malformed one.
 pub fn private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, String> {
     PrivateKeyDer::from_pem_slice(pem).map_err(|e| format!("cannot parse a private key: {e}"))
 }
@@ -50,6 +97,7 @@ mod tests {
         (cert.pem(), key.serialize_pem())
     }
 
+    /// Verifies: ADR-0036
     #[test]
     fn reads_a_certificate_and_a_key() {
         let (cert_pem, key_pem) = pair();
@@ -70,6 +118,7 @@ mod tests {
     }
 
     /// Fail closed: a file with no certificate in it is not an empty trust store.
+    /// Verifies: ADR-0036
     #[test]
     fn a_file_holding_no_certificate_is_an_error() {
         assert!(certificates(b"").is_err());
@@ -79,6 +128,16 @@ mod tests {
             certificates(key_pem.as_bytes()).is_err(),
             "a key is not a certificate"
         );
+    }
+
+    #[test]
+    fn the_debug_form_of_an_identity_hides_its_key() {
+        let (cert_pem, key_pem) = pair();
+        let identity = Identity {
+            cert_pem: cert_pem.into_bytes(),
+            key_pem: key_pem.into_bytes(),
+        };
+        assert!(!format!("{identity:?}").contains("PRIVATE KEY"));
     }
 
     #[test]

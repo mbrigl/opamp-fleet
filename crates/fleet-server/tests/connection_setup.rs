@@ -8,18 +8,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum_server::accept::DefaultAcceptor;
-use axum_server::Handle;
 use fleet_server::fleet::AppState;
 use fleet_server::transport::Admission;
 use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerToAgent};
+use opamp::server::listen::Handle;
 use opamp::uid::InstanceUid;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// Short enough for a test to wait it out, and the reason `plane_with_header_read_timeout` exists:
+/// Short enough for a test to wait it out, and the reason `with_header_read_timeout` exists:
 /// the Server's own bound is 30 seconds, which no suite should sit through.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -33,13 +32,9 @@ async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(
-        fleet_server::listen::plane_with_header_read_timeout(
-            listener,
-            DefaultAcceptor::new(),
-            Handle::new(),
-            HEADER_READ_TIMEOUT,
-        )
-        .serve(app.into_make_service()),
+        fleet_server::listen::plane(listener, None, Handle::new())
+            .with_header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve(app),
     );
     (addr, dir)
 }

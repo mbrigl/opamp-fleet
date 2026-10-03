@@ -15,20 +15,16 @@ pub mod pool;
 pub mod registry;
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::{header, StatusCode};
-use axum::Router;
-use axum_server::tls_rustls::RustlsConfig;
-use axum_server::Handle;
 use opamp::proto::{AgentToServer, ServerToAgent};
+use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls};
 use opamp::server::{
     Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Transport, Unreadable,
 };
+use opamp::tls::Identity;
 use opamp::uid::InstanceUid;
-use rustls::server::WebPkiClientVerifier;
-use rustls::ServerConfig;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -106,101 +102,61 @@ pub async fn run_on(
     // The receive and send limits the Baseline requires, enforced per hop.
     let app = opamp::server::router(handler, Settings::new(config.max_message_size_bytes));
 
-    match &gateway.tls {
-        Some(tls) => serve_tls(app, listener, tls, gateway.upstream_connections, shutdown).await,
-        None => serve_plain(app, listener, gateway.upstream_connections, shutdown).await,
-    }
-}
-
-/// The plaintext downstream endpoint. Documented for a bootstrapping fleet, but the hop then carries
-/// the `Authorization` credential in the clear, so say so loudly.
-async fn serve_plain(
-    app: Router,
-    listener: std::net::TcpListener,
-    upstream_cap: usize,
-    mut shutdown: Shutdown,
-) -> Result<(), String> {
-    let listen = listener
-        .local_addr()
-        .map_err(|e| format!("cannot read the gateway endpoint's address: {e}"))?;
-    let listener = tokio::net::TcpListener::from_std(listener)
-        .map_err(|e| format!("cannot prepare the gateway endpoint {listen}: {e}"))?;
-    warn!(
-        %listen,
-        "the gateway endpoint is serving plaintext — configure [gateway.tls] to encrypt the \
-         downstream hop and gate it with a client CA"
-    );
-    info!(%listen, upstream_cap, "gateway listening");
-
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown.requested().await;
-    })
-    .await
-    .map_err(|e| format!("the gateway endpoint stopped: {e}"))
-}
-
-/// The TLS downstream endpoint (ADR-0009): the same server-side rustls terminator the Server uses,
-/// with the handshake proving the downstream Agent against `client_ca_file` when one is set.
-async fn serve_tls(
-    app: Router,
-    listener: std::net::TcpListener,
-    tls: &GatewayTlsConfig,
-    upstream_cap: usize,
-    mut shutdown: Shutdown,
-) -> Result<(), String> {
-    let server_config = tls_server_config(tls)?;
+    let upstream_cap = gateway.upstream_connections;
     let handle = Handle::new();
-    // axum_server drains rather than drops: on shutdown the handle lets in-flight exchanges finish
-    // (up to the grace) instead of tearing every downstream connection down mid-message.
-    let trigger = handle.clone();
+    let mut downstream = Listener::new(listener, handle.clone());
+    match &gateway.tls {
+        Some(tls) => {
+            let config = server_tls(tls)?
+                .rustls_config()
+                .map_err(|e| format!("the gateway endpoint: {e}"))?;
+            downstream = downstream.with_tls(config);
+            let mutual_tls = tls.client_ca_file.is_some();
+            info!(%listen, upstream_cap, mutual_tls, "gateway listening over TLS");
+        }
+        // Documented for a bootstrapping fleet, but the hop then carries the `Authorization`
+        // credential in the clear, so say so loudly.
+        None => {
+            warn!(
+                %listen,
+                "the gateway endpoint is serving plaintext — configure [gateway.tls] to encrypt \
+                 the downstream hop and gate it with a client CA"
+            );
+            info!(%listen, upstream_cap, "gateway listening");
+        }
+    }
+    // The listener drains rather than drops: on shutdown in-flight exchanges finish, up to the
+    // grace, instead of every downstream connection being torn down mid-message.
+    let mut shutdown = shutdown;
     tokio::spawn(async move {
         shutdown.requested().await;
-        trigger.graceful_shutdown(Some(DRAIN_GRACE));
+        handle.graceful_shutdown(Some(DRAIN_GRACE));
     });
-
-    let mutual = tls.client_ca_file.is_some();
-    let listen = listener
-        .local_addr()
-        .map_err(|e| format!("cannot read the gateway endpoint's address: {e}"))?;
-    info!(%listen, upstream_cap, mutual_tls = mutual, "gateway listening over TLS");
-    axum_server::from_tcp_rustls(listener, RustlsConfig::from_config(server_config))
-        .handle(handle)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+    downstream
+        .serve(app)
         .await
         .map_err(|e| format!("the gateway endpoint stopped: {e}"))
 }
 
-/// Builds the rustls configuration the downstream endpoint serves with. A configured
-/// `client_ca_file` turns on mutual TLS and — unlike the Server, whose one port also answers
-/// browsers (ADR-0011) — makes a client certificate **mandatory**: this endpoint speaks only OpAMP,
-/// so a configured CA is an access-control boundary, not a hint. Its absence keeps the hop
-/// server-authenticated only, which a bootstrapping fleet uses.
-fn tls_server_config(tls: &GatewayTlsConfig) -> Result<Arc<ServerConfig>, String> {
-    let certs = crate::tls::read_certs(&tls.cert_file)?;
-    let key = crate::tls::read_key(&tls.key_file)?;
-
-    let builder = match &tls.client_ca_file {
-        None => ServerConfig::builder().with_no_client_auth(),
-        Some(ca_file) => {
-            let roots = crate::tls::root_store(ca_file)?;
-            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-                .build()
-                .map_err(|e| format!("cannot build the downstream client verifier: {e}"))?;
-            ServerConfig::builder().with_client_cert_verifier(verifier)
-        }
+/// The material the downstream endpoint serves with (ADR-0009). A configured `client_ca_file`
+/// makes a client certificate **mandatory** — unlike the Server, whose Agent plane also serves
+/// the package download to peers without one. This endpoint speaks only OpAMP, so a configured CA
+/// is an access-control boundary, not a hint. Its absence keeps the hop server-authenticated only,
+/// which a bootstrapping fleet uses.
+fn server_tls(tls: &GatewayTlsConfig) -> Result<ServerTls, String> {
+    let client_auth = match &tls.client_ca_file {
+        Some(ca_file) => ClientAuth::Required {
+            ca_pem: crate::tls::certificates_file(ca_file)?,
+        },
+        None => ClientAuth::None,
     };
-
-    let mut config = builder
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("cannot use the gateway TLS certificate and key: {e}"))?;
-    // `RustlsConfig::from_config` leaves ALPN to the caller; without it an HTTP/2 client fails the
-    // negotiation. Matches the Server's listener (ADR-0011).
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(Arc::new(config))
+    Ok(ServerTls {
+        identity: Identity {
+            cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
+            key_pem: crate::tls::key_file(&tls.key_file)?,
+        },
+        client_auth,
+    })
 }
 
 /// One downstream connection: a socket, or one plain-HTTP exchange.

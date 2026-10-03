@@ -28,7 +28,7 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
-      # ADR-0031: the workspace build unifies `opamp`'s features, so each one is linted on its own.
+      # ADR-0036: the workspace build unifies `opamp`'s features, so each one is linted on its own.
       - name: Lint opamp per feature
         run: |
           for f in "" client server; do

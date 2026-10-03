@@ -3,7 +3,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum_server::accept::DefaultAcceptor;
 use fleet_server::fleet::AppState;
 use opamp::proto::{
     any_value, AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue,
@@ -80,7 +79,7 @@ async fn spawn_full(
     stale_after: std::time::Duration,
 ) -> TestServer {
     // What main() does at startup: without a process provider, reqwest refuses to build a client.
-    fleet_server::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
@@ -128,15 +127,9 @@ pub async fn serve_guarded(
     let rest_addr = operator_listener.local_addr().expect("local addr");
     // Through `listen::plane`, as the binary serves them (ADR-0012), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
-    let handle = axum_server::Handle::new();
-    tokio::spawn(
-        fleet_server::listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
-            .serve(agents.into_make_service()),
-    );
-    tokio::spawn(
-        fleet_server::listen::plane(operator_listener, DefaultAcceptor::new(), handle)
-            .serve(operators.into_make_service()),
-    );
+    let handle = opamp::server::listen::Handle::new();
+    tokio::spawn(fleet_server::listen::plane(agent_listener, None, handle.clone()).serve(agents));
+    tokio::spawn(fleet_server::listen::plane(operator_listener, None, handle).serve(operators));
     (addr, rest_addr)
 }
 
@@ -255,7 +248,7 @@ pub async fn distribute_with_role(
 /// The same real router with own-telemetry destinations to offer (ADR-0025).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) -> TestServer {
-    fleet_server::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))

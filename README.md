@@ -173,8 +173,9 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 ## Build, Test & Run
 
 The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
-with five crates — `opamp` (the OpAMP wire layer, publishable on its own, with an Agent's client
-and a server endpoint behind the `client` and `server` features, ADR-0031),
+with five crates — `opamp` (the OpAMP communication layer, publishable on its own, with an Agent's
+client and a server endpoint with their TLS and listener behind the `client` and `server` features,
+ADR-0036),
 `fleet-core` (what both ends share beyond the protocol), `fleet-server` (the Server),
 `fleet-agent` (the Client, in all its modes), and `fleet-tools` (the operator command-line tools, ADR-0011). 
 This section is the single source for build/test/run commands — both humans and agents rely on 
@@ -186,7 +187,7 @@ it (AGENTS.md links here).
 - **Lint `opamp` per feature:**
   `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done`
   — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
-  build of each feature on its own shows that it stands alone (ADR-0031).
+  build of each feature on its own shows that it stands alone (ADR-0036).
 - **Check the Windows build:**
   `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
   (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev

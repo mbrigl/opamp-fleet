@@ -1,4 +1,4 @@
-//! One Agent's OpAMP state machine, as the specification defines it (ADR-0033).
+//! One Agent's OpAMP state machine, as the specification defines it (ADR-0036).
 //!
 //! It decides **which** fields a report carries — a full snapshot or only what changed, and only
 //! what the Server's Capability Set licenses — and settles what a reply means for the protocol:

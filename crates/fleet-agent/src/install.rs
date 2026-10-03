@@ -3,7 +3,7 @@
 //! The Client installs programs in two quite different ways: a Managed Process is replaced by a
 //! Supervisor that outlives it (ADR-0019), and the Client's own binary is staged beside the running
 //! version and reached by a restart (ADR-0021). Those two lifecycles are genuinely different and
-//! stay where they are — `supervisor::process` owns the first, [`crate::selfupdate`] the second.
+//! stay where they are — `supervisor::process` owns the first, [`crate::update`] the second.
 //!
 //! What they share is the step in the middle, and they shared it by writing it twice: unpack the
 //! artifact — raw bytes or an archive holding the program (ADR-0019) — to a path, make the result

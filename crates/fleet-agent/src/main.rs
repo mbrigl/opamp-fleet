@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use fleet_agent::cli::{self, Command, InstallArgs, ServiceAction};
 use fleet_agent::config::ClientConfig;
 use fleet_agent::config_init;
-use fleet_agent::selfupdate;
 use fleet_agent::service::runtime::{self, RunSpec};
 use fleet_agent::service::{layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel};
+use fleet_agent::update;
 
 fn main() {
     // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
@@ -49,7 +49,7 @@ fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0012): ring, never a system library.
-    fleet_agent::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {
@@ -75,7 +75,7 @@ fn main() {
         Some(Command::SelfCheck) => {
             println!(
                 "{}{}",
-                selfupdate::SELF_CHECK_TOKEN,
+                update::SELF_CHECK_TOKEN,
                 fleet_core::version::current()
             );
             Ok(())

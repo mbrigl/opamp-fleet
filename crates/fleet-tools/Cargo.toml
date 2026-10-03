@@ -13,6 +13,8 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+# The ring provider every binary installs at startup (ADR-0036, ADR-0012).
+opamp = { workspace = true, features = ["client"] }
 # ADR-0011: the Client's own `archive` — its 7z Unix-mode convention, used when packing, and its
 # unpackers, used by the tests to open what these tools produce. Checking an artifact against the
 # code that will install it is the property worth asserting, and it is why these tools live in the

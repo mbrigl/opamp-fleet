@@ -1,29 +1,16 @@
-//! TLS for the Client's two transports (ADR-0012, ADR-0017): rustls everywhere, an optional CA
-//! file that *replaces* the built-in roots for self-signed deployments, and the optional client
-//! certificate a Server demanding mutual TLS asks for.
+//! Which TLS material the Client uses (ADR-0012, ADR-0017), read from disk and handed to `opamp` as
+//! [`ClientTls`] (ADR-0036).
 //!
-//! Both transports are served from here rather than each building its own: `wss://` takes a rustls
-//! `ClientConfig`, `https://` takes a reqwest identity, and the two must be built from the same
-//! resolution of "which identity is in force" — the one the Server issued, else the one the
-//! operator configured.
+//! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
+//! identity in force — the one the Server issued, else the one the operator configured. Building a
+//! rustls configuration or an HTTP client from that material is `opamp`'s.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use opamp::client::ClientTls;
+use opamp::tls::Identity;
 
 use crate::config::ClientConfig;
-
-/// Installs the process-wide rustls provider — ring, never a system library (ADR-0012) — once;
-/// later calls are no-ops. The binary calls it at startup. Tests that build an HTTP client call
-/// it themselves: reqwest's `rustls-no-provider` feature refuses to build one without a process
-/// provider, which is the very guarantee that keeps aws-lc-rs and its cmake out of this build.
-pub fn install_ring_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        // A concurrent second install can still lose the race; losing to the same provider is fine.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
 
 /// The Server-issued client certificate, in the state directory beside the connection settings —
 /// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0017).
@@ -32,160 +19,79 @@ pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 
-/// The rustls configuration the WebSocket transport connects with, or `None` when nothing about
-/// TLS is configured and the transport's own defaults (webpki roots, no client certificate) are
-/// exactly right.
-pub fn rustls_client_config(
-    config: &ClientConfig,
-) -> Result<Option<Arc<rustls::ClientConfig>>, String> {
-    rustls_client_config_for(config, None)
+/// The trust and the identity in force.
+///
+/// # Errors
+/// Returns an error naming the file that cannot be read.
+pub fn client_tls(config: &ClientConfig) -> Result<ClientTls, String> {
+    client_tls_for(config, None)
 }
 
 /// The same, for a **candidate** identity: an offered certificate is proved by connecting with it
 /// before it is stored (ADR-0018's MUST, applied to the certificate in ADR-0017), so the
 /// certificate under test comes from the offer while its key is the pending one on disk.
-pub fn rustls_client_config_for(
+///
+/// # Errors
+/// Returns an error naming the file that cannot be read, or the missing key of a candidate.
+pub fn client_tls_for(
     config: &ClientConfig,
     candidate_cert: Option<&[u8]>,
-) -> Result<Option<Arc<rustls::ClientConfig>>, String> {
-    let ca_file = config.ca_file();
-    let identity = candidate_identity(config, candidate_cert)?;
-    if ca_file.is_none() && identity.is_none() {
-        return Ok(None);
-    }
-
-    let roots = match ca_file {
-        Some(ca_file) => root_store(ca_file)?,
-        // A configured identity does not imply a private CA: presenting a client certificate to a
-        // Server with a publicly trusted one is an ordinary deployment.
-        None => rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+) -> Result<ClientTls, String> {
+    let ca_pem = config.ca_file().map(certificates_file).transpose()?;
+    let identity = match candidate_cert {
+        Some(cert) => {
+            // An offered certificate belongs to the key this Client generated for its request;
+            // without that key there is nothing to prove possession with.
+            let key = config.state_dir.join(ISSUED_KEY_FILE);
+            if !key.exists() {
+                return Err(format!(
+                    "an offered certificate has no key to go with it — {} is missing",
+                    key.display()
+                ));
+            }
+            Some(Identity {
+                cert_pem: cert.to_vec(),
+                key_pem: key_file(&key)?,
+            })
+        }
+        None => match config.client_identity() {
+            Some((cert, key)) => Some(Identity {
+                cert_pem: certificates_file(&cert)?,
+                key_pem: key_file(&key)?,
+            }),
+            None => None,
         },
     };
-    let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
-    let config = match identity {
-        None => builder.with_no_client_auth(),
-        Some((cert_pem, key_file)) => builder
-            .with_client_auth_cert(
-                fleet_core::pem::certificates(&cert_pem)?,
-                read_key(&key_file)?,
-            )
-            .map_err(|e| format!("cannot present the client certificate: {e}"))?,
-    };
-    Ok(Some(Arc::new(config)))
+    Ok(ClientTls { ca_pem, identity })
 }
 
-/// The certificate PEM and key path in force: the candidate when one is under test, else whatever
-/// [`ClientConfig::client_identity`] resolves to.
-fn candidate_identity(
-    config: &ClientConfig,
-    candidate_cert: Option<&[u8]>,
-) -> Result<Option<(Vec<u8>, std::path::PathBuf)>, String> {
-    if let Some(cert) = candidate_cert {
-        // An offered certificate belongs to the key this Client generated for its request; without
-        // that key there is nothing to prove possession with, and the offer cannot be honoured.
-        let key = config.state_dir.join(ISSUED_KEY_FILE);
-        if !key.exists() {
-            return Err(format!(
-                "an offered certificate has no key to go with it — {} is missing",
-                key.display()
-            ));
-        }
-        return Ok(Some((cert.to_vec(), key)));
-    }
-    let Some((cert_file, key_file)) = config.client_identity() else {
-        return Ok(None);
-    };
-    let cert = std::fs::read(&cert_file)
-        .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
-    Ok(Some((cert, key_file)))
-}
-
-/// The client identity for the plain-HTTP transport, in reqwest's shape — for a candidate
-/// certificate under test when one is given — or `None` when there is none to present.
+/// The trust anchors alone — what a download from a host that is not the Server needs. Reads no
+/// identity, so a client certificate that cannot be read does not stop a download.
 ///
-/// reqwest's rustls backend takes key and certificate as **one** PEM buffer — `from_pkcs8_pem` is
-/// the native-tls constructor and does not exist here — so the two files are concatenated rather
-/// than passed separately. The key comes first, as its own documented example does.
-fn reqwest_identity_for(
-    config: &ClientConfig,
-    candidate_cert: Option<&[u8]>,
-) -> Result<Option<reqwest::Identity>, String> {
-    let Some((cert_pem, key_file)) = candidate_identity(config, candidate_cert)? else {
-        return Ok(None);
-    };
-    let mut pem =
-        std::fs::read(&key_file).map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
-    if !pem.ends_with(b"\n") {
-        pem.push(b'\n');
-    }
-    pem.extend_from_slice(&cert_pem);
-    reqwest::Identity::from_pem(&pem)
-        .map(Some)
-        .map_err(|e| format!("cannot present the client certificate: {e}"))
+/// # Errors
+/// Returns an error naming the CA file that cannot be read or holds no certificate.
+pub fn trust(config: &ClientConfig) -> Result<ClientTls, String> {
+    Ok(ClientTls {
+        ca_pem: config.ca_file().map(certificates_file).transpose()?,
+        identity: None,
+    })
 }
 
-/// Applies the configured CA to a reqwest builder — the trust half, which every outbound HTTPS of
-/// this Client needs.
-pub fn trust(
-    builder: reqwest::ClientBuilder,
-    config: &ClientConfig,
-) -> Result<reqwest::ClientBuilder, String> {
-    let Some(ca_file) = config.ca_file() else {
-        return Ok(builder);
-    };
-    let pem =
-        std::fs::read(ca_file).map_err(|e| format!("cannot read {}: {e}", ca_file.display()))?;
-    let ca = reqwest::Certificate::from_pem(&pem)
-        .map_err(|e| format!("cannot parse {}: {e}", ca_file.display()))?;
-    // The configured CA *replaces* the built-in roots (`tls_certs_only`), exactly as the
-    // WebSocket transport's rustls config does — a `[tls] ca_file` says whom to trust, whole.
-    Ok(builder.tls_certs_only([ca]))
+/// A PEM file of certificates, parsed here so that a bad one is named by its path.
+pub(crate) fn certificates_file(path: &Path) -> Result<Vec<u8>, String> {
+    let pem = read(path)?;
+    opamp::tls::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(pem)
 }
 
-/// Applies both halves — trust and this Client's own identity — to a reqwest builder: what the
-/// plain-HTTP transport talks to the Server with.
-///
-/// Package downloads deliberately use [`trust`] alone: a `download_url` may point at a mirror this
-/// project knows nothing about (ADR-0019), and an identity is for the Server, not for whoever
-/// happens to host an artifact.
-pub fn trust_and_identity(
-    builder: reqwest::ClientBuilder,
-    config: &ClientConfig,
-) -> Result<reqwest::ClientBuilder, String> {
-    trust_and_identity_for(builder, config, None)
+/// A PEM file holding a private key, parsed here so that a bad one is named by its path.
+pub(crate) fn key_file(path: &Path) -> Result<Vec<u8>, String> {
+    let pem = read(path)?;
+    opamp::tls::private_key(&pem)
+        .map_err(|_| format!("{} contains no private key", path.display()))?;
+    Ok(pem)
 }
 
-/// The same, with a candidate certificate under test (ADR-0017).
-pub fn trust_and_identity_for(
-    builder: reqwest::ClientBuilder,
-    config: &ClientConfig,
-    candidate_cert: Option<&[u8]>,
-) -> Result<reqwest::ClientBuilder, String> {
-    let builder = trust(builder, config)?;
-    match reqwest_identity_for(config, candidate_cert)? {
-        Some(identity) => Ok(builder.identity(identity)),
-        None => Ok(builder),
-    }
-}
-
-pub(crate) fn root_store(ca_file: &Path) -> Result<rustls::RootCertStore, String> {
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in read_certs(ca_file)? {
-        roots
-            .add(cert)
-            .map_err(|e| format!("cannot trust a certificate from {}: {e}", ca_file.display()))?;
-    }
-    Ok(roots)
-}
-
-pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let pem = std::fs::read(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    fleet_core::pem::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-pub(crate) fn read_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
-    let pem = std::fs::read(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    fleet_core::pem::private_key(&pem)
-        .map_err(|_| format!("{} contains no private key", path.display()))
+fn read(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }

@@ -27,6 +27,12 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   new name. The programs keep theirs — `supervisor`, `server`, `opamp-package-fetch` and
   `opamp-package-sign`. **What to do:** nothing, unless you build by package — `cargo build -p
   client` becomes `-p fleet-agent`, `-p server` becomes `-p fleet-server`.
+- **The Gateway's downstream endpoint and the Supervisor Endpoint bound connection setup** as the
+  Server's two planes do: a peer has 30 seconds to send its request headers, and on a TLS Gateway
+  10 seconds to complete the handshake
+  ([ADR-0036](docs/adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). A
+  plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
+  **What to do:** nothing.
 
 ### Fixed
 

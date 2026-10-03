@@ -102,7 +102,7 @@ pub async fn download_and_verify(
         .read_timeout(std::time::Duration::from_secs(60));
     // Trust only, never this Client's certificate: a `download_url` may point at a mirror
     // (ADR-0019), and an identity belongs to the Server rather than to whoever hosts an artifact.
-    builder = crate::tls::trust(builder, config)?;
+    builder = crate::tls::trust(config)?.trust(builder)?;
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;
@@ -234,7 +234,7 @@ fn with_headers(
                 "the offered download header {key:?} carries a value that is not a valid header"
             )
         })?;
-        // As the OpAMP transport marks its own credential (`transport/http.rs`).
+        // As the OpAMP transport marks its own credential (`opamp::client::connection`).
         value.set_sensitive(true);
         request = request.header(name, value);
     }

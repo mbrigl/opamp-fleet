@@ -19,7 +19,8 @@ pub use tokio_tungstenite::Connector;
 
 use super::{AfterReply, Backoff, Ended, ReportSink, Session, StopSignal};
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// One open WebSocket to a server.
+pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// One WebSocket connection's material, built by the application.
 pub struct Settings {
@@ -54,29 +55,17 @@ pub async fn run<S: Session, X: StopSignal>(
     session: &mut S,
     stop: &mut X,
 ) -> Result<Ended, String> {
-    // The receive limit the specification requires of an Agent: the transport refuses to buffer a
-    // message past it, so an oversized Server can never make this process allocate without bound.
-    // The per-frame cap moves with the message limit: left at its default it would refuse
-    // messages below the configured limit, which is the limit's business, not the framing's.
-    let ws_config = Some(
-        WebSocketConfig::default()
-            .max_message_size(Some(settings.max_message_size))
-            .max_frame_size(Some(settings.max_message_size)),
-    );
-
     let mut backoff = Backoff::new();
     loop {
-        // tungstenite consumes the request per attempt; rebuild it from the endpoint each time.
-        let mut request = settings
-            .endpoint
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("invalid endpoint {}: {e}", settings.endpoint))?;
-        request.headers_mut().extend(settings.headers.clone());
-        match connect_async_tls_with_config(request, ws_config, false, settings.connector.clone())
-            .await
+        match connect(
+            &settings.endpoint,
+            &settings.headers,
+            settings.connector.clone(),
+            settings.max_message_size,
+        )
+        .await
         {
-            Ok((socket, _)) => {
+            Ok(socket) => {
                 info!(endpoint = %settings.endpoint, "connected");
                 backoff.reset();
                 match serve(socket, settings, session, stop).await {
@@ -90,13 +79,18 @@ pub async fn run<S: Session, X: StopSignal>(
                     Served::ConnectionLost => warn!("connection lost; reconnecting"),
                 }
             }
-            Err(WsError::Http(response)) if response.status() == StatusCode::UNAUTHORIZED => {
+            Err(Connect::Refused(WsError::Http(response)))
+                if response.status() == StatusCode::UNAUTHORIZED =>
+            {
                 warn!(
                     endpoint = %settings.endpoint,
                     "the server rejected the credentials (HTTP 401)"
                 );
             }
-            Err(e) => warn!(endpoint = %settings.endpoint, error = %e, "cannot connect"),
+            Err(Connect::Refused(e)) => {
+                warn!(endpoint = %settings.endpoint, error = %e, "cannot connect");
+            }
+            Err(Connect::InvalidEndpoint(e)) => return Err(e),
         }
 
         let delay = backoff.advance();
@@ -110,6 +104,52 @@ pub async fn run<S: Session, X: StopSignal>(
             }
         }
     }
+}
+
+/// Why [`connect`] failed.
+#[derive(Debug)]
+pub enum Connect {
+    /// The endpoint is not a WebSocket URL; trying again will not help.
+    InvalidEndpoint(String),
+    /// The server could not be reached, or it refused the upgrade.
+    Refused(WsError),
+}
+
+impl std::fmt::Display for Connect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Connect::InvalidEndpoint(e) => f.write_str(e),
+            Connect::Refused(e) => e.fmt(f),
+        }
+    }
+}
+
+/// Opens one WebSocket to `endpoint`, sending `headers` with the upgrade request.
+///
+/// The receive limit the specification requires of an Agent is set on the socket: the transport
+/// refuses to buffer a message past it, so an oversized server can never make this process
+/// allocate without bound. The per-frame cap moves with it: left at its default it would refuse
+/// messages below the limit, which is the limit's business, not the framing's.
+///
+/// # Errors
+/// Returns why the socket could not be opened.
+pub async fn connect(
+    endpoint: &str,
+    headers: &HeaderMap,
+    connector: Option<Connector>,
+    max_message_size: usize,
+) -> Result<Socket, Connect> {
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(max_message_size))
+        .max_frame_size(Some(max_message_size));
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|e| Connect::InvalidEndpoint(format!("invalid endpoint {endpoint}: {e}")))?;
+    request.headers_mut().extend(headers.clone());
+    connect_async_tls_with_config(request, Some(config), false, connector)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(Connect::Refused)
 }
 
 async fn serve<S: Session, X: StopSignal>(

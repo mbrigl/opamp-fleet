@@ -95,7 +95,7 @@ Moving to a newer upstream version is a deliberate change, not a version-string 
 4. **Adjust the code** for anything that moved, and record any gap under *Deviations* rather than
    leaving it silent.
 5. **Move the `opamp` crate's version** to the target's `MAJOR.MINOR` with patch `0` — its version
-   is the Baseline's (ADR-0031). `BASELINE` in `crates/opamp/build.rs` and the version in
+   is the Baseline's (ADR-0036). `BASELINE` in `crates/opamp/build.rs` and the version in
    `crates/opamp/Cargo.toml` change together; a test fails the build when they disagree.
 6. **Update the marker and the reconciliation date** in [Protocol Baseline](#protocol-baseline) last,
    once the steps above actually hold.

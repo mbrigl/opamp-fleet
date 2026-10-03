@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/selfupdate.rs, the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property
+- **Applies to:** crates/fleet-agent/src/update/, the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property
 
 ## Context
 
@@ -231,7 +231,7 @@ different Windows layout.
   `managed_processes_stop_cleanly_on_the_self_update_restart`,
   `a_set_at_the_running_version_reaches_nobody`,
   `a_package_under_another_name_is_refused_and_the_client_keeps_running`.
-- [`selfupdate.rs`](../../crates/fleet-agent/src/selfupdate.rs): `install_refuses_a_downgrade`,
+- [`update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs): `install_refuses_a_downgrade`,
   `install_refuses_a_version_that_would_escape_the_layout`, the `the_probe_refuses_*` tests,
   `the_probe_ignores_the_commit_a_build_came_from`,
   `taking_over_needs_the_binary_to_be_the_version_the_marker_names`,

@@ -17,9 +17,6 @@ use futures_util::{SinkExt, StreamExt};
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
@@ -150,32 +147,15 @@ impl Pool {
         uid: InstanceUid,
         authorization: Option<&str>,
     ) -> Result<mpsc::Sender<Vec<u8>>, String> {
-        let endpoint = self.config.endpoint.clone();
-        let mut request = endpoint
-            .as_str()
-            .into_client_request()
-            .map_err(|e| format!("invalid endpoint {endpoint}: {e}"))?;
+        let mut upstream = crate::transport::connection(&self.config)?;
         // The downstream peer's credential, forwarded untouched — a Gateway makes no
         // authentication decisions (ADR-0009, ADR-0017).
-        if let Some(value) = authorization {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                value
-                    .parse()
-                    .map_err(|e| format!("a forwarded credential is not a valid header: {e}"))?,
-            );
-        }
-        let connector = crate::tls::rustls_client_config(&self.config)?
-            .map(tokio_tungstenite::Connector::Rustls);
-        let ws_config = Some(
-            WebSocketConfig::default()
-                .max_message_size(Some(self.limit))
-                .max_frame_size(Some(self.limit)),
-        );
-        let (socket, _) =
-            tokio_tungstenite::connect_async_tls_with_config(request, ws_config, false, connector)
-                .await
-                .map_err(|e| format!("cannot reach {endpoint}: {e}"))?;
+        upstream.authorization = authorization.map(str::to_string);
+        upstream.max_message_size = self.limit;
+        upstream
+            .headers()
+            .map_err(|e| format!("a forwarded credential is not valid: {e}"))?;
+        let socket = upstream.connect_websocket().await?;
 
         let (mut sink, mut stream) = socket.split();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);

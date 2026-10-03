@@ -13,8 +13,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent};
+use opamp::server::listen::{Handle, Listener};
 use opamp::server::{Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Transports};
-use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 use crate::shutdown::Shutdown;
@@ -26,7 +26,7 @@ const ENDPOINT_CAPABILITIES: u64 =
     ServerCapabilities::AcceptsStatus as u64 | ServerCapabilities::AcceptsEffectiveConfig as u64;
 
 pub struct Endpoint {
-    listener: TcpListener,
+    listener: std::net::TcpListener,
     name: String,
     events: EventSender,
     /// The message size limit this endpoint enforces in both directions. It speaks the Server
@@ -50,10 +50,8 @@ impl Endpoint {
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("supervisor {name:?}: cannot prepare the endpoint: {e}"))?;
-        let listener = TcpListener::from_std(std_listener)
-            .map_err(|e| format!("supervisor {name:?}: cannot prepare the endpoint: {e}"))?;
         Ok(Endpoint {
-            listener,
+            listener: std_listener,
             name,
             events,
             max_message_size,
@@ -87,9 +85,15 @@ impl Endpoint {
                 any_path: true,
             },
         );
-        let served = axum::serve(self.listener, app)
-            .with_graceful_shutdown(async move { shutdown.requested().await })
-            .await;
+        // On the listener every OpAMP endpoint is served on (ADR-0036), so a local process that
+        // falls silent mid-request is bounded as a remote one is.
+        let handle = Handle::new();
+        let trigger = handle.clone();
+        tokio::spawn(async move {
+            shutdown.requested().await;
+            trigger.graceful_shutdown(None);
+        });
+        let served = Listener::new(self.listener, handle).serve(app).await;
         if let Err(e) = served {
             warn!(supervisor = %self.name, error = %e, "the endpoint stopped");
         }

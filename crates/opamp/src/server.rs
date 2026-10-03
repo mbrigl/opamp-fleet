@@ -1,5 +1,5 @@
 //! One OpAMP server endpoint, for every surface that speaks the Server side of the protocol
-//! (ADR-0032, ADR-0031). Behind the `server` feature.
+//! (ADR-0036). Behind the `server` feature.
 //!
 //! This crate carries the communication and nothing else: it tells a WebSocket upgrade from a
 //! plain-HTTP exchange as the specification describes, applies the media type, gzip and the
@@ -7,8 +7,11 @@
 //! one, and never puts an oversized reply on the wire. What a message *means* is the
 //! application's: it implements [`Handler`], and the endpoint calls it.
 //!
-//! It hands out an axum [`Router`] rather than owning a listener, so each surface keeps its own
-//! TLS, admission layers and neighbouring routes.
+//! [`router`] hands out an axum [`Router`], so a surface can add its admission layers and
+//! neighbouring routes. [`listen`] serves the result, with its TLS and its bounds on connection
+//! setup.
+
+pub mod listen;
 
 use std::future::Future;
 use std::net::SocketAddr;

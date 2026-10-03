@@ -1,7 +1,9 @@
 # opamp
 
-The wire layer of the [Open Agent Management Protocol](https://github.com/open-telemetry/opamp-spec)
-(OpAMP) for Rust — what any OpAMP server or agent needs before it writes a line of its own:
+The communication layer of the
+[Open Agent Management Protocol](https://github.com/open-telemetry/opamp-spec) (OpAMP) for Rust.
+Without features it is the wire layer — what any OpAMP server or agent needs before it writes a
+line of its own:
 
 - `opamp::proto` — the protobuf messages (`AgentToServer`, `ServerToAgent`, …), generated with
   [prost](https://crates.io/crates/prost) from the specification's own schema, which ships inside
@@ -15,8 +17,17 @@ The wire layer of the [Open Agent Management Protocol](https://github.com/open-t
 - `opamp::attributes` — the attribute keys an `AgentDescription` is read by, and accessors over
   them.
 
-It does no I/O and carries no transport: WebSocket and HTTP machinery stay with the program that
-uses it.
+Two features add each side on top, end to end, and neither is on by default:
+
+- `client` — `opamp::client`: an agent's protocol state machine, a `Session` the program
+  implements, and the WebSocket and plain-HTTP transports with backoff, heartbeat, limits and
+  throttling. A `Connection` describes the endpoint, the credential, the trust anchors and the
+  client certificate; the crate builds the TLS configuration and the HTTP client from it.
+- `server` — `opamp::server`: one endpoint for both transports around a `Handler` the program
+  implements, and `opamp::server::listen`, which serves it over TLS with the client-certificate
+  rule, a bounded header read and a bounded handshake.
+
+Both take their material as values — PEM bytes, a header value, durations — and read no file.
 
 ## Versions
 

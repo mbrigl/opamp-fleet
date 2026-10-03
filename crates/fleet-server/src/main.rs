@@ -9,11 +9,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum_server::accept::DefaultAcceptor;
-use axum_server::Handle;
 use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
+use opamp::server::listen::Handle;
 use tracing::info;
 
 fn usage() -> ! {
@@ -69,7 +68,7 @@ async fn main() {
         .init();
 
     // One TLS provider for the whole process (ADR-0012): ring, never a system library.
-    fleet_server::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
 
     let config_path = parse_args();
     let config = match ServerConfig::load(&config_path) {
@@ -233,51 +232,31 @@ async fn main() {
         }
     });
 
-    match &config.tls {
-        Some(tls) => {
-            let rustls_config = match fleet_server::tls::server_config(tls) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            };
-            info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
-            info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
-            // The Agent plane's acceptor is its own: it is what carries the handshake's peer
-            // certificate into the request the OpAMP route checks. The Operator plane needs
-            // nothing of the sort — no route there reads a certificate — so it serves with the
-            // same certificate and key through the plain rustls acceptor.
-            let (agents, operators) = tokio::join!(
-                listen::plane(
-                    agent_listener,
-                    fleet_server::tls::PeerCertAcceptor::new(rustls_config.clone()),
-                    handle.clone(),
-                )
-                .serve(agents.into_make_service()),
-                listen::plane(
-                    operator_listener,
-                    fleet_server::tls::rustls_acceptor(rustls_config),
-                    handle,
-                )
-                .serve(operators.into_make_service()),
-            );
-            agents.expect("serve the Agent plane");
-            operators.expect("serve the Operator plane");
+    // Both planes serve with the same certificate and key (ADR-0012). Only the OpAMP route reads
+    // the peer certificate the listener carries into each request (ADR-0017).
+    let tls = match config.tls.as_ref().map(fleet_server::tls::server_tls) {
+        None => None,
+        Some(Ok(material)) => match material.rustls_config() {
+            Ok(rustls_config) => Some(rustls_config),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
-        None => {
-            info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads");
-            info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI");
-            let (agents, operators) = tokio::join!(
-                listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
-                    .serve(agents.into_make_service()),
-                listen::plane(operator_listener, DefaultAcceptor::new(), handle)
-                    .serve(operators.into_make_service()),
-            );
-            agents.expect("serve the Agent plane");
-            operators.expect("serve the Operator plane");
-        }
-    }
+    };
+    let over = if tls.is_some() { " over TLS" } else { "" };
+    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads{over}");
+    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI{over}");
+    let (agents, operators) = tokio::join!(
+        listen::plane(agent_listener, tls.clone(), handle.clone()).serve(agents),
+        listen::plane(operator_listener, tls, handle).serve(operators),
+    );
+    agents.expect("serve the Agent plane");
+    operators.expect("serve the Operator plane");
     // The graceful-shutdown flush (ADR-0026): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();

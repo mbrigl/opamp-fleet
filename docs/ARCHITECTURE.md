@@ -26,15 +26,18 @@ The parts the system is made of, each with one responsibility, named in the voca
 [`GLOSSARY.md`](GLOSSARY.md). One level deep, deeper only where the size of a part earns it. The
 golden path and the test pattern an agent copies from are named here.
 
-Five crates in one workspace ([ADR-0034](adr/0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)):
+Five crates in one workspace ([ADR-0037](adr/0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)):
 
-- **`opamp`** — the OpAMP wire layer, publishable on its own: the generated types, framing, the
-  endpoint's body rules, an Agent's protocol state machine and drivers behind `client`, and the
-  server endpoint behind `server`
-  ([ADR-0031](adr/0031-one-opamp-crate-a-publishable-wire-layer-with-client-and-server-features.md)). It knows nothing of
-  this project.
+- **`opamp`** — the OpAMP communication layer, publishable on its own
+  ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). Always the
+  generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
+  machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
+  HTTP client from a `Connection` the application fills in. Behind `server`, the endpoint around a
+  `Handler` and `server::listen`, the listener with its TLS and its bounds on connection setup.
+  `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
+  project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
-  version, the platform aliases, the PEM readers.
+  version and the platform aliases.
 - **`fleet-server`** — the Server: the fleet, its Configurations, labels, packages and
   Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
@@ -57,6 +60,9 @@ core module names an adapter or a technology, and when a module has no role.
   core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
   `PackageOffering::with_deployments` — and `lib.rs` wires the filesystem adapters in
   `AppState::new`, `PackageStore::open` and `PackageOffering::new`.
+- **Server listeners** — `tls` reads the `[tls]` files into the material `opamp`'s listener
+  serves with, and `listen` serves both planes on one handle with one drain
+  ([ADR-0012](adr/0012-transports-tls-and-the-servers-two-planes.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow ([ADR-0017](adr/0017-admission-and-authentication.md)), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
@@ -76,11 +82,19 @@ core module names an adapter or a technology, and when a module has no role.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0011](adr/0011-workspace-crates-and-configuration.md)); `config_file` reads it from disk, makes its
   directories absolute, and finds the identity the state directory holds.
+- **Client connection** — `tls` decides which CA and which identity are in force, and `transport`
+  describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
+  settings verification in `connection`, the Gateway's upstream pool and its downstream listener,
+  and the Supervisor Endpoint use the same `opamp` building blocks
+  ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0009](adr/0009-client-modes-and-the-gateway.md)) and owns `SelfUpdater`, which
-  `selfupdate::Installer` implements on the version directories
-  ([ADR-0021](adr/0021-the-client-updates-itself.md)). The transports, the Gateway, telemetry and
-  the service runtime are adapters around it.
+  ([ADR-0009](adr/0009-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
+  and the service runtime are adapters around it.
+- **Client self-update** — `update` is the Client updating itself
+  ([ADR-0021](adr/0021-the-client-updates-itself.md)). It owns the port `SelfUpdater` and
+  `SelfUpdate`, the state the Engine keeps about it: armed or not, probation committed, restart
+  due. `update::installer` implements the port on the version directories and holds the start-up
+  check of the process that follows an install.
 
 ## How it runs
 

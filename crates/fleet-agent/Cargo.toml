@@ -44,7 +44,6 @@ hex.workspace = true
 tokio-tungstenite.workspace = true
 reqwest.workspace = true
 base64.workspace = true
-rustls.workspace = true
 ring.workspace = true
 rcgen.workspace = true
 time.workspace = true
@@ -64,10 +63,6 @@ sysinfo = { workspace = true, features = ["network"] }
 # POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
 # it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
 axum = { workspace = true, features = ["ws"] }
-# ADR-0009: the downstream hop's TLS. The same server-side rustls terminator the Server already
-# serves with (`crates/fleet-server`), reused here so the two ends of a hop are built the same way.
-axum-server.workspace = true
-webpki-roots.workspace = true
 # ADR-0019: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true

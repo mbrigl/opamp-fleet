@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/telemetry.rs, the telemetry half of crates/fleet-agent/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, selfupdate and Supervisor modules, the Server's `[telemetry_offer]` (crates/fleet-server/src/config.rs, crates/fleet-server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml
+- **Applies to:** crates/fleet-agent/src/telemetry.rs, the telemetry half of crates/fleet-agent/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, update and Supervisor modules, the Server's `[telemetry_offer]` (crates/fleet-server/src/config.rs, crates/fleet-server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml
 
 ## Context
 
@@ -135,7 +135,7 @@ and invent nothing OTLP already defines.
    | `config.apply` (Supervisor set) | `validate`, `stop`, `write`, `purge`, `start` | `reconfigure::apply` |
    | `config.apply` (Managed Process) | `reload` or `restart`, `gate` | `engine::handle`, where the Configuration is handed over |
    | `connection.settings.apply` | `verify`, `store` | `transport::process_connection_offer` |
-   | `self.update` | `stage`, `probe`, then `commit` or `roll_back` | `selfupdate::install` |
+   | `self.update` | `stage`, `probe`, then `commit` or `roll_back` | `update::installer::install` |
 
    An install and a Managed Process's apply are begun by the task that received the message and
    finished by the Supervisor's own task, so the span travels with the command through the Port
@@ -427,7 +427,7 @@ on the Agent that drops the three capability bits.
   `an_empty_endpoint_withdraws_the_signal` (clause 18).
 - [`crates/fleet-agent/src/transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs):
   `a_refused_telemetry_destination_is_reported_failed_on_the_same_offer` (clause 21).
-- [`crates/fleet-agent/src/selfupdate.rs`](../../crates/fleet-agent/src/selfupdate.rs):
+- [`crates/fleet-agent/src/update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs):
   `a_marker_carries_its_trace_and_one_written_without_it_still_parses` (clause 10);
   [`crates/fleet-agent/src/packages.rs`](../../crates/fleet-agent/src/packages.rs):
   `the_download_source_drops_whatever_authorises_it` (clause 13).

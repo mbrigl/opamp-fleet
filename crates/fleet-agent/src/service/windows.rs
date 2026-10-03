@@ -126,7 +126,7 @@ fn run_service() -> Result<(), String> {
         Ok(runtime::Exit::RestartForUpdate) => {
             error!("exiting so the SCM starts the newly installed version");
             ServiceExitCode::ServiceSpecific(
-                crate::selfupdate::EXIT_RESTART_FOR_UPDATE
+                crate::update::EXIT_RESTART_FOR_UPDATE
                     .try_into()
                     .unwrap_or(SERVICE_SPECIFIC_FAILURE),
             )

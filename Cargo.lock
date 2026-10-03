@@ -746,7 +746,6 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
- "axum-server",
  "base64 0.22.1",
  "clap",
  "dialoguer",
@@ -767,7 +766,6 @@ dependencies = [
  "rcgen",
  "reqwest",
  "ring",
- "rustls",
  "serde",
  "serde_json",
  "service-manager",
@@ -785,7 +783,6 @@ dependencies = [
  "tracing-appender",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "webpki-roots 1.0.9",
  "windows-service",
  "x509-parser",
  "zip",
@@ -796,8 +793,6 @@ name = "fleet-core"
 version = "0.5.0"
 dependencies = [
  "git2",
- "rcgen",
- "rustls",
 ]
 
 [[package]]
@@ -805,14 +800,12 @@ name = "fleet-server"
 version = "0.5.0"
 dependencies = [
  "axum",
- "axum-server",
  "base64 0.22.1",
  "constant_time_eq",
  "flate2",
  "fleet-core",
  "futures-util",
  "hex",
- "hyper-util",
  "opamp",
  "prost",
  "rcgen",
@@ -842,6 +835,7 @@ dependencies = [
  "flate2",
  "fleet-agent",
  "hex",
+ "opamp",
  "reqwest",
  "ring",
  "rustls",
@@ -1734,11 +1728,14 @@ name = "opamp"
 version = "0.20.0"
 dependencies = [
  "axum",
+ "axum-server",
  "flate2",
  "futures-util",
+ "hyper-util",
  "prost",
  "prost-build",
  "protox",
+ "rcgen",
  "reqwest",
  "ring",
  "rustls",
@@ -1746,6 +1743,7 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tracing",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

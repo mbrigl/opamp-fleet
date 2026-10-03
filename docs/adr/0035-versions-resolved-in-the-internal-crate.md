@@ -246,7 +246,7 @@ release-candidate flow is wanted.
 - `crates/fleet-server/tests/version_flag.rs` (`the_version_flag_prints_the_baked_version_and_nothing_of_its_own`,
   `the_baked_version_says_more_than_the_manifest_does`) and `crates/fleet-agent/src/cli.rs`
   `the_version_flag_reports_the_baked_in_version` hold both CLIs to `current()`.
-- `crates/fleet-agent/src/selfupdate.rs` probe tests: `the_probe_ignores_the_commit_a_build_came_from`,
+- `crates/fleet-agent/src/update/installer.rs` probe tests: `the_probe_ignores_the_commit_a_build_came_from`,
   `the_probe_refuses_a_development_build_offered_as_a_release`,
   `the_probe_refuses_a_client_of_the_wrong_version`, `the_probe_refuses_an_offer_that_is_not_a_version`.
 - `crates/fleet-server/src/fleet.rs` `the_displayed_version_drops_the_commit_and_keeps_the_pre_release`.

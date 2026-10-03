@@ -1,14 +1,11 @@
-//! The Client's side of the two OpAMP transports (ADR-0012, ADR-0033). The connection itself —
-//! backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s; what is the
-//! Client's is the material a connection is built from, in [`ws`] and [`http`], and [`Upstream`]:
+//! The Client's upstream connection (ADR-0012, ADR-0036). The connection itself — the transport,
+//! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
+//! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
 //! the session over the [`Engine`], with the flows that follow a reply.
-
-pub mod http;
-pub mod ws;
 
 use std::time::Duration;
 
-use opamp::client::{AfterReply, ReportSink, Session, StopSignal};
+use opamp::client::{AfterReply, ClientTls, Connection, Ended, ReportSink, Session, StopSignal};
 use opamp::proto::{AgentToServer, ServerToAgent};
 use tracing::Instrument as _;
 
@@ -350,6 +347,60 @@ pub async fn process_connection_offer(
     }
 }
 
+/// The upstream connection `supervisor.toml` describes, with the credential and the identity in
+/// force (ADR-0017, ADR-0018).
+///
+/// # Errors
+/// Returns an error when the credential or a TLS file cannot be read.
+pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
+    connection_with(config, crate::tls::client_tls(config)?)
+}
+
+/// The same connection with other TLS material — a candidate certificate under test.
+///
+/// # Errors
+/// Returns an error when the credential cannot be read.
+pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Result<Connection, String> {
+    Ok(Connection {
+        endpoint: config.endpoint.clone(),
+        authorization: config.authorization_value()?,
+        tls,
+        max_message_size: config.max_message_size_bytes,
+        // The heartbeat (ReportsHeartbeat, Baseline default 30 s; 0 disables).
+        heartbeat: (config.heartbeat_interval_secs > 0)
+            .then(|| Duration::from_secs(config.heartbeat_interval_secs)),
+        poll: Duration::from_secs(config.poll_interval_secs.max(1)),
+    })
+}
+
+/// Runs the Engine's Agents over the connection `config` describes, on the transport its endpoint
+/// names, until the run ends.
+///
+/// # Errors
+/// Returns an error when the connection cannot be built.
+pub async fn run(
+    engine: &mut Engine,
+    config: &mut ClientConfig,
+    shutdown: &mut Shutdown,
+    telemetry: &crate::telemetry::Telemetry,
+) -> Result<RunOutcome, String> {
+    let connection = connection(config)?;
+    let mut session = Upstream {
+        engine,
+        config,
+        shutdown: shutdown.clone(),
+        telemetry,
+    };
+    Ok(
+        match opamp::client::connection::run(&connection, &mut session, shutdown).await? {
+            Ended::Stopped => RunOutcome::Shutdown,
+            Ended::Reconnect => RunOutcome::Reconfigured,
+            // The only end the Client asks for is the self-update restart (ADR-0021).
+            Ended::End => RunOutcome::RestartForUpdate,
+        },
+    )
+}
+
 /// Why a transport run ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunOutcome {
@@ -411,7 +462,7 @@ mod tests {
     /// exporters, and a Server whose hash gate therefore never closed and re-offered for ever.
     #[tokio::test]
     async fn a_telemetry_only_offer_is_applied_without_reconnecting() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
         // Loopback is the cleartext exception (ADR-0025) — nothing leaves the machine.
@@ -458,7 +509,7 @@ mod tests {
     /// offer — not warned to a log while the Server is told everything applied.
     #[tokio::test]
     async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
         // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0025).
@@ -503,7 +554,7 @@ mod tests {
     /// like a stuck install. Driven by a server that trickles the artifact out.
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
 

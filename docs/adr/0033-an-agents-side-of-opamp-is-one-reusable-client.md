@@ -1,6 +1,6 @@
 # ADR-0033: An Agent's side of OpAMP is one reusable client — a protocol state machine apart from what the Client does with it, and the connection driven over a session
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/opamp/src/client/` (`mod.rs`, `protocol.rs`, `ws.rs`, `http.rs`, `backoff.rs`), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, and the Client's `Session` and its flows after a reply in `crates/fleet-agent/src/transport/`

@@ -18,7 +18,7 @@ const PROTOBUF: &str = "application/x-protobuf";
 /// A Server whose Operator plane accepts one operator, with package delivery armed so the Agent
 /// plane has an artifact to serve.
 async fn spawn_guarded() -> TestServer {
-    fleet_server::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = PackageStore::open(dir.path().join("packages")).expect("store");
     let state = Arc::new(

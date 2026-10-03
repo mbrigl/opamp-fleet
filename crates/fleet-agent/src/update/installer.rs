@@ -1,4 +1,5 @@
-//! The Client replacing its own binary (ADR-0021).
+//! The Client replacing its own binary on the ADR-0014 version directories (ADR-0021): the
+//! [`SelfUpdater`] adapter and the start-up check of the process that comes after it.
 //!
 //! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0019): stop, swap,
 //! restart, watch, roll back. Nothing here outlives anything — the process that installs the
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use super::{SelfInstall, SelfUpdater, SELF_CHECK_TOKEN};
 use crate::install;
 use crate::service::layout::{self, Layout, BINARY_FILENAME};
 
@@ -39,14 +41,6 @@ const MARKER_FILE: &str = "update-marker.json";
 /// something unrelated to the new binary — and many would leave a fleet crash-looping on a broken
 /// version for minutes while it counted.
 const MAX_ATTEMPTS: u32 = 3;
-
-/// What `client self-check` prints. A package can be offered under the configured name and still
-/// be some other program; this is what only this program answers.
-pub const SELF_CHECK_TOKEN: &str = "supervisor self-check ok version=";
-
-/// The exit code that asks the service manager for a restart (ADR-0021). Non-zero on purpose:
-/// "restart on failure" is what all three managers offer, and there is no "restart on success".
-pub const EXIT_RESTART_FOR_UPDATE: i32 = 10;
 
 /// What the process that switched the pointer tells the one that comes after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,24 +137,9 @@ fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
         .map_err(|e| format!("cannot write the update marker: {e}"))
 }
 
-/// What installing an offered artifact came to.
-#[derive(Debug)]
-pub enum Install {
-    /// Staged beside the running version, proved, and pointed at. The caller ends the run with
-    /// [`EXIT_RESTART_FOR_UPDATE`]; the terminal status comes from the process that starts next,
-    /// which reads the marker this wrote rather than being handed it.
-    Staged,
-    /// The offered version is the one already running — there is nothing to do, and saying so is
-    /// not a failure. The Baseline is explicit: an Agent that already has the offered version
-    /// "does not need to do anything, it already has the right version". Reporting anything else
-    /// leaves the Server's re-offer gate open, and a Server that keeps offering meets a Client
-    /// that keeps downloading.
-    AlreadyRunning,
-}
-
-/// The Engine's [`SelfUpdater`](crate::engine::SelfUpdater) on this host (ADR-0021): the state
-/// directory the marker lives in, the key that opens an encrypted archive, and the marker this
-/// process commits if it is itself a freshly installed version.
+/// The [`SelfUpdater`] on this host (ADR-0021): the state directory the marker lives in, the key
+/// that opens an encrypted archive, and the marker this process commits if it is itself a freshly
+/// installed version.
 pub struct Installer {
     state_dir: PathBuf,
     archive_key: Option<String>,
@@ -182,13 +161,8 @@ impl Installer {
     }
 }
 
-impl crate::engine::SelfUpdater for Installer {
-    fn install(
-        &self,
-        staged: &Path,
-        version: &str,
-        hash: &[u8],
-    ) -> Result<crate::engine::SelfInstall, String> {
+impl SelfUpdater for Installer {
+    fn install(&self, staged: &Path, version: &str, hash: &[u8]) -> Result<SelfInstall, String> {
         let installed = install(
             &self.state_dir,
             staged,
@@ -198,10 +172,7 @@ impl crate::engine::SelfUpdater for Installer {
         );
         // Whatever the outcome, the staged artifact has served its purpose.
         let _ = std::fs::remove_file(staged);
-        installed.map(|install| match install {
-            Install::Staged => crate::engine::SelfInstall::Staged,
-            Install::AlreadyRunning => crate::engine::SelfInstall::AlreadyRunning,
-        })
+        installed
     }
 
     fn commit_probation(&mut self) {
@@ -224,7 +195,7 @@ pub fn install(
     version: &str,
     package_hash: &[u8],
     archive_key: Option<&str>,
-) -> Result<Install, String> {
+) -> Result<SelfInstall, String> {
     // The version is Server-controlled and becomes an on-disk directory name below (ADR-0014).
     // Refuse anything that is not a well-formed version *before* it names a path: a value carrying
     // `..` or a separator would otherwise stage the (hash-verified) binary outside `versions/` and
@@ -278,7 +249,7 @@ pub fn install(
         // time a freshly updated Client is offered the package it just installed, which is the
         // ordinary course of events and not something to report as broken.
         info!(version = %version, "the offered version is the one already running");
-        return Ok(Install::AlreadyRunning);
+        return Ok(SelfInstall::AlreadyRunning);
     }
     // The update's own span (ADR-0025). It sits under the install that downloaded the artifact
     // when there is one, which there always is today — this is only ever reached from a package
@@ -314,7 +285,7 @@ pub fn install(
     layout.set_current(&new_dir)?;
     info!(version = %version, dir = %new_dir.display(), "staged a new Client version; restarting into it");
     drop(update);
-    Ok(Install::Staged)
+    Ok(SelfInstall::Staged)
 }
 
 /// Unpacks the artifact into `dir` as this platform's binary and writes the ADR-0014 manifest.

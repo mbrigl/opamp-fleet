@@ -141,7 +141,7 @@ fn report(uid: &InstanceUid) -> AgentToServer {
 /// A reqwest client that trusts `pki`'s CA and, given an identity, presents it as a client
 /// certificate.
 fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
-    fleet_agent::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")]);

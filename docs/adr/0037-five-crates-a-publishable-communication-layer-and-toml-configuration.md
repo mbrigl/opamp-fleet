@@ -1,17 +1,18 @@
-# ADR-0034: Five crates in one Cargo workspace on tokio and axum — a publishable wire layer, an internal shared crate by measurement — and TOML configuration
+# ADR-0037: Five crates in one Cargo workspace on tokio and axum — a publishable communication layer, an internal shared crate by measurement — and TOML configuration
 
-- **Status:** ⚪ superseded by [ADR-0037](0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)
+- **Status:** 🟡 proposed
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** Cargo.toml, crates/opamp/, crates/fleet-core/, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, and every new crate, module placement or dependency
-- **Supersedes:** [ADR-0011](0011-workspace-crates-and-configuration.md)
+- **Supersedes:** [ADR-0034](0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)
 
 ## Context
 
-Supersedes [ADR-0011](0011-workspace-crates-and-configuration.md) for the crate
-split of [ADR-0031](0031-one-opamp-crate-a-publishable-wire-layer-with-client-and-server-features.md) and the server endpoint and
-client of [ADR-0032](0032-one-opamp-server-endpoint-for-every-server-surface.md) and
-[ADR-0033](0033-an-agents-side-of-opamp-is-one-reusable-client.md).
+Supersedes [ADR-0034](0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)
+because [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md) moves the
+whole communication layer into `opamp`. The TLS material, the listener and the PEM readers leave
+the two ends and `fleet-core`. Clauses 1, 3, 7, 8 and 12 change with them; the rest of the
+decision stands as it was.
 
 The [specification](../SPECIFICATION.md) fixes the language (both ends in Rust) and the deployables:
 one Server (Linux only, API-first, with a rudimentary bundled UI) and one Client binary covering every
@@ -26,7 +27,7 @@ costs what a module boundary does not: every dependency of a shared crate is gai
 and every change to it recompiles both. Two different things are shared. What the Baseline defines
 — the types, the framing, the endpoint's body rules, the attribute keys, and the server and client
 sides of the communication — is OpAMP, reusable by anyone, and lives in the publishable `opamp`
-crate (ADR-0031 to ADR-0033). What both ends of *this* project implement identically beyond the
+crate (ADR-0036). What both ends of *this* project implement identically beyond the
 protocol — the baked version and its grammar, the PEM readers, the platform aliases — is this
 project's own, and lives in an internal crate.
 **How does a test reach the Client?** Cargo hands a test a helper binary's path
@@ -49,7 +50,7 @@ the Client a library under a thin binary, keep the operator tools in their own c
 Client, and configure both binaries from strict TOML files.
 
 1. **One workspace, five crates, one lockfile, one toolchain.** `crates/opamp` (the publishable
-   wire layer, ADR-0031), `crates/fleet-core` (the internal shared crate), `crates/fleet-server`,
+   communication layer, ADR-0036), `crates/fleet-core` (the internal shared crate), `crates/fleet-server`,
    `crates/fleet-agent` and `crates/fleet-tools`. Versions are pinned once in
    `[workspace.dependencies]`; `rust-toolchain.toml` pins the compiler. Every crate but `opamp` is
    `publish = false`. A further crate needs a concrete need a module cannot meet (compile time,
@@ -61,8 +62,8 @@ Client, and configure both binaries from strict TOML files.
 
 3. **`axum` is the workspace's HTTP server stack.** The Server's OpAMP endpoint, REST API and UI are
    axum routes, with the `ws` feature so upgrades and plain routes share one router; the OpAMP
-   endpoint of the Server, the Gateway and the Supervisor Endpoint is `opamp::server`'s (ADR-0032).
-   How the routes are bound to listeners is
+   endpoint of the Server, the Gateway and the Supervisor Endpoint is `opamp::server`'s, and so is
+   the listener it is served on (ADR-0036). Which listeners exist is
    [ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)'s.
 
 4. **The bundled UI is static assets embedded in the Server binary.** Plain HTML, CSS and JS under
@@ -90,18 +91,19 @@ Client, and configure both binaries from strict TOML files.
      `is_protobuf`, and `decode_body`, which applies the Baseline's gzip MUST with the size limit
      enforced *after* decompression and whose `BodyError` separates unsupported encoding,
      undecodable gzip and too large.
-   - `opamp`, behind its features (ADR-0031): the server endpoint (ADR-0032) and an Agent's protocol
-     state machine and connection (ADR-0033).
-   - `fleet-core`: `pem`, `certificates` and `private_key` from PEM bytes, whose path-based
-     wrappers and error wording stay in each end, where what the file means is known; `version`,
-     the version helper ([ADR-0035](0035-versions-resolved-in-the-internal-crate.md)); `platform`,
-     the platform alias table ([ADR-0020](0020-the-package-store.md)).
+   - `opamp`, behind its features (ADR-0036): the server endpoint and its listener, an Agent's
+     protocol state machine and connection, and `tls` with the PEM readers `certificates` and
+     `private_key`. Their path-based wrappers and error wording stay in each end, where what the
+     file means is known.
+   - `fleet-core`: `version`, the version helper
+     ([ADR-0035](0035-versions-resolved-in-the-internal-crate.md)); `platform`, the platform alias
+     table ([ADR-0020](0020-the-package-store.md)).
 
-8. **What the measurement leaves where it is.** The Server's router and admission, the Server's CA
-   and peer-certificate acceptor, the Client's CSR flow and connection settings, the TLS and
-   credential material each end builds for its connection, and the Server's `attr_map` (a decision
-   about the REST view). Each exists once. A later measurement that finds one written twice moves
-   it under clause 6.
+8. **What the measurement leaves where it is.** The Server's router and admission, the Server's CA,
+   the Client's CSR flow, the persistence of its connection settings, the choice of which TLS and
+   credential material each end hands `opamp`, and the Server's `attr_map` (a decision about the
+   REST view). Each exists once. A later measurement that finds one written twice moves it under
+   clause 6.
 
 9. **The Client is a library with a thin binary on top.** `crates/fleet-agent/src/lib.rs` declares the
    module tree; `src/main.rs` keeps only what starting a process needs: parsing the command line,
@@ -121,7 +123,7 @@ Client, and configure both binaries from strict TOML files.
 
 12. **The operator package tools are their own crate, depending on the Client.**
     `crates/fleet-tools` produces `opamp-package-fetch` and `opamp-package-sign` and has no library.
-    The arrow points one way: `fleet-tools` uses `fleet_agent::archive` and `fleet_agent::tls` rather than
+    The arrow points one way: `fleet-tools` uses `fleet_agent::archive` and `opamp::tls` rather than
     restating them, and its tests open what the tools produce with the Client's own unpacker. Nothing
     in `fleet-agent`, `fleet-server` or `opamp` depends on `fleet-tools`. Tool-only dependencies (the 7z
     writer, release listing) are declared there, so `cargo build -p fleet-agent` does not build them.
@@ -151,11 +153,11 @@ tools.
   layer over hyper anyway.
 - **A frontend framework and bundler for the UI.** A node toolchain in the Dev Container and CI is a
   large standing cost for a page the specification caps at rudimentary.
-- **Mutual TLS and the credential in `opamp`.** They are this project's policy, not the protocol,
-  and each exists once; ADR-0033 leaves them with the application.
+- **The choice of TLS material and credential in `opamp`.** That choice is this project's policy,
+  not the protocol, so each end makes it and hands `opamp` the result (ADR-0036).
 - **One shared crate for the protocol and this project's own code.** The git build step and the
   version grammar would sit in a crate others build from a registry, outside any checkout
-  (ADR-0031).
+  (ADR-0036).
 - **Resolving the stub from the test binary's directory.** The suite would pass or fail depending on
   the command that ran it.
 - **Moving the supervision core into its own crate for testability.** A library target meets the need
@@ -225,7 +227,7 @@ tools.
 - `crates/opamp/src/attributes.rs` `an_empty_string_is_not_a_value`;
   `crates/opamp/src/endpoint.rs` `a_gzip_bomb_buys_no_more_memory_than_a_plain_body_would`,
   `what_is_not_gzip_under_a_gzip_header_is_refused`,
-  `an_encoding_this_endpoint_does_not_implement_names_itself`; `crates/fleet-core/src/pem.rs`
+  `an_encoding_this_endpoint_does_not_implement_names_itself`; `crates/opamp/src/tls.rs`
   `a_file_holding_no_certificate_is_an_error` (clause 7).
 - `crates/fleet-server/src/config.rs` `rejects_unknown_keys` and `crates/fleet-agent/src/config.rs`
   `rejects_an_unknown_scheme_and_unknown_keys` (clause 14).

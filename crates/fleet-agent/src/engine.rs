@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::supervisor::agent::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
 use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
+use crate::update::{SelfInstall, SelfUpdate, SelfUpdater};
 
 /// The Engine index of the Client's own Agent (ADR-0021). It is built first, so a Supervisor's
 /// index is its block's position plus this.
@@ -39,37 +40,6 @@ pub struct SamplingTarget {
     /// The process to sample: this one for the Client's own Agent, the Managed Process for a
     /// Supervisor-backed one.
     pub pid: u32,
-}
-
-/// What installs a new version of this Client and closes out one that is on probation (ADR-0021).
-/// The Engine decides when; the adapter ([`Installer`](crate::selfupdate::Installer)) stages,
-/// proves and points at the version directory.
-pub trait SelfUpdater: Send {
-    /// Installs the verified artifact `staged` as `version`. The staged file has served its purpose
-    /// whatever the outcome, and is gone afterwards.
-    ///
-    /// # Errors
-    /// Returns an error — with the previous version still current and still running — when the
-    /// artifact cannot be installed.
-    fn install(
-        &self,
-        staged: &std::path::Path,
-        version: &str,
-        hash: &[u8],
-    ) -> Result<SelfInstall, String>;
-
-    /// Commits this process as the new version if it is one on probation; nothing otherwise, and
-    /// nothing a second time.
-    fn commit_probation(&mut self);
-}
-
-/// What installing a new version of this Client came to.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SelfInstall {
-    /// Staged, proved and pointed at: the run ends, and the version that starts next reports.
-    Staged,
-    /// The offered version is the one running — nothing to do, and not a failure.
-    AlreadyRunning,
 }
 
 /// One Agent as [`Engine::with_processes`] takes it: the protocol state machine plus the handles
@@ -140,16 +110,9 @@ pub struct Engine {
     /// Packages awaiting the transport's download and verification (ADR-0019), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
-    /// How the Client updates *itself* (ADR-0021): where its state lives, the archive key, and —
-    /// while this process is a freshly installed version — the marker it must commit. `None` when
-    /// `[self_update]` is absent, in which case the self-Agent accepts no packages anyway.
-    self_update: Option<Box<dyn SelfUpdater>>,
-    /// Set once the Server has answered at all. Reaching the Server is what a new version has to
-    /// do to prove itself: a binary that starts, connects, and is spoken to is running.
-    seen_server: bool,
-    /// Set once a self-update has moved the `current` pointer: the run must end for the service
-    /// manager to start the new version (ADR-0021).
-    restart_for_update: bool,
+    /// How the Client updates *itself* (ADR-0021). Unarmed when `[self_update]` is absent, in
+    /// which case the self-Agent accepts no packages anyway.
+    self_update: SelfUpdate,
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0025), which runs beside
     /// a transport that holds this Engine mutably for the whole of a connection.
     sampling: Arc<Mutex<Vec<SamplingTarget>>>,
@@ -194,9 +157,7 @@ impl Engine {
             pending_self_config: None,
             pending_connection_offer: None,
             pending_package_downloads: Vec::new(),
-            self_update: None,
-            seen_server: false,
-            restart_for_update: false,
+            self_update: SelfUpdate::default(),
             sampling: Arc::new(Mutex::new(Vec::new())),
         };
         // The Client's own Agent samples this process, and that is true from the start — only a
@@ -208,7 +169,7 @@ impl Engine {
     /// Arms self-update (ADR-0021) with what installs a new version and commits this one if it is
     /// itself freshly installed.
     pub fn arm_self_update(&mut self, updater: impl SelfUpdater + 'static) {
-        self.self_update = Some(Box::new(updater));
+        self.self_update.arm(updater);
     }
 
     /// Reports a self-update that finished in a previous process (ADR-0021): the install
@@ -375,7 +336,7 @@ impl Engine {
     /// the service manager restarts into the new version (ADR-0021).
     #[must_use]
     pub fn restart_for_update(&self) -> bool {
-        self.restart_for_update
+        self.self_update.restart_requested()
     }
 
     /// Installs a verified artifact as a new version of *this Client* (ADR-0021).
@@ -388,25 +349,13 @@ impl Engine {
             return;
         };
         agent.state.package_downloaded();
-        let Some(update) = &self.self_update else {
-            // Unreachable while the capability is only declared with `[self_update]`, but a
-            // refusal that says so beats an install that should not have been offered.
-            self.agents[SELF_AGENT_INDEX]
-                .package_applied(hash, Err("self-update is not enabled".to_string()));
-            return;
-        };
-
-        match update.install(staged, &version, &hash) {
-            Ok(SelfInstall::Staged) => {
-                // `Installing` is already the reported status and the caller flushes it before the
-                // run ends. What comes after the restart reports the outcome.
-                self.restart_for_update = true;
-            }
+        match self.self_update.install(staged, &version, &hash) {
+            // `Installing` is already the reported status and the caller flushes it before the run
+            // ends. What comes after the restart reports the outcome.
+            Ok(SelfInstall::Staged) => {}
             // The version offered is the one running — which is what a freshly updated Client is
             // told every time, since the Server keeps offering until an Agent reports a terminal
-            // status for that package. Saying `Installed` is both true and what closes the loop:
-            // reporting a failure here left the Server offering and this Client downloading, over
-            // and over, for as long as both were up.
+            // status for that package. Saying `Installed` is both true and what closes the loop.
             Ok(SelfInstall::AlreadyRunning) => {
                 self.agents[SELF_AGENT_INDEX].package_applied(hash, Ok(version));
             }
@@ -509,14 +458,8 @@ impl Engine {
             return Handled::default();
         };
         // The Server answered, so this version connected and is being spoken to — which is what a
-        // freshly installed one has to manage to stop being on probation (ADR-0021). Committing
-        // here rather than on a timer means the bar is "it works", not "it survived a clock".
-        if !self.seen_server {
-            self.seen_server = true;
-            if let Some(update) = &mut self.self_update {
-                update.commit_probation();
-            }
-        }
+        // freshly installed one has to manage to stop being on probation (ADR-0021).
+        self.self_update.server_answered();
         let agent = &mut self.agents[index];
         let mut handled = agent.state.handle(reply);
         if handled.send_report {

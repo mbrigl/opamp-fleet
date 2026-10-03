@@ -1,6 +1,6 @@
 # ADR-0032: One OpAMP server endpoint for every server surface — the endpoint carries the communication, the application only answers
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/opamp/src/server.rs`, and the OpAMP endpoint of each server surface: `crates/fleet-server/src/transport.rs`, `crates/fleet-agent/src/gateway/mod.rs` and `crates/fleet-agent/src/supervisor/endpoint.rs`

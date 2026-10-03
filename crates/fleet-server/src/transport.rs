@@ -94,8 +94,8 @@ async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: 
     if admission.require_client_certificate {
         let presented = request
             .extensions()
-            .get::<crate::tls::PeerCertificate>()
-            .is_some_and(crate::tls::PeerCertificate::present);
+            .get::<opamp::server::listen::PeerCertificate>()
+            .is_some_and(opamp::server::listen::PeerCertificate::present);
         if !presented {
             debug!("refused: the OpAMP endpoint requires a client certificate");
             return (

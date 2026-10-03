@@ -101,33 +101,30 @@ async fn serve(
         ca_file.display().to_string(),
     ))
     .expect("tls config");
-    let rustls_config = fleet_server::tls::server_config(&tls).expect("server config");
+    let rustls_config = fleet_server::tls::server_tls(&tls)
+        .expect("server material")
+        .rustls_config()
+        .expect("server config");
 
-    let agent_acceptor = fleet_server::tls::PeerCertAcceptor::new(rustls_config.clone());
-    let operator_acceptor = fleet_server::tls::PeerCertAcceptor::new(rustls_config);
+    // Both planes through the listener the binary serves them on (ADR-0012, ADR-0036).
+    let handle = opamp::server::listen::Handle::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
     let addr = listener.local_addr().expect("addr");
     let agents = fleet_server::agent_app(state.clone(), admission);
-    tokio::spawn(async move {
-        axum_server::from_tcp(listener)
-            .acceptor(agent_acceptor)
-            .serve(agents.into_make_service())
-            .await
-            .expect("serve the Agent plane");
-    });
+    tokio::spawn(
+        fleet_server::listen::plane(listener, Some(rustls_config.clone()), handle.clone())
+            .serve(agents),
+    );
     // The Operator plane, over the same certificate on its own listener (ADR-0012) — the half a
     // browser reaches, and the reason the verifier stays optional is no longer that it is here.
     let operator_listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let operator_addr = operator_listener.local_addr().expect("addr");
     let operators = fleet_server::operator_app(state, None);
-    tokio::spawn(async move {
-        axum_server::from_tcp(operator_listener)
-            .acceptor(operator_acceptor)
-            .serve(operators.into_make_service())
-            .await
-            .expect("serve the Operator plane");
-    });
+    tokio::spawn(
+        fleet_server::listen::plane(operator_listener, Some(rustls_config), handle)
+            .serve(operators),
+    );
     // The temp dir must outlive the server task; leak it deliberately for the test's lifetime.
     let endpoint = format!("https://localhost:{}/v1/opamp", addr.port());
     std::mem::forget(dir);
@@ -135,7 +132,7 @@ async fn serve(
 }
 
 fn client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
-    fleet_server::tls::install_ring_provider();
+    opamp::tls::install_ring_provider();
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .tls_certs_only([reqwest::Certificate::from_pem(ca_pem.as_bytes()).expect("ca")])

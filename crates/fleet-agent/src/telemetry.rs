@@ -586,16 +586,17 @@ fn exporter_client(
         .as_ref()
         .map(|certificate| certificate.cert.as_slice())
         .filter(|cert| !cert.is_empty());
-    let builder = crate::tls::trust_and_identity_for(
-        // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps its own
-        // for the client it would have built, and never applies it to this one.
-        reqwest::Client::builder()
-            .use_rustls_tls()
-            .timeout(EXPORT_TIMEOUT),
-        config,
-        offered,
-    )
-    .map_err(|e| format!("{field}: {e}"))?;
+    let builder = crate::tls::client_tls_for(config, offered)
+        .and_then(|tls| {
+            tls.apply(
+                // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps
+                // its own for the client it would have built, and never applies it to this one.
+                reqwest::Client::builder()
+                    .use_rustls_tls()
+                    .timeout(EXPORT_TIMEOUT),
+            )
+        })
+        .map_err(|e| format!("{field}: {e}"))?;
     let client = builder
         .build()
         .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))?;
@@ -841,7 +842,7 @@ mod tests {
     /// and still inside the boundary the operator owns (ADR-0025).
     #[tokio::test]
     async fn a_private_network_destination_is_allowed_in_cleartext() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://192.168.10.5:4318/v1/metrics")),
@@ -857,7 +858,7 @@ mod tests {
     /// development and sidecar shape, and nothing leaves the machine at all.
     #[tokio::test]
     async fn a_loopback_destination_is_allowed_in_cleartext() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
@@ -874,7 +875,7 @@ mod tests {
     /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
     #[tokio::test]
     async fn an_empty_endpoint_stops_reporting_and_refuses_nothing() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let telemetry = Telemetry::new();
         let running = ConnectionSettingsOffers {
             own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
@@ -925,7 +926,7 @@ mod tests {
     /// an exporter that presents it.
     #[tokio::test]
     async fn an_offered_certificate_is_presented_by_the_exporter() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         // What the CSR flow leaves behind: the key the request was made for, and the certificate
         // the Server signed for it. Self-signed here — nothing verifies the chain in this test, the
@@ -968,7 +969,7 @@ mod tests {
     /// silently connected without the certificate would be reporting success it did not have.
     #[test]
     fn an_offered_certificate_without_its_key_is_refused_and_named() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let config = ClientConfig {
             state_dir: dir.path().to_path_buf(),
@@ -1116,7 +1117,7 @@ mod tests {
     /// thread for good and takes own telemetry down until the process restarts.
     #[tokio::test]
     async fn an_export_to_a_destination_that_never_answers_gives_up() {
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1/metrics", listener.local_addr().unwrap());
         let _silent = tokio::spawn(async move {
@@ -1161,7 +1162,7 @@ mod tests {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tracing_subscriber::layer::SubscriberExt as _;
 
-        crate::tls::install_ring_provider();
+        opamp::tls::install_ring_provider();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1/traces", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel();
