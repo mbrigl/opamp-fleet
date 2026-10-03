@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
-- **Applies to:** AgentDescription building in crates/client/src/supervisor/agent.rs, the Agent type resolution in crates/client/src/supervisor/mod.rs, [attributes] and service_namespace in supervisor.toml, the fleet view's name and network columns
+- **Applies to:** AgentDescription building in crates/fleet-agent/src/supervisor/agent.rs, the Agent type resolution in crates/fleet-agent/src/supervisor/mod.rs, [attributes] and service_namespace in supervisor.toml, the fleet view's name and network columns
 
 ## Context
 
@@ -188,7 +188,7 @@ by starting a Collector once with a generated extension-only configuration.
 
 ## Enforcement
 
-- [`agent.rs`](../../crates/client/src/supervisor/agent.rs) unit tests:
+- [`agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs) unit tests:
   `a_process_reporting_its_type_does_not_take_the_operators_name_with_it`,
   `the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in`,
   `the_reported_type_is_the_processs_own_word_where_it_gives_one`,
@@ -200,11 +200,11 @@ by starting a Collector once with a generated extension-only configuration.
   `host_addresses_follow_the_conventions`, `os_release_parses_the_fields_the_description_reports`,
   `the_cpu_model_is_reported`, `the_agent_reports_the_host_name_a_selector_would_pin_it_by`,
   `the_os_is_reported_as_a_name_and_a_version_not_only_as_prose`.
-- [`config.rs`](../../crates/client/src/config.rs) unit tests:
+- [`config.rs`](../../crates/fleet-agent/src/config.rs) unit tests:
   `a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted`,
   `an_empty_agent_type_is_refused_rather_than_treated_as_absent`,
   `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent`,
-  `non_string_attributes_are_rejected`; [`supervisor/mod.rs`](../../crates/client/src/supervisor/mod.rs)
+  `non_string_attributes_are_rejected`; [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs)
   `a_wrapped_block_that_restates_a_derived_value_is_refused`.
-- Server: [`fleet.rs`](../../crates/server/src/fleet.rs) unit test
+- Server: [`fleet.rs`](../../crates/fleet-server/src/fleet.rs) unit test
   `the_view_joins_a_string_array_attribute`.

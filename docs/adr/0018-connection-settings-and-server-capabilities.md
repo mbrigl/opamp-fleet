@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-20
 - **Deciders:** Markus Brigl
-- **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/server/src/fleet.rs`, the Client's offer handling in `crates/client/src/connection.rs`, `crates/client/src/transport/mod.rs` and `crates/client/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/client/src/supervisor/agent.rs`
+- **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`
 
 ## Context
 
@@ -246,28 +246,28 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 
 ## Enforcement
 
-- [`crates/server/src/config.rs`](../../crates/server/src/config.rs) —
+- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
   `a_connection_offer_yields_the_expected_authorization`, `a_connection_offer_needs_at_least_one_field`,
   `a_connection_offer_rejects_a_bad_endpoint_scheme`,
   `a_credential_offer_must_be_accepted_by_auth_unless_the_endpoint_moves` (clause 1).
-- [`crates/server/tests/connection_settings.rs`](../../crates/server/tests/connection_settings.rs) —
+- [`crates/fleet-server/tests/connection_settings.rs`](../../crates/fleet-server/tests/connection_settings.rs) —
   `the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential`,
   `no_offer_without_the_capability_or_without_a_configured_section`, `the_reported_hash_gates_reoffering`
   (clause 2).
-- [`crates/server/tests/own_telemetry.rs`](../../crates/server/tests/own_telemetry.rs) —
+- [`crates/fleet-server/tests/own_telemetry.rs`](../../crates/fleet-server/tests/own_telemetry.rs) —
   `a_telemetry_only_server_declares_that_it_offers_connection_settings` (clauses 2, 3).
-- [`crates/client/src/connection.rs`](../../crates/client/src/connection.rs) —
+- [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) —
   `an_offer_carries_settings_when_it_names_anything_this_client_applies` (clause 4),
   `merge_leaves_opamp_absent_when_neither_side_has_one`,
   `merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward`,
   `merge_keeps_unchanged_fields_from_the_previous_settings`, `load_store_round_trips`,
   `stored_settings_and_their_directory_are_owner_only`, `apply_overrides_client_toml_where_the_server_spoke`,
   `apply_leaves_untouched_what_the_offer_omits` (clauses 9, 10).
-- [`crates/client/tests/connection_settings_e2e.rs`](../../crates/client/tests/connection_settings_e2e.rs) —
+- [`crates/fleet-agent/tests/connection_settings_e2e.rs`](../../crates/fleet-agent/tests/connection_settings_e2e.rs) —
   `an_offer_is_verified_persisted_and_reported_applied`;
-  [`crates/client/tests/gateway_and_supervisor_e2e.rs`](../../crates/client/tests/gateway_and_supervisor_e2e.rs) —
+  [`crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs`](../../crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs) —
   `a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running` (clauses 5, 11).
-- [`crates/client/src/supervisor/agent.rs`](../../crates/client/src/supervisor/agent.rs) —
+- [`crates/fleet-agent/src/supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs) —
   `a_connection_offer_is_acknowledged_applying_and_handed_to_the_transport`,
   `a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering`,
   `an_offer_is_applied_and_acknowledged` (clauses 5, 7, 8);
@@ -277,12 +277,12 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
   `a_connection_settings_status_is_reported_to_a_server_that_offered_without_declaring_the_bit`,
   `a_restored_connection_settings_status_is_withheld_from_a_server_that_never_offers` (clauses 13,
   14); `a_remote_config_status_rides_to_a_server_that_offers_no_remote_config` (clause 16).
-- [`crates/server/tests/mutual_tls.rs`](../../crates/server/tests/mutual_tls.rs) —
+- [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs) —
   `a_csr_to_a_server_that_signs_nothing_is_a_bad_request`, the error clause 15 keeps a Client from
   provoking.
-- [`crates/server/src/fleet.rs`](../../crates/server/src/fleet.rs) —
+- [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) —
   `an_offered_heartbeat_interval_sets_the_budget` (clause 10).
 
 **Not mechanically decidable:** clause 6's "no reconnect" for a telemetry-only offer is held by the
-`OfferOutcome::Applied` path in [`transport/mod.rs`](../../crates/client/src/transport/mod.rs) and
+`OfferOutcome::Applied` path in [`transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs) and
 review; clause 17 governs capabilities not yet added, which only review of each new gate can hold.

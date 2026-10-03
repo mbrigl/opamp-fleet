@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/supervisor/icinga2.rs, the preflight, version parser and process-group stop in crates/client/src/supervisor/process.rs, icinga2_plans and windows_plan in opamp-package-fetch, the Dev Container image and its system packages, docs/artifacts/icinga2.md
+- **Applies to:** crates/fleet-agent/src/supervisor/icinga2.rs, the preflight, version parser and process-group stop in crates/fleet-agent/src/supervisor/process.rs, icinga2_plans and windows_plan in opamp-package-fetch, the Dev Container image and its system packages, docs/artifacts/icinga2.md
 
 ## Context
 
@@ -63,7 +63,7 @@ packages, bundling everything but glibc and built on a pinned Dev Container whos
 artifact's reach.
 
 1. **A kind of its own, reusing the shared Runner.** One module in
-   `crates/client/src/supervisor/` and one registry line; spawn, watchdog, backoff, bounded stop,
+   `crates/fleet-agent/src/supervisor/` and one registry line; spawn, watchdog, backoff, bounded stop,
    package swap, rollback, retention and health are the shared `Runner`'s. The kind supervises the
    **Agent role, never a master**, and runs the delivered tree only: program `icinga2` plus
    `EXE_SUFFIX` at `program_path` `sbin/icinga2[.exe]`, `service_name = "icinga2"`. It refuses an
@@ -362,7 +362,7 @@ keys.
 
 ## Enforcement
 
-- `crates/client/src/supervisor/icinga2.rs`:
+- `crates/fleet-agent/src/supervisor/icinga2.rs`:
   `the_layout_follows_the_delivered_tree_and_needs_no_settings`,
   `the_daemon_arguments_carry_the_relocation`, `the_defaults_are_the_artifacts`,
   `a_parent_carries_its_port_or_icingas_default`,
@@ -378,16 +378,16 @@ keys.
   `an_expired_certificate_enrols_again`, `the_expiry_is_read_from_what_pki_verify_printed`,
   `a_certificate_near_expiry_is_renewed_without_a_new_key`,
   `a_configuration_icinga_refuses_does_not_reach_the_daemon`.
-- `crates/client/tests/icinga2_supervisor.rs` (against the `stub_icinga2` binary):
+- `crates/fleet-agent/tests/icinga2_supervisor.rs` (against the `stub_icinga2` binary):
   `an_unreachable_parent_waits_with_a_reason_and_starts_nothing`,
   `enrolment_opens_the_gate_and_the_daemon_starts`,
   `a_configuration_icinga_refuses_is_reported_failed`,
   `a_standalone_node_runs_without_enrolment`.
 - Preflight: `a_package_that_cannot_run_here_is_refused_without_stopping_what_runs`
-  (`crates/client/tests/supervisor_process.rs`) and
+  (`crates/fleet-agent/tests/supervisor_process.rs`) and
   `a_package_that_fails_the_configured_version_check_is_refused`
-  (`crates/client/tests/packages_e2e.rs`).
-- `crates/package-tools/src/bin/opamp-package-fetch.rs`:
+  (`crates/fleet-agent/tests/packages_e2e.rs`).
+- `crates/fleet-tools/src/bin/opamp-package-fetch.rs`:
   `the_repository_index_yields_a_packages_filename_digest_and_libc_floor`,
   `icinga_2s_line_is_the_reach_of_the_host_it_is_read_on`,
   `every_distro_the_tool_builds_for_has_a_stated_reach`,

@@ -22,7 +22,7 @@ on:
       - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   schedule:
-    - cron: "17 6 * * *" # Daily at 06:17 UTC — timeliness matters more than quiet for a security check.
+    - cron: "17 6 * * 6" # Weekly, Saturday 06:17 UTC; pushes touching the lockfile run it in between.
 
 # `issues: write` is for the scheduled-failure notification below; the audit itself only reads.
 permissions:

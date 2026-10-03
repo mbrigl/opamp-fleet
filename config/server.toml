@@ -1,5 +1,5 @@
 # OpAMP Fleet Server configuration (ADR-0011). Every setting is optional; the values shown are the
-# defaults. Start with: cargo run -p server -- --config config/server.toml
+# defaults. Start with: cargo run -p fleet-server -- --config config/server.toml
 #
 # HOW THIS FILE IS ORDERED, AND WHY IT MATTERS. Every bare key comes first; every [section] comes
 # after them. That is not tidiness — it is the only layout in which the commented examples below can

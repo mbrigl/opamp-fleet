@@ -1,7 +1,7 @@
 # ADR-0013: `Cargo.toml` decides the version, the build stamps it with git's provenance, and the commit is compared nowhere
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-08-10
+- **Status:** ⚪ superseded by [ADR-0035](0035-versions-resolved-in-the-internal-crate.md)
+- **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `Cargo.toml` `[workspace.package] version`, `crates/opamp/build.rs`, `crates/opamp/src/version.rs`, the `version` job of `.github/workflows/release.yml`, and every surface that states, compares or displays a version
 
@@ -169,7 +169,7 @@ release-candidate flow is wanted.
   lengthens every identifier and adds no identity, and a build date breaks reproducibility.
 - **Reading the version at runtime** — the reported version would describe the deployment, and a
   copied binary would change identity.
-- **A second `build.rs` in `crates/server`, or an `include!`d shared fragment** — duplicates the tag
+- **A second `build.rs` in `crates/fleet-server`, or an `include!`d shared fragment** — duplicates the tag
   grammar and the failure modes where they can drift. **A crate holding only build support** — a
   further crate for one function, where a shared crate already sits between the two ends
   ([ADR-0011](0011-workspace-crates-and-configuration.md)).
@@ -233,13 +233,13 @@ release-candidate flow is wanted.
   `a_development_build_is_not_the_release_it_heads_for`, `different_releases_never_match`,
   `what_is_not_a_version_is_refused`, `a_version_that_would_escape_a_path_is_refused`,
   `leading_zeros_are_not_a_version`, `precedence_orders_versions_by_semver_rules`.
-- `crates/server/tests/version_flag.rs` (`the_version_flag_prints_the_baked_version_and_nothing_of_its_own`,
-  `the_baked_version_says_more_than_the_manifest_does`) and `crates/client/src/cli.rs`
+- `crates/fleet-server/tests/version_flag.rs` (`the_version_flag_prints_the_baked_version_and_nothing_of_its_own`,
+  `the_baked_version_says_more_than_the_manifest_does`) and `crates/fleet-agent/src/cli.rs`
   `the_version_flag_reports_the_baked_in_version` hold both CLIs to `current()`.
-- `crates/client/src/selfupdate.rs` probe tests: `the_probe_ignores_the_commit_a_build_came_from`,
+- `crates/fleet-agent/src/selfupdate.rs` probe tests: `the_probe_ignores_the_commit_a_build_came_from`,
   `the_probe_refuses_a_development_build_offered_as_a_release`,
   `the_probe_refuses_a_client_of_the_wrong_version`, `the_probe_refuses_an_offer_that_is_not_a_version`.
-- `crates/server/src/fleet.rs` `the_displayed_version_drops_the_commit_and_keeps_the_pre_release`.
+- `crates/fleet-server/src/fleet.rs` `the_displayed_version_drops_the_commit_and_keeps_the_pre_release`.
 - The `version` job of [`.github/workflows/release.yml`](../../.github/workflows/release.yml): the
   steps *Read the version out of Cargo.toml*, *This version has not been released yet*, *Tag this
   commit* and *The binary agrees* implement clauses 6–8 and fail the run on violation.

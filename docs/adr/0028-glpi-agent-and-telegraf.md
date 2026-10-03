@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/supervisor/glpi.rs, crates/client/src/supervisor/telegraf.rs, the zip container in crates/client/src/archive.rs, glpi_plans and telegraf_plans in opamp-package-fetch, docs/artifacts/glpi-agent.md, docs/artifacts/telegraf.md
+- **Applies to:** crates/fleet-agent/src/supervisor/glpi.rs, crates/fleet-agent/src/supervisor/telegraf.rs, the zip container in crates/fleet-agent/src/archive.rs, glpi_plans and telegraf_plans in opamp-package-fetch, docs/artifacts/glpi-agent.md, docs/artifacts/telegraf.md
 
 ## Context
 
@@ -246,21 +246,21 @@ distribution plus a relocatable Perl is the only visible route); a reproducible 
 
 ## Enforcement
 
-- `crates/client/src/supervisor/glpi.rs`: `the_block_has_no_settings`,
+- `crates/fleet-agent/src/supervisor/glpi.rs`: `the_block_has_no_settings`,
   `the_recipes_keys_are_refused_by_name`, `the_defaults_are_the_artifacts`,
   `the_invocation_carries_what_supervision_requires` (both flags, `--conf-file`, `--vardir` beside
   `program/`), `linux_runs_the_apprun_entry_point`, `windows_runs_the_bundled_perl`.
-- `crates/client/src/supervisor/telegraf.rs`: `the_block_has_no_settings`,
+- `crates/fleet-agent/src/supervisor/telegraf.rs`: `the_block_has_no_settings`,
   `the_recipes_keys_are_refused_by_name`, `the_invocation_points_at_the_delivered_configuration`,
   `the_defaults_are_the_artifacts`.
-- `crates/client/tests/wrapped_supervisors.rs`: `a_two_line_glpi_block_runs_reports_and_applies`,
+- `crates/fleet-agent/tests/wrapped_supervisors.rs`: `a_two_line_glpi_block_runs_reports_and_applies`,
   `a_two_line_telegraf_block_runs_reports_and_applies` — the two-line block runs, reports its
   version, receives a Configuration, and finds its directories made.
-- `crates/client/src/archive.rs`: `detects_a_zip_by_its_signature_and_an_empty_one_too`,
+- `crates/fleet-agent/src/archive.rs`: `detects_a_zip_by_its_signature_and_an_empty_one_too`,
   `extracts_the_named_member_from_a_zip_wherever_the_archive_keeps_it`,
   `a_zip_tree_lands_whole_with_the_wrapper_directory_dropped`,
   `a_hostile_zip_member_refuses_the_archive`, `a_zip_past_the_budget_is_refused`.
-- `crates/package-tools/src/bin/opamp-package-fetch.rs`:
+- `crates/fleet-tools/src/bin/opamp-package-fetch.rs`:
   `glpi_finds_both_zip_spellings_and_repacks_only_linux`,
   `a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang`,
   `telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names`,

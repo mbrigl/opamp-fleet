@@ -1,7 +1,7 @@
 name: Service smoke
 
 # The one thing every other test stands in for: the machine's *real* service manager (ADR-0014,
-# ADR-0021). `crates/client/tests/service_smoke.rs` installs the Client as a system service, starts
+# ADR-0021). `crates/fleet-agent/tests/service_smoke.rs` installs the Client as a system service, starts
 # it, kills its process, and asserts the manager brings it back — the restart a self-update depends
 # on and that no in-process stand-in can prove.
 #
@@ -11,8 +11,8 @@ name: Service smoke
 on:
   workflow_dispatch:
   schedule:
-    # Nightly, well outside working hours in CET.
-    - cron: "0 3 * * *"
+    # Weekly on Saturday, well outside working hours in CET.
+    - cron: "0 3 * * 6"
 
 permissions:
   contents: read
@@ -40,6 +40,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Built as its own step so a compile failure is not reported as a smoke-test failure.
       - name: Build
-        run: cargo test -p client --test service_smoke --locked --no-run
+        run: cargo test -p fleet-agent --test service_smoke --locked --no-run
       - name: Install, start, kill, restart, stop, uninstall
-        run: cargo test -p client --test service_smoke --locked -- --ignored --nocapture --test-threads=1
+        run: cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1

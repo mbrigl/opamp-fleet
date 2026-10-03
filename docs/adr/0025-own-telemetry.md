@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-21
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/telemetry.rs, the telemetry half of crates/client/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, selfupdate and Supervisor modules, the Server's `[telemetry_offer]` (crates/server/src/config.rs, crates/server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml
+- **Applies to:** crates/fleet-agent/src/telemetry.rs, the telemetry half of crates/fleet-agent/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, update and Supervisor modules, the Server's `[telemetry_offer]` (crates/fleet-server/src/config.rs, crates/fleet-server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml
 
 ## Context
 
@@ -47,7 +47,7 @@ with one Collector on its LAN to put TLS in front of a stream that never leaves 
 network. The private address space — [RFC 1918](https://www.rfc-editor.org/rfc/rfc1918)'s three IPv4
 ranges and [RFC 4193](https://www.rfc-editor.org/rfc/rfc4193)'s `fc00::/7` — is not routable across
 the public internet, and the Server's artifact-URL check (`is_internal` in
-[`api.rs`](../../crates/server/src/api.rs)) already draws the same line.
+[`api.rs`](../../crates/fleet-server/src/api.rs)) already draws the same line.
 
 **The Baseline cannot switch own telemetry off.** For each `own_*` field the schema says *"If this
 field is not set then the Agent should assume that the settings are unchanged"*, and the empty string
@@ -135,7 +135,7 @@ and invent nothing OTLP already defines.
    | `config.apply` (Supervisor set) | `validate`, `stop`, `write`, `purge`, `start` | `reconfigure::apply` |
    | `config.apply` (Managed Process) | `reload` or `restart`, `gate` | `engine::handle`, where the Configuration is handed over |
    | `connection.settings.apply` | `verify`, `store` | `transport::process_connection_offer` |
-   | `self.update` | `stage`, `probe`, then `commit` or `roll_back` | `selfupdate::install` |
+   | `self.update` | `stage`, `probe`, then `commit` or `roll_back` | `update::installer::install` |
 
    An install and a Managed Process's apply are begun by the task that received the message and
    finished by the Supervisor's own task, so the span travels with the command through the Port
@@ -403,7 +403,7 @@ on the Agent that drops the three capability bits.
 
 ## Enforcement
 
-- [`crates/client/src/telemetry.rs`](../../crates/client/src/telemetry.rs) tests:
+- [`crates/fleet-agent/src/telemetry.rs`](../../crates/fleet-agent/src/telemetry.rs) tests:
   `no_destination_builds_nothing` (clause 15),
   `a_cleartext_destination_beyond_the_private_network_is_refused`,
   `cleartext_is_admitted_by_address_and_nowhere_else`,
@@ -421,23 +421,23 @@ on the Agent that drops the three capability bits.
   `a_span_this_client_writes_reaches_the_offered_destination` (clauses 6–7),
   `a_trace_survives_being_written_down_and_picked_up_again`,
   `an_unreadable_trace_reference_is_ignored` (clause 10).
-- [`crates/client/src/connection.rs`](../../crates/client/src/connection.rs) tests:
+- [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) tests:
   `an_offer_naming_one_signal_stops_the_others`,
   `an_offer_silent_about_telemetry_leaves_all_three_alone` (clause 17),
   `an_empty_endpoint_withdraws_the_signal` (clause 18).
-- [`crates/client/src/transport/mod.rs`](../../crates/client/src/transport/mod.rs):
+- [`crates/fleet-agent/src/transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs):
   `a_refused_telemetry_destination_is_reported_failed_on_the_same_offer` (clause 21).
-- [`crates/client/src/selfupdate.rs`](../../crates/client/src/selfupdate.rs):
+- [`crates/fleet-agent/src/update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs):
   `a_marker_carries_its_trace_and_one_written_without_it_still_parses` (clause 10);
-  [`crates/client/src/packages.rs`](../../crates/client/src/packages.rs):
+  [`crates/fleet-agent/src/packages.rs`](../../crates/fleet-agent/src/packages.rs):
   `the_download_source_drops_whatever_authorises_it` (clause 13).
-- [`crates/client/tests/supervisor_process.rs`](../../crates/client/tests/supervisor_process.rs):
+- [`crates/fleet-agent/tests/supervisor_process.rs`](../../crates/fleet-agent/tests/supervisor_process.rs):
   `the_phases_of_an_install_hang_off_the_span_that_came_with_it` (clause 8).
-- [`crates/server/tests/own_telemetry.rs`](../../crates/server/tests/own_telemetry.rs):
+- [`crates/fleet-server/tests/own_telemetry.rs`](../../crates/fleet-server/tests/own_telemetry.rs):
   `every_declared_signal_is_offered_a_destination`,
   `a_withdrawn_signal_is_offered_as_an_empty_destination`, `an_undeclared_signal_gets_no_destination`,
   `an_agent_that_reports_no_own_telemetry_is_offered_none` (clause 23); and
-  [`crates/server/src/config.rs`](../../crates/server/src/config.rs):
+  [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs):
   `an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error` (clause 23).
 
 **Not mechanically decidable:** that no OTLP schema is vendored and no OpenTelemetry type appears

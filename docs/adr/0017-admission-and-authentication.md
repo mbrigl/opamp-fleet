@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-16
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp` in `crates/server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, the Operator plane's guard in `crates/server/src/api.rs`, the Client's credential, identity and enrolment in `crates/client/src/config.rs`, `tls.rs` and `csr.rs`, and the `[auth]`, `[tls]`, `[client_ca]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`
+- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, the Operator plane's guard in `crates/fleet-server/src/api.rs`, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, and the `[auth]`, `[tls]`, `[client_ca]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`
 
 ## Context
 
@@ -61,7 +61,7 @@ the Operator plane with a separate, optional set of Basic credentials.
 
 2. **One credential primitive for both planes.** Accepted `Authorization` values are precomputed in
    full, and a presented header is compared against each in constant time with `constant_time_eq`
-   ([`credentials.rs`](../../crates/server/src/credentials.rs)). The planes differ in what they pair
+   ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). The planes differ in what they pair
    the check with, never in how it compares.
 
 3. **The Client sends exactly one credential.** `supervisor.toml`'s `[auth]` holds either
@@ -304,38 +304,38 @@ operator actions.
 
 ## Enforcement
 
-- [`crates/server/tests/auth.rs`](../../crates/server/tests/auth.rs) —
+- [`crates/fleet-server/tests/auth.rs`](../../crates/fleet-server/tests/auth.rs) —
   `a_request_without_credentials_is_answered_401_with_a_challenge`,
   `both_configured_schemes_authenticate_a_plain_http_exchange`,
   `the_websocket_upgrade_is_checked_before_it_completes` (clause 1).
-- [`crates/server/src/config.rs`](../../crates/server/src/config.rs) —
+- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
   `an_empty_auth_section_is_rejected`, `auth_precomputes_the_accepted_headers_and_the_challenge`
   (clauses 1, 2), `a_secret_bearing_offer_without_auth_is_flagged` (clause 4),
   `rest_auth_precomputes_the_accepted_headers_and_the_basic_challenge`,
   `an_unusable_rest_auth_section_is_rejected` (clause 15).
-- [`crates/client/src/config.rs`](../../crates/client/src/config.rs) —
+- [`crates/fleet-agent/src/config.rs`](../../crates/fleet-agent/src/config.rs) —
   `auth_yields_exactly_one_authorization_scheme`, `cleartext_credentials_are_flagged_beyond_the_loopback`
   (clause 3).
-- [`crates/server/tests/mutual_tls.rs`](../../crates/server/tests/mutual_tls.rs) —
+- [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs) —
   `a_client_certificate_is_required_on_the_opamp_route_and_nowhere_else` (clause 5),
   `a_certificate_does_not_stand_in_for_the_credential` (clause 6),
   `a_csr_is_answered_with_an_issued_certificate`, `a_csr_to_a_server_that_signs_nothing_is_a_bad_request`
   (clause 9).
-- [`crates/server/src/ca.rs`](../../crates/server/src/ca.rs) — `signs_a_request_into_a_certificate`,
+- [`crates/fleet-server/src/ca.rs`](../../crates/fleet-server/src/ca.rs) — `signs_a_request_into_a_certificate`,
   `the_request_cannot_dictate_the_certificates_powers`, `refuses_a_request_that_does_not_parse`
   (clauses 7, 9).
-- [`crates/client/src/csr.rs`](../../crates/client/src/csr.rs) —
+- [`crates/fleet-agent/src/csr.rs`](../../crates/fleet-agent/src/csr.rs) —
   `a_client_without_a_certificate_asks_and_keeps_its_key`, `the_private_key_is_written_owner_only`,
   `an_issued_certificate_becomes_the_identity`, `a_certificate_without_a_pending_key_is_refused`,
   `a_certificate_in_its_renewal_window_is_requested_again` (clauses 8, 9, 11).
-- [`crates/client/tests/gateway_tls.rs`](../../crates/client/tests/gateway_tls.rs) —
+- [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs) —
   `a_downstream_agent_with_a_certificate_reaches_the_server_over_tls`,
   `a_downstream_peer_without_a_certificate_is_refused` (clause 13).
-- [`crates/server/tests/rest_auth.rs`](../../crates/server/tests/rest_auth.rs) —
+- [`crates/fleet-server/tests/rest_auth.rs`](../../crates/fleet-server/tests/rest_auth.rs) —
   `a_request_without_credentials_is_answered_401_with_a_basic_challenge`,
   `the_configured_operator_reaches_the_api`, `the_ui_and_the_api_docs_are_guarded_too`,
   `the_agent_plane_is_untouched_by_the_operator_credential` (clauses 15, 18);
-  [`crates/server/tests/rest_api.rs`](../../crates/server/tests/rest_api.rs) —
+  [`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs) —
   `a_cross_site_state_changing_post_is_refused` (clause 16).
 
 **Not mechanically decidable:** clause 14 decides what is *not* built — no test can show the absence

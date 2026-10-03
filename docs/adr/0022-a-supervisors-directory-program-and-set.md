@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/client/src/config.rs (supervisor_dir, program resolution), crates/client/src/supervisor/ (start, placeholders), crates/client/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml
+- **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml
 
 ## Context
 
@@ -277,22 +277,22 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
 
 ## Enforcement
 
-- Directory and program, in `crates/client/src/config.rs`:
+- Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable`,
   `a_relative_state_dir_yields_absolute_directories`,
   `a_bare_name_resolves_and_everything_else_is_refused`,
   `an_absolute_program_path_is_refused_and_names_the_way_across`,
   `the_retired_package_keys_are_refused`, `a_program_path_must_stay_inside_the_package`.
-- Consent and start, in `crates/client/src/supervisor/mod.rs`:
+- Consent and start, in `crates/fleet-agent/src/supervisor/mod.rs`:
   `every_supervisor_declares_package_acceptance`, `installs_packages_reflects_declared_package_acceptance`,
   `a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package`,
   `a_program_path_that_is_neither_fails_the_build`, `a_block_without_a_program_fails_the_build`,
   `an_orphaned_supervisor_directory_is_not_reaped_at_startup`.
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
-  `an_unknown_placeholder_is_passed_through_untouched` (`crates/client/src/supervisor/ports.rs`),
+  `an_unknown_placeholder_is_passed_through_untouched` (`crates/fleet-agent/src/supervisor/ports.rs`),
   `a_command_supervisors_arguments_are_expanded_to_its_own_directories`
-  (`crates/client/tests/supervisor.rs`), `the_spec_carries_the_environment` (`collector.rs`).
-- The set apply, in `crates/client/src/reconfigure.rs`: `foreign_top_level_keys_are_ignored`,
+  (`crates/fleet-agent/tests/supervisor.rs`), `the_spec_carries_the_environment` (`collector.rs`).
+- The set apply, in `crates/fleet-agent/src/reconfigure.rs`: `foreign_top_level_keys_are_ignored`,
   `duplicate_supervisor_names_fail_the_offer`, `a_malformed_block_names_its_entry`,
   `blocks_are_collected_across_entries_in_name_order`,
   `a_server_delivered_block_may_not_name_an_absolute_program`,
@@ -304,6 +304,6 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   `the_purge_deletes_exactly_the_removed_supervisors_directory`,
   `the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root`,
   `an_empty_offer_removes_every_block`; `retiring_uninstalls_the_removed_and_only_stops_the_changed`
-  (`crates/client/src/engine.rs`); and end to end
-  `a_config_change_reaches_both_supervised_agents_over_one_connection` (`crates/client/tests/e2e.rs`),
+  (`crates/fleet-agent/src/engine.rs`); and end to end
+  `a_config_change_reaches_both_supervised_agents_over_one_connection` (`crates/fleet-agent/tests/e2e.rs`),
   which adds, keeps and removes a Supervisor through a delivered set and checks the purge.
