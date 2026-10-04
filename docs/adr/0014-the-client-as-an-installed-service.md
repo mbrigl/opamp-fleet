@@ -1,6 +1,6 @@
 # ADR-0014: The Client installs itself as a native service named after a build-time product name, from a versioned layout it can rewrite
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, and every path, name or account an installed Client uses

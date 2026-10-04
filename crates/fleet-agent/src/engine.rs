@@ -116,6 +116,9 @@ pub struct Engine {
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0025), which runs beside
     /// a transport that holds this Engine mutably for the whole of a connection.
     sampling: Arc<Mutex<Vec<SamplingTarget>>>,
+    /// The certificate request last queued on this connection (ADR-0017): a new one goes out at
+    /// once, the same one again only with the next report.
+    last_csr: Option<Vec<u8>>,
 }
 
 impl Engine {
@@ -159,6 +162,7 @@ impl Engine {
             pending_package_downloads: Vec::new(),
             self_update: SelfUpdate::default(),
             sampling: Arc::new(Mutex::new(Vec::new())),
+            last_csr: None,
         };
         // The Client's own Agent samples this process, and that is true from the start — only a
         // Managed Process's pid has to wait for the process to exist.
@@ -249,6 +253,11 @@ impl Engine {
     /// any one Agent (n Agents share it, ADR-0009), and the self-Agent is the one every Client has.
     ///
     /// `csr` makes the request — called only when one is to be sent, since it generates a key.
+    ///
+    /// A request this Engine has not queued before is owed at once, so it never waits for a
+    /// heartbeat, of which there may be none. One re-sent while it waits for an operator rides the
+    /// next report instead: queued after every reply and owed each time, it would answer every
+    /// answer.
     pub fn request_certificate(&mut self, csr: impl FnOnce() -> Option<Vec<u8>>) {
         let Some(agent) = self
             .agents
@@ -258,6 +267,10 @@ impl Engine {
             return;
         };
         if let Some(csr) = csr() {
+            if self.last_csr.as_ref() != Some(&csr) {
+                agent.owes_report = true;
+                self.last_csr = Some(csr.clone());
+            }
             agent.state.request_certificate(csr);
         }
     }
@@ -405,11 +418,13 @@ impl Engine {
     }
 
     /// Every Agent starts over with a full snapshot — after (re)connecting, or when an exchange
-    /// was lost and the Server may be missing state.
+    /// was lost and the Server may be missing state. A certificate request may have been lost
+    /// with it, so the next one is new to the Server again and goes out at once.
     pub fn force_full_all(&mut self) {
         for agent in &mut self.agents {
             agent.state.force_full();
         }
+        self.last_csr = None;
     }
 
     /// One report per Agent — the routine poll, and the after-connect snapshot when
@@ -827,6 +842,50 @@ mod tests {
         assert_eq!(owed[0].instance_uid, reports[0].instance_uid);
         assert!(owed[0].agent_description.is_some());
         assert!(engine.owed_reports().is_empty());
+    }
+
+    /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
+    /// re-sent while it waits for an operator rides the next report, so it never answers every
+    /// answer (ADR-0039 clause 21).
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut engine = engine_of_two(dir.path());
+        let reports = engine.poll_reports();
+        let _ = engine.handle(&ServerToAgent {
+            instance_uid: reports[0].instance_uid.clone(),
+            capabilities: opamp::proto::ServerCapabilities::AcceptsConnectionSettingsRequest as u64,
+            ..Default::default()
+        });
+        let _ = engine.owed_reports();
+        let carries_request = |report: &AgentToServer| report.connection_settings_request.is_some();
+
+        engine.request_certificate(|| Some(b"first".to_vec()));
+        let owed = engine.owed_reports();
+        assert_eq!(owed.len(), 1);
+        assert!(carries_request(&owed[0]), "the new request is sent at once");
+
+        engine.request_certificate(|| Some(b"first".to_vec()));
+        assert!(engine.owed_reports().is_empty(), "the same request is not");
+        assert!(
+            engine.poll_reports().iter().any(carries_request),
+            "it rides the next report"
+        );
+
+        engine.request_certificate(|| Some(b"second".to_vec()));
+        assert!(
+            engine.owed_reports().iter().any(carries_request),
+            "a request for a new key is"
+        );
+
+        // A reconnect or a lost exchange may have taken the last one with it.
+        engine.force_full_all();
+        engine.request_certificate(|| Some(b"second".to_vec()));
+        assert!(
+            engine.owed_reports().iter().any(carries_request),
+            "the same request is sent at once on a new connection"
+        );
     }
 
     #[test]

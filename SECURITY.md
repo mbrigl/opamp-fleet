@@ -80,28 +80,34 @@ with its risk in [ADR-0007](docs/adr/0007-action-references.md) and held by
 
 ## Fleet trust model
 
-**Admission is a fleet-wide trust boundary, not per-Agent authentication**
-([ADR-0017](docs/adr/0017-admission-and-authentication.md)). A peer reaches the OpAMP
-endpoint by proving *fleet membership* — the [ADR-0017](docs/adr/0017-admission-and-authentication.md)
-credential and/or the [ADR-0017](docs/adr/0017-admission-and-authentication.md)
-client certificate. Neither identifies *which* Agent is speaking: an Agent's `instance_uid` is
-self-asserted (the Server may itself re-key it), a certificate is deliberately not bound to it, and a
-Gateway ([ADR-0009](docs/adr/0009-client-modes-and-the-gateway.md)) forwards many Agents' reports under one
-certificate.
+**Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
+([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clauses 7, 14
+and 27). A peer reaches the OpAMP endpoint by proving *fleet membership* — the fleet credential and
+a client certificate. The certificate also names the **host** it was issued to, and an
+`instance_uid` first reported with one host's certificate is not spoken for by another's: such a
+reporter is re-keyed to an identity of its own. A certificate is not bound to one `instance_uid`,
+which is self-asserted and which the Server may re-key, and a Gateway
+([ADR-0040](docs/adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)) forwards many
+Agents' reports under its own certificate.
 
-The consequence, which is a design property rather than a defect: **within one admitted fleet there
-is no authorization between Agents.** Any admitted peer can send a report under any `instance_uid`
-and update that Agent's Server-side record (health, effective config, remote-config status, and so
-the Configuration offered to it) — most cleanly over plain HTTP, which offers nothing to tell two
-pollers apart. This is *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
+The consequence, which is a design property rather than a defect: **a host marked as a Gateway, or
+a peer behind one, can report under any `instance_uid`** and update that Agent's Server-side record
+(health, effective config, remote-config status, and so the Configuration offered to it). This is
+*not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
 
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
-trust domain. Do not place mutually distrusting Agents in the same fleet; isolate them by separate
-Server instance or network segment. The rationale, and the alternatives that were weighed and
-rejected (binding certificates to `instance_uid`, trust-on-first-use pinning, sequence-number
-checks), are in [ADR-0017](docs/adr/0017-admission-and-authentication.md).
+trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
+place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate
+Server instance or network segment. The alternatives that were weighed are in ADR-0039.
 
 ## Supported versions
 
-<!-- TODO: document which versions/branches receive security fixes once the project has releases. -->
-The project is pre-release; a support policy will be defined once it reaches its first release.
+Security fixes land on `main` and ship in the next release. Only the latest release is supported:
+before 1.0 no fix is backported to an earlier one, so the remedy for a vulnerable version is an
+upgrade — through the fleet's own self-update where the Client is concerned. Each fix is listed in
+[`CHANGELOG.md`](CHANGELOG.md) under the release that carries it.
+
+| Version | Supported |
+|---|---|
+| the latest `version/*` release | ✅ |
+| any earlier release | ❌ |

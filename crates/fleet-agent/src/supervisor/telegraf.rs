@@ -112,6 +112,7 @@ impl Plugin for TelegrafPlugin {
         let (commands, command_rx) = mpsc::channel(16);
         let version_args: Vec<String> = VERSION_ARGS.iter().map(|a| (*a).to_string()).collect();
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
@@ -212,6 +213,7 @@ mod tests {
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
         let (events, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = SupervisorContext {
+            endpoint_token: String::new(),
             name: "telegraf".to_string(),
             supervisor_dir: dir.path().to_path_buf(),
             config_dir: dir.path().join("config"),

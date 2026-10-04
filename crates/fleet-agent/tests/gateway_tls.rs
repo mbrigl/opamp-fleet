@@ -1,11 +1,6 @@
-//! The downstream hop's TLS (ADR-0009, ADR-0017): a Gateway configured with `[gateway.tls]` serves
-//! the downstream endpoint over TLS, and when a `client_ca_file` is set it *requires* a downstream
-//! Agent to present a certificate that chains to it.
-//!
-//! This is the boundary a `[gateway.tls]` section exists for. Before it was wired in, the section
-//! was parsed and then ignored: the endpoint stayed plaintext and the client CA gated nobody, so
-//! the `Authorization` credential rode the hop in the clear and any peer could connect. These tests
-//! pin the fix — TLS is actually served, and the CA is actually enforced.
+//! The downstream hop's TLS (ADR-0009, ADR-0017, ADR-0040): a Gateway serves the downstream
+//! endpoint over mutual TLS 1.3 only, and *requires* a downstream Agent to present a certificate
+//! that chains to `client_ca_file`. Without the full `[gateway.tls]` section it does not start.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,36 +64,28 @@ async fn spawn_server() -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
     (addr, state, dir)
 }
 
-/// A Gateway whose downstream endpoint serves TLS. `require_client_ca` writes the CA as
-/// `client_ca_file`, turning the hop into mutual TLS.
-async fn spawn_tls_gateway(
+/// The Gateway's TOML, `[gateway.tls]` naming the files in `dir`; `client_ca` adds
+/// `client_ca_file`.
+fn gateway_toml(
     server: SocketAddr,
+    listen: SocketAddr,
     pki: &Pki,
-    require_client_ca: bool,
-) -> (
-    SocketAddr,
-    tokio::sync::watch::Sender<bool>,
-    tempfile::TempDir,
-) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    dir: &std::path::Path,
+    client_ca: bool,
+) -> String {
     let (cert, key) = pki.issue("127.0.0.1");
-    let cert_file = dir.path().join("gateway-cert.pem");
-    let key_file = dir.path().join("gateway-key.pem");
-    let ca_file = dir.path().join("ca.pem");
+    let cert_file = dir.join("gateway-cert.pem");
+    let key_file = dir.join("gateway-key.pem");
+    let ca_file = dir.join("ca.pem");
     std::fs::write(&cert_file, &cert).expect("write cert");
     std::fs::write(&key_file, &key).expect("write key");
     std::fs::write(&ca_file, &pki.ca_pem).expect("write ca");
-
-    // Bound here and handed over, so no parallel test can take the port before the Gateway uses it.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let listen = listener.local_addr().expect("addr");
-
-    let client_ca_line = if require_client_ca {
+    let client_ca_line = if client_ca {
         format!("client_ca_file = {:?}", ca_file.display().to_string())
     } else {
         String::new()
     };
-    let toml = format!(
+    format!(
         r#"
         endpoint = "ws://{server}/v1/opamp"
         [gateway]
@@ -111,13 +98,47 @@ async fn spawn_tls_gateway(
         "#,
         cert_file.display().to_string(),
         key_file.display().to_string(),
-    );
+    )
+}
+
+/// A Gateway whose downstream endpoint serves mutual TLS with `pki`'s CA as `client_ca_file`.
+async fn spawn_tls_gateway(
+    server: SocketAddr,
+    pki: &Pki,
+) -> (
+    SocketAddr,
+    tokio::sync::watch::Sender<bool>,
+    tempfile::TempDir,
+) {
+    spawn_bounded_gateway(server, pki, opamp::server::listen::HEADER_READ_TIMEOUT).await
+}
+
+/// [`spawn_tls_gateway`], with the header bound tightened to `header_read_timeout`.
+async fn spawn_bounded_gateway(
+    server: SocketAddr,
+    pki: &Pki,
+    header_read_timeout: Duration,
+) -> (
+    SocketAddr,
+    tokio::sync::watch::Sender<bool>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Bound here and handed over, so no parallel test can take the port before the Gateway uses it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    let toml = gateway_toml(server, listen, pki, dir.path(), true);
     let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
     let (tx, shutdown) = shutdown_channel();
     tokio::spawn(async move {
-        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
-            .await
-            .expect("gateway");
+        fleet_agent::gateway::run_on_bounded(
+            Arc::new(config),
+            listener,
+            shutdown,
+            header_read_timeout,
+        )
+        .await
+        .expect("gateway");
     });
     // Wait for the listener to accept before anyone dials it.
     for _ in 0..100 {
@@ -156,11 +177,12 @@ fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
 /// With a client CA configured, a downstream Agent that presents a certificate reaches the Server
 /// through the Gateway over TLS — and its reply comes back addressed to it. This is the hop working
 /// end to end, encrypted, with the CA accepting a valid peer.
+/// Verifies: ADR-0055, ADR-0039, G-15, G-17
 #[tokio::test]
 async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
     let (server, state, _server_dir) = spawn_server().await;
     let pki = Pki::new();
-    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki, true).await;
+    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki).await;
 
     let (cert, key) = pki.issue("edge-01");
     let uid = InstanceUid::default();
@@ -186,13 +208,14 @@ async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
     );
 }
 
-/// The fix's core: with a client CA configured, a peer presenting *no* certificate is turned away at
-/// the handshake. Before the section was wired in, this peer connected freely.
+/// A peer presenting *no* certificate is turned away at the handshake.
+///
+/// Verifies: ADR-0055, ADR-0039
 #[tokio::test]
 async fn a_downstream_peer_without_a_certificate_is_refused() {
     let (server, _state, _server_dir) = spawn_server().await;
     let pki = Pki::new();
-    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki, true).await;
+    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki).await;
 
     let result = client(&pki, None)
         .post(format!("https://{gateway}/v1/opamp"))
@@ -208,11 +231,13 @@ async fn a_downstream_peer_without_a_certificate_is_refused() {
 
 /// A Gateway serving TLS does not also answer plaintext on the same port: a cleartext HTTP request
 /// fails rather than exposing the hop the section was configured to protect.
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn the_tls_endpoint_does_not_answer_plaintext() {
+    opamp::tls::install_ring_provider();
     let (server, _state, _server_dir) = spawn_server().await;
     let pki = Pki::new();
-    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki, true).await;
+    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki).await;
 
     let result = reqwest::Client::new()
         .post(format!("http://{gateway}/v1/opamp"))
@@ -224,4 +249,237 @@ async fn the_tls_endpoint_does_not_answer_plaintext() {
         result.is_err(),
         "a plaintext request to a TLS endpoint must fail, got {result:?}"
     );
+}
+
+/// A peer presenting a certificate from *another* CA is turned away at the handshake: only the
+/// configured `client_ca_file` admits.
+///
+/// Verifies: ADR-0055
+#[tokio::test]
+async fn a_downstream_peer_with_a_certificate_from_another_ca_is_refused() {
+    let (server, state, _server_dir) = spawn_server().await;
+    let pki = Pki::new();
+    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki).await;
+
+    let stranger = Pki::new().issue("edge-01");
+    let result = client(&pki, Some(stranger))
+        .post(format!("https://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(report(&InstanceUid::default()).encode_to_vec())
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "a peer with a certificate from another CA must not be admitted, got {result:?}"
+    );
+    assert!(state.snapshot().is_empty(), "nothing reached the Server");
+}
+
+/// A Gateway whose `[gateway.tls]` lacks `client_ca_file` does not start: the load refuses the
+/// file, and `run_on` refuses the configuration rather than serving without client certificates.
+///
+/// Verifies: ADR-0055
+#[tokio::test]
+async fn a_gateway_without_a_client_ca_does_not_start() {
+    let (server, _state, _server_dir) = spawn_server().await;
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    let toml = gateway_toml(server, listen, &pki, dir.path(), false);
+
+    let path = dir.path().join("supervisor.toml");
+    std::fs::write(&path, &toml).expect("write config");
+    let err =
+        ClientConfig::load(&path).expect_err("the load refuses a Gateway without a client CA");
+    assert!(err.contains("client_ca_file"), "{err}");
+
+    let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
+    let (_stop, shutdown) = shutdown_channel();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown),
+    )
+    .await
+    .expect("run_on returns rather than serving");
+    let err = result.expect_err("a Gateway without a client CA must not serve");
+    assert!(err.contains("client_ca_file"), "{err}");
+}
+
+/// A Gateway without `[gateway.tls]` does not start, on the loopback too: `run_on` refuses the
+/// configuration rather than serving the downstream endpoint in plaintext.
+///
+/// Verifies: ADR-0055
+#[tokio::test]
+async fn a_gateway_without_tls_on_loopback_does_not_start() {
+    let (server, _state, _server_dir) = spawn_server().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    let toml = format!(
+        "endpoint = \"ws://{server}/v1/opamp\"\n[gateway]\nlisten = \"{listen}\"\n\
+         upstream_connections = 4\n"
+    );
+    let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
+    let (_stop, shutdown) = shutdown_channel();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown),
+    )
+    .await
+    .expect("run_on returns rather than serving");
+    let err = result.expect_err("a Gateway without TLS must not serve");
+    assert!(err.contains("[gateway.tls] is required"), "{err}");
+}
+
+/// The connection-setup bound on the Gateway's own surface (H18): a downstream peer that completes
+/// the mutual-TLS handshake and then never finishes its request headers is hung up on, as the
+/// Server's Agent plane does (`connection_setup.rs`). The handshake bound is 10 seconds; closing well
+/// inside it shows the header bound did the work.
+/// Verifies: ADR-0057, ADR-0055
+#[tokio::test]
+async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on() {
+    use std::io::{Read as _, Write as _};
+    let (server, _state, _server_dir) = spawn_server().await;
+    let pki = Pki::new();
+    let (listen, _shutdown, _dir) =
+        spawn_bounded_gateway(server, &pki, Duration::from_secs(1)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let ca = pki.ca_pem.clone();
+    let (read, elapsed) = tokio::task::spawn_blocking(move || {
+        opamp::tls::install_ring_provider();
+        let config = opamp::tls::client_builder()
+            .with_root_certificates(opamp::tls::root_store(ca.as_bytes()).expect("roots"))
+            .with_client_auth_cert(
+                opamp::tls::certificates(cert.as_bytes()).expect("cert"),
+                opamp::tls::private_key(key.as_bytes()).expect("key"),
+            )
+            .expect("client auth");
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").expect("name");
+        let connection = rustls::ClientConnection::new(Arc::new(config), name).expect("tls");
+        let tcp = std::net::TcpStream::connect(listen).expect("connect");
+        tcp.set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("read timeout");
+        let mut tls = rustls::StreamOwned::new(connection, tcp);
+        // The handshake runs on the first write; a request line and one header, never ended.
+        tls.write_all(b"GET /v1/opamp HTTP/1.1\r\nHost: localhost\r\n")
+            .expect("handshake and a partial request");
+        tls.flush().expect("flush");
+        let started = std::time::Instant::now();
+        let mut buffer = Vec::new();
+        (tls.read_to_end(&mut buffer), started.elapsed())
+    })
+    .await
+    .expect("join");
+    let timed_out = matches!(&read, Err(e) if matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert!(
+        !timed_out,
+        "the Gateway left a connection open that never finished its headers"
+    );
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+}
+
+/// The Server on an ephemeral plaintext port, admitting only `Authorization: Bearer <token>`.
+async fn spawn_server_requiring(token: &str) -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("state"));
+    let auth = fleet_server::transport::OpampAuth::from_config(
+        &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
+            "bearer_tokens = [{:?}]",
+            fleet_server::credentials::bearer_entry(token)
+        ))
+        .expect("auth config"),
+    )
+    .expect("auth");
+    let app = fleet_server::agent_app(
+        state.clone(),
+        fleet_server::transport::Admission::new(Some(auth), false),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (addr, state, dir)
+}
+
+/// The Gateway decides nothing about a credential: each downstream peer's own `Authorization`
+/// reaches the Server, and a peer with a wrong one, or none, is not admitted — even when the one
+/// upstream connection the pool may hold was opened with another peer's valid credential.
+/// Verifies: ADR-0055, ADR-0039, G-15, Q-1
+#[tokio::test]
+async fn each_downstream_peer_is_admitted_on_its_own_credential() {
+    const TOKEN: &str = "the-fleet-token-of-at-least-32-chars";
+    let (server, state, _server_dir) = spawn_server_requiring(TOKEN).await;
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    // The Gateway's own credential, which it fetches the revocation list with (ADR-0055 clause
+    // 14); what it forwards upstream is each peer's.
+    let toml = gateway_toml(server, listen, &pki, dir.path(), true)
+        .replace("upstream_connections = 4", "upstream_connections = 1")
+        + &format!("\n[auth]\nbearer_token = \"{TOKEN}\"\n");
+    let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
+    let (_stop, shutdown) = shutdown_channel();
+    tokio::spawn(async move {
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+            .await
+            .expect("gateway");
+    });
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(listen).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let http = client(&pki, Some(pki.issue("downstream")));
+    let send = |uid: InstanceUid, authorization: Option<&'static str>| {
+        let mut request = http
+            .post(format!("https://{listen}/v1/opamp"))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .body(report(&uid).encode_to_vec());
+        if let Some(value) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, value);
+        }
+        request.send()
+    };
+
+    let admitted = InstanceUid::default();
+    let response = send(
+        admitted,
+        Some("Bearer the-fleet-token-of-at-least-32-chars"),
+    )
+    .await
+    .expect("send");
+    assert!(response.status().is_success(), "{:?}", response.status());
+
+    for (uid, authorization) in [
+        (
+            InstanceUid::default(),
+            Some("Bearer a-token-the-server-does-not-hold"),
+        ),
+        (InstanceUid::default(), None),
+    ] {
+        let response = send(uid, authorization).await.expect("send");
+        assert!(
+            !response.status().is_success(),
+            "a peer with {authorization:?} rode another peer's credential"
+        );
+        assert!(
+            state
+                .snapshot()
+                .iter()
+                .all(|agent| agent.instance_uid != uid.to_string()),
+            "the Server took a report the credential did not admit"
+        );
+    }
+    assert!(state
+        .snapshot()
+        .iter()
+        .any(|agent| agent.instance_uid == admitted.to_string()));
 }

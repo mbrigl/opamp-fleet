@@ -16,7 +16,142 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ## [0.5.0]
 
+### Added
+
+- **A certificate names its host, and a host speaks only for its own Agents**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clauses 7,
+  14 and 27). Every certificate the Server signs carries `urn:opamp-fleet:host:<id>`; a connection
+  reporting for an Agent another host reported first is re-keyed, and a host holds at most three
+  valid certificates. A Client's renewal proves, with its current key, which certificate it renews.
+  `GET /api/v1/hosts` lists the hosts, and `PUT /api/v1/hosts/{host}/gateway` with
+  `{"gateway": true}` marks a Gateway, whose certificate then speaks for any Agent. **What to do:**
+  mark each Gateway once its certificate has been renewed; until then the first Agents it carries
+  are bound to it.
+
+- **The Supervisor Endpoint admits only the process its Supervisor started**
+  ([ADR-0053](docs/adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)). Every
+  Managed Process finds a token in `OPAMP_SUPERVISOR_TOKEN`, and the endpoint answers any
+  connection without `Authorization: Bearer <token>` with `401`. **What to do:** add
+  `headers: { Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}" }` to the `opampextension`'s
+  `server.ws` in every Collector configuration that reports through the endpoint.
+
+- **An audit record of every security decision**
+  ([ADR-0052](docs/adr/0052-an-append-only-audit-record-chained-by-hash.md)): admissions and
+  refusals, enrolment, issuance, revocation and the sessions it ends, credential rotation, operator
+  acts with the operator's name, and package outcomes, as JSON lines in `config_dir/audit/`, each
+  chained to the one before by its hash. `server audit-verify <dir>` checks the chain. A Server
+  that cannot write the record admits no one and runs no operator act until it can. **What to
+  do:** keep `config_dir/audit/` on a disk with room for `[audit] max_file_bytes` times
+  `keep_files` (1 GiB by default), and copy it off the host if an intruder must not be able to
+  rewrite it unseen.
+
+- **`server.toml` holds no credential that authenticates on its own**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md),
+  [ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md)). `[auth]`
+  `bearer_tokens` are listed as `sha256:<hex>`, Basic passwords in `[auth]` and `[rest.auth]` as
+  Argon2id hashes; `server hash-credential --bearer|--basic` makes the entries. The credential
+  `[connection_offer]` hands the fleet is read from `bearer_token_file` or `password_file`, a file
+  readable by its owner alone. **What to do:** before upgrading, replace every token and password
+  in `server.toml` with the entry `hash-credential` prints, and move an offered credential into
+  its own `0600` file; a Server with a credential in clear refuses to start, naming the entry.
+
+- **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
+  signature** ([ADR-0051](docs/adr/0051-a-delivered-block-brings-nothing-past-the-signature.md)).
+  It may set `env`, `args` and `version_args` only as the running block of the same name already
+  has them, or as the new `[supervisors] delivered_env` and `delivered_args` allow; never `PATH`,
+  `LD_*` or `DYLD_*`. A delivered `icinga2` block reads `ticket_file` and `trusted_cert_file` only
+  from `${config_dir}/` and must pin its parent. **What to do:** where the Server delivers blocks
+  with environment or arguments, allow them in each Client's `supervisor.toml`; otherwise the set
+  is refused, naming the block and the key, and the running set stays as it is.
+
+- **Revocation that takes effect at once**
+  ([ADR-0049](docs/adr/0049-revocation-ends-sessions-and-follows-renewal.md)).
+  `POST /api/v1/revocations` revokes a certificate, by issuing CA (`client` or `bootstrap`) and
+  serial and with every renewal of it, or a credential of `[auth]`; the Server refuses it and closes every session it admitted.
+  `GET /api/v1/certificates` lists what the client CA signed. Every certificate the client CA
+  signs now carries a random serial. A WebSocket session ends when its certificate expires. The
+  list is kept in `config_dir/revocation/`. **What to do:** nothing; back that directory up with
+  the rest of `config_dir`.
+- **A CSR naming another Agent's `instance_uid` is refused**
+  ([ADR-0050](docs/adr/0050-a-csr-naming-an-instance-uid-must-name-its-sender.md)). The Client of
+  this project names none and is not affected.
+
 ### Changed
+
+- **A Gateway refuses a certificate the Server revoked, and admits nobody until its host is
+  marked** ([ADR-0055](docs/adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md),
+  [ADR-0056](docs/adr/0056-revocation-that-follows-renewal-and-reaches-the-gateways.md)). A host
+  marked as a Gateway fetches the revoked certificates of the client CA from
+  `GET /v1/gateway/revocations` every 30 s and refuses them downstream with `401`, closing their
+  sessions with `1008`. A Gateway with no list younger than 300 s answers every downstream peer
+  `503`. **What to do:** upgrade the Server before its Gateways — an older Server has no list to
+  hand out. Give each Gateway a certificate the Server issued, by enrolment or by a renewal, since
+  only such a certificate names the host there is to mark; then mark that host with
+  `PUT /api/v1/hosts/<host>/gateway` before the Gateway is upgraded. An unmarked Gateway admits
+  nobody.
+- **A package signature now covers the Agent type, the version and the SHA-256**
+  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md)), and a
+  Supervisor refuses a package for another Agent type or older than the one it runs. **What to
+  do:** sign every Deployment's entries again with `opamp-package-sign sign --agent-type <type>
+  --version <version> <artifact>` and `PUT` the new signatures; signatures over the bytes alone no
+  longer verify.
+
+- **Client certificates live 30 days by default, not 90**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 9);
+  a Client renews at two thirds of the life. **What to do:** nothing, unless a host is offline
+  longer than about 20 days; then set `[client_ca] validity_days` higher.
+- **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
+  ([ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md) clause 5). **What to
+  do:** set `ca_file` on every Client before offering a new endpoint.
+
+- **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
+  ([ADR-0038](docs/adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).
+  `ws://` and `http://` are accepted only to `127.0.0.1` or `::1` — not to `localhost`, not to a
+  private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
+  ([ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md)), a
+  referenced package `url`
+  ([ADR-0043](docs/adr/0043-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md))
+  and an own-telemetry destination
+  ([ADR-0048](docs/adr/0048-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). A
+  peer that speaks only TLS 1.2 can no longer connect. **What to do:** move every such URL to
+  `wss://` or `https://`, and put TLS 1.3 in front of any Collector or mirror that lacks it.
+- **The Server requires `[tls]` and listens on the loopback by default.** Without `[tls]` it does
+  not start; `listen` defaults to `127.0.0.1:4320`, and the Operator plane serves TLS too.
+  `[rest] listen` off the loopback now requires `[rest.auth]`. **What to do:** add `[tls]`
+  (`scripts/dev-pki.sh` makes a development set), set `listen = "0.0.0.0:4320"` to serve the
+  fleet, and point clients of the REST API at `https://`.
+- **The Client's default endpoint is `wss://127.0.0.1:4320/v1/opamp`**, and so is the MSI's
+  prefill ([ADR-0047](docs/adr/0047-releases-installers-and-the-name-supervisor-secure-by-default.md)).
+  **What to do:** a Client that relied on the old `ws://` default needs `[tls] ca_file` for the
+  Server's certificate.
+- **Nothing is installed without a signature**
+  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md),
+  [ADR-0044](docs/adr/0044-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0045](docs/adr/0045-packages-and-deployments-that-sign-every-package.md)). A Client without
+  `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
+  its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
+  entry. A download goes only to the Server's own origin or to an https prefix in `[packages]
+  allowed_sources`, every redirect hop included. **What to do:** set `verification_key` on every
+  Client, sign every entry of every Deployment before rolling it out, and list any mirror in
+  `allowed_sources`.
+- **Every Agent proves itself twice, and a new host is approved by an operator**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md),
+  [ADR-0040](docs/adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md),
+  [ADR-0046](docs/adr/0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
+  The Server requires `[auth]` and `[tls] client_ca_file`, and asks for the client certificate in
+  the TLS handshake — the package download included. A fresh host enrols with a bootstrap
+  certificate from `[enrolment] bootstrap_ca_file`, only while an operator holds the enrolment
+  window open (`POST /api/v1/enrolment/window`), and only once an operator approves its request
+  (`POST /api/v1/enrolments/<id>/approve`). Repeated admission failures from one address are
+  answered `429` (`[admission_throttle]`). A Gateway requires `[gateway.tls]` with
+  `client_ca_file`. The Client refuses to start without `[auth]` and a client certificate.
+  **What to do:** give the Server `[auth]`, `client_ca_file`, `[client_ca]` and, to enrol hosts,
+  `[enrolment]`; give every Client its credential and a certificate — an issued one, or a
+  bootstrap certificate to enrol with — and every Gateway its client CA.
+- **Connection caps:** `max_connections` (10 000) and `[rest] max_connections` (256) bound each
+  plane; HTTP/2 is limited to 100 concurrent streams per connection and pings a silent peer away.
+  **What to do:** raise `max_connections` for a larger fleet, together with the file-descriptor
+  limit.
 
 - **Deleting a Deployment that has released a package is refused** (`409`). Its Agents' offer
   travels with that Deployment's signatures, and deleting it used to leave them offered the
@@ -36,8 +171,54 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **A request body or a WebSocket message that stalls is cut off**
+  ([ADR-0054](docs/adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+  Once its headers had arrived, a peer could hold any connection of the Server, a Gateway or a
+  Supervisor Endpoint by sending its body, or a WebSocket message, a byte at a time or not at all.
+  Every body and message that has begun must now deliver 64 KiB within each minute: a body that
+  falls behind is answered `408`, a message closes its connection with `1008`. Nothing has a
+  deadline, so a large upload over a slow link still completes, and an idle connection is left
+  alone. **What to do:** nothing.
+- **An enrolment and a renewal each issue one certificate, not two**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)). A
+  Client that received its certificate sent the request it had just been answered for once more
+  on its next connection, and the Server signed it again, so every host held a second valid
+  certificate it never used. **What to do:** nothing; a duplicate already issued expires with its
+  life, or can be revoked by its serial from `GET /api/v1/certificates`.
+- **A certificate request goes out at once, with or without heartbeats.** A Client sent a new
+  request only with its next heartbeat or poll, so an enrolment waited up to 30 s for its request
+  to be listed, and a Client with `heartbeat_interval_secs = 0` on WebSocket never sent it. **What
+  to do:** nothing.
+- **The certificate register lists a key by the fingerprint its enrolment request carried.**
+  `key_fingerprint` in `GET /api/v1/certificates` and in the audit record's issuance lines is now
+  the SHA-256 of the public key, as the Client logs it and `GET /api/v1/enrolments` lists it, not
+  of the key's SubjectPublicKeyInfo. **What to do:** nothing; certificates registered before keep
+  the old value.
+
+- **A Gateway no longer carries a downstream peer's report on another peer's credential.** The
+  upstream pool reused a connection opened with one peer's `Authorization` for the reports of
+  another, so a peer with a wrong credential, or none, reached the Server on someone else's. A
+  connection now carries only the Agents of the credential it was opened with; with
+  `upstream_connections` reached by connections of other credentials, a report is refused until
+  one of them carries nobody. **What to do:** nothing — a fleet on one credential sees no change;
+  during a rotation keep `upstream_connections` above one.
+
+- **On Windows, a system-scope install no longer leaves its secrets readable by every local user.**
+  Every folder under `%ProgramData%` grants `BUILTIN\Users` read access by inheritance, so
+  `supervisor.toml` with the fleet credential, the private key and the stored connection settings
+  were readable by any account on the host. `service install` now removes the inherited rights
+  from the data root and leaves it to LocalSystem, the Administrators and the service account
+  ([ADR-0046](docs/adr/0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
+  clause 18). **What to do:** re-run `service install` on every Windows host, or apply the same
+  with `icacls "%ProgramData%\<product>" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r
+  *S-1-5-32-544:(OI)(CI)F` followed by a grant to the service account. Rotate the fleet credential
+  if other people can log on to those hosts.
 - **A configuration entry named only with dots (`.`, `...`) is stored** as the entry file `config`,
   as an empty name already was. It used to fail the whole configuration with an I/O error.
+- **A package is no longer refused as one that "cannot be run" when another program starts at the
+  same moment.** The check that runs a staged package before it replaces the running one, and the
+  version probe, now wait out the moment Linux refuses to run a freshly written file, as a start
+  already did.
 
 ## [0.4.5] - 2026-08-24
 

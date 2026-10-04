@@ -235,6 +235,7 @@ mod tests {
     /// ADR-0030 point 20: an envelope written before the ADR has no assignment fields, and they
     /// restore as `None` — the marker the fleet's migration reads. They are not invented as
     /// empty, which would silently un-roll the Agent.
+    /// Verifies: ADR-0045
     #[test]
     fn a_pre_adr_0027_record_restores_with_no_assignments() {
         let dir = tempfile::tempdir().expect("tempdir");

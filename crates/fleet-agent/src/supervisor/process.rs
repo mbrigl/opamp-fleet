@@ -267,8 +267,14 @@ pub struct VersionProbe {
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
+/// The environment variable a Managed Process finds the Supervisor Endpoint's token in
+/// (ADR-0053): an `opampextension` presents it as `Authorization: Bearer ${env:OPAMP_SUPERVISOR_TOKEN}`.
+pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
+
 pub struct Runner {
     pub name: String,
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0053).
+    pub endpoint_token: String,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0015's health-gated acknowledgement); zero acknowledges on start.
@@ -861,6 +867,10 @@ impl Runner {
         };
         let mut command = Command::new(&program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
+        // Last, so no block's `env` can replace it (ADR-0053).
+        if !self.endpoint_token.is_empty() {
+            command.env(ENDPOINT_TOKEN_ENV, &self.endpoint_token);
+        }
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
@@ -933,13 +943,13 @@ pub async fn probe_version(
 ) {
     let mut command = Command::new(&program);
     command.args(&args).kill_on_drop(true);
-    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
+    let output = match bounded_output(&mut command).await {
+        Some(Ok(output)) => output,
+        Some(Err(e)) => {
             warn!(program = %program.display(), error = %e, "version probe cannot run");
             return;
         }
-        Err(_) => {
+        None => {
             warn!(program = %program.display(), "version probe timed out");
             return;
         }
@@ -1018,6 +1028,25 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
+/// Runs `command` to completion within [`PROBE_TIMEOUT`]; `None` when it does not finish in time.
+///
+/// A program written moments ago may fail to exec with `ETXTBSY` while another thread's fork still
+/// holds it open for writing ([`install::is_text_file_busy`] states why); that is retried briefly,
+/// as a spawn is, rather than taken for a program that cannot run.
+async fn bounded_output(command: &mut Command) -> Option<std::io::Result<std::process::Output>> {
+    let mut attempt = 0;
+    loop {
+        match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
+            Err(_) => return None,
+            Ok(Err(e)) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(install::BUSY_DELAY).await;
+            }
+            Ok(result) => return Some(result),
+        }
+    }
+}
+
 /// Runs a plugin's preflight against a staged package (ADR-0029).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
@@ -1034,10 +1063,10 @@ async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), Str
             value.replace("${staged}", &staged.root.to_string_lossy()),
         );
     }
-    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
-        Err(_) => return Err("the packaged program did not answer in time".to_string()),
+    let output = match bounded_output(&mut command).await {
+        Some(Ok(output)) => output,
+        Some(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
+        None => return Err("the packaged program did not answer in time".to_string()),
     };
     if output.status.success() {
         return Ok(());
@@ -1277,6 +1306,38 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
+    /// A program held open for writing cannot be exec'd for that moment (`ETXTBSY`); the probe
+    /// waits it out instead of reporting a program that cannot run — the race a staged package
+    /// meets when another thread forks while it is being written.
+    /// Verifies: ADR-0029
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("true");
+        std::fs::copy("/bin/true", &program).expect("copy a program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .expect("hold it open for writing");
+        let busy = Command::new(&program).output().await;
+        assert!(
+            busy.as_ref().is_err_and(install::is_text_file_busy),
+            "the condition this guards against: {busy:?}"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            drop(writer);
+        });
+        let output = bounded_output(&mut Command::new(&program))
+            .await
+            .expect("in time")
+            .expect("run once the writer let go");
+        assert!(output.status.success());
+    }
+
     // What remains here are the cases that reach *into* this module — a private helper and the
     // install function — and need no program to spawn. Everything that supervises a running
     // process moved to `tests/supervisor_process.rs` when ADR-0011 made a real stub reachable;
@@ -1395,6 +1456,7 @@ mod tests {
 
     /// ADR-0019: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
+    /// Verifies: ADR-0042
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1419,6 +1481,7 @@ mod tests {
 
     /// A backup with no marker is not something this Runner retained (the pre-ADR-0019 immediate
     /// drop, or a half-finished install), so a sweep leaves it alone.
+    /// Verifies: ADR-0042
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1430,6 +1493,7 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
+    /// Verifies: ADR-0042
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");

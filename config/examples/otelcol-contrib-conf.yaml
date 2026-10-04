@@ -7,6 +7,10 @@ extensions:
     server:
       ws:
         endpoint: ws://127.0.0.1:4321/v1/opamp
+        # The token the Supervisor hands its Managed Process (ADR-0053); without it the endpoint
+        # answers 401.
+        headers:
+          Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}"
         tls:
           insecure: true
 

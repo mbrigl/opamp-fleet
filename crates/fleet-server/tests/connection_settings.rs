@@ -16,13 +16,21 @@ use support::{full_report, spawn_with, TestServer};
 const PROTOBUF: &str = "application/x-protobuf";
 
 fn offer() -> ConnectionOffer {
-    let config: ConnectionOfferConfig = toml::from_str(
-        r#"
-        bearer_token = "rotated-token"
-        heartbeat_interval_secs = 7
-        "#,
-    )
+    // The offered credential lives in a file of its own, owner-only (ADR-0041).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token = dir.path().join("token");
+    std::fs::write(&token, "rotated-token\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let config: ConnectionOfferConfig = toml::from_str(&format!(
+        "bearer_token_file = {:?}\nheartbeat_interval_secs = 7\n",
+        token.display().to_string()
+    ))
     .expect("parse");
+    // Read at compile time; the directory may go with the test.
     ConnectionOffer::from_config(&config).expect("offer")
 }
 
@@ -38,6 +46,7 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
     ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode")
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() {
     let server = spawn_with(None, Some(offer())).await;
@@ -60,6 +69,7 @@ async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() 
     assert_eq!(header.value, "Bearer rotated-token");
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn no_offer_without_the_capability_or_without_a_configured_section() {
     let armed = spawn_with(None, Some(offer())).await;
@@ -83,6 +93,7 @@ async fn no_offer_without_the_capability_or_without_a_configured_section() {
     );
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn the_reported_hash_gates_reoffering() {
     let server = spawn_with(None, Some(offer())).await;

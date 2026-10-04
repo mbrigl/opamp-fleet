@@ -1,7 +1,8 @@
 name: Security audit
 
-# Runs `cargo audit` (README → "Build, Test & Run") against the locked dependency graph. It fails on
-# any vulnerability; reviewed, non-actionable warnings are recorded in `.cargo/audit.toml`.
+# Runs `cargo deny check` (README → "Build, Test & Run") against the locked dependency graph — the
+# supply-chain gate of specification Q-3. It fails on a known advisory, a licence outside the list,
+# a source outside crates.io, or a banned crate; reviewed advisories are recorded in `deny.toml`.
 #
 # Two kinds of trigger, because two kinds of thing change: the dependency graph (a Cargo.toml/lock
 # edit) and the advisory database itself. The schedule is what catches a newly disclosed advisory in
@@ -13,21 +14,21 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
-      - ".cargo/audit.toml"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
-      - ".cargo/audit.toml"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
   schedule:
     - cron: "17 6 * * 6" # Weekly, Saturday 06:17 UTC; pushes touching the lockfile run it in between.
 
-# `issues: write` is for the scheduled-failure notification below; the audit itself only reads.
+# A failing scheduled run is reported the way GitHub reports any failed workflow: a red run, and a
+# notification to whoever last edited the schedule. The project keeps no issue tracker for it.
 permissions:
   contents: read
-  issues: write
 
 jobs:
   audit:
@@ -36,46 +37,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
-      - name: cargo audit
-        run: cargo audit
+          tool: cargo-deny
+      - name: cargo deny
+        run: cargo deny check
+      # The fuzz targets have a lockfile of their own (fuzz/Cargo.lock); the same gate holds.
+      - name: cargo deny (fuzz targets)
+        run: cargo deny --manifest-path fuzz/Cargo.toml check
 
-      # A failing *scheduled* run is easy to miss — nobody watches the Actions tab the way they watch
-      # a red check on a PR. Turn it into a GitHub issue so a new advisory in an untouched dependency
-      # is actually seen. Only one open issue at a time; later failures comment on it rather than pile
-      # up. On a PR/push the failing check is already visible, so this is scheduled-only.
-      - name: Open an issue when the scheduled audit fails
-        if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const label = 'security-audit';
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const { data: open } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: label,
-            });
-            if (open.length === 0) {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: 'cargo audit: a new advisory affects a locked dependency',
-                labels: [label],
-                body: [
-                  'The scheduled `cargo audit` run failed — a new RustSec advisory affects a dependency in `Cargo.lock`.',
-                  '',
-                  `Run: ${runUrl}`,
-                  '',
-                  'Fix it by updating the dependency, or — if reviewed and non-actionable — record the advisory id with rationale in `.cargo/audit.toml`. Close this issue once the audit is green again.',
-                ].join('\n'),
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: open[0].number,
-                body: `The scheduled \`cargo audit\` run failed again: ${runUrl}`,
-              });
-            }

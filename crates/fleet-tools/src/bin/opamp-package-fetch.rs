@@ -59,7 +59,8 @@ struct Cli {
     /// Where to write the artifacts.
     #[arg(long, default_value = ".")]
     out_dir: PathBuf,
-    /// Upload to this Server when the artifacts are ready, e.g. `http://127.0.0.1:4321`.
+    /// Upload to this Server when the artifacts are ready, e.g. `https://127.0.0.1:4321`. The
+    /// Operator plane serves TLS 1.3 only (ADR-0038).
     #[arg(long, value_name = "URL")]
     server: Option<String>,
     /// Write the artifacts and stop — no upload, and no question about one.
@@ -692,7 +693,7 @@ fn upload_target(cli: &Cli) -> Result<Option<String>, String> {
     }
     let url: String = Input::new()
         .with_prompt("Server base URL")
-        .default("http://127.0.0.1:4321".to_string())
+        .default("https://127.0.0.1:4321".to_string())
         .interact_text()
         .map_err(|e| format!("cannot read the answer: {e}"))?;
     Ok(Some(url.trim_end_matches('/').to_string()))
@@ -2254,6 +2255,18 @@ async fn expect_ok(response: reqwest::Response, url: &str) -> Result<(), String>
 
 fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        // TLS 1.3 alone, as every connection of this project (ADR-0038).
+        .tls_version_min(reqwest::tls::Version::TLS_1_3)
+        // Release hosts redirect to their CDN, so redirects are followed — but never to http.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() != "https" {
+                attempt.error("a redirect to anything but https is refused")
+            } else if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
         // An artifact is hundreds of megabytes over someone else's CDN; a whole-request timeout
         // would kill a working download on principle, so only the connect phase is bounded.
         .connect_timeout(std::time::Duration::from_secs(30))

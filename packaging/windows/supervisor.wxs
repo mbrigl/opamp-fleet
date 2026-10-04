@@ -114,7 +114,7 @@
                  Before="InstallInitialize"
                  Condition="NOT SELFUPDATE OR SELFUPDATE=&quot;0&quot;" />
     <SetProperty Id="ENDPOINT"
-                 Value="http://localhost:4320/v1/opamp"
+                 Value="wss://127.0.0.1:4320/v1/opamp"
                  Sequence="ui"
                  After="LaunchConditions"
                  Condition="NOT ENDPOINT AND NOT Installed" />

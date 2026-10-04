@@ -43,7 +43,12 @@ use crate::packages::{PackageId, PackageSummary, Platform, Source};
         (name = "configurations", description = "Selector-targeted Configurations"),
         (name = "packages", description = "Software packages the Server delivers (ADR-0019)"),
         (name = "deployments", description = "What reaches a channel of hosts — the only thing \
-                                              rolled out (ADR-0030)")
+                                              rolled out (ADR-0030)"),
+        (name = "enrolment", description = "How a host gets its first certificate: a window an \
+                                            operator opens, and requests an operator decides \
+                                            (ADR-0039)"),
+        (name = "revocation", description = "What the client CA signed, and the certificates and \
+                                             credentials the Server no longer admits (ADR-0049)")
     )
 )]
 struct ApiDoc;
@@ -52,21 +57,129 @@ struct ApiDoc;
 /// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
 /// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
 /// page and a session.
-pub struct OperatorAuth(Credentials);
+pub struct OperatorAuth(
+    Arc<Credentials>,
+    Option<Arc<crate::throttle::Throttle>>,
+    Option<Arc<dyn crate::audit::Audit>>,
+);
 
 impl OperatorAuth {
-    pub fn from_config(auth: &RestAuthConfig) -> Self {
-        OperatorAuth(Credentials::new(auth.accepted_headers(), auth.challenge()))
+    /// # Errors
+    /// Returns an error naming an entry of `[rest.auth]` that is not a hash this Server keeps.
+    pub fn from_config(auth: &RestAuthConfig) -> Result<Self, String> {
+        Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
+    }
+
+    /// Records refused sign-ins in `audit` (ADR-0052 clause 1).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
+        self.2 = audit;
+        self
+    }
+
+    /// Counts this plane's failures in a table of its own (ADR-0039 clause 24).
+    #[must_use]
+    pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
+        self.1 = Some(throttle);
+        self
     }
 }
 
-/// Refuses every request that carries no configured credential, before any handler sees it.
+/// Records every mutating act on the Operator plane, before it runs and once it has run; an act
+/// that cannot be recorded is not run (ADR-0052 clauses 1, 6).
+async fn record_act(
+    State(audit): State<Arc<dyn crate::audit::Audit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use crate::audit::Entry;
+    let method = request.method().clone();
+    if matches!(
+        method,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let peer = crate::transport::peer_ip(&request);
+    let operator = basic_user(request.headers());
+    let path = request.uri().path().to_string();
+    let entry = |event: &str, outcome: &str| {
+        Entry::new(event, outcome)
+            .peer(peer)
+            .with("plane", "operator")
+            .with("operator", operator.clone())
+            .with("method", method.to_string())
+            .with("path", path.clone())
+    };
+    if audit.record(entry("operator.act", "requested")).is_err() {
+        return crate::transport::busy();
+    }
+    let response = next.run(request).await;
+    audit.refusal(entry("operator.act", "completed").with("status", response.status().as_u16()));
+    response
+}
+
+/// The user name of a Basic `Authorization` header, never the password.
+fn basic_user(headers: &axum::http::HeaderMap) -> Option<String> {
+    use base64::Engine as _;
+    let encoded = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    text.split_once(':').map(|(user, _)| user.to_string())
+}
+
+/// Refuses every request that carries no configured credential, before any handler sees it, and
+/// a peer address that has failed too often before its credential is compared.
 async fn authenticate(
     State(auth): State<Arc<OperatorAuth>>,
     request: Request,
     next: Next,
 ) -> Response {
-    if !auth.0.permits(request.headers()) {
+    let peer = crate::transport::peer_ip(&request);
+    let operator = basic_user(request.headers());
+    let refusal = |event: &str, outcome: &str| {
+        if let Some(audit) = &auth.2 {
+            audit.refusal(
+                crate::audit::Entry::new(event, outcome)
+                    .peer(peer)
+                    .with("plane", "operator")
+                    .with("operator", operator.clone()),
+            );
+        }
+    };
+    if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
+        if let Some(wait) = throttle.retry_after(peer) {
+            refusal("operator.throttled", "throttled");
+            return crate::transport::throttled(wait);
+        }
+    }
+    // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
+    // the back-off check first (ADR-0039 clause 2).
+    let _attempt = match (&auth.1, peer) {
+        (Some(throttle), Some(peer)) => match throttle.begin(peer) {
+            Some(attempt) => Some(attempt),
+            None => {
+                refusal("operator.throttled", "throttled");
+                return crate::transport::throttled(throttle.retry_after(peer).unwrap_or(1));
+            }
+        },
+        _ => None,
+    };
+    let verdict = auth.0.check(request.headers()).await;
+    if verdict == crate::credentials::Verdict::Busy {
+        return crate::transport::busy();
+    }
+    if verdict == crate::credentials::Verdict::Refused {
+        if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
+            throttle.failed(peer);
+        }
+        refusal("operator.refused", "refused");
         // The challenge is what turns this into a browser prompt rather than a dead end.
         return (
             StatusCode::UNAUTHORIZED,
@@ -112,6 +225,19 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
             delete_deployment_signature
         ))
         .routes(routes!(rollout_deployment))
+        .routes(routes!(
+            get_enrolment_window,
+            open_enrolment_window,
+            close_enrolment_window
+        ))
+        .routes(routes!(list_enrolments))
+        .routes(routes!(approve_enrolment))
+        .routes(routes!(reject_enrolment))
+        .routes(routes!(list_certificates))
+        .routes(routes!(list_revocations, revoke))
+        .routes(routes!(lift_revocation))
+        .routes(routes!(list_hosts))
+        .routes(routes!(set_gateway))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -132,7 +258,13 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
         .route("/", get(index))
-        .with_state(state);
+        .with_state(state.clone());
+    // Inside the guard, so an act is recorded only once it is authenticated, and named by the
+    // operator who made it (ADR-0052 clause 1).
+    let router = match state.audit().cloned() {
+        Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
+        None => router,
+    };
     match auth {
         // The outermost layer, so the guard covers every route on this listener — including the
         // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0017).
@@ -1423,6 +1555,9 @@ async fn probe(
         return Err(reason);
     }
     let client = match reqwest::Client::builder()
+        .use_rustls_tls()
+        // TLS 1.3 alone, as every connection of this Server (ADR-0038, ADR-0043).
+        .tls_version_min(reqwest::tls::Version::TLS_1_3)
         .timeout(std::time::Duration::from_secs(10))
         // Never chase a redirect: a public URL that 3xx-bounces to `169.254.169.254` or an internal
         // host would otherwise walk the probe straight past the check above.
@@ -1678,8 +1813,7 @@ struct DeploymentPackageView {
     /// The platforms whose artifact this Deployment holds a signature for, as `os/arch`.
     ///
     /// Read it against the Package's own entries: a platform listed there and missing here is one
-    /// an Agent will be offered **unsigned**. The Server does not refuse that — an unsigned fleet
-    /// is a legitimate policy (ADR-0019) — so it reports it, which is the only thing left to do.
+    /// no Agent is offered, and it keeps the channel from being rolled out (ADR-0045).
     signed_platforms: Vec<String>,
 }
 
@@ -2080,4 +2214,589 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
         .copied()
         .unwrap_or_default();
     Json(DeploymentView::of(deployment, reach)).into_response()
+}
+
+/// The enrolment window as the API answers with it (ADR-0039 clause 20).
+#[derive(Serialize, ToSchema)]
+struct EnrolmentWindow {
+    /// Whether a host with a bootstrap certificate may enrol now.
+    open: bool,
+    /// When the window closes, in milliseconds since the Unix epoch; absent while it is closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_ms: Option<u64>,
+}
+
+/// How long to open the enrolment window for.
+#[derive(Deserialize, ToSchema)]
+struct OpenWindow {
+    /// From 1 to 86400 seconds.
+    open_for_secs: u64,
+}
+
+/// One enrolment request waiting for an operator (ADR-0039 clause 22).
+#[derive(Serialize, ToSchema)]
+struct PendingEnrolment {
+    /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
+    id: String,
+    arrived_ms: u64,
+    /// The address the request came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
+    /// The subject the request asks for.
+    subject: String,
+    /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
+    /// so an operator can match a request to a host.
+    key_fingerprint: String,
+    /// The bootstrap certificate the connection carried.
+    bootstrap_subject: String,
+    bootstrap_fingerprint: String,
+}
+
+fn enrolment_off() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "enrolment is not configured — set [enrolment] bootstrap_ca_file",
+    )
+}
+
+fn window_view(until_ms: Option<u64>) -> Response {
+    Json(EnrolmentWindow {
+        open: until_ms.is_some(),
+        until_ms,
+    })
+    .into_response()
+}
+
+/// Whether hosts may enrol now, and until when.
+#[utoipa::path(
+    get,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    responses(
+        (status = 200, body = EnrolmentWindow),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
+    match state.enrolment() {
+        Some(enrolment) => window_view(enrolment.window()),
+        None => enrolment_off(),
+    }
+}
+
+/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default and
+/// lives in memory only, so a Server restart closes it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    request_body = OpenWindow,
+    responses(
+        (status = 200, body = EnrolmentWindow),
+        (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn open_enrolment_window(
+    State(state): State<Arc<AppState>>,
+    Json(spec): Json<OpenWindow>,
+) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    match enrolment.open(spec.open_for_secs) {
+        Ok(until) => {
+            info!(secs = spec.open_for_secs, "enrolment window opened");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.window", "opened").with("until_ms", until),
+            );
+            window_view(Some(until))
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Closes the enrolment window now: every enrolling connection ends, and every pending request
+/// expires.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/enrolment/window",
+    tag = "enrolment",
+    responses(
+        (status = 204, description = "Closed"),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    let expired = enrolment.pending().len();
+    enrolment.close();
+    info!("enrolment window closed");
+    note(
+        &state,
+        crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The enrolment requests waiting for an operator, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/enrolments",
+    tag = "enrolment",
+    responses(
+        (status = 200, body = Vec<PendingEnrolment>),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    let pending: Vec<PendingEnrolment> = enrolment
+        .pending()
+        .into_iter()
+        .map(|p| PendingEnrolment {
+            id: p.id,
+            arrived_ms: p.arrived_ms,
+            peer: p.requester.peer.map(|ip| ip.to_string()),
+            subject: p.subject,
+            key_fingerprint: p.key_fingerprint,
+            bootstrap_subject: p.requester.bootstrap_subject,
+            bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
+        })
+        .collect();
+    Json(pending).into_response()
+}
+
+/// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolments/{id}/approve",
+    tag = "enrolment",
+    params(("id" = String, Path, description = "the request's id")),
+    responses(
+        (status = 204, description = "Approved and signed"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request", body = ErrorBody)
+    )
+)]
+async fn approve_enrolment(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    match state.approve_enrolment(&id) {
+        Ok(()) => {
+            info!(request = %id, "enrolment request approved");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.approved", "approved").with("id", id.clone()),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(crate::enrolment::DecisionError::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            format!("no pending enrolment request {id:?}"),
+        ),
+        Err(crate::enrolment::DecisionError::Sign(e)) => error(StatusCode::CONFLICT, e),
+    }
+}
+
+/// Rejects one enrolment request; its connection is closed.
+#[utoipa::path(
+    post,
+    path = "/api/v1/enrolments/{id}/reject",
+    tag = "enrolment",
+    params(("id" = String, Path, description = "the request's id")),
+    responses(
+        (status = 204, description = "Rejected"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn reject_enrolment(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(enrolment) = state.enrolment() else {
+        return enrolment_off();
+    };
+    match enrolment.reject(&id) {
+        Ok(()) => {
+            info!(request = %id, "enrolment request rejected");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.rejected", "rejected").with("id", id.clone()),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => error(
+            StatusCode::NOT_FOUND,
+            format!("no pending enrolment request {id:?}"),
+        ),
+    }
+}
+
+/// One certificate the client CA signed (ADR-0049 clause 2).
+#[derive(Serialize, ToSchema)]
+struct CertificateView {
+    /// `client` — the CA that signed it, as a revocation names it.
+    authority: String,
+    /// The issuer's name, for reading.
+    issuer: String,
+    /// The serial, lowercase hex.
+    serial: String,
+    subject: String,
+    /// The SHA-256 fingerprint of the certified public key, hex.
+    key_fingerprint: String,
+    not_after_ms: u64,
+    /// The `instance_uid` of the message that carried the CSR, hex.
+    instance_uid: String,
+    issued_ms: u64,
+    /// On a renewal, the certificate it renewed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predecessor: Option<CertificateRef>,
+    /// The host it was issued to (ADR-0039 clause 7); absent on one an operator provisioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+}
+
+/// A host the client CA issued to (ADR-0039 clause 7).
+#[derive(Serialize, ToSchema)]
+struct HostView {
+    host: String,
+    /// A Gateway speaks for any Agent; any other host only for those it reported first.
+    gateway: bool,
+    /// The `instance_uid`s it speaks for, hex.
+    instance_uids: Vec<String>,
+    /// How many valid certificates it holds — at most three.
+    certificates: usize,
+}
+
+/// Whether a host is a Gateway.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct GatewayRequest {
+    gateway: bool,
+}
+
+/// A certificate by the CA that issued it and its serial.
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct CertificateRef {
+    /// `client` for the client CA, `bootstrap` for the bootstrap CA of `[enrolment]`.
+    authority: String,
+    /// The serial in hex, as `openssl x509 -noout -serial` prints it; colons, spaces, case and
+    /// leading zeros are ignored.
+    serial: String,
+}
+
+/// What to revoke: exactly one of the two.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct RevokeRequest {
+    #[serde(default)]
+    certificate: Option<CertificateRef>,
+    /// The exact `Authorization` value of a credential in `[auth]`, e.g. `Bearer …`. Only its
+    /// SHA-256 is kept.
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+/// One revocation (ADR-0049 clause 7).
+#[derive(Serialize, ToSchema)]
+struct RevocationView {
+    /// What `DELETE` names.
+    id: String,
+    /// `certificate` or `credential`.
+    kind: &'static str,
+    revoked_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate: Option<CertificateRef>,
+    /// The first eight hex digits of the credential's SHA-256.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_sha256_prefix: Option<String>,
+}
+
+impl RevocationView {
+    fn of(entry: crate::revocation::Revocation) -> Self {
+        use crate::revocation::Revoked;
+        match entry.revoked {
+            Revoked::Certificate {
+                authority, serial, ..
+            } => RevocationView {
+                id: entry.id,
+                kind: "certificate",
+                revoked_ms: entry.revoked_ms,
+                certificate: Some(CertificateRef { authority, serial }),
+                credential_sha256_prefix: None,
+            },
+            Revoked::Credential { sha256 } => RevocationView {
+                id: entry.id,
+                kind: "credential",
+                revoked_ms: entry.revoked_ms,
+                certificate: None,
+                credential_sha256_prefix: Some(sha256[..8].to_string()),
+            },
+        }
+    }
+}
+
+/// Records what an operator act did, beside the act itself (ADR-0052 clause 1). The act was
+/// already recorded before it ran, so a detail that cannot be recorded changes nothing.
+fn note(state: &AppState, entry: crate::audit::Entry) {
+    if let Some(audit) = state.audit() {
+        audit.refusal(entry);
+    }
+}
+
+fn revocation_entry(
+    event: &str,
+    outcome: &str,
+    entry: &crate::revocation::Revocation,
+) -> crate::audit::Entry {
+    use crate::revocation::Revoked;
+    let base = crate::audit::Entry::new(event, outcome).with("id", entry.id.clone());
+    match &entry.revoked {
+        Revoked::Certificate {
+            authority, serial, ..
+        } => base
+            .with("kind", "certificate")
+            .with("authority", authority.clone())
+            .with("serial", serial.clone()),
+        Revoked::Credential { sha256 } => base
+            .with("kind", "credential")
+            .with("credential_sha256_prefix", sha256[..8].to_string()),
+    }
+}
+
+fn revocation_off() -> Response {
+    error(StatusCode::NOT_FOUND, "revocation is not configured")
+}
+
+/// Every certificate the client CA signed that has not yet expired, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<CertificateView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let authority = |id: &crate::revocation::CertId| {
+        revocations
+            .authority_of(&id.issuer)
+            .map_or_else(|| "unknown".to_string(), |a| a.role.clone())
+    };
+    let issued: Vec<CertificateView> = revocations
+        .issued()
+        .into_iter()
+        .map(|issued| CertificateView {
+            authority: authority(&issued.facts.id),
+            issuer: issued.facts.issuer_name,
+            serial: issued.facts.id.serial,
+            subject: issued.facts.subject,
+            key_fingerprint: issued.facts.key_fingerprint,
+            not_after_ms: issued.facts.not_after_ms,
+            instance_uid: issued.instance_uid,
+            issued_ms: issued.issued_ms,
+            predecessor: issued.predecessor.map(|id| CertificateRef {
+                authority: authority(&id),
+                serial: id.serial,
+            }),
+            host: issued.facts.host,
+        })
+        .collect();
+    Json(issued).into_response()
+}
+
+/// Every host the client CA issued to, by name.
+#[utoipa::path(
+    get,
+    path = "/api/v1/hosts",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<HostView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let hosts: Vec<HostView> = revocations
+        .hosts()
+        .into_iter()
+        .map(|(host, entry, certificates)| HostView {
+            host,
+            gateway: entry.gateway,
+            instance_uids: entry.instance_uids.into_iter().collect(),
+            certificates,
+        })
+        .collect();
+    Json(hosts).into_response()
+}
+
+/// Marks a host as a Gateway, which speaks for the Agents behind it, or takes the mark away.
+#[utoipa::path(
+    put,
+    path = "/api/v1/hosts/{host}/gateway",
+    tag = "revocation",
+    params(("host" = String, Path, description = "the host, as its certificates name it")),
+    request_body = GatewayRequest,
+    responses(
+        (status = 204, description = "Set"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such host, or revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn set_gateway(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(host): Path<String>,
+    Json(request): Json<GatewayRequest>,
+) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    match revocations.set_gateway(&host, request.gateway) {
+        Ok(true) => {
+            info!(%host, gateway = request.gateway, "gateway mark set");
+            note(
+                &state,
+                crate::audit::Entry::new(
+                    "host.gateway",
+                    if request.gateway { "set" } else { "cleared" },
+                )
+                .with("host", host),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no host {host:?}")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The revocation list, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/revocations",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<RevocationView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let list: Vec<RevocationView> = revocations
+        .list()
+        .into_iter()
+        .map(RevocationView::of)
+        .collect();
+    Json(list).into_response()
+}
+
+/// Revokes a certificate, and every renewal of it, or a credential of `[auth]`. Every session it
+/// admitted ends at once, and no new one is admitted.
+#[utoipa::path(
+    post,
+    path = "/api/v1/revocations",
+    tag = "revocation",
+    request_body = RevokeRequest,
+    responses(
+        (status = 201, body = RevocationView),
+        (status = 400, description = "Not exactly one of the two, an authority this Server does not have, a serial that is not hex, or a credential [auth] does not hold", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody),
+        (status = 507, description = "The list is full", body = ErrorBody)
+    )
+)]
+async fn revoke(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Json(request): Json<RevokeRequest>,
+) -> Response {
+    use crate::revocation::RevokeError;
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let outcome = match (request.certificate, request.credential) {
+        (Some(certificate), None) => {
+            revocations.revoke_certificate(&certificate.authority, &certificate.serial)
+        }
+        (None, Some(credential)) => revocations.revoke_credential(&credential),
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of certificate and credential",
+            )
+        }
+    };
+    match outcome {
+        Ok(entry) => {
+            info!(revocation = %entry.id, "revoked");
+            note(
+                &state,
+                revocation_entry("revocation.revoked", "revoked", &entry),
+            );
+            (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
+        }
+        Err(RevokeError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(RevokeError::Full) => error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "the revocation list holds {} entries already",
+                crate::revocation::MAX_REVOCATIONS
+            ),
+        ),
+        Err(RevokeError::Store(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Lifts one revocation. It takes effect at the next connection.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/revocations/{id}",
+    tag = "revocation",
+    params(("id" = String, Path, description = "the revocation's id")),
+    responses(
+        (status = 204, description = "Lifted"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such revocation, or revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn lift_revocation(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    match revocations.lift(&id) {
+        Ok(true) => {
+            info!(revocation = %id, "revocation lifted");
+            note(
+                &state,
+                crate::audit::Entry::new("revocation.lifted", "lifted").with("id", id.clone()),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }

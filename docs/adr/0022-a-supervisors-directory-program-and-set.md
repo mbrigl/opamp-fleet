@@ -1,6 +1,6 @@
 # ADR-0022: Each Supervisor owns one directory and runs only a program installed there, and the Server manages the set of Supervisors
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0051](0051-a-delivered-block-brings-nothing-past-the-signature.md)
 - **Date:** 2026-08-19
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml

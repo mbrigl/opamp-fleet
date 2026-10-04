@@ -10,6 +10,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,8 +25,9 @@ fn spawn(dir: &Path, args: &[&str]) -> Child {
         &config,
         // Port 1 answers nothing, so this Client stays in its reconnect loop for the whole test.
         format!(
-            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {:?}\n",
-            dir.join("state").to_string_lossy()
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {:?}\n{}",
+            dir.join("state").to_string_lossy(),
+            common::credentials(dir)
         ),
     )
     .expect("write config");
@@ -63,6 +66,7 @@ fn wait_for_log(dir: &Path, within: Duration) -> Option<std::path::PathBuf> {
 
 /// The whole point: started as a service, the Client writes a log somebody can read — which on
 /// Windows is the only copy that exists, since the SCM discards stderr.
+/// Verifies: ADR-0046
 #[test]
 fn a_service_run_writes_a_log_file() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -86,6 +90,7 @@ fn a_service_run_writes_a_log_file() {
 /// A person at a terminal is already reading stderr, so nothing is written to disk. This is the
 /// half that keeps the feature from quietly leaving files behind every time somebody runs the
 /// Client by hand.
+/// Verifies: ADR-0046
 #[test]
 fn a_foreground_run_writes_no_log_file() {
     let dir = tempfile::tempdir().expect("tempdir");

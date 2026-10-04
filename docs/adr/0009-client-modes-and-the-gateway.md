@@ -1,6 +1,6 @@
 # ADR-0009: One Client binary with two composable modes, carrying n Agents over m connections
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)
 - **Date:** 2026-08-09
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state

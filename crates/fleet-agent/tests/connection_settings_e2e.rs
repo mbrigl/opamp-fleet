@@ -3,6 +3,8 @@
 //! connecting, persists it, reconnects, and reports `APPLIED`; the Server, seeing the reported
 //! hash match, stops offering. A restarted Client is not re-offered what it already runs.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -67,6 +69,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
+/// Verifies: ADR-0041
 #[tokio::test]
 async fn an_offer_is_verified_persisted_and_reported_applied() {
     let (addr, state, dir) = spawn_armed_server().await;
@@ -77,7 +80,8 @@ async fn an_offer_is_verified_persisted_and_reported_applied() {
         state_dir = state_dir.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
 
     let client = spawn_client(&config_path);
 

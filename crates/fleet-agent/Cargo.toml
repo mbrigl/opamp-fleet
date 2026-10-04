@@ -59,10 +59,10 @@ async-trait.workspace = true
 # `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
 # `host.mac` (ADR-0024).
 sysinfo = { workspace = true, features = ["network"] }
-# The downstream OpAMP endpoint of Gateway Mode (ADR-0009): a WebSocket upgrade and a plain-HTTP
-# POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
-# it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
-axum = { workspace = true, features = ["ws"] }
+# The downstream OpAMP endpoint of Gateway Mode (ADR-0009) is `opamp::server`'s, an axum router;
+# its WebSocket upgrade is `opamp`'s own (ADR-0057). The HTTP engine under it — hyper, tower,
+# http-body — is already linked through reqwest; this adds the routing layer.
+axum.workspace = true
 # ADR-0019: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true
@@ -140,7 +140,12 @@ post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
 
 [dev-dependencies]
+# Virtual time, so a bound measured in minutes is tested in milliseconds.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+# A test holds a TLS connection open mid-headers on the Gateway (H18), below what a client library
+# would let it do.
+rustls.workspace = true
 # Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
 # encoder rides here alone again now that `pack` has moved to its own crate (ADR-0011) — a
 # dev-dependency reaches the tests and no shipped binary.

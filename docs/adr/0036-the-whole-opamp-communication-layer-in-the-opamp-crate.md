@@ -1,6 +1,6 @@
 # ADR-0036: The whole OpAMP communication layer lives in the `opamp` crate — wire layer, both sides, their TLS and their listener — built from material the application hands it
 
-- **Status:** 🟡 proposed
+- **Status:** ⚪ superseded by [ADR-0057](0057-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, and the per-feature lint in `.github/workflows/ci.yml` and `README.md`
@@ -62,7 +62,13 @@ from values the application hands it and never from a file or a configuration fo
 4. **`opamp::tls` is the TLS both sides share,** compiled with either feature. It installs the ring
    provider, never a system library ([ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)).
    It reads certificates and a private key from PEM bytes, and an empty result is an error. It
-   carries an `Identity`, a certificate chain and its key as PEM. It opens no file.
+   carries an `Identity`, a certificate chain and its key as PEM. It opens no file. Every rustls
+   configuration either side builds speaks TLS 1.3 alone, with the three TLS 1.3 suites of the ring
+   provider. The process-wide provider carries those suites and no other, so a TLS stack that
+   builds its own configuration, such as `reqwest`'s, cannot negotiate TLS 1.2 either. The
+   `wss://` connector is always built here, never left to the WebSocket library, so TLS 1.3 holds
+   even in an application that never installed the provider. This is the specification's floor
+   (Q-3), not a setting the application can lower.
 
 5. **The server endpoint.** `opamp::server` serves both transports on one path, with the media type,
    gzip, the limit in both directions, framing, the 1009 close and the per-connection loop. The
@@ -76,7 +82,8 @@ from values the application hands it and never from a file or a configuration fo
    a 30-second header read with the timer it needs, and a 10-second TLS handshake. It puts the
    verified peer certificate and the peer address into every request, on every listener it serves.
    A handle shuts listeners down, and one handle may drain several. How long a drain may take is
-   the application's to state. Every OpAMP listener of this project serves through it. Those are
+   the application's to state. `serve` refuses to listen without TLS on any address but the
+   loopback literals `127.0.0.1` and `::1` (Q-1). Every OpAMP listener of this project serves through it. Those are
    the Server's two planes, the Gateway's downstream endpoint and the Supervisor Endpoint.
 
 7. **The client state machine and its session.** `opamp::client::protocol` decides which fields a
@@ -90,8 +97,9 @@ from values the application hands it and never from a file or a configuration fo
    limit, the heartbeat and the poll interval. `opamp::client` builds everything from that
    description. It picks the transport by scheme. It builds the rustls configuration for `wss://`
    and the HTTP client for `https://`, which follows no redirect, times out after 30 seconds and
-   marks the credential sensitive. It warns once when a credential would cross the network in
-   cleartext ([ADR-0017](0017-admission-and-authentication.md)). The same description drives the
+   marks the credential sensitive. It refuses `ws://` and `http://` to any host but the loopback
+   literals `127.0.0.1` and `::1`, before it connects (Q-1). A host name is never loopback, not
+   even `localhost`, because a name can be made to resolve anywhere. The same description drives the
    connection, the one-shot probe that proves offered settings (ADR-0018), and a single WebSocket
    for a caller that drives its own socket, such as the Gateway's upstream pool.
 
@@ -113,6 +121,8 @@ from values the application hands it and never from a file or a configuration fo
       into their requests too. Nothing there reads them.
     - The probe of offered settings applies the message limit and marks the credential sensitive,
       as the long-running connection does.
+    - TLS 1.2 is no longer offered or accepted by either end, and plaintext off the loopback is
+      refused rather than warned about (clauses 4, 6 and 8).
 
 **Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0017;
 finer features, such as one per transport; a release routine for the crate; and where the PEM

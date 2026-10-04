@@ -195,10 +195,10 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
-        // service starts, dials the development default, and manages nothing.
+        // service refuses to start.
         println!(
-            "warning: no configuration at {} — the Client will run on defaults until it exists \
-             (write it, or re-run with --interactive)",
+            "warning: no configuration at {} — the Client refuses to start until it exists with \
+             a fleet credential and a client identity (write it, or re-run with --interactive)",
             config_path.display()
         );
     }
@@ -206,6 +206,16 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
     let config = ClientConfig::load(&config_path)?;
+    // And held to what the Client needs at startup. A packaged install registers the service even
+    // so — it has an endpoint and no terminal to ask for a secret — but never starts it, and the
+    // service refuses to run until the file is complete (ADR-0046, ADR-0047). Said loudly here.
+    if let Err(e) = config.check_admission() {
+        println!(
+            "warning: {}: {e}. The service is registered, and refuses to start until this is set \
+             (or re-run with --interactive).",
+            config_path.display()
+        );
+    }
 
     let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;
@@ -223,6 +233,18 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         state_dir: state_dir.clone(),
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
+
+    // On Windows every local user inherits read access under %ProgramData%; the data root, and a
+    // state directory placed elsewhere, are cut off from it before anyone is granted anything
+    // (H8). Unix needs nothing here: the Client writes its secrets owner-only itself.
+    std::fs::create_dir_all(&data_root)
+        .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
+    windows_rights::restrict_data_root(level, &data_root)?;
+    if !state_dir.starts_with(&data_root) {
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        windows_rights::restrict_data_root(level, &state_dir)?;
+    }
 
     // The handover (ADR-0014 clause 13, carrying ADR-0014): both roots belong to the account —
     // config and state because the service reads and rewrites them (ADR-0022), the executable

@@ -233,6 +233,9 @@ pub trait HostFacts: Send + Sync {
 pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
+    /// What the Supervisor Endpoint asks the Managed Process to present (ADR-0053); handed to the
+    /// process as [`ENDPOINT_TOKEN_ENV`](crate::supervisor::process::ENDPOINT_TOKEN_ENV).
+    pub endpoint_token: String,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
     /// (ADR-0022). Placed by `supervisor_dir`, so nothing may assume where it is.
     pub supervisor_dir: PathBuf,
@@ -387,6 +390,21 @@ pub trait Plugin {
     /// # Errors
     /// Returns an error when the settings do not parse.
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
+
+    /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
+    /// `args` (ADR-0051 clause 19): a kind whose settings name files the Supervisor reads confines
+    /// them here. `running` is the settings of the running block of the same name, if any. By
+    /// default a kind names no such file.
+    ///
+    /// # Errors
+    /// Returns the reason the delivered block is refused.
+    fn check_delivered(
+        &self,
+        _settings: &toml::Table,
+        _running: Option<&toml::Table>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The strict second-stage parse of a block's plugin settings, shared by every plugin's
@@ -439,6 +457,7 @@ mod tests {
         let (_tx, shutdown) = shutdown_channel();
         let (event_tx, _events) = mpsc::channel(1);
         SupervisorContext {
+            endpoint_token: String::new(),
             name: "fluent-bit".to_string(),
             config_dir: supervisor_dir.join("config"),
             supervisor_dir,

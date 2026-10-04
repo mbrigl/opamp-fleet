@@ -1,6 +1,6 @@
 # ADR-0019: A Supervisor downloads, verifies, unpacks, swaps and health-gates a package, and rolls back only to a predecessor
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0042](0042-signed-package-delivery-from-allowed-sources.md)
 - **Date:** 2026-08-13
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/packages.rs, crates/fleet-agent/src/archive.rs, crates/fleet-agent/src/install.rs, crates/fleet-agent/src/supervisor/process.rs, the package handling in crates/fleet-agent/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`

@@ -1,6 +1,6 @@
 # ADR-0021: The Client updates itself — as its own Agent, by a consent that stands, through a staged version and a restart it does not issue
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0044](0044-the-client-updates-itself-from-a-signed-package.md)
 - **Date:** 2026-08-18
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/update/, the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property

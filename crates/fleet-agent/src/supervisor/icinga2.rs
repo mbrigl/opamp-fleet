@@ -866,6 +866,27 @@ async fn intercept(
     }
 }
 
+/// `node_name` names the certificate and key files of this host, so it is one plain file-name
+/// component and nothing that could climb out of the certificate directory (ADR-0051 clause 19).
+fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
+    let Some(node_name) = node_name else {
+        return Ok(());
+    };
+    let plain = !node_name.is_empty()
+        && !node_name.contains(['/', '\\', ':'])
+        && node_name != "."
+        && node_name != ".."
+        && node_name.trim() == node_name;
+    if plain {
+        Ok(())
+    } else {
+        Err(format!(
+            "supervisor {name:?}: node_name {node_name:?} must be a plain name — it names this \
+             host's certificate and key files"
+        ))
+    }
+}
+
 impl Plugin for Icinga2Plugin {
     fn kind(&self) -> &'static str {
         "icinga2"
@@ -905,6 +926,7 @@ impl Plugin for Icinga2Plugin {
             RETIRED,
             std::mem::take(&mut ctx.settings),
         )?;
+        check_node_name(&ctx.name, settings.node_name.as_deref())?;
         let layout = Self::layout(&ctx, &settings);
         // What the delivered tree needs to run at all, and nothing else (ADR-0029): its own
         // libraries have to win over whatever the machine has, which is the whole point of a
@@ -920,6 +942,7 @@ impl Plugin for Icinga2Plugin {
         let events = ctx.events.clone();
         let gate = layout.clone();
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
@@ -986,7 +1009,59 @@ impl Plugin for Icinga2Plugin {
         // Retired keys are refused before the strict parse, so a block written against an older
         // Client is told where its value went instead of meeting serde's "unknown field"
         // (ADR-0029).
-        parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings).map(|_| ())
+        let settings = parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings)?;
+        check_node_name(name, settings.node_name.as_deref())
+    }
+
+    /// A delivered block reads its ticket and the parent's certificate only from its own
+    /// configuration directory, and pins the parent it names (ADR-0051 clause 19): otherwise the
+    /// Server could name any file on the host and a parent to send it to.
+    fn check_delivered(
+        &self,
+        settings: &toml::Table,
+        running: Option<&toml::Table>,
+    ) -> Result<(), String> {
+        // The block the operator wrote, delivered back unchanged, brings nothing new.
+        if running == Some(settings) {
+            return Ok(());
+        }
+        // A file the operator named is kept only while it goes to the parent the operator named,
+        // under the node name the operator chose.
+        let same_parent = ["parent_host", "node_name"]
+            .iter()
+            .all(|key| running.map(|running| running.get(*key)) == Some(settings.get(*key)));
+        for key in ["ticket_file", "trusted_cert_file"] {
+            let Some(value) = settings.get(key) else {
+                continue;
+            };
+            if same_parent && running.and_then(|running| running.get(key)) == Some(value) {
+                continue;
+            }
+            let inside = value
+                .as_str()
+                .and_then(|path| path.strip_prefix("${config_dir}/"))
+                .is_some_and(|rest| {
+                    let rest = std::path::Path::new(rest);
+                    rest.components().count() > 0
+                        && rest
+                            .components()
+                            .all(|c| matches!(c, std::path::Component::Normal(_)))
+                });
+            if !inside {
+                return Err(format!(
+                    "a delivered block's {key} must be ${{config_dir}}/<file>, inside its own \
+                     configuration directory"
+                ));
+            }
+        }
+        if settings.contains_key("parent_host") && !settings.contains_key("trusted_cert_file") {
+            return Err(
+                "a delivered block must name trusted_cert_file: a parent the Server names is not \
+                 trusted on first use"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1012,6 +1087,7 @@ mod tests {
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
         let (events, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = SupervisorContext {
+            endpoint_token: String::new(),
             name: "icinga2".to_string(),
             supervisor_dir: root.clone(),
             config_dir: root.join("config"),
@@ -1269,6 +1345,7 @@ mod tests {
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
         let (events, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = SupervisorContext {
+            endpoint_token: String::new(),
             name: "icinga2".to_string(),
             supervisor_dir: root.clone(),
             config_dir: root.join("config"),

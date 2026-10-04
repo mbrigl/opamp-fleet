@@ -1,6 +1,6 @@
 # ADR-0020: The Server stores each release as one package per Agent type and version, with one entry per Platform, and offers an Agent only the artifact built for its type and machine
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0043](0043-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-server/src/packages.rs`, the package routes and the download route of `crates/fleet-server/src/api.rs`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages tab of the bundled UI

@@ -150,7 +150,57 @@ async fn ring_holding(
         .await
         .expect("put package");
     assert_eq!(response.status(), 200, "the channel takes the package");
+    sign_every_entry(server, channel, support::AGENT_TYPE, version).await;
     channel.to_string()
+}
+
+/// Records a signature on `channel` for every entry the Package holds, as an operator does before a
+/// rollout: the Server offers nothing unsigned (ADR-0045). The Server stores a signature and never
+/// checks it — the Agent does — so a placeholder serves every test here that is not about it.
+async fn sign_every_entry(server: &TestServer, channel: &str, agent_type: &str, version: &str) {
+    let set: serde_json::Value = reqwest::Client::new()
+        .get(set_url(server, agent_type, version))
+        .send()
+        .await
+        .expect("get package")
+        .json()
+        .await
+        .expect("json");
+    // What the channel already holds stays as it is: a signature on a released Package is frozen.
+    let signed: Vec<String> = ring_view(server, channel).await["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["agent_type"] == agent_type && p["version"] == version)
+        .flat_map(|p| {
+            p["signed_platforms"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    for entry in set["entries"].as_array().into_iter().flatten() {
+        let (os, arch) = (
+            entry["os"].as_str().unwrap_or(""),
+            entry["arch"].as_str().unwrap_or(""),
+        );
+        if signed.contains(&format!("{os}/{arch}")) {
+            continue;
+        }
+        let response = reqwest::Client::new()
+            .put(format!(
+                "{}/signatures/{agent_type}/{version}/{os}/{arch}",
+                deployment_url(server, channel)
+            ))
+            .json(&serde_json::json!({ "signature": "01".repeat(64) }))
+            .send()
+            .await
+            .expect("put signature");
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        assert_eq!(status, 200, "the channel takes the signature: {body}");
+    }
 }
 
 /// The channel every test that does not care about aim uses: it claims every Agent of the type this
@@ -234,6 +284,7 @@ async fn the_act_names_the_version_it_releases() {
 /// ADR-0012: the offered `download_url` is a path the Client resolves against **its own OpAMP
 /// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
 /// the Operator plane, which is where authentication is going and where no Agent will ever look.
+/// Verifies: ADR-0043, ADR-0054
 #[tokio::test]
 async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -266,6 +317,7 @@ async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_pla
     );
 }
 
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -346,6 +398,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     );
 }
 
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn no_offer_without_the_capability() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -363,6 +416,7 @@ async fn no_offer_without_the_capability() {
 
 /// An entry belongs to a Set: uploading toward an identity nobody created is a 404, not a package
 /// conjured out of a URL (ADR-0020 — the identity is stated at creation).
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn an_entry_needs_its_set_first() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -373,6 +427,7 @@ async fn an_entry_needs_its_set_first() {
 /// A package is a *program*: an `otelcol-contrib` binary weighs hundreds of megabytes, so the
 /// entry route must not be bounded by the framework's 2 MiB default, and the artifact must reach
 /// the Agent unchanged whatever its size.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -407,6 +462,7 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
 
 /// The upload limit is a configured bound, not an accident of the framework: past it the API
 /// refuses rather than buffering whatever arrives.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn an_artifact_past_the_configured_limit_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -442,6 +498,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
 
 /// The point of ADR-0030: the channel decides whom the rollout act assigns, so a binary rollout can
 /// be tried on part of the fleet first — and nobody outside it is touched by the act.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -574,6 +631,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
 /// — because a Selector is equality and cannot say "not", so the fleet-wide-plus-narrower-override
 /// shape ADR-0020 allowed is gone. Each channel holds its own version; the rollout finishes by moving
 /// the canary host's label back and rolling the stable channel out again. Nobody moves without an act.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -656,6 +714,7 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
 /// The one case with no defensible answer, restated for ADR-0030. It is no longer about versions
 /// or specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
 /// either is. The Server offers nothing and the fleet view names both.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -694,6 +753,7 @@ async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
 
 /// ADR-0019: an entry may live somewhere else. The Server stores the reference, offers that
 /// address verbatim with the operator's checksum and headers, and has nothing of its own to serve.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -777,6 +837,7 @@ async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
 
 /// The probe is a typo catch, and only a definitive refusal counts as one: a source this Server
 /// cannot reach at all says nothing about whether the Agents can.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -832,6 +893,7 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
 /// ADR-0020 in place of ADR-0020's late typing: the Agent type is identity, stated at creation —
 /// there is no untyped state — and a Set built for another type fits nobody here: its rollout
 /// act assigns no one, whatever its Selector says.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_set_reaches_only_agents_of_its_type() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -879,6 +941,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .await
         .expect("put package");
     assert_eq!(response.status(), 200);
+    sign_every_entry(&server, "stable", "promtail", "1.0.0").await;
     let outcome = rollout_ring(&server, "stable").await;
     assert_eq!(
         outcome["assigned_agents"], 0,
@@ -1032,6 +1095,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
 /// The silent no-op ADR-0020 named: a Set can target nobody through a mistyped Agent type, a
 /// platform the fleet does not run, or a Selector that matches no one — and none of the three is
 /// a rejected upload, so without a count nothing says it.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_set_says_how_many_agents_it_reaches() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1105,6 +1169,7 @@ async fn a_set_says_how_many_agents_it_reaches() {
 /// ADR-0026 reaches packages, not just Configurations — which is the case it exists for. A binary
 /// rollout starts on the hosts an operator moved into the canary channel, and moving one in needs no
 /// access to that host.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_label_aims_a_set_at_part_of_the_fleet() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1234,6 +1299,8 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
 
     let response = upload_entry(&server, support::AGENT_TYPE, "2.0.0", HOST, b"the-binary").await;
     assert_eq!(response.status(), 200);
+    // An entry uploaded after the rollout reaches nobody until its channel signs it (ADR-0045).
+    sign_every_entry(&server, &channel, support::AGENT_TYPE, "2.0.0").await;
 
     let staged = view(&server, "2.0.0").await;
     assert!(
@@ -1317,6 +1384,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
 /// A source URL that steers the probe at the cloud metadata endpoint — or another never-legitimate
 /// internal address — is refused (SSRF). The URL and its headers are entirely caller-supplied, so
 /// without this the Server could be made to read `169.254.169.254` and reflect the answer back.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn a_source_url_aimed_at_an_internal_address_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1353,8 +1421,53 @@ async fn a_source_url_aimed_at_an_internal_address_is_refused() {
     }
 }
 
+/// A referenced source is `https://`; plaintext is accepted on a loopback literal alone, and a host
+/// name never counts as one. Each refusal is a `400` that names the rule, before any probe.
+/// Verifies: ADR-0043, ADR-0054
+#[tokio::test]
+async fn a_plaintext_source_off_the_loopback_is_refused() {
+    let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+    let source = |url: &str| {
+        reqwest::Client::new()
+            .put(format!(
+                "{}/entries/{HOST}/source",
+                set_url(&server, support::AGENT_TYPE, "1.0.0")
+            ))
+            .json(&serde_json::json!({ "url": url, "sha256": hex::encode(sha256(b"x")) }))
+            .send()
+    };
+    for url in [
+        "http://mirror.example/otelcol.tar.gz",
+        "http://192.168.10.5/otelcol.tar.gz",
+        "http://localhost:8080/otelcol.tar.gz",
+    ] {
+        let response = source(url).await.expect("put source");
+        assert_eq!(response.status(), 400, "{url} must be refused");
+        let body = response.text().await.expect("body");
+        assert!(
+            body.contains("plaintext"),
+            "the refusal names the rule: {body}"
+        );
+    }
+    // Port 1 answers nothing, so the probe stores it unprobed: the rule alone decides.
+    let loopback = source("http://127.0.0.1:1/otelcol.tar.gz")
+        .await
+        .expect("put source");
+    assert_eq!(loopback.status(), 200, "a loopback literal is accepted");
+    let loopback = source("http://[::1]:1/otelcol.tar.gz")
+        .await
+        .expect("put source");
+    assert_eq!(
+        loopback.status(),
+        200,
+        "the IPv6 loopback literal is accepted"
+    );
+}
+
 /// The store has a whole-store ceiling, so a caller cannot fill the disk by uploading artifact after
 /// artifact under distinct names: once the store is at its limit, the next upload is refused.
+/// Verifies: ADR-0043
 #[tokio::test]
 async fn the_package_store_has_a_total_size_ceiling() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1438,6 +1551,7 @@ async fn put_deployment(
 /// A Deployment must name the channel it aims at. There is no fleet-wide default, and the refusal
 /// says what to write instead — an empty Selector is what a forgotten field looks like, and it
 /// would collide with every other channel (ADR-0030 point 10).
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_deployment_without_a_selector_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1467,6 +1581,7 @@ async fn a_deployment_without_a_selector_is_refused() {
 
 /// A channel cannot offer what the store does not hold, and it holds one Package per Agent type.
 /// Both refusals happen at the write, where the mistake is, rather than at resolution.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1547,6 +1662,7 @@ async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
 /// The signature belongs to the Deployment, not the artifact (ADR-0030 point 14) — and the view
 /// reports which platforms are covered, because an unsigned artifact is a legitimate policy the
 /// Server cannot refuse, only surface.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_deployment_carries_the_signature_and_says_what_is_unsigned() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1614,6 +1730,7 @@ async fn a_deployment_carries_the_signature_and_says_what_is_unsigned() {
 
 /// The aim stays editable and the channel keeps what it holds — moving a Deployment between channels is
 /// how a rollout proceeds, and it is not a change of bytes.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1668,7 +1785,7 @@ async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
 /// and the channel is where the offer's signature lives — deleting it under a standing offer
 /// would keep offering the Package, unsigned (ADR-0030 point 17). The refusal says which acts end
 /// the offer first.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1734,6 +1851,7 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
 
 /// The signature an Agent is offered comes from **its** Deployment (ADR-0030 point 14), not from
 /// the artifact record — so the same Package in two channels travels with each channel's own signature.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1790,6 +1908,7 @@ async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
 
 /// The retired upload parameter is refused **by name**, never ignored: a signature dropped on the
 /// floor is an unsigned rollout nobody notices.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1819,6 +1938,7 @@ async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
 /// a standing assignment: an Agent already rolled out to keeps its offer, because nothing
 /// distributes — or un-distributes — by itself (ADR-0027). Creating an overlapping channel must not
 /// withdraw software from a running host, and that is one `if` away from being wrong.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1875,6 +1995,7 @@ async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing(
 /// also claims the Agent is `409`, even though the operator has said which they mean. Honouring it
 /// would sidestep the conflict for good and make this path the way into a state the channel-wide act
 /// forbids.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn the_per_agent_act_refuses_to_pick_a_side() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1933,6 +2054,7 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
 /// **Swapping the version the channel holds is deliberately not frozen**, and the last assertion here
 /// pins that: it is how a rollout proceeds, it leaves every standing offer exactly as it was, and
 /// a rule that forbade it would forbid updating a fleet at all.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_ring_freezes_what_it_has_released() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2029,6 +2151,7 @@ async fn a_ring_freezes_what_it_has_released() {
 
 /// ADR-0030 point 3: the hash an Agent verifies against is readable off the package, so "did this
 /// host take my bytes" is answerable without trusting a status field.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2074,6 +2197,7 @@ async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
 /// because the operator's next move differs in each. An Agent in **no channel** has to be labelled;
 /// one in a channel that holds nothing for it needs a package uploaded; one with something waiting
 /// needs a press.
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_agent() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2135,4 +2259,243 @@ async fn the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_ag
     assert_eq!(view.deployment, "stable");
     assert_eq!(view.pending_packages.len(), 1, "now something waits");
     assert_eq!(view.pending_packages[0].deployment, "stable");
+}
+
+/// A Deployment that lacks a signature for an entry it holds is not rolled out: `409`, naming the
+/// Package and the platform, and nothing is released (ADR-0045).
+/// Verifies: ADR-0045
+#[tokio::test]
+async fn a_rollout_of_a_deployment_with_an_unsigned_package_is_refused_naming_it() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "3.0.0", b"the-binary").await;
+    assert_eq!(
+        put_deployment(
+            &server,
+            "unsigned",
+            &[("service.name", support::AGENT_TYPE)]
+        )
+        .await
+        .status(),
+        200
+    );
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/3.0.0",
+            deployment_url(&server, "unsigned"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+
+    let refused = reqwest::Client::new()
+        .post(format!("{}/rollout", deployment_url(&server, "unsigned")))
+        .send()
+        .await
+        .expect("rollout");
+    assert_eq!(refused.status(), 409);
+    let body = refused.text().await.expect("body");
+    assert!(
+        body.contains("3.0.0") && body.contains("linux/amd64"),
+        "{body}"
+    );
+}
+
+/// The per-Agent act is refused the same way: naming a Deployment that lacks a signature for an
+/// entry it holds is `409`, naming the Package and the platform, and the Agent is offered nothing.
+/// Once the entry is signed, the same act goes through.
+/// Verifies: ADR-0045
+#[tokio::test]
+async fn the_per_agent_act_refuses_a_deployment_with_an_unsigned_package() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let uid = InstanceUid::default();
+    let mut report = full_report(&uid, "edge-01", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    exchange(&server, &report).await;
+
+    upload(&server, support::AGENT_TYPE, "3.0.0", b"the-binary").await;
+    assert_eq!(
+        put_deployment(
+            &server,
+            "unsigned",
+            &[("service.name", support::AGENT_TYPE)]
+        )
+        .await
+        .status(),
+        200
+    );
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/3.0.0",
+            deployment_url(&server, "unsigned"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(response.status(), 200);
+
+    let act = || {
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/agents/{uid}/rollout",
+                server.rest_addr
+            ))
+            .json(&serde_json::json!({ "deployment": "unsigned" }))
+            .send()
+    };
+    let refused = act().await.expect("rollout to agent");
+    assert_eq!(refused.status(), 409);
+    let body = refused.text().await.expect("body");
+    assert!(
+        body.contains("3.0.0") && body.contains("linux/amd64"),
+        "{body}"
+    );
+    let mut next = full_report(&uid, "edge-01", 2);
+    next.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    let answer = exchange(&server, &next).await;
+    assert!(
+        answer
+            .packages_available
+            .is_none_or(|offer| offer.packages.is_empty()),
+        "nothing unsigned is offered"
+    );
+
+    sign_every_entry(&server, "unsigned", support::AGENT_TYPE, "3.0.0").await;
+    assert_eq!(act().await.expect("rollout to agent").status(), 200);
+}
+
+/// Setting a source probes it without following a redirect: a source that bounces the probe to a
+/// path that would answer `404` is stored, because the bounce is not chased, and nothing reaches
+/// the target.
+/// Verifies: ADR-0043
+#[tokio::test]
+async fn the_probe_follows_no_redirect() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let bouncing = listener.local_addr().expect("addr");
+    let followed = Arc::new(AtomicUsize::new(0));
+    let counted = followed.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut scratch = [0u8; 1024];
+            let read = stream.read(&mut scratch).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&scratch[..read]);
+            let answer: &[u8] = if request.contains("/missing") {
+                counted.fetch_add(1, Ordering::SeqCst);
+                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            } else {
+                b"HTTP/1.1 302 Found\r\nlocation: /missing\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            };
+            let _ = stream.write_all(answer).await;
+        }
+    });
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/entries/{HOST}/source",
+            set_url(&server, support::AGENT_TYPE, "1.0.0")
+        ))
+        .json(&serde_json::json!({
+            "url": format!("http://{bouncing}/otelcol.tar.gz"),
+            "sha256": hex::encode(sha256(b"x")),
+        }))
+        .send()
+        .await
+        .expect("put source");
+    assert_eq!(response.status(), 200, "a redirect is not a refusal");
+    assert_eq!(
+        followed.load(Ordering::SeqCst),
+        0,
+        "the probe followed the redirect"
+    );
+}
+
+/// Every `*.upload` file under `dir` — what an upload in progress stages its artifact into.
+fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "upload") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// An upload that stops arriving is answered `408` and leaves nothing staged behind: the floor
+/// on every body holds on the Operator plane's longest route too (ADR-0054 clause 14).
+/// Verifies: ADR-0054
+#[tokio::test]
+async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    opamp::tls::install_ring_provider();
+    let window = std::time::Duration::from_millis(300);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let operators = fleet_server::operator_app(state, None);
+    tokio::spawn(
+        opamp::server::listen::Listener::new(listener, opamp::server::listen::Handle::new())
+            .with_pace(window, 1024)
+            .serve(operators),
+    );
+    let set = format!(
+        "http://127.0.0.1:{port}/api/v1/packages/{}/1.0.0",
+        support::AGENT_TYPE
+    );
+    let created = reqwest::Client::new()
+        .put(&set)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(created.status(), 200);
+
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    socket
+        .write_all(
+            format!(
+                "PUT /api/v1/packages/{}/1.0.0/entries/linux/amd64 HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Length: 100000\r\n\r\npartial",
+                support::AGENT_TYPE
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    let mut buffer = vec![0u8; 1024];
+    let read = tokio::time::timeout(window * 10, socket.read(&mut buffer))
+        .await
+        .expect("an answer in time")
+        .expect("read");
+    assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("HTTP/1.1 408"));
+    assert!(
+        staged_uploads(dir.path()).is_empty(),
+        "{:?}",
+        staged_uploads(dir.path())
+    );
 }

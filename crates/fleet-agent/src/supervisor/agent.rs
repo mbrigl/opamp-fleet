@@ -903,6 +903,40 @@ impl Local {
             self.refuse_offer(offer, error, handled);
             return;
         }
+        // A Supervisor takes a package for its own Agent type and nothing else, and never an older
+        // one than it runs: the signature covers type and version (ADR-0042), so neither can be
+        // changed in transit — this refuses a Server that offers the wrong one.
+        if self.expected_package.is_none() {
+            if name != self.service_name {
+                error!(
+                    offered = %name, agent_type = %self.service_name,
+                    "refusing a package for another Agent type"
+                );
+                let error = format!(
+                    "this Agent is a {:?}; the Server offered a package for {name:?}",
+                    self.service_name
+                );
+                self.refuse_offer(offer, error, handled);
+                return;
+            }
+            if let Some(installed) = &self.installed_package {
+                if fleet_core::version::precedence(&available.version, &installed.version)
+                    == Some(std::cmp::Ordering::Less)
+                {
+                    error!(
+                        offered = %available.version, installed = %installed.version,
+                        "refusing a package older than the one installed"
+                    );
+                    let error = format!(
+                        "the Server offered {} {}, older than the {} installed — a downgrade is \
+                         not taken",
+                        name, available.version, installed.version
+                    );
+                    self.refuse_offer(offer, error, handled);
+                    return;
+                }
+            }
+        }
         // A usable offer clears whatever the last unusable one complained about.
         self.offer_error.clear();
         self.offered_name = Some(name.clone());
@@ -1249,6 +1283,7 @@ mod tests {
 
     /// ADR-0018 clause 4: an offer that names a telemetry destination is actionable, whether or not
     /// it carries OpAMP settings — and one that carries nothing this Client applies is not.
+    /// Verifies: ADR-0041
     #[test]
     fn an_offer_carries_settings_when_it_names_anything_this_client_applies() {
         assert!(carries_settings(&ConnectionSettingsOffers {
@@ -1497,6 +1532,7 @@ mod tests {
     /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
     /// constant `supervisor` (ADR-0023) and not whatever the operator called this instance — which
     /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0024).
+    /// Verifies: ADR-0047
     #[test]
     fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1518,6 +1554,7 @@ mod tests {
     /// gave the program, its service and its configuration file the same word, so what began as
     /// the Agent's *role* is now the one name this thing has anywhere — which is the point, and
     /// which is why the two constants are asserted to agree rather than to differ.
+    /// Verifies: ADR-0047
     #[test]
     fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
         assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
@@ -1853,6 +1890,7 @@ mod tests {
     /// package with an empty Selector reaches every consenting Agent (ADR-0020), so without this
     /// the first fleet-wide Collector artifact an operator uploads would be written over the
     /// Client and take the host out of reach.
+    /// Verifies: ADR-0044
     #[test]
     fn the_self_agent_refuses_a_package_it_was_not_configured_to_take() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -2119,6 +2157,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0042
     #[test]
     fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
         use opamp::proto::{
@@ -2255,7 +2294,7 @@ mod tests {
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
     /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
     /// than installed over the process they were meant to extend, and the refusal is reported.
-    // Verifies: ADR-0019
+    /// Verifies: ADR-0042, ADR-0045
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -2311,6 +2350,97 @@ mod tests {
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
 
+    /// An offer of two top-level packages is refused whole: an Agent has one binary to replace,
+    /// and picking one of the two would let the order of a map decide what runs.
+    /// Verifies: ADR-0042
+    #[test]
+    fn an_offer_of_two_top_level_packages_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.accept_packages();
+        let _ = agent.next_report();
+
+        let mut offer = package_offer("otelcol", "1.0.0", b"one");
+        offer
+            .packages
+            .extend(package_offer("otelcol-extra", "1.0.0", b"two").packages);
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_none(), "neither is fetched");
+        assert!(handled.send_report, "the refusal is reported at once");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert!(
+            statuses.error_message.contains("two top-level packages"),
+            "{}",
+            statuses.error_message
+        );
+        assert!(statuses.packages.is_empty(), "nothing was installed");
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-1");
+    }
+
+    /// A Supervisor takes a package only for its own Agent type, and never one older than it
+    /// runs: both are refused before anything is downloaded, and the reason is reported.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_package_for_another_type_or_an_older_version_is_refused() {
+        use crate::supervisor::ports::AgentStorage as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::supervisor::ports::InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "0.110.0".to_string(),
+                hash_hex: hex::encode(b"installed"),
+            })
+            .expect("store");
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.accept_packages();
+        let _ = agent.next_report();
+
+        for (offer, reason) in [
+            (package_offer("telegraf", "1.30.0", b"other"), "telegraf"),
+            (package_offer("otelcol", "0.109.0", b"older"), "older"),
+        ] {
+            let handled = agent.handle(&ServerToAgent {
+                packages_available: Some(offer),
+                ..Default::default()
+            });
+            assert!(
+                handled.package_download.is_none(),
+                "{reason}: nothing is fetched"
+            );
+            let statuses = agent.next_report().package_statuses.expect("statuses");
+            assert!(
+                statuses.error_message.contains(reason),
+                "{reason}: {}",
+                statuses.error_message
+            );
+        }
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "0.111.0", b"newer")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_some(),
+            "a newer one of its own type is taken"
+        );
+    }
+
     /// A reply declaring a Capability Set, so a test can say what the Server accepts.
     fn declaring(capabilities: u64) -> ServerToAgent {
         ServerToAgent {
@@ -2322,6 +2452,7 @@ mod tests {
     /// ADR-0018 clause 14: once the Server has declared its capabilities, package status stops going
     /// to one that cannot take it. The Baseline makes this a MUST in both directions, and until now
     /// only two of seven Server bits changed any behaviour here.
+    /// Verifies: ADR-0041
     #[test]
     fn package_statuses_stop_once_the_server_says_it_accepts_none() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2357,6 +2488,7 @@ mod tests {
 
     /// And the optimistic half (clause 1): before the Server has said anything there is nothing to
     /// obey, so the first report — which necessarily precedes any declaration — carries everything.
+    /// Verifies: ADR-0041
     #[test]
     fn package_statuses_ride_until_the_server_has_spoken() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2376,6 +2508,7 @@ mod tests {
     /// *without* declaring `OffersConnectionSettings` — this project's own does exactly that for a
     /// `[telemetry_offer]`-only or `[client_ca]`-only configuration. Withholding the acknowledgement
     /// would leave its hash gate open and have it re-offer for ever, so the offer arms the report.
+    /// Verifies: ADR-0041
     #[test]
     fn a_connection_settings_status_is_reported_to_a_server_that_offered_without_declaring_the_bit()
     {
@@ -2410,6 +2543,7 @@ mod tests {
     /// having arrived in this process. Sent to a Server that declares only the mandatory bit, that
     /// status exercises a capability the Server never claimed — so it is withheld until the Server
     /// either declares the bit or offers something.
+    /// Verifies: ADR-0041
     #[test]
     fn a_restored_connection_settings_status_is_withheld_from_a_server_that_never_offers() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2439,6 +2573,7 @@ mod tests {
     /// reversed by someone applying the MUST field by field. `OffersRemoteConfig` says the Server
     /// *can offer* configuration; what licenses this inbound status is `AcceptsStatus`, and gating
     /// it would silence the hash the Server's re-offer decision depends on.
+    /// Verifies: ADR-0041
     #[test]
     fn a_remote_config_status_rides_to_a_server_that_offers_no_remote_config() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2475,6 +2610,7 @@ mod tests {
     /// The headers a `DownloadableFile` names travel to the download that has to use them — the
     /// credential a referenced source needs (ADR-0019), which the Server fills from the operator's
     /// configuration.
+    /// Verifies: ADR-0042
     #[test]
     fn a_package_offer_hands_its_download_headers_to_the_transport() {
         use opamp::proto::{
@@ -2526,6 +2662,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0042
     #[test]
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2562,6 +2699,7 @@ mod tests {
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-2");
     }
 
+    /// Verifies: ADR-0041
     #[test]
     fn a_connection_offer_is_acknowledged_applying_and_handed_to_the_transport() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2619,6 +2757,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0041
     #[test]
     fn a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2708,6 +2847,7 @@ mod tests {
     /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
     /// Supervisor-set apply (ADR-0022); the verdict closes the lifecycle, and only then does the
     /// configuration echo as effective.
+    /// Verifies: ADR-0041
     #[test]
     fn an_offer_is_applied_and_acknowledged() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2815,6 +2955,7 @@ mod tests {
         assert!(!handled.send_report);
     }
 
+    /// Verifies: ADR-0041
     #[test]
     fn effective_config_respects_the_servers_capability_set() {
         let dir = tempfile::tempdir().expect("tempdir");

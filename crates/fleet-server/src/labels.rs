@@ -162,6 +162,7 @@ mod tests {
 
     /// The crux (ADR-0026 point 18): reported wins. A label that could rewrite `os.type` would let a
     /// slip in the UI offer this Agent an artifact built for another machine.
+    /// Verifies: ADR-0043
     #[test]
     fn a_label_never_overrides_what_the_agent_reports() {
         let described = described(&[("os.type", "linux")]);

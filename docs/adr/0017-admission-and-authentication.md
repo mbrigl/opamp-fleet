@@ -1,6 +1,6 @@
 # ADR-0017: Admission stacks a fleet credential and a Server-issued client certificate, proves membership rather than identity, and the Operator plane has Basic authentication of its own
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)
 - **Date:** 2026-08-16
 - **Deciders:** Markus Brigl
 - **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, the Operator plane's guard in `crates/fleet-server/src/api.rs`, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, and the `[auth]`, `[tls]`, `[client_ca]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`

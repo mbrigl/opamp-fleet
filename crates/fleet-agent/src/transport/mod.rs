@@ -91,9 +91,10 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 /// The Client's own flows after a reply, the same for both transports (ADR-0033): what the reply
 /// left to do, in one order.
 ///
-/// 1. Ask for a certificate, now that the Server's capabilities are known (ADR-0017).
-/// 2. A connection-settings offer (ADR-0018) — verified OpAMP settings end the
+/// 1. A connection-settings offer (ADR-0018) — verified OpAMP settings end the
 ///    connection; an offer applied in place owes its acknowledgement now.
+/// 2. Ask for a certificate, now that the Server's capabilities are known and an offered
+///    certificate is in force (ADR-0017).
 /// 3. Offered packages are downloaded and verified (ADR-0019).
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0021). It ends the run, so
@@ -106,7 +107,6 @@ pub async fn after_reply<S: ReportSink>(
     telemetry: &crate::telemetry::Telemetry,
     sink: &mut S,
 ) -> AfterReply {
-    engine.request_certificate(|| crate::csr::request(config));
     match process_connection_offer(engine, config, telemetry).await {
         OfferOutcome::Reconnect => return AfterReply::Reconnect,
         OfferOutcome::Applied => {
@@ -115,6 +115,14 @@ pub async fn after_reply<S: ReportSink>(
             }
         }
         OfferOutcome::None => {}
+    }
+    // Only after the offer: one that carries the certificate a request asked for answers it, and a
+    // request queued before it would ride the next connection and be signed a second time. A
+    // request queued after an earlier reply has left already: an offer always owes a report, which
+    // goes out before this runs on WebSocket and is the report the offer answers on plain HTTP.
+    engine.request_certificate(|| crate::csr::request(config));
+    if flush_owed(engine, sink).await.is_err() {
+        return AfterReply::ConnectionLost;
     }
     if process_package_downloads(engine, config, sink).await
         && flush_owed(engine, sink).await.is_err()
@@ -507,6 +515,7 @@ mod tests {
 
     /// And a destination this Client refuses is reported `FAILED` naming the reason, on the same
     /// offer — not warned to a log while the Server is told everything applied.
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
         opamp::tls::install_ring_provider();
@@ -552,11 +561,30 @@ mod tests {
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
+    /// Verifies: ADR-0042
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
         opamp::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
+        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0042).
+        let keypair = {
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair")
+        };
+        let signature = keypair
+            .sign(&fleet_core::package::statement(
+                "otelcol",
+                "2.0.0",
+                &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+            ))
+            .as_ref()
+            .to_vec();
+        let public = {
+            use ring::signature::KeyPair as _;
+            keypair.public_key().as_ref().to_vec()
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -592,8 +620,14 @@ mod tests {
         state.accept_packages();
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
+        // A Client that takes packages holds a key and allows the source (ADR-0042).
         let config = ClientConfig {
             state_dir: dir.path().to_path_buf(),
+            packages: Some(crate::config::PackagesConfig {
+                allowed_sources: vec![format!("http://{addr}/")],
+                ..Default::default()
+            }),
+            package_key: Some(public),
             ..ClientConfig::default()
         };
 
@@ -608,6 +642,7 @@ mod tests {
                         file: Some(DownloadableFile {
                             download_url: format!("http://{addr}/otelcol"),
                             content_hash: content_hash.clone(),
+                            signature: signature.clone(),
                             ..Default::default()
                         }),
                         hash: b"pkg-hash".to_vec(),

@@ -4,9 +4,12 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Verifies: ADR-0046
 #[test]
 fn sigterm_shuts_the_client_down_cleanly() {
     let dir = tempfile::tempdir().expect("create a tempdir");
@@ -16,8 +19,9 @@ fn sigterm_shuts_the_client_down_cleanly() {
     std::fs::write(
         &config,
         format!(
-            "endpoint = \"http://127.0.0.1:9\"\nstate_dir = \"{}\"\n",
-            dir.path().join("state").display()
+            "endpoint = \"http://127.0.0.1:9\"\nstate_dir = \"{}\"\n{}",
+            dir.path().join("state").display(),
+            common::credentials(dir.path())
         ),
     )
     .expect("write the config");

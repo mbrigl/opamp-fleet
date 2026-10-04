@@ -1,6 +1,6 @@
 # ADR-0037: Five crates in one Cargo workspace on tokio and axum — a publishable communication layer, an internal shared crate by measurement — and TOML configuration
 
-- **Status:** 🟡 proposed
+- **Status:** ⚪ superseded by [ADR-0058](0058-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** Cargo.toml, crates/opamp/, crates/fleet-core/, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, and every new crate, module placement or dependency

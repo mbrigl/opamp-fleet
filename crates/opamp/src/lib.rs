@@ -49,7 +49,7 @@ pub const BASELINE: &str = env!("OPAMP_BASELINE");
 mod tests {
     /// The crate's `MAJOR.MINOR` is the Baseline's (ADR-0036), so the dependency a user declares
     /// says which OpAMP it speaks. Moving the Baseline without moving the version fails here.
-    /// Verifies: ADR-0036
+    /// Verifies: ADR-0057
     #[test]
     fn the_crate_version_is_the_baselines() {
         let minor_of = |v: &str| {
