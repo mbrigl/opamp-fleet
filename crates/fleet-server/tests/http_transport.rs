@@ -82,6 +82,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     assert!(capabilities.contains(&serde_json::json!("AcceptsRemoteConfig")));
 }
 
+/// Verifies: G-3
 #[tokio::test]
 async fn the_offer_is_gated_by_the_config_hash() {
     let server = spawn().await;
@@ -128,6 +129,41 @@ async fn the_offer_is_gated_by_the_config_hash() {
     assert!(
         reply.remote_config.is_none(),
         "no redundant reconfiguration"
+    );
+}
+
+/// A Configuration aimed by a Selector reaches the Agents it matches, and an Agent outside it is
+/// offered nothing and keeps what it runs.
+/// Verifies: G-9
+#[tokio::test]
+async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let (inside, outside) = (InstanceUid::default(), InstanceUid::default());
+    exchange(&client, &url, &full_report(&inside, "canary-01", 1)).await;
+    exchange(&client, &url, &full_report(&outside, "edge-01", 1)).await;
+
+    distribute(
+        server.rest_addr,
+        "canary",
+        &[("service.instance.name", "canary-01")],
+        "receivers: {}\n",
+    )
+    .await;
+
+    let offered = exchange(&client, &url, &compressed_report(&inside, 2)).await;
+    assert!(
+        offered
+            .remote_config
+            .and_then(|offer| offer.config)
+            .is_some_and(|map| map.config_map.contains_key("canary")),
+        "the matching Agent is offered the Configuration"
+    );
+    let untouched = exchange(&client, &url, &compressed_report(&outside, 2)).await;
+    assert!(
+        untouched.remote_config.is_none(),
+        "an Agent outside the Selector is offered nothing"
     );
 }
 

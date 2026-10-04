@@ -1,6 +1,6 @@
 # ADR-0040: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits only over mutual TLS 1.3
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state

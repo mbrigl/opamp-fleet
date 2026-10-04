@@ -1,6 +1,6 @@
 # ADR-0049: The Server keeps a revocation list that follows renewal, and a session ends when what admitted it is revoked or its certificate expires
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** admission on `/v1/opamp` and on the download route in `crates/fleet-server/src/transport.rs`, the WebSocket session loop there, the certificate register and revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the `/api/v1/revocations` and `/api/v1/certificates` routes in `crates/fleet-server/src/api.rs`, and the files they persist under `config_dir`

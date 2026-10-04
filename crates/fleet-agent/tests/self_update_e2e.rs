@@ -472,7 +472,7 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 /// The whole loop: the Server offers the Client a version of itself, the Client stages it beside
 /// the running one, proves it with `self-check`, moves `current`, and asks to be restarted — and
 /// whatever comes up afterwards owes the Server a terminal status, which must be `Installed`.
-/// Verifies: ADR-0044
+/// Verifies: ADR-0044, G-10, G-11
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let dir = tempfile::tempdir().expect("tempdir");

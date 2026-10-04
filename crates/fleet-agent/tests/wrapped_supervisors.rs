@@ -165,6 +165,7 @@ async fn stop(mut harness: Harness) {
 /// Telegraf's whole block: `type` and `name`. The program is a single file found by its own name,
 /// the version comes from the kind's own `--version`, and the Configuration the fleet delivers is
 /// the one the kind points `--config` at.
+/// Verifies: G-7
 #[tokio::test]
 async fn a_two_line_telegraf_block_runs_reports_and_applies() {
     let mut harness = start(
@@ -187,6 +188,7 @@ async fn a_two_line_telegraf_block_runs_reports_and_applies() {
 
 /// The GLPI Agent's whole block, likewise — and on both platforms, with the program found at the
 /// place inside the tree that this platform's constant names.
+/// Verifies: G-7
 #[tokio::test]
 async fn a_two_line_glpi_block_runs_reports_and_applies() {
     let program_path = fleet_agent::supervisor::glpi::GlpiPlugin

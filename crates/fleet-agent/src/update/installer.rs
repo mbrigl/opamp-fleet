@@ -380,6 +380,15 @@ fn probe(binary: &Path, expected_version: &str) -> Result<(), String> {
 /// Returns an error only when a rollback is needed and the pointer cannot be moved, which leaves
 /// the host running a version its own marker says is failing.
 pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
+    on_start_as(
+        state_dir,
+        &layout::running_exe()?,
+        fleet_core::version::current(),
+    )
+}
+
+/// [`on_start`] for the process running `exe` at `running_version`.
+fn on_start_as(state_dir: &Path, exe: &Path, running_version: &str) -> Result<Startup, String> {
     let Some(mut marker) = load_marker(state_dir) else {
         // Nothing in flight — but an outcome may still be owed from the run that finished one.
         return Ok(
@@ -388,13 +397,8 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
     };
     marker.attempts += 1;
 
-    let exe = layout::running_exe()?;
-    let running_dir = Layout::enclosing(&exe).map(|(_, dir)| dir);
-    let is_new_version = took_over(
-        fleet_core::version::current(),
-        running_dir.as_deref(),
-        &marker,
-    );
+    let running_dir = Layout::enclosing(exe).map(|(_, dir)| dir);
+    let is_new_version = took_over(running_version, running_dir.as_deref(), &marker);
 
     if !is_new_version {
         // We are the *old* version and the marker is still here: the switch never took effect, or
@@ -402,7 +406,7 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
         let reason = format!(
             "the new version {} did not take over; running {} from {} instead",
             marker.version,
-            fleet_core::version::current(),
+            running_version,
             running_dir
                 .as_deref()
                 .unwrap_or(Path::new("an unknown directory"))
@@ -445,7 +449,7 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
             ),
         );
         let _rolling = span.enter();
-        let (layout, _) = Layout::enclosing(&exe).expect("checked above");
+        let (layout, _) = Layout::enclosing(exe).expect("checked above");
         layout.set_current(&marker.previous_dir)?;
         crate::telemetry::failed(&span, &reason);
         finish(state_dir, &marker, Some(reason));
@@ -725,6 +729,61 @@ mod tests {
             outcome.error
         );
         assert!(!marker_path(dir.path()).exists());
+    }
+
+    /// A new version that does not stay up is rolled back: after its last attempt `current` points
+    /// at the previous version again, and the Server is owed `InstallFailed` with the reason. The
+    /// attempts before it run on probation.
+    /// Verifies: ADR-0044, G-10, G-11
+    #[test]
+    fn a_new_version_that_does_not_stay_up_is_rolled_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("install");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).expect("state");
+        let marker = marker(&root, 0);
+        for version_dir in [&marker.previous_dir, &marker.new_dir] {
+            std::fs::create_dir_all(version_dir).expect("version dir");
+            std::fs::write(version_dir.join(BINARY_FILENAME), b"client").expect("binary");
+        }
+        let layout = Layout::new(&root);
+        layout
+            .set_current(&marker.new_dir)
+            .expect("point at the new version");
+        store_marker(&state, &marker).expect("store");
+        let exe = marker.new_dir.join(BINARY_FILENAME);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let startup = on_start_as(&state, &exe, "2.0.0").expect("start");
+            assert!(
+                matches!(&startup, Startup::OnProbation(m) if m.attempts == attempt),
+                "attempt {attempt}: {startup:?}"
+            );
+        }
+        let startup = on_start_as(&state, &exe, "2.0.0").expect("start");
+        assert!(matches!(startup, Startup::RolledBack(_)), "{startup:?}");
+        assert_eq!(
+            std::fs::canonicalize(layout.current()).expect("current resolves"),
+            std::fs::canonicalize(&marker.previous_dir).expect("previous resolves"),
+            "current points back at the previous version"
+        );
+        assert!(!marker_path(&state).exists());
+        let owed = load_outcome(&state).expect("an outcome is owed");
+        assert_eq!(owed.version, "2.0.0");
+        assert!(
+            owed.error
+                .as_deref()
+                .is_some_and(|e| e.contains("did not stay up")),
+            "{owed:?}"
+        );
+
+        // The previous version comes up next and reports the failure.
+        let previous = marker.previous_dir.join(BINARY_FILENAME);
+        let startup = on_start_as(&state, &previous, "1.0.0").expect("start");
+        assert!(
+            matches!(&startup, Startup::Outcome(o) if o.error.is_some()),
+            "{startup:?}"
+        );
     }
 
     /// A binary that cannot run at all is the failure class no post-restart mechanism can catch,

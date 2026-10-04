@@ -177,7 +177,7 @@ fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
 /// With a client CA configured, a downstream Agent that presents a certificate reaches the Server
 /// through the Gateway over TLS — and its reply comes back addressed to it. This is the hop working
 /// end to end, encrypted, with the CA accepting a valid peer.
-/// Verifies: ADR-0040, ADR-0039
+/// Verifies: ADR-0040, ADR-0039, G-15, G-17
 #[tokio::test]
 async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
     let (server, state, _server_dir) = spawn_server().await;
@@ -379,4 +379,104 @@ async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on()
         "the Gateway left a connection open that never finished its headers"
     );
     assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+}
+
+/// The Server on an ephemeral plaintext port, admitting only `Authorization: Bearer <token>`.
+async fn spawn_server_requiring(token: &str) -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("state"));
+    let auth = fleet_server::transport::OpampAuth::from_config(
+        &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
+            "bearer_tokens = [{:?}]",
+            fleet_server::credentials::bearer_entry(token)
+        ))
+        .expect("auth config"),
+    )
+    .expect("auth");
+    let app = fleet_server::agent_app(
+        state.clone(),
+        fleet_server::transport::Admission::new(Some(auth), false),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (addr, state, dir)
+}
+
+/// The Gateway decides nothing about a credential: each downstream peer's own `Authorization`
+/// reaches the Server, and a peer with a wrong one, or none, is not admitted — even when the one
+/// upstream connection the pool may hold was opened with another peer's valid credential.
+/// Verifies: ADR-0040, ADR-0039, G-15, Q-1
+#[tokio::test]
+async fn each_downstream_peer_is_admitted_on_its_own_credential() {
+    const TOKEN: &str = "the-fleet-token-of-at-least-32-chars";
+    let (server, state, _server_dir) = spawn_server_requiring(TOKEN).await;
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let listen = listener.local_addr().expect("addr");
+    let toml = gateway_toml(server, listen, &pki, dir.path(), true)
+        .replace("upstream_connections = 4", "upstream_connections = 1");
+    let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
+    let (_stop, shutdown) = shutdown_channel();
+    tokio::spawn(async move {
+        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+            .await
+            .expect("gateway");
+    });
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(listen).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let http = client(&pki, Some(pki.issue("downstream")));
+    let send = |uid: InstanceUid, authorization: Option<&'static str>| {
+        let mut request = http
+            .post(format!("https://{listen}/v1/opamp"))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .body(report(&uid).encode_to_vec());
+        if let Some(value) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, value);
+        }
+        request.send()
+    };
+
+    let admitted = InstanceUid::default();
+    let response = send(
+        admitted,
+        Some("Bearer the-fleet-token-of-at-least-32-chars"),
+    )
+    .await
+    .expect("send");
+    assert!(response.status().is_success(), "{:?}", response.status());
+
+    for (uid, authorization) in [
+        (
+            InstanceUid::default(),
+            Some("Bearer a-token-the-server-does-not-hold"),
+        ),
+        (InstanceUid::default(), None),
+    ] {
+        let response = send(uid, authorization).await.expect("send");
+        assert!(
+            !response.status().is_success(),
+            "a peer with {authorization:?} rode another peer's credential"
+        );
+        assert!(
+            state
+                .snapshot()
+                .iter()
+                .all(|agent| agent.instance_uid != uid.to_string()),
+            "the Server took a report the credential did not admit"
+        );
+    }
+    assert!(state
+        .snapshot()
+        .iter()
+        .any(|agent| agent.instance_uid == admitted.to_string()));
 }

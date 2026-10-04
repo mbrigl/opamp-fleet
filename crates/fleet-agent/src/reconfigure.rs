@@ -935,6 +935,127 @@ mod tests {
         assert_eq!(parsed.supervisors[0].name, "new");
     }
 
+    /// A delivered set reaches no key of `supervisor.toml` but the `[[supervisor]]` array: whatever
+    /// else it names — the credential, trust, the verification key, the allowed sources, the
+    /// operator's consent in `[supervisors]`, self-update, Gateway Mode — the file keeps the
+    /// operator's values and gains none of the offered ones.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_delivered_set_writes_nothing_beyond_the_supervisor_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let operator = "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
+                        [auth]\nbearer_token = \"operator-token\"\n\n\
+                        [packages]\nverification_key = \"aa\"\n";
+        std::fs::write(&path, operator).expect("write");
+
+        let offer = offer_of(&[(
+            "fleet",
+            r#"
+            [auth]
+            bearer_token = "server-token"
+
+            [tls]
+            ca_file = "/tmp/server-ca.pem"
+
+            [packages]
+            verification_key = "bb"
+            allowed_sources = ["https://evil.example/"]
+
+            [supervisors]
+            delivered_args = true
+            delivered_env = ["LD_PRELOAD"]
+
+            [self_update]
+            package = "evil"
+
+            [gateway]
+            listen = "0.0.0.0:4320"
+
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "agent"
+            "#,
+        )]);
+        let (blocks, tables) = offered_blocks(&offer).expect("parse");
+        assert_eq!(blocks.len(), 1);
+        let text = render_supervisors(&path, tables).expect("render");
+        for offered in [
+            "server-token",
+            "server-ca.pem",
+            "\"bb\"",
+            "evil.example",
+            "delivered_args",
+            "LD_PRELOAD",
+            "self_update",
+            "[gateway]",
+        ] {
+            assert!(
+                !text.contains(offered),
+                "{offered} reached the file:\n{text}"
+            );
+        }
+        let parsed: ClientConfig = toml::from_str(&text).expect("the file parses");
+        assert_eq!(parsed.endpoint, "wss://fleet.example:4320/v1/opamp");
+        assert!(text.contains("operator-token"));
+        assert!(text.contains("verification_key = \"aa\""));
+        assert_eq!(parsed.supervisors.len(), 1);
+    }
+
+    /// A delivered block of a kind this Client was not built with is refused, naming the kind —
+    /// a Server cannot conjure a Supervisor type.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_delivered_block_of_an_unknown_type_is_refused() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"shell\"\nname = \"agent\"\ncommand = \"agent\"\n",
+        )]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("an unknown type");
+        assert!(err.contains("shell"), "{err}");
+    }
+
+    /// Neither a delivered Supervisor name nor a delivered program name can leave the directories
+    /// this Client owns: a name is one path component of a fixed grammar, and a program a bare
+    /// file name inside `program/`.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_delivered_name_or_program_that_traverses_is_refused() {
+        for name in ["..", "../etc", "a/b", "a\\b", "Agent"] {
+            let offer = offer_of(&[(
+                "fleet",
+                &format!(
+                    "[[supervisor]]\ntype = \"command\"\nname = {name:?}\ncommand = \"agent\"\n"
+                ),
+            )]);
+            assert!(
+                offered_blocks(&offer).is_err(),
+                "the Supervisor name {name:?} was accepted"
+            );
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        for program in ["../../bin/sh", "sub/../../sh", "..", "sub/agent"] {
+            let block = delivered(&format!(
+                "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = {program:?}\n"
+            ));
+            assert!(
+                validate_offered_block(&config, &block).is_err(),
+                "the program {program:?} was accepted"
+            );
+        }
+    }
+
     /// `supervisor.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
     /// not widen it. Before the fix, writing the temp file at the default umask and renaming it over
     /// the original left the file (and the credential) world-readable after a Server reconfigure.

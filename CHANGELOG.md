@@ -160,6 +160,14 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **A Gateway no longer carries a downstream peer's report on another peer's credential.** The
+  upstream pool reused a connection opened with one peer's `Authorization` for the reports of
+  another, so a peer with a wrong credential, or none, reached the Server on someone else's. A
+  connection now carries only the Agents of the credential it was opened with; with
+  `upstream_connections` reached by connections of other credentials, a report is refused until
+  one of them carries nobody. **What to do:** nothing — a fleet on one credential sees no change;
+  during a rotation keep `upstream_connections` above one.
+
 - **On Windows, a system-scope install no longer leaves its secrets readable by every local user.**
   Every folder under `%ProgramData%` grants `BUILTIN\Users` read access by inheritance, so
   `supervisor.toml` with the fleet credential, the private key and the stored connection settings

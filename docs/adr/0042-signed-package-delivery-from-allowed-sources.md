@@ -1,6 +1,6 @@
 # ADR-0042: A Supervisor downloads from an allowed source, verifies a mandatory signature over the package's type, version and hash, refuses another type and a downgrade, unpacks, swaps and health-gates a package, and rolls back only to a predecessor
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/packages.rs, crates/fleet-agent/src/archive.rs, crates/fleet-agent/src/install.rs, crates/fleet-agent/src/supervisor/process.rs, the package handling in crates/fleet-agent/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`, `crates/fleet-core/src/package.rs`, and the `sign` command of `opamp-package-sign`

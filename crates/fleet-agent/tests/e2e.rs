@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0051, ADR-0040
+// Verifies: ADR-0051, ADR-0040, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -547,5 +547,105 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(
         state_dir.join("supervisors/stub/instance-uid").is_file(),
         "a supervisor that stays keeps its directory and identity"
+    );
+}
+
+/// A delivered Supervisor set with one block the Client refuses is refused whole: the running
+/// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
+/// reports the refusal.
+/// Verifies: ADR-0051
+#[tokio::test]
+async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let marker = dir.path().join("stub-marker");
+    let program = stub_program_name();
+    let toml = format!(
+        concat!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\n",
+            "state_dir = {state:?}\n",
+            "heartbeat_interval_secs = 1\n\n",
+            // Consent to delivered arguments, so the one refusal is the unknown kind.
+            "[supervisors]\n",
+            "delivered_args = true\n\n",
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {marker:?}]\n",
+        ),
+        addr = addr,
+        state = state_dir.to_string_lossy(),
+        program = program,
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
+    let written = std::fs::read(&config_path).expect("read");
+    stage_owned_program(&state_dir, "stub", &program);
+    let _client = spawn_client(&config_path);
+
+    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    wait_until("the Client's own Agent", || {
+        view(&state.snapshot(), "Supervisor Agent").map(|_| ())
+    })
+    .await;
+
+    // The stub with other arguments — applied, it would restart — beside a kind no Client has.
+    let offered = format!(
+        concat!(
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {marker:?}, \"--changed\"]\n\n",
+            "[[supervisor]]\n",
+            "type = \"shell\"\n",
+            "name = \"intruder\"\n",
+            "command = \"sh\"\n",
+        ),
+        program = program,
+        marker = marker.to_string_lossy(),
+    );
+    state
+        .save_configuration(
+            "supervisor-set",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: offered,
+                role: String::new(),
+                service_name: "supervisor".to_string(),
+            },
+        )
+        .expect("save");
+    state
+        .rollout_configuration("supervisor-set")
+        .expect("roll out");
+
+    let refusal = wait_until("the Client to refuse the set", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|agent| agent.remote_config_status == "FAILED")
+            .map(|agent| agent.remote_config_error.clone())
+    })
+    .await;
+    assert!(
+        refusal.contains("shell"),
+        "the refusal names the kind: {refusal}"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        stub_pid(&marker),
+        Some(pid),
+        "the running Supervisor was restarted"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read"),
+        written,
+        "supervisor.toml changed"
+    );
+    assert!(
+        view(&state.snapshot(), "intruder").is_none(),
+        "the refused block started"
     );
 }

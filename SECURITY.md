@@ -102,5 +102,12 @@ Server instance or network segment. The alternatives that were weighed are in AD
 
 ## Supported versions
 
-<!-- TODO: document which versions/branches receive security fixes once the project has releases. -->
-The project is pre-release; a support policy will be defined once it reaches its first release.
+Security fixes land on `main` and ship in the next release. Only the latest release is supported:
+before 1.0 no fix is backported to an earlier one, so the remedy for a vulnerable version is an
+upgrade — through the fleet's own self-update where the Client is concerned. Each fix is listed in
+[`CHANGELOG.md`](CHANGELOG.md) under the release that carries it.
+
+| Version | Supported |
+|---|---|
+| the latest `version/*` release | ✅ |
+| any earlier release | ❌ |

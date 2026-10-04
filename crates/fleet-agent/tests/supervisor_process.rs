@@ -1007,7 +1007,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let _ = harness.task.await;
 }
 
-// Verifies: ADR-0042
+// Verifies: ADR-0042, G-10
 #[tokio::test]
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");

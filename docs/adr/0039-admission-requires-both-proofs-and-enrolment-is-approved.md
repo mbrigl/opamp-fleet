@@ -1,6 +1,6 @@
 # ADR-0039: Admission requires a fleet credential and a client certificate in the handshake, every enrolment is approved by an operator, the Operator plane is guarded beyond the loopback, and server.toml holds no credential that authenticates on its own
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
@@ -572,9 +572,12 @@ operator actions.
   `the_private_key_is_written_owner_only`, `an_issued_certificate_becomes_the_identity`,
   `a_certificate_without_a_pending_key_is_refused` (clause 8),
   `a_certificate_in_its_renewal_window_is_requested_again` (clause 11).
+- [`crates/fleet-agent/tests/packages_download.rs`](../../crates/fleet-agent/tests/packages_download.rs) —
+  `the_client_certificate_goes_to_the_servers_origin_alone` (clause 23).
 - [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs) —
   `a_downstream_agent_with_a_certificate_reaches_the_server_over_tls`,
-  `a_downstream_peer_without_a_certificate_is_refused` (clause 13).
+  `a_downstream_peer_without_a_certificate_is_refused`,
+  `each_downstream_peer_is_admitted_on_its_own_credential` (clause 13).
 - [`crates/fleet-server/tests/rest_auth.rs`](../../crates/fleet-server/tests/rest_auth.rs) —
   `a_request_without_credentials_is_answered_401_with_a_basic_challenge`,
   `the_configured_operator_reaches_the_api`, `the_ui_and_the_api_docs_are_guarded_too`,
@@ -585,6 +588,3 @@ operator actions.
 **Not mechanically decidable:** clause 14 decides what is *not* built beyond the host — no test
 can show the absence of a per-Agent authorization the design rejects; clause 12 is a dependency choice; and
 clause 25 rests on a Gateway's client CA, which the Server cannot see. Review holds them.
-Clause 23's Client half — the certificate presented only to the Server's own origin — is
-decidable, but no test decides it yet; review holds it until a download test in the Client's
-[`packages_download.rs`](../../crates/fleet-agent/tests/packages_download.rs) does.

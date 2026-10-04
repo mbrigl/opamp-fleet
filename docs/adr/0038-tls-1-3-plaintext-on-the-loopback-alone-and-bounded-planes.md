@@ -1,6 +1,6 @@
 # ADR-0038: Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, and a Server on two listeners split by audience with bounded connections
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, how the Server binds and serves in `crates/opamp/src/server/listen.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the package URL probe in `crates/fleet-server/src/api.rs`, the `rustls` features in `Cargo.toml`, and the `listen`, `max_connections`, `[rest]` and `[tls]` keys of `server.toml`

@@ -1,6 +1,6 @@
 # ADR-0053: The Supervisor Endpoint admits only the process its Supervisor started, by a token handed to that process
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/endpoint.rs, the token threaded through `SupervisorContext` and `Runner` in crates/fleet-agent/src/supervisor/, the environment every Managed Process is started with, and the `opampextension` configuration the documentation shows

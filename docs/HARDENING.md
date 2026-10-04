@@ -136,7 +136,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0009).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
     is served on (ADR-0036) · ✅ message size, gzip after decompression, per-hop exchange timeout,
-    `max_carried_agents`
+    `max_carried_agents` · ✅ an upstream connection carries only the Agents of the credential it
+    was opened with
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
@@ -185,11 +186,6 @@ root; install anything unsigned, from a source not allowed, or with an archive m
 out; downgrade the Client or install a program that is not the Client as the Client; switch to
 plaintext beyond the loopback; weaken TLS verification or set a proxy; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
-
-Checks still missing for things that are enforced: an unknown Supervisor `type`; a delivered set
-naming top-level keys beyond `endpoint` and `state_dir`; a refused set leaving the running
-Supervisors untouched; the OpAMP half of an offer's `tls` and `proxy` not being honoured; two
-top-level packages in one offer; a delivered program name and Supervisor name that traverse.
 
 ## Verifying a measure is in force
 

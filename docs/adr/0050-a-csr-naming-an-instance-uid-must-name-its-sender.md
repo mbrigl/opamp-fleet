@@ -1,6 +1,6 @@
 # ADR-0050: A CSR that names an instance_uid is signed only when it names its sender's
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** the reading of a CSR in `crates/fleet-server/src/ca.rs`, the CSR handling on a member connection in `crates/fleet-server/src/fleet.rs` and on an enrolment connection in `crates/fleet-server/src/transport.rs`

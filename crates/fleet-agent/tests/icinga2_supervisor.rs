@@ -207,6 +207,7 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
 /// ADR-0029's validation gate, through the assembled adapter: a configuration Icinga refuses is
 /// answered `FAILED` and never reaches the running daemon — which is the only way the fleet can be
 /// told the truth about an apply Icinga aborts silently.
+/// Verifies: G-4, G-7
 #[tokio::test]
 async fn a_configuration_icinga_refuses_is_reported_failed() {
     let mut harness = start(

@@ -472,6 +472,42 @@ mod tests {
         assert_eq!(config.authorization_override, None);
     }
 
+    /// An offer's `tls` and `proxy` are not taken: what is stored carries neither, so the
+    /// connection keeps the operator's trust, and the report names both rather than claiming the
+    /// offer was applied whole.
+    /// Verifies: ADR-0041
+    #[test]
+    fn offered_tls_and_proxy_are_neither_stored_nor_claimed() {
+        use opamp::proto::{ProxyConnectionSettings, TlsConnectionSettings};
+        let mut offer = offer_with(b"h1", "wss://server.example/v1/opamp", None, 0);
+        if let Some(settings) = offer.opamp.as_mut() {
+            settings.tls = Some(TlsConnectionSettings {
+                insecure_skip_verify: true,
+                ca_pem_contents: "-----BEGIN CERTIFICATE-----".to_string(),
+                ..Default::default()
+            });
+            settings.proxy = Some(ProxyConnectionSettings {
+                url: "http://proxy.example:3128".to_string(),
+                ..Default::default()
+            });
+        }
+        let stored = merge(None, &offer);
+        let settings = stored.opamp.as_ref().expect("the OpAMP half");
+        assert_eq!(
+            settings.destination_endpoint,
+            "wss://server.example/v1/opamp"
+        );
+        assert!(settings.tls.is_none(), "an offered tls was stored");
+        assert!(settings.proxy.is_none(), "an offered proxy was stored");
+
+        let mut config = ClientConfig::default();
+        apply(&mut config, &stored);
+        assert_eq!(config.endpoint, "wss://server.example/v1/opamp");
+
+        let reported = unhonoured(offer.opamp.as_ref().expect("offer")).expect_err("named");
+        assert!(reported.contains("tls and proxy"), "{reported}");
+    }
+
     fn endpoint_only(endpoint: &str) -> OpAmpConnectionSettings {
         OpAmpConnectionSettings {
             destination_endpoint: endpoint.to_string(),

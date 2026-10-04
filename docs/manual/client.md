@@ -1004,7 +1004,10 @@ so an Agent behind a Gateway is as manageable as one in front of it. Both transp
 downstream, so a polling Client works as well as a WebSocket one.
 
 `upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
-front of three Agents holds three, and each Agent stays on its connection while that lives.
+front of three Agents holds three, and each Agent stays on its connection while that lives. A
+connection carries only Agents whose Clients present the credential it was opened with, because
+the Server checks a credential when a connection opens; while a credential rotation is under way
+the Gateway needs a connection for each credential in use.
 
 This mode composes with `[[supervisor]]` blocks: one host may supervise its own processes *and*
 gateway for others.

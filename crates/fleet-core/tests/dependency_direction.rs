@@ -713,7 +713,7 @@ fn reexports() -> Reexports {
     found
 }
 
-/// Verifies: ADR-0006
+/// Verifies: ADR-0006, G-8
 #[test]
 fn the_core_depends_on_no_adapter_and_no_technology() {
     let locked = locked_crates();

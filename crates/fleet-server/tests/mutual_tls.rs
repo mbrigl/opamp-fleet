@@ -298,7 +298,7 @@ async fn post(
 /// trust, never reaches the Agent plane — neither the OpAMP endpoint nor the package download —
 /// while the Operator plane on its own listener serves a browser that presents none (ADR-0038,
 /// ADR-0039).
-/// Verifies: ADR-0039, ADR-0038
+/// Verifies: ADR-0039, ADR-0038, G-17
 #[tokio::test]
 async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() {
     let pki = Pki::new();
@@ -360,7 +360,7 @@ async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() 
 
 /// Every configured proof must succeed, not the first that happens to pass: with both a credential
 /// and a client CA configured, a valid certificate alone is not admission.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0039, G-17
 #[tokio::test]
 async fn a_certificate_does_not_stand_in_for_the_credential() {
     let pki = Pki::new();

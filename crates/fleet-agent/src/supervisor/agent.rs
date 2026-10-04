@@ -2350,6 +2350,43 @@ mod tests {
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
     }
 
+    /// An offer of two top-level packages is refused whole: an Agent has one binary to replace,
+    /// and picking one of the two would let the order of a map decide what runs.
+    /// Verifies: ADR-0042
+    #[test]
+    fn an_offer_of_two_top_level_packages_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.accept_packages();
+        let _ = agent.next_report();
+
+        let mut offer = package_offer("otelcol", "1.0.0", b"one");
+        offer
+            .packages
+            .extend(package_offer("otelcol-extra", "1.0.0", b"two").packages);
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(offer),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_none(), "neither is fetched");
+        assert!(handled.send_report, "the refusal is reported at once");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert!(
+            statuses.error_message.contains("two top-level packages"),
+            "{}",
+            statuses.error_message
+        );
+        assert!(statuses.packages.is_empty(), "nothing was installed");
+        assert_eq!(statuses.server_provided_all_packages_hash, b"agg-1");
+    }
+
     /// A Supervisor takes a package only for its own Agent type, and never one older than it
     /// runs: both are refused before anything is downloaded, and the reason is reported.
     /// Verifies: ADR-0042

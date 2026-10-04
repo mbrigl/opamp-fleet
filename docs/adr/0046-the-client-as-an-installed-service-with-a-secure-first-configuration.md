@@ -1,6 +1,6 @@
 # ADR-0046: The Client installs itself as a native service named after a build-time product name, from a versioned layout it can rewrite, with a first configuration that authenticates and encrypts
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, and every path, name or account an installed Client uses

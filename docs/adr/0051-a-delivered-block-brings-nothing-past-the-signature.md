@@ -1,6 +1,6 @@
 # ADR-0051: Each Supervisor owns one directory and runs only a program installed there, the Server manages the set of Supervisors, and a delivered block brings nothing that reaches past the package signature
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml, the `delivered_env` and `delivered_args` keys of its `[supervisors]` section, and the delivered-block check every kind in crates/fleet-agent/src/supervisor/ states

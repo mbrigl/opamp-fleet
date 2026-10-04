@@ -3517,7 +3517,7 @@ mod tests {
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
     /// to an identity of its own, and the Agent it claimed keeps its record.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0039, G-17
     #[test]
     fn a_host_cannot_report_for_another_hosts_agent() {
         let dir = tempfile::tempdir().expect("tempdir");

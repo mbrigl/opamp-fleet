@@ -193,7 +193,7 @@ fn report(uid: &InstanceUid, sequence: u64) -> AgentToServer {
 
 /// Two Agents, two downstream transports, one upstream connection — and the Server tells them
 /// apart by `instance_uid` alone, which is the whole premise of Gateway Mode.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0040, G-14, G-15
 #[tokio::test]
 async fn two_agents_reach_the_server_over_one_folded_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -247,7 +247,7 @@ async fn two_agents_reach_the_server_over_one_folded_connection() {
 
 /// The pool grows lazily to its cap and no further: one Agent means one upstream connection, even
 /// with a cap of ten (ADR-0009 rule 8).
-/// Verifies: ADR-0040
+/// Verifies: ADR-0040, G-15
 #[tokio::test]
 async fn one_agent_opens_one_upstream_connection() {
     let (server, state, _dir) = spawn_server().await;

@@ -1,6 +1,6 @@
 # ADR-0044: The Client updates itself only from a signed package — as its own Agent, by a consent that stands, through a staged version and a restart it does not issue
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/update/ (mod.rs and installer.rs), the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property, and the startup notice on a missing `[packages] verification_key`
