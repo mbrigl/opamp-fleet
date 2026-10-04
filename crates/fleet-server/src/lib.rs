@@ -5,6 +5,8 @@
 
 pub mod agent_store;
 pub mod api;
+pub mod audit;
+pub mod audit_log;
 pub mod ca;
 pub mod clock;
 pub mod config;

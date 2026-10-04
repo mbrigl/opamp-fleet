@@ -88,6 +88,12 @@ has:
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0051): no
   environment or arguments beyond what the running block has or the operator allowed, never a
   loader variable or `PATH`, and no file outside its own `config/` directory.
+- **No credential in `server.toml` authenticates on its own** (ADR-0039, ADR-0041): Bearer tokens
+  as SHA-256, Basic passwords as Argon2id hashes, verified in constant time; the credential the
+  Server offers for rotation lives in an owner-only file of its own.
+- **An audit record of every security decision** (ADR-0052): admissions and refusals, enrolment,
+  issuance, revocation, rotation, operator acts and package outcomes, one hash-chained line each;
+  no admission without its record.
 - `TLSConnectionSettings` and `ProxyConnectionSettings` refused on merit, so a Server cannot command
   a Client to weaken its own verification
   ([`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
@@ -167,19 +173,6 @@ without anyone noticing. Shortening it is cheap, but only once renewal is shown 
 fleet left running for longer than one validity period: otherwise it moves the failure to
 "eject the whole fleet by accident".
 
-## Stage 3 — Stop storing secrets in the clear
-
-🔴 **H7 — Store admission credentials hashed, and referenced rather than inline.**
-`server.toml` holds Bearer tokens and Basic passwords verbatim, so they reach backups, diffs, and
-config management. Since ADR-0017 this is **two** sections — `[auth]` for the fleet and
-`[rest.auth]` for the operators — and they have to change together, or the file ends up carrying two
-credential formats. Two different answers are needed for the two schemes, and conflating them would
-be a mistake: Basic passwords want a password hash (Argon2/bcrypt), while running a KDF per Bearer
-request is itself a denial-of-service vector — a plain SHA-256 over a high-entropy token is the
-right shape there. Either way the constant-time comparison already in place has to survive the
-change. Secondly, allowing a credential to be named by file or environment reference keeps it out of
-the configuration file altogether.
-
 ## Stage 4 — Shrink the surface and bound the abuse
 
 🔴 **H20 — Bound certificate issuance per Agent, not per chain.**
@@ -236,17 +229,10 @@ naming top-level keys beyond `endpoint` and `state_dir`; a refused set leaving t
 Supervisors untouched; the OpAMP half of an offer's `tls` and `proxy` not being honoured; two
 top-level packages in one offer; a delivered program name and Supervisor name that traverse.
 
-## Stage 6 — Make it provable after the fact
-
-🔴 **H15 — An audit record for admission, issuance, rotation, revocation, and package application.**
-Every measure above changes what the Server permits; none of them is demonstrable afterwards without
-a record of what was permitted and to whom. This is last in order but not in importance — it is what
-turns an incident into an investigation.
-
 ## Suggested order
 
-**H7 and H15 first, then H23 and H24.** Hashed credentials and an audit record bind nothing else
-and make the rest provable after the fact.
+**H23 and H24 next.** Each narrows what a compromised Server can do on a host beyond what the
+signature already stops.
 
 **H4 last of the identity work, not first.** A sharper identity is only worth what the revocation
 path behind it is worth: binding certificates to Agents while still being unable to withdraw one
@@ -264,8 +250,6 @@ measure that has not been taken.
 |---|---|
 | H4 | *Cannot be fixed before the ADR* — the shape decides the check. Two conditions hold whichever way it goes, and are the floor: a certificate issued for one Agent does not authenticate a connection claiming another, and a re-key through `AgentIdentification` does not invalidate a certificate still in force. |
 | H6 | Renewal is observed to complete **before** expiry in a fleet left running longer than one validity period. Not a unit test — this one needs a soak, and shortening validity without that evidence is the failure mode the measure is meant to avoid. |
-| H7 | No credential appears in `server.toml` in a form that authenticates on its own; a correct credential still authenticates; a wrong one is still rejected in constant time. The last clause matters: the point of the change is not to lose the property already held. |
-| H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
 | H23 | A signed artifact offered to a Supervisor of another Agent type, or at a version below the one installed, is refused before anything is swapped. |
 | H24 | An offered endpoint is not adopted unless the Client's own `ca_file` verifies it. |
 

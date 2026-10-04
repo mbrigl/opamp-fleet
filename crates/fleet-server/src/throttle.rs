@@ -42,6 +42,40 @@ struct Entry {
     /// Set while the address is in back-off.
     blocked_until_ms: Option<u64>,
     last_ms: u64,
+    /// Attempts from this address being verified right now.
+    in_flight: u32,
+}
+
+/// The address a peer is counted under: an IPv6 address by its /64, the block one host holds, so
+/// a peer cannot step past its back-off by changing the low bits; an IPv4-mapped one as IPv4.
+#[must_use]
+pub fn peer_key(peer: IpAddr) -> IpAddr {
+    match peer {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut segments = v6.segments();
+                segments[4..].fill(0);
+                IpAddr::V6(std::net::Ipv6Addr::from(segments))
+            }
+        },
+        v4 => v4,
+    }
+}
+
+/// One attempt being verified; dropping it ends it.
+pub struct Attempt {
+    throttle: Arc<Throttle>,
+    key: IpAddr,
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        let mut entries = self.throttle.entries.lock().expect("throttle lock");
+        if let Some(entry) = entries.get_mut(&self.key) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
 }
 
 /// One table of peer addresses and their failures.
@@ -73,33 +107,65 @@ impl Throttle {
     pub fn retry_after(&self, peer: IpAddr) -> Option<u64> {
         let now = self.clock.now_ms();
         let entries = self.entries.lock().expect("throttle lock");
-        let until = entries.get(&peer)?.blocked_until_ms?;
+        let until = entries.get(&peer_key(peer))?.blocked_until_ms?;
         (until > now).then(|| (until - now).div_ceil(1000).max(1))
     }
 
-    /// Counts one failure of `peer`, and puts it in back-off once it has failed too often.
-    pub fn failed(&self, peer: IpAddr) {
+    /// Starts an attempt of `peer` before its credential is verified; `None` when its failures and
+    /// the attempts already under way reach `max_failures`. Without this, every attempt sent at
+    /// once would pass the back-off check before the first of them had failed.
+    #[must_use]
+    pub fn begin(self: &Arc<Self>, peer: IpAddr) -> Option<Attempt> {
+        let key = peer_key(peer);
         let now = self.clock.now_ms();
-        let window_ms = self.limits.window_secs * 1000;
         let mut entries = self.entries.lock().expect("throttle lock");
-        if !entries.contains_key(&peer) && entries.len() >= self.capacity {
+        let entry = Self::entry_for(&mut entries, self.capacity, key, now);
+        if entry.failures + entry.in_flight >= self.limits.max_failures {
+            return None;
+        }
+        entry.in_flight += 1;
+        drop(entries);
+        Some(Attempt {
+            throttle: self.clone(),
+            key,
+        })
+    }
+
+    fn entry_for(
+        entries: &mut HashMap<IpAddr, Entry>,
+        capacity: usize,
+        key: IpAddr,
+        now: u64,
+    ) -> &mut Entry {
+        if !entries.contains_key(&key) && entries.len() >= capacity {
             if let Some(oldest) = entries
                 .iter()
                 .min_by_key(|(_, entry)| {
-                    let blocked = entry.blocked_until_ms.is_some_and(|until| until > now);
-                    (blocked, entry.last_ms)
+                    let busy = entry.blocked_until_ms.is_some_and(|until| until > now)
+                        || entry.in_flight > 0;
+                    (busy, entry.last_ms)
                 })
                 .map(|(address, _)| *address)
             {
                 entries.remove(&oldest);
             }
         }
-        let entry = entries.entry(peer).or_insert(Entry {
+        entries.entry(key).or_insert(Entry {
             since_ms: now,
             failures: 0,
             blocked_until_ms: None,
             last_ms: now,
-        });
+            in_flight: 0,
+        })
+    }
+
+    /// Counts one failure of `peer`, and puts it in back-off once it has failed too often.
+    pub fn failed(&self, peer: IpAddr) {
+        let peer = peer_key(peer);
+        let now = self.clock.now_ms();
+        let window_ms = self.limits.window_secs * 1000;
+        let mut entries = self.entries.lock().expect("throttle lock");
+        let entry = Self::entry_for(&mut entries, self.capacity, peer, now);
         if now.saturating_sub(entry.since_ms) > window_ms {
             entry.since_ms = now;
             entry.failures = 0;
@@ -206,5 +272,26 @@ mod tests {
             !throttle.entries.lock().expect("lock").contains_key(&PEER),
             "the oldest address was dropped"
         );
+    }
+
+    /// Attempts already under way count against the limit, so sending many at once gains
+    /// nothing, and a whole IPv6 /64 is one peer.
+    /// Verifies: ADR-0039
+    #[test]
+    fn attempts_under_way_count_and_a_slash_64_is_one_peer() {
+        let (throttle, _) = throttle(16);
+        let throttle = Arc::new(throttle);
+        let attempts: Vec<_> = (0..3).map(|_| throttle.begin(PEER)).collect();
+        assert!(attempts.iter().all(Option::is_some));
+        assert!(throttle.begin(PEER).is_none(), "a fourth at once");
+        drop(attempts);
+        assert!(throttle.begin(PEER).is_some(), "ended attempts make room");
+
+        let a: IpAddr = "2001:db8::1".parse().expect("ip");
+        let b: IpAddr = "2001:db8::ffff:2".parse().expect("ip");
+        for _ in 0..3 {
+            throttle.failed(a);
+        }
+        assert!(throttle.retry_after(b).is_some(), "the same /64");
     }
 }

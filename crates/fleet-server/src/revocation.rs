@@ -192,12 +192,15 @@ pub fn credential_hash(authorization: &str) -> String {
     hex::encode(Sha256::digest(authorization.as_bytes()))
 }
 
+/// The check that tells whether `[auth]` accepts an `Authorization` value.
+pub type Accepts = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// The register and the list, in memory and in their store.
 pub struct Revocations {
     store: Box<dyn LedgerStore>,
     clock: Arc<dyn Clock>,
-    /// The hashes of the credentials `[auth]` accepts: only one of them can be revoked.
-    accepted: BTreeSet<String>,
+    /// Whether `[auth]` accepts an `Authorization` value: only such a credential can be revoked.
+    accepts: Accepts,
     authorities: Vec<Authority>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
@@ -278,15 +281,12 @@ impl Revocations {
     pub fn open(
         store: Box<dyn LedgerStore>,
         clock: Arc<dyn Clock>,
-        accepted_credentials: &[String],
+        accepts: Accepts,
         authorities: Vec<Authority>,
     ) -> Result<Self, String> {
         let ledger = store.load()?;
         let revocations = Revocations {
-            accepted: accepted_credentials
-                .iter()
-                .map(|value| credential_hash(value))
-                .collect(),
+            accepts,
             authorities,
             state: Mutex::new({
                 let mut state = State {
@@ -319,23 +319,6 @@ impl Revocations {
             revocations.prune(&mut state)?;
         }
         Ok(revocations)
-    }
-
-    /// The prefixes of the revoked credentials `[auth]` still accepts — what startup names
-    /// (ADR-0049 clause 5).
-    #[must_use]
-    pub fn revoked_but_configured(&self) -> Vec<String> {
-        let state = self.state.lock().expect("revocation lock");
-        state
-            .revocations
-            .iter()
-            .filter_map(|entry| match &entry.revoked {
-                Revoked::Credential { sha256 } if self.accepted.contains(sha256) => {
-                    Some(sha256[..8].to_string())
-                }
-                _ => None,
-            })
-            .collect()
     }
 
     /// The CA an issuer hash belongs to, when it is one of this Server's.
@@ -445,13 +428,14 @@ impl Revocations {
     /// # Errors
     /// Refuses a credential `[auth]` does not accept, a full list, and a failed write.
     pub fn revoke_credential(&self, authorization: &str) -> Result<Revocation, RevokeError> {
-        let sha256 = credential_hash(authorization);
-        if !self.accepted.contains(&sha256) {
+        if !(self.accepts)(authorization) {
             return Err(RevokeError::Invalid(
                 "no credential of [auth] has this value".into(),
             ));
         }
-        self.add(Revoked::Credential { sha256 })
+        self.add(Revoked::Credential {
+            sha256: credential_hash(authorization),
+        })
     }
 
     fn add(&self, revoked: Revoked) -> Result<Revocation, RevokeError> {
@@ -683,7 +667,7 @@ mod tests {
         let revocations = Revocations::open(
             Box::new(store.clone()),
             clock.clone(),
-            &[TOKEN.to_string()],
+            Arc::new(|authorization: &str| authorization == TOKEN),
             vec![Authority {
                 role: "client".into(),
                 subject: name_hash(CA),
@@ -783,10 +767,6 @@ mod tests {
         assert!(revocations.is_credential_revoked(&credential_hash(TOKEN)));
         let persisted = format!("{:?}", store.load().expect("load"));
         assert!(!persisted.contains("fleet-token"), "{persisted}");
-        assert_eq!(
-            revocations.revoked_but_configured(),
-            vec![credential_hash(TOKEN)[..8].to_string()]
-        );
         assert_eq!(
             revocations.revoke_credential(TOKEN).expect("again").id,
             entry.id,

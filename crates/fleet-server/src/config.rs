@@ -99,6 +99,39 @@ pub struct ServerConfig {
     /// How repeated admission failures from one peer address are throttled (ADR-0039 clause 24).
     #[serde(default)]
     pub admission_throttle: AdmissionThrottleConfig,
+    /// How large the audit record grows and how much of it is kept (ADR-0052).
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+/// The `[audit]` section (ADR-0052 clause 4).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuditConfig {
+    /// A file reaching this size is closed and a new one started.
+    pub max_file_bytes: u64,
+    /// How many files are kept; the oldest past this is deleted.
+    pub keep_files: usize,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        let limits = crate::audit_log::Limits::default();
+        AuditConfig {
+            max_file_bytes: limits.max_file_bytes,
+            keep_files: limits.keep_files,
+        }
+    }
+}
+
+impl AuditConfig {
+    #[must_use]
+    pub fn limits(&self) -> crate::audit_log::Limits {
+        crate::audit_log::Limits {
+            max_file_bytes: self.max_file_bytes,
+            keep_files: self.keep_files,
+        }
+    }
 }
 
 /// The `[enrolment]` section (ADR-0039 clause 19).
@@ -176,8 +209,8 @@ impl Default for RestConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestAuthConfig {
-    /// Accepted Basic credentials, `user = "password"`. Several allow a rotation, or an individual
-    /// operator's credential to be withdrawn on its own.
+    /// Accepted Basic credentials, `user = "<Argon2id hash>"` (ADR-0039 clause 26). Several allow
+    /// a rotation, or an individual operator's credential to be withdrawn on its own.
     #[serde(default)]
     pub basic_users: BTreeMap<String, String>,
 }
@@ -191,17 +224,13 @@ impl std::fmt::Debug for RestAuthConfig {
 }
 
 impl RestAuthConfig {
-    /// The exact `Authorization` header values that authenticate, precomputed so the request path
-    /// is one constant-time comparison per candidate.
-    pub fn accepted_headers(&self) -> Vec<String> {
-        self.basic_users
-            .iter()
-            .map(|(user, password)| {
-                let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-                format!("Basic {encoded}")
-            })
-            .collect()
+    /// The check the Operator plane runs on every request (ADR-0039 clause 2).
+    ///
+    /// # Errors
+    /// Returns an error naming an entry that is not a hash this Server keeps.
+    pub fn credentials(&self) -> Result<crate::credentials::Credentials, String> {
+        crate::credentials::Credentials::new(&[], &self.basic_users, self.challenge())
+            .map_err(|e| format!("[rest.auth.basic_users] {e}"))
     }
 
     /// The `WWW-Authenticate` challenge — what makes a browser ask for the password rather than
@@ -226,20 +255,30 @@ impl RestAuthConfig {
                 ));
             }
         }
-        Ok(())
+        self.credentials().map(|_| ())
     }
 }
 
-/// The `[connection_offer]` section (ADR-0018): what every Agent declaring
-/// `AcceptsOpAMPConnectionSettings` is offered — a canonical credential (`bearer_token`, or
-/// `username`/`password`, exactly one scheme), a heartbeat interval, an endpoint. Any subset,
-/// but never none of them.
+/// The `[connection_offer]` section (ADR-0041): what every Agent declaring
+/// `AcceptsOpAMPConnectionSettings` is offered — a canonical credential (`bearer_token_file`, or
+/// `username` and `password_file`, exactly one scheme), a heartbeat interval, an endpoint. Any
+/// subset, but never none of them. The credential is read from its file, never from this one.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionOfferConfig {
-    pub bearer_token: Option<String>,
+    /// A file holding the offered Bearer token, readable by its owner alone.
+    pub bearer_token_file: Option<PathBuf>,
     pub username: Option<String>,
+    /// A file holding the offered Basic password, readable by its owner alone.
+    pub password_file: Option<PathBuf>,
+    /// Refused: the credential is never kept inline (ADR-0041 clause 1).
+    pub bearer_token: Option<String>,
+    /// Refused, as `bearer_token`.
     pub password: Option<String>,
+    /// The offered `Authorization` value, read once: what is checked against `[auth]` is what is
+    /// offered.
+    #[serde(skip)]
+    resolved: std::sync::OnceLock<Result<Option<String>, String>>,
     /// Offered heartbeat interval — on plain HTTP the polling interval (the Baseline's MUST).
     pub heartbeat_interval_secs: Option<u64>,
     /// Offered OpAMP endpoint, e.g. for a Server move; `ws(s)://` or `http(s)://`.
@@ -249,13 +288,57 @@ pub struct ConnectionOfferConfig {
 impl std::fmt::Debug for ConnectionOfferConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionOfferConfig")
-            .field("bearer_token", &redacted(&self.bearer_token))
+            .field("bearer_token_file", &self.bearer_token_file)
             .field("username", &self.username)
+            .field("password_file", &self.password_file)
+            .field("bearer_token", &redacted(&self.bearer_token))
             .field("password", &redacted(&self.password))
             .field("heartbeat_interval_secs", &self.heartbeat_interval_secs)
             .field("endpoint", &self.endpoint)
             .finish()
     }
+}
+
+/// A credential kept in a file of its own (ADR-0041 clause 1): present, not empty, and readable by
+/// its owner alone on Unix. Trailing whitespace — the newline an editor adds — is dropped.
+fn secret_file(key: &str, path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let named = |e: std::io::Error| format!("[connection_offer] {key} {}: {e}", path.display());
+    // Opened once, and checked and read through that one handle, so the file read is the file
+    // checked — not one swapped in between.
+    let mut file = std::fs::File::open(path).map_err(named)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = file.metadata().map_err(named)?;
+        if meta.mode() & 0o077 != 0 {
+            return Err(format!(
+                "[connection_offer] {key} {} is readable by others (mode {:o}) — make it 0600",
+                path.display(),
+                meta.mode() & 0o777
+            ));
+        }
+        // SAFETY: geteuid has no preconditions and touches no memory.
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            return Err(format!(
+                "[connection_offer] {key} {} belongs to another account (uid {}) — it must be \
+                 this Server's own",
+                path.display(),
+                meta.uid()
+            ));
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(named)?;
+    let secret = text.trim_end().to_string();
+    if secret.is_empty() {
+        return Err(format!(
+            "[connection_offer] {key} {} is empty",
+            path.display()
+        ));
+    }
+    Ok(secret)
 }
 
 /// Names what is configured, never the secret itself.
@@ -268,21 +351,48 @@ fn redacted<T>(value: &Option<T>) -> &'static str {
 }
 
 impl ConnectionOfferConfig {
-    /// The offered `Authorization` header value, `None` for a credential-less offer.
+    /// The offered `Authorization` header value, read from its file; `None` for a
+    /// credential-less offer.
+    ///
+    /// # Errors
+    /// Refuses an inline credential, a scheme half given or both given, and a file that is
+    /// missing, empty or readable by anyone but its owner.
     pub fn authorization(&self) -> Result<Option<String>, String> {
-        match (&self.bearer_token, &self.username, &self.password) {
+        self.resolved
+            .get_or_init(|| self.read_authorization())
+            .clone()
+    }
+
+    fn read_authorization(&self) -> Result<Option<String>, String> {
+        for (key, inline) in [
+            ("bearer_token", &self.bearer_token),
+            ("password", &self.password),
+        ] {
+            if inline.is_some() {
+                return Err(format!(
+                    "[connection_offer] {key} is never kept in server.toml — write it to a file \
+                     only this Server's account can read and name it with {key}_file"
+                ));
+            }
+        }
+        match (&self.bearer_token_file, &self.username, &self.password_file) {
             (None, None, None) => Ok(None),
-            (Some(token), None, None) => Ok(Some(format!("Bearer {token}"))),
-            (None, Some(user), Some(password)) => {
+            (Some(file), None, None) => Ok(Some(format!(
+                "Bearer {}",
+                secret_file("bearer_token_file", file)?
+            ))),
+            (None, Some(user), Some(file)) => {
+                let password = secret_file("password_file", file)?;
                 let encoded =
                     base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
                 Ok(Some(format!("Basic {encoded}")))
             }
             (Some(_), _, _) => Err(
-                "[connection_offer] must set either bearer_token or username/password, not both"
+                "[connection_offer] must set either bearer_token_file or username/password_file, \
+                 not both"
                     .to_string(),
             ),
-            _ => Err("[connection_offer] needs username and password together".to_string()),
+            _ => Err("[connection_offer] needs username and password_file together".to_string()),
         }
     }
 
@@ -306,7 +416,7 @@ impl ConnectionOfferConfig {
                 .map_err(|e| format!("[connection_offer] endpoint {e}"))?;
         }
         if let (Some(offered), Some(auth), None) = (&authorization, auth, self.endpoint.as_ref()) {
-            if !auth.accepted_headers().contains(offered) {
+            if !auth.credentials()?.verify(offered) {
                 return Err(
                     "the [connection_offer] credential is not in the [auth] accepted set — \
                      this rotation would lock the fleet out"
@@ -324,10 +434,10 @@ impl ConnectionOfferConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
-    /// Accepted `Authorization: Bearer <token>` values.
+    /// Accepted Bearer tokens, each as `sha256:<hex>` (ADR-0039 clause 26).
     #[serde(default)]
     pub bearer_tokens: Vec<String>,
-    /// Accepted Basic credentials, `user = "password"`.
+    /// Accepted Basic credentials, `user = "<Argon2id hash>"`.
     #[serde(default)]
     pub basic_users: BTreeMap<String, String>,
 }
@@ -342,16 +452,17 @@ impl std::fmt::Debug for AuthConfig {
 }
 
 impl AuthConfig {
-    /// The exact `Authorization` header values that authenticate, precomputed so the request
-    /// path is one constant-time string comparison per candidate.
-    pub fn accepted_headers(&self) -> Vec<String> {
-        let bearer = self.bearer_tokens.iter().map(|t| format!("Bearer {t}"));
-        let basic = self.basic_users.iter().map(|(user, password)| {
-            let encoded =
-                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-            format!("Basic {encoded}")
-        });
-        bearer.chain(basic).collect()
+    /// The check the Agent plane runs on every request (ADR-0039 clause 2).
+    ///
+    /// # Errors
+    /// Returns an error naming an entry that is not a hash this Server keeps.
+    pub fn credentials(&self) -> Result<crate::credentials::Credentials, String> {
+        crate::credentials::Credentials::new(
+            &self.bearer_tokens,
+            &self.basic_users,
+            self.challenge(),
+        )
+        .map_err(|e| format!("[auth] {e}"))
     }
 
     /// The `WWW-Authenticate` challenge advertising exactly the configured schemes (RFC 9110).
@@ -375,7 +486,7 @@ impl AuthConfig {
                     .to_string(),
             );
         }
-        Ok(())
+        self.credentials().map(|_| ())
     }
 }
 
@@ -564,6 +675,7 @@ impl Default for ServerConfig {
             max_connections: default_agent_max_connections(),
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -711,6 +823,13 @@ impl ServerConfig {
                 "[enrolment] needs [client_ca]: an approved request is signed by it".to_string(),
             );
         }
+        if self.audit.max_file_bytes == 0 || self.audit.keep_files == 0 {
+            return Err(
+                "[audit] max_file_bytes and keep_files must be greater than 0 — the record is \
+                 never switched off"
+                    .to_string(),
+            );
+        }
         let throttle = &self.admission_throttle;
         if throttle.max_failures == 0 || throttle.window_secs == 0 || throttle.backoff_secs == 0 {
             return Err(
@@ -790,6 +909,36 @@ impl TelemetryOffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The entry `server.toml` keeps for a Bearer token, for any token a test names.
+    fn bearer(token: &str) -> String {
+        use sha2::Digest as _;
+        format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(token.as_bytes()))
+        )
+    }
+
+    /// The `[auth]` line accepting the token `t`.
+    fn auth_t() -> String {
+        format!("[auth]\nbearer_tokens = [{:?}]\n", bearer("t"))
+    }
+
+    /// A credential file, owner-only, as ADR-0041 asks.
+    fn secret_in(dir: &Path, name: &str, value: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("{value}\n")).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        path
+    }
+
+    fn offer_with(body: &str) -> ConnectionOfferConfig {
+        toml::from_str(body).expect("parse")
+    }
 
     #[test]
     fn parses_a_full_config() {
@@ -936,28 +1085,82 @@ mod tests {
 
     /// Verifies: ADR-0039
     #[test]
-    fn auth_precomputes_the_accepted_headers_and_the_challenge() {
-        let cfg: ServerConfig = toml::from_str(
-            r#"
-            [auth]
-            bearer_tokens = ["tok"]
-            [auth.basic_users]
-            fleet = "secret"
-            "#,
-        )
+    fn auth_keeps_hashes_and_advertises_both_schemes() {
+        let cfg: ServerConfig = toml::from_str(&format!(
+            "[auth]\nbearer_tokens = [{:?}]\n[auth.basic_users]\nfleet = {:?}\n",
+            bearer("tok"),
+            crate::credentials::hash_basic("secret").expect("hash"),
+        ))
         .expect("parse");
         let auth = cfg.auth.expect("auth");
-        let headers = auth.accepted_headers();
-        assert!(headers.contains(&"Bearer tok".to_string()));
-        // base64("fleet:secret")
-        assert!(headers.contains(&"Basic ZmxlZXQ6c2VjcmV0".to_string()));
-        assert_eq!(auth.challenge(), r#"Basic realm="opamp", Bearer"#);
         assert!(auth.check().is_ok());
+        let credentials = auth.credentials().expect("credentials");
+        assert!(credentials.verify("Bearer tok"));
+        // base64("fleet:secret")
+        assert!(credentials.verify("Basic ZmxlZXQ6c2VjcmV0"));
+        assert!(!credentials.verify("Bearer secret"));
+        assert_eq!(auth.challenge(), r#"Basic realm="opamp", Bearer"#);
+    }
+
+    /// No credential in `server.toml` authenticates on its own: a token or a password in clear is
+    /// refused at startup, the entry named and the value never echoed (ADR-0039 clause 26).
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_plaintext_credential_is_refused_naming_its_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        let tls =
+            "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n";
+        for (body, names) in [
+            (
+                format!("[auth]\nbearer_tokens = [{:?}, \"plain-token-value\"]\n{tls}", bearer("t")),
+                "entry 1",
+            ),
+            (
+                format!("{}[auth.basic_users]\nfleet = \"plain-password\"\n{tls}", auth_t()),
+                "user \"fleet\"",
+            ),
+            (
+                format!(
+                    "{}[rest]\nlisten = \"0.0.0.0:4321\"\n[rest.auth.basic_users]\nops = \"plain-password\"\n{tls}",
+                    auth_t()
+                ),
+                "[rest.auth.basic_users] user \"ops\"",
+            ),
+        ] {
+            std::fs::write(&path, body).expect("write");
+            let err = ServerConfig::load(&path).expect_err("a credential in clear");
+            assert!(err.contains(names), "names the entry: {err}");
+            assert!(err.contains("hash-credential"), "says how to fix it: {err}");
+            assert!(!err.contains("plain-"), "never echoes the value: {err}");
+        }
+    }
+
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_weak_argon2id_hash_is_refused() {
+        use argon2::password_hash::{PasswordHasher as _, SaltString};
+        let cheap = argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(4096, 1, 1, None).expect("params"),
+        )
+        .hash_password(
+            b"secret",
+            &SaltString::encode_b64(b"0123456789abcdef").expect("salt"),
+        )
+        .expect("hash")
+        .to_string();
+        let auth: RestAuthConfig =
+            toml::from_str(&format!("[basic_users]\nops = {cheap:?}\n")).expect("parse");
+        let err = auth.check().expect_err("cheaper than the minimum");
+        assert!(err.contains("cheaper"), "{err}");
     }
 
     #[test]
     fn the_challenge_advertises_only_the_configured_scheme() {
-        let bearer_only: AuthConfig = toml::from_str("bearer_tokens = [\"tok\"]").expect("parse");
+        let bearer_only: AuthConfig =
+            toml::from_str(&format!("bearer_tokens = [{:?}]", bearer("tok"))).expect("parse");
         assert_eq!(bearer_only.challenge(), "Bearer");
         assert!(bearer_only.check().is_ok());
     }
@@ -966,19 +1169,18 @@ mod tests {
     /// authenticate, with the challenge that makes a browser ask rather than give up.
     /// Verifies: ADR-0039
     #[test]
-    fn rest_auth_precomputes_the_accepted_headers_and_the_basic_challenge() {
-        let cfg: ServerConfig = toml::from_str(
-            r#"
-            [rest]
-            listen = "127.0.0.1:4321"
-            [rest.auth.basic_users]
-            fleet = "secret"
-            "#,
-        )
+    fn rest_auth_verifies_its_hashes_and_carries_the_basic_challenge() {
+        let cfg: ServerConfig = toml::from_str(&format!(
+            "[rest]\nlisten = \"127.0.0.1:4321\"\n[rest.auth.basic_users]\nfleet = {:?}\n",
+            crate::credentials::hash_basic("secret").expect("hash"),
+        ))
         .expect("parse");
         let auth = cfg.rest.auth.expect("rest auth");
         // base64("fleet:secret")
-        assert_eq!(auth.accepted_headers(), vec!["Basic ZmxlZXQ6c2VjcmV0"]);
+        assert!(auth
+            .credentials()
+            .expect("credentials")
+            .verify("Basic ZmxlZXQ6c2VjcmV0"));
         assert_eq!(auth.challenge(), r#"Basic realm="opamp""#);
         assert!(auth.check().is_ok());
 
@@ -1018,16 +1220,24 @@ mod tests {
 
     /// Verifies: ADR-0041
     #[test]
-    fn a_connection_offer_yields_the_expected_authorization() {
-        let bearer: ConnectionOfferConfig =
-            toml::from_str("bearer_token = \"tok\"").expect("parse");
+    fn an_offered_credential_is_read_from_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = secret_in(dir.path(), "token", "tok");
+        let bearer = offer_with(&format!(
+            "bearer_token_file = {:?}",
+            token.display().to_string()
+        ));
         assert_eq!(
             bearer.authorization().expect("value"),
-            Some("Bearer tok".to_string())
+            Some("Bearer tok".to_string()),
+            "the trailing newline is dropped"
         );
 
-        let basic: ConnectionOfferConfig =
-            toml::from_str("username = \"fleet\"\npassword = \"secret\"").expect("parse");
+        let password = secret_in(dir.path(), "password", "secret");
+        let basic = offer_with(&format!(
+            "username = \"fleet\"\npassword_file = {:?}",
+            password.display().to_string()
+        ));
         assert_eq!(
             basic.authorization().expect("value"),
             Some("Basic ZmxlZXQ6c2VjcmV0".to_string())
@@ -1037,6 +1247,44 @@ mod tests {
         let heartbeat_only: ConnectionOfferConfig =
             toml::from_str("heartbeat_interval_secs = 15").expect("parse");
         assert_eq!(heartbeat_only.authorization().expect("value"), None);
+    }
+
+    /// Verifies: ADR-0041
+    #[test]
+    fn an_inline_offered_credential_is_refused() {
+        for body in [
+            "bearer_token = \"tok\"",
+            "username = \"fleet\"\npassword = \"secret\"",
+        ] {
+            let err = offer_with(body).authorization().expect_err(body);
+            assert!(err.contains("never kept in server.toml"), "{err}");
+            assert!(!err.contains("tok\"") && !err.contains("secret\""), "{err}");
+        }
+    }
+
+    /// Verifies: ADR-0041
+    #[cfg(unix)]
+    #[test]
+    fn an_offered_credential_file_readable_by_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = secret_in(dir.path(), "token", "tok");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let offer = offer_with(&format!(
+            "bearer_token_file = {:?}",
+            token.display().to_string()
+        ));
+        let err = offer.authorization().expect_err("readable by others");
+        assert!(
+            err.contains("bearer_token_file") && err.contains("0600"),
+            "{err}"
+        );
+        let empty = secret_in(dir.path(), "empty", "");
+        let offer = offer_with(&format!(
+            "bearer_token_file = {:?}",
+            empty.display().to_string()
+        ));
+        assert!(offer.authorization().expect_err("empty").contains("empty"));
     }
 
     /// Verifies: ADR-0041
@@ -1098,7 +1346,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
         let tls = "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\n";
-        std::fs::write(&path, format!("[auth]\nbearer_tokens = [\"t\"]\n{tls}")).expect("write");
+        std::fs::write(&path, format!("{}{tls}", auth_t())).expect("write");
         let err = ServerConfig::load(&path).expect_err("no client CA");
         assert!(err.contains("client_ca_file is required"), "{err}");
 
@@ -1107,7 +1355,7 @@ mod tests {
         let err = ServerConfig::load(&path).expect_err("no credential");
         assert!(err.contains("[auth] is required"), "{err}");
 
-        let complete = format!("[auth]\nbearer_tokens = [\"t\"]\n{tls}");
+        let complete = format!("{}{tls}", auth_t());
         std::fs::write(&path, &complete).expect("write");
         ServerConfig::load(&path).expect("both proofs configured");
 
@@ -1158,42 +1406,50 @@ mod tests {
     /// Verifies: ADR-0038, ADR-0039
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
-        let tls = "[auth]\nbearer_tokens = [\"t\"]\n\
-                   [tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n";
+        let tls = format!(
+            "{}[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n",
+            auth_t()
+        );
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
         std::fs::write(&path, format!("[rest]\nlisten = \"0.0.0.0:4321\"\n{tls}")).expect("write");
         let err = ServerConfig::load(&path).expect_err("open plane without auth");
         assert!(err.contains("[rest.auth] is required"), "{err}");
 
-        let guarded =
-            "[rest]\nlisten = \"0.0.0.0:4321\"\n[rest.auth.basic_users]\nops = \"s3cret\"\n";
+        let guarded = format!(
+            "[rest]\nlisten = \"0.0.0.0:4321\"\n[rest.auth.basic_users]\nops = {:?}\n",
+            crate::credentials::hash_basic("s3cret").expect("hash")
+        );
         std::fs::write(&path, format!("{guarded}{tls}")).expect("write");
         ServerConfig::load(&path).expect("guarded plane loads");
 
-        std::fs::write(&path, tls).expect("write");
+        std::fs::write(&path, &tls).expect("write");
         ServerConfig::load(&path).expect("a loopback plane needs no authentication");
     }
 
     /// Verifies: ADR-0041
     #[test]
     fn a_credential_offer_must_be_accepted_by_auth_unless_the_endpoint_moves() {
-        let auth: AuthConfig = toml::from_str("bearer_tokens = [\"new\"]").expect("parse");
+        let auth: AuthConfig =
+            toml::from_str(&format!("bearer_tokens = [{:?}]", bearer("new"))).expect("parse");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = secret_in(dir.path(), "new", "new").display().to_string();
+        let other = secret_in(dir.path(), "other", "other")
+            .display()
+            .to_string();
 
         // Offering a credential [auth] does not accept would lock the fleet out.
-        let stranger: ConnectionOfferConfig =
-            toml::from_str("bearer_token = \"other\"").expect("parse");
+        let stranger = offer_with(&format!("bearer_token_file = {other:?}"));
         assert!(stranger.check(Some(&auth)).is_err());
 
         // Offering the accepted credential is fine.
-        let matching: ConnectionOfferConfig =
-            toml::from_str("bearer_token = \"new\"").expect("parse");
+        let matching = offer_with(&format!("bearer_token_file = {new:?}"));
         assert!(matching.check(Some(&auth)).is_ok());
 
         // A move to another Server is exempt — the destination validates its own credential.
-        let moved: ConnectionOfferConfig =
-            toml::from_str("bearer_token = \"other\"\nendpoint = \"wss://elsewhere/v1/opamp\"")
-                .expect("parse");
+        let moved = offer_with(&format!(
+            "bearer_token_file = {other:?}\nendpoint = \"wss://elsewhere/v1/opamp\""
+        ));
         assert!(moved.check(Some(&auth)).is_ok());
     }
 }

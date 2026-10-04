@@ -24,6 +24,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::agent_store::{AgentStore, PersistedAgent};
+use crate::audit::{Audit, Entry};
 use crate::configs::{self, ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
@@ -426,6 +427,11 @@ pub struct AppState {
     /// What the client CA signed and what is revoked (ADR-0049); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
+    /// The audit record every security decision goes to (ADR-0052); `None` only in tests.
+    audit: Option<Arc<dyn Audit>>,
+    /// The connection-settings hash last recorded as offered to each Agent, so a rotation is
+    /// recorded once per offer and not once per poll.
+    offered: Mutex<HashMap<InstanceUid, Vec<u8>>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
@@ -500,6 +506,8 @@ impl AppState {
             client_ca: None,
             enrolment: None,
             revocations: None,
+            audit: None,
+            offered: Mutex::new(HashMap::new()),
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -659,13 +667,72 @@ impl AppState {
         self.revocations.as_ref()
     }
 
-    /// Records a certificate the client CA signed, before it is offered (ADR-0049 clause 2).
+    /// Arms the audit record (ADR-0052).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    /// The audit record.
+    pub fn audit(&self) -> Option<&Arc<dyn Audit>> {
+        self.audit.as_ref()
+    }
+
+    /// Records a decision this Server is about to act on; without a record it is not taken
+    /// (ADR-0052 clause 6).
+    fn audited(&self, entry: Entry) -> Result<(), String> {
+        match &self.audit {
+            Some(audit) => audit
+                .record(entry)
+                .map_err(|_| "the audit record is unavailable — retry shortly".to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// Records a refusal; it is refused either way.
+    fn audit_refusal(&self, entry: Entry) {
+        if let Some(audit) = &self.audit {
+            audit.refusal(entry);
+        }
+    }
+
+    /// Records a certificate the client CA signed, before it is offered (ADR-0049 clause 2,
+    /// ADR-0052 clause 1).
     fn record_issued(
         &self,
         signed: &Signed,
         instance_uid: &[u8],
         predecessor: Option<CertId>,
     ) -> Result<(), String> {
+        self.audited(
+            Entry::new("issuance.signed", "issued")
+                .with(
+                    "kind",
+                    if predecessor.is_some() {
+                        "renewal"
+                    } else {
+                        "enrolment"
+                    },
+                )
+                .with("issuer", signed.facts.issuer_name.clone())
+                .with(
+                    "authority",
+                    self.revocations.as_ref().and_then(|revocations| {
+                        revocations
+                            .authority_of(&signed.facts.id.issuer)
+                            .map(|authority| authority.role.clone())
+                    }),
+                )
+                .with("serial", signed.facts.id.serial.clone())
+                .with("subject", signed.facts.subject.clone())
+                .with("key_fingerprint", signed.facts.key_fingerprint.clone())
+                .with("instance_uid", hex::encode(instance_uid))
+                .with(
+                    "predecessor_serial",
+                    predecessor.as_ref().map(|id| id.serial.clone()),
+                ),
+        )?;
         match &self.revocations {
             Some(revocations) => revocations
                 .record(signed.facts.clone(), instance_uid, predecessor)
@@ -1418,9 +1485,82 @@ impl AppState {
             if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
             }
+            let settled = status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
+                || status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32;
+            let changed = record
+                .connection_settings_status
+                .as_ref()
+                .is_none_or(|previous| {
+                    previous.status != status.status
+                        || previous.last_connection_settings_hash
+                            != status.last_connection_settings_hash
+                });
+            let rotated = self
+                .offered
+                .lock()
+                .expect("offered lock")
+                .get(&uid)
+                .is_some_and(|hash| *hash == status.last_connection_settings_hash);
+            // An acknowledgement of the standing offer when it carries a credential — recorded
+            // whether or not this Server's memory of having offered it survived a restart.
+            let credential_offered = self
+                .connection_offer
+                .as_ref()
+                .is_some_and(|offer| offer.settings.headers.is_some());
+            if settled && changed && (rotated || credential_offered) {
+                self.audit_refusal(
+                    Entry::new(
+                        "rotation.acknowledged",
+                        if status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
+                        {
+                            "applied"
+                        } else {
+                            "failed"
+                        },
+                    )
+                    .with("instance_uid", uid.to_string())
+                    .with("hash", hex::encode(&status.last_connection_settings_hash))
+                    .with(
+                        "error",
+                        (!status.error_message.is_empty()).then(|| status.error_message.clone()),
+                    ),
+                );
+            }
             record.connection_settings_status = Some(status);
         }
         if let Some(statuses) = msg.package_statuses {
+            use opamp::proto::PackageStatusEnum as P;
+            for (name, status) in &statuses.packages {
+                let before = record
+                    .package_statuses
+                    .as_ref()
+                    .and_then(|previous| previous.packages.get(name))
+                    .map(|previous| (previous.status, previous.agent_has_version.clone()));
+                let outcome = if status.status == P::Installed as i32 {
+                    Some("installed")
+                } else if status.status == P::InstallFailed as i32 {
+                    Some("failed")
+                } else {
+                    None
+                };
+                if let (Some(outcome), true) = (
+                    outcome,
+                    before != Some((status.status, status.agent_has_version.clone())),
+                ) {
+                    self.audit_refusal(
+                        Entry::new("package.outcome", outcome)
+                            .with("instance_uid", uid.to_string())
+                            .with("package", name.clone())
+                            .with("version", status.agent_has_version.clone())
+                            .with("offered_version", status.server_offered_version.clone())
+                            .with(
+                                "error",
+                                (!status.error_message.is_empty())
+                                    .then(|| status.error_message.clone()),
+                            ),
+                    );
+                }
+            }
             for status in statuses.packages.values() {
                 if status.status == opamp::proto::PackageStatusEnum::InstallFailed as i32 {
                     warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
@@ -1490,6 +1630,11 @@ impl AppState {
                     }
                     Err(e) => {
                         warn!(agent = %uid, error = %e, "refused a certificate signing request");
+                        self.audit_refusal(
+                            Entry::new("issuance.refused", "refused")
+                                .with("instance_uid", uid.to_string())
+                                .with("reason", e.clone()),
+                        );
                         // The report's updates above are already in the record, so they are
                         // persisted even though the CSR is refused (ADR-0026).
                         self.persist_if_dirty(&uid, record);
@@ -1564,7 +1709,7 @@ impl AppState {
         let connection_settings = if disconnected {
             None
         } else {
-            self.settings_offer(record, issued)
+            self.settings_offer(&uid, record, issued)
         };
 
         // The package offer (ADR-0019), gated by capability and the reported
@@ -1663,6 +1808,7 @@ impl AppState {
     /// with it, exactly as the Baseline describes.
     fn settings_offer(
         &self,
+        uid: &InstanceUid,
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
@@ -1707,7 +1853,29 @@ impl AppState {
         if settings.is_none() && telemetry.is_empty() {
             return None;
         }
-        gate(record, compose_settings_offer(settings, telemetry))
+        let carries_credential = settings
+            .as_ref()
+            .is_some_and(|settings| settings.headers.is_some());
+        let offer = gate(record, compose_settings_offer(settings, telemetry))?;
+        if carries_credential {
+            let fresh = self.offered.lock().expect("offered lock").get(uid) != Some(&offer.hash);
+            if fresh {
+                // A credential is not handed out unrecorded (ADR-0052 clause 6): without a record
+                // there is no offer this time, and the next report asks again.
+                self.audited(
+                    Entry::new("rotation.offered", "offered")
+                        .with("instance_uid", uid.to_string())
+                        .with("hash", hex::encode(&offer.hash)),
+                )
+                .ok()?;
+                let mut offered = self.offered.lock().expect("offered lock");
+                if offered.len() >= 100_000 {
+                    offered.clear();
+                }
+                offered.insert(*uid, offer.hash.clone());
+            }
+        }
+        Some(offer)
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a rollout act changes an assignment;

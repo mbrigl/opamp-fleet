@@ -28,17 +28,15 @@ async fn spawn_guarded() -> TestServer {
                 PackageOffering::new(store, String::new()).expect("deployments"),
             )),
     );
-    let auth: RestAuthConfig = toml::from_str(
-        r#"
-        [basic_users]
-        fleet-admin = "secret"
-        "#,
-    )
+    let auth: RestAuthConfig = toml::from_str(&format!(
+        "[basic_users]\nfleet-admin = {:?}\n",
+        fleet_server::credentials::hash_basic("secret").expect("hash"),
+    ))
     .expect("parse");
     let (addr, rest_addr) = support::serve_guarded(
         state.clone(),
         fleet_server::transport::Admission::open(),
-        Some(OperatorAuth::from_config(&auth)),
+        Some(OperatorAuth::from_config(&auth).expect("auth")),
     )
     .await;
     TestServer {

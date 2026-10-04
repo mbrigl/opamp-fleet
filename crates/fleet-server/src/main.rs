@@ -13,11 +13,137 @@ use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
-use tracing::{info, warn};
+use tracing::info;
 
 fn usage() -> ! {
-    eprintln!("Usage: server [--config <server.toml>] [--version]");
+    eprintln!(
+        "Usage: server [--config <server.toml>] [--version]\n       \
+         server hash-credential --bearer|--basic   (reads the secret from standard input)\n       \
+         server audit-verify <config_dir>/audit"
+    );
     std::process::exit(2);
+}
+
+/// `server audit-verify <dir>` (ADR-0052 clause 3): walks the audit record's files in order and
+/// names the first entry whose `prev` does not match the entry before it.
+fn audit_verify(dir: Option<String>) -> ! {
+    let Some(dir) = dir else { usage() };
+    let files = match fleet_server::fs::audit_files(std::path::Path::new(&dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let mut texts = Vec::new();
+    for file in &files {
+        match std::fs::read_to_string(file) {
+            Ok(text) => texts.push((file.display().to_string(), text)),
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", file.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    let lines = texts.iter().flat_map(|(name, text)| {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
+    });
+    match fleet_server::audit_log::verify(lines) {
+        Ok(count) => {
+            println!("{count} entries in {} files, the chain holds", files.len());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("the chain breaks at {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `server hash-credential --bearer|--basic` (ADR-0039 clause 26): reads the secret from standard
+/// input — without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
+fn hash_credential(scheme: Option<String>) -> ! {
+    let hash: fn(&str) -> Result<String, String> = match scheme.as_deref() {
+        Some("--bearer") => fleet_server::credentials::hash_bearer,
+        Some("--basic") => fleet_server::credentials::hash_basic,
+        _ => usage(),
+    };
+    let secret = match read_secret() {
+        Ok(secret) => secret,
+        Err(e) => {
+            eprintln!("cannot read the secret: {e}");
+            std::process::exit(1);
+        }
+    };
+    match hash(&secret) {
+        Ok(entry) => {
+            println!("{entry}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One line from standard input, the trailing newline dropped. On a Unix terminal echo is off while
+/// it is typed, so the secret does not stand on the screen.
+fn read_secret() -> std::io::Result<String> {
+    use std::io::{BufRead as _, IsTerminal as _};
+    let stdin = std::io::stdin();
+    let terminal = stdin.is_terminal();
+    if terminal {
+        eprint!("secret: ");
+    }
+    let _echo = terminal.then(EchoOff::new).flatten();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    if terminal {
+        eprintln!();
+    }
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Terminal echo switched off for as long as it lives.
+struct EchoOff {
+    #[cfg(unix)]
+    saved: libc::termios,
+}
+
+impl EchoOff {
+    #[cfg(unix)]
+    fn new() -> Option<Self> {
+        // SAFETY: tcgetattr/tcsetattr on standard input with a termios this function owns.
+        unsafe {
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut saved) != 0 {
+                return None;
+            }
+            let mut silent = saved;
+            silent.c_lflag &= !libc::ECHO;
+            (libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &silent) == 0)
+                .then_some(EchoOff { saved })
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: restores the termios read in `new`.
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
+        }
+    }
 }
 
 fn parse_args() -> PathBuf {
@@ -25,6 +151,8 @@ fn parse_args() -> PathBuf {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "hash-credential" => hash_credential(args.next()),
+            "audit-verify" => audit_verify(args.next()),
             "--config" => match args.next() {
                 Some(path) => config = PathBuf::from(path),
                 None => usage(),
@@ -171,12 +299,28 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // What the client CA signed and what is revoked (ADR-0049), kept beside the fleet's records.
-    let accepted = config
+    // The fleet credential's check (ADR-0039), built once: admission runs it, and the revocation
+    // list revokes only what it accepts. The configuration was refused at load without `[auth]`.
+    let auth = match config
         .auth
         .as_ref()
-        .map(|auth| auth.accepted_headers())
-        .unwrap_or_default();
+        .map(fleet_server::transport::OpampAuth::from_config)
+        .transpose()
+    {
+        Ok(auth) => auth,
+        Err(e) => {
+            eprintln!("{}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    };
+    let accepts: fleet_server::revocation::Accepts = match &auth {
+        Some(auth) => {
+            let credentials = auth.credentials();
+            Arc::new(move |authorization: &str| credentials.verify(authorization))
+        }
+        None => Arc::new(|_: &str| false),
+    };
+    // What the client CA signed and what is revoked (ADR-0049), kept beside the fleet's records.
     let revocations = match fleet_server::fs::FsLedgerStore::open(
         config.config_dir.join("revocation"),
     )
@@ -184,7 +328,7 @@ async fn main() {
         fleet_server::revocation::Revocations::open(
             Box::new(store),
             clock.clone(),
-            &accepted,
+            accepts,
             planes.3.clone(),
         )
     }) {
@@ -194,12 +338,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    for prefix in revocations.revoked_but_configured() {
-        // Still refused; the line in server.toml is only dead weight (ADR-0049 clause 5).
-        warn!(
-            credential = %prefix,
-            "a revoked credential is still in [auth] — remove it from server.toml"
-        );
+    // The audit record (ADR-0052), opened before anything is decided.
+    let audit = match fleet_server::fs::FsAuditStore::open(config.config_dir.join("audit"))
+        .and_then(|store| {
+            fleet_server::audit_log::AuditLog::start(
+                Box::new(store),
+                config.audit.limits(),
+                clock.clone(),
+            )
+        }) {
+        Ok(audit) => Arc::new(audit) as Arc<dyn fleet_server::audit::Audit>,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(enrolment) = &enrolment {
+        enrolment.set_audit(audit.clone());
     }
     let state = match AppState::new(config.config_dir.clone()) {
         Ok(state) => Arc::new(
@@ -208,6 +363,7 @@ async fn main() {
                 .with_client_ca(client_ca)
                 .with_enrolment(enrolment.clone())
                 .with_revocations(Some(revocations.clone()))
+                .with_audit(Some(audit.clone()))
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
@@ -222,10 +378,6 @@ async fn main() {
         }
     };
     // Both proofs, always (ADR-0039): the configuration was refused at load without either.
-    let auth = config
-        .auth
-        .as_ref()
-        .map(fleet_server::transport::OpampAuth::from_config);
     info!("the OpAMP endpoint requires the fleet credential and a client certificate");
     // Two planes, two listeners (ADR-0038): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
@@ -235,16 +387,29 @@ async fn main() {
         fleet_server::transport::Admission::new(auth, true)
             .with_enrolment(issuers, enrolment)
             .with_revocations(Some(revocations))
+            .with_audit(Some(audit.clone()))
             .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
                 limits,
                 clock.clone(),
             ))),
     );
-    let operator_auth = config.rest.auth.as_ref().map(|auth| {
-        fleet_server::api::OperatorAuth::from_config(auth).with_throttle(Arc::new(
-            fleet_server::throttle::Throttle::new(limits, clock.clone()),
-        ))
-    });
+    let operator_auth = match config
+        .rest
+        .auth
+        .as_ref()
+        .map(fleet_server::api::OperatorAuth::from_config)
+        .transpose()
+    {
+        Ok(auth) => auth.map(|auth| {
+            auth.with_audit(Some(audit.clone())).with_throttle(Arc::new(
+                fleet_server::throttle::Throttle::new(limits, clock.clone()),
+            ))
+        }),
+        Err(e) => {
+            eprintln!("{}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    };
     if operator_auth.is_some() {
         // ADR-0039. Both planes serve TLS, so the password never crosses a network in clear
         // (ADR-0038).

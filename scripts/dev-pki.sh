@@ -89,7 +89,7 @@ Created in $OUT. In server.toml:
   bootstrap_ca_file = "$OUT/bootstrap-ca.pem"
 
   [auth]
-  bearer_tokens = ["dev-fleet-token"]
+  bearer_tokens = ["$(printf '%s' dev-fleet-token | sha256sum | cut -d' ' -f1 | sed 's/^/sha256:/')"]
 
 In supervisor.toml (or bootstrap.pem and bootstrap-key.pem to try enrolment):
 

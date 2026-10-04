@@ -149,12 +149,12 @@ other.
 
 ```toml
 [rest.auth.basic_users]
-fleet-admin = "a-strong-password"
+fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "password"`. A section without one, or an entry with an empty name or password, fails startup. |
+| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "<Argon2id hash>"` — see [Credentials are kept as hashes](#credentials-are-kept-as-hashes). A section without one, or an entry that is not such a hash, fails startup. |
 
 ### `[tls]`
 
@@ -224,9 +224,9 @@ Required. See [Authentication](#authentication).
 
 ```toml
 [auth]
-bearer_tokens = ["a-long-random-token", "the-previous-one-during-rotation"]
+bearer_tokens = ["sha256:<hex of the new token>", "sha256:<hex of the previous one>"]
 [auth.basic_users]
-fleet = "a-strong-password"
+fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 ### `[connection_offer]`
@@ -237,7 +237,7 @@ not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http
 
 ```toml
 [connection_offer]
-bearer_token = "a-long-random-token"           # or username = "…" / password = "…"
+bearer_token_file = "/etc/opamp-fleet/offered-token"   # or username = "…" / password_file = "…"
 heartbeat_interval_secs = 30
 endpoint = "wss://fleet.example:4320/v1/opamp"
 ```
@@ -445,6 +445,33 @@ the new certificate, so a healthy fleet never sees this.
 Behind a Gateway the Server sees the Gateway's certificate, not the Agent's. Revoke a gatewayed
 Agent through its credential, or revoke the Gateway's certificate, which ends every Agent it
 carries.
+
+## The audit record
+
+Every security decision leaves one line in `config_dir/audit/`: each admission and refusal on the
+Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
+certificate issued, each revocation and the session it ended, each credential rotation, each
+operator act with the operator's name, and each package an Agent reports installed or failed. A
+plain-HTTP Agent's admission is recorded once an hour per address and certificate, a WebSocket
+session every time. No line holds a credential, a key or a CSR body.
+
+```console
+$ tail -n1 /var/lib/opamp-fleet-server/audit/audit-1.jsonl
+{"event":"revocation.revoked","id":"9d2e…","kind":"certificate","authority":"client",
+ "serial":"5c0f…","outcome":"revoked","prev":"41b7…","seq":5113,"time":"2026-10-04T09:12:44Z"}
+$ server audit-verify /var/lib/opamp-fleet-server/audit
+5113 entries in 1 files, the chain holds
+```
+
+Each line carries the SHA-256 of the line before it, so a line edited or removed afterwards breaks
+the chain where it happened; `audit-verify` names the first entry that does not follow. Against an
+intruder on the Server host that only helps with a copy taken before, so ship the directory off the
+host. The record also goes to the Server's log under the target `audit`.
+
+The Server never takes a decision it cannot record: when the record cannot be written — a full
+disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
+can. Refusals past ten a second from one address are counted into one line, not dropped.
+`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
 
 ## Configurations: what the fleet runs
 
@@ -949,13 +976,38 @@ first, and both are always required.
 
 ```toml
 [auth]
-bearer_tokens = ["a-long-random-token"]
+bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f"]
 [auth.basic_users]
-fleet = "a-strong-password"
+fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 Both schemes may be configured at once, and several valid credentials may be listed — which is what
 makes an overlapping rotation possible.
+
+### Credentials are kept as hashes
+
+No credential in `server.toml` authenticates on its own, so a copy of the file — in a backup, a
+diff, configuration management — admits no host and signs in no operator. A Bearer token is listed
+by its SHA-256 as `sha256:<64 hex digits>`; a Basic password, in `[auth]` and `[rest.auth]` alike,
+by its Argon2id hash. A value in clear is refused at startup, naming the section and the entry
+without repeating the value. Make each entry with the Server itself:
+
+```console
+$ printf '%s' "$TOKEN" | server hash-credential --bearer
+sha256:2c0c8f8b…
+$ server hash-credential --basic
+secret:
+$argon2id$v=19$m=19456,t=2,p=1$…
+```
+
+`--bearer` refuses a token shorter than 32 characters: a token's strength is its randomness alone,
+so make one with `openssl rand -base64 33`. `--basic` asks for the password without showing it on
+a terminal. A Client keeps its own credential in clear in `supervisor.toml`, because it has to
+present it; that file is readable by its owner alone.
+
+The one credential the Server must still be able to send — the rotated one `[connection_offer]`
+hands the fleet — is read from a file of its own named by `bearer_token_file` or `password_file`.
+The file must be readable by its owner alone (`0600`), or the Server does not start.
 
 **The REST API and the UI are not guarded by this** — they are a different plane with a credential
 of their own, `[rest.auth]` below. The package download route sits outside the credential check:
@@ -997,7 +1049,7 @@ Server without it is refused at startup with a message naming both keys.
 listen = "0.0.0.0:4321"          # publishing it requires the section below
 
 [rest.auth.basic_users]
-fleet-admin = "a-strong-password"
+fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 Basic, and only Basic, because the audience is a browser and `curl`: the browser answers the
@@ -1015,8 +1067,7 @@ $ opamp-package-fetch … --server https://fleet-admin:secret@127.0.0.1:4321
 Two limits worth stating plainly. It is **authentication, not authorization**: everyone listed can
 do everything the plane offers — there are no roles, and one Server still manages one fleet. And
 Basic sends a reusable password on **every** request. The plane always serves TLS 1.3, so the
-password never crosses the network in cleartext. Passwords are stored in `server.toml` verbatim,
-exactly as `[auth]`'s are.
+password never crosses the network in cleartext, and `server.toml` holds only its Argon2id hash.
 
 ## TLS
 

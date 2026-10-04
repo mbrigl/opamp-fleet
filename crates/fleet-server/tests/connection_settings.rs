@@ -16,13 +16,21 @@ use support::{full_report, spawn_with, TestServer};
 const PROTOBUF: &str = "application/x-protobuf";
 
 fn offer() -> ConnectionOffer {
-    let config: ConnectionOfferConfig = toml::from_str(
-        r#"
-        bearer_token = "rotated-token"
-        heartbeat_interval_secs = 7
-        "#,
-    )
+    // The offered credential lives in a file of its own, owner-only (ADR-0041).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token = dir.path().join("token");
+    std::fs::write(&token, "rotated-token\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let config: ConnectionOfferConfig = toml::from_str(&format!(
+        "bearer_token_file = {:?}\nheartbeat_interval_secs = 7\n",
+        token.display().to_string()
+    ))
     .expect("parse");
+    // Read at compile time; the directory may go with the test.
     ConnectionOffer::from_config(&config).expect("offer")
 }
 

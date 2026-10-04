@@ -18,6 +18,26 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
+- **An audit record of every security decision**
+  ([ADR-0052](docs/adr/0052-an-append-only-audit-record-chained-by-hash.md)): admissions and
+  refusals, enrolment, issuance, revocation and the sessions it ends, credential rotation, operator
+  acts with the operator's name, and package outcomes, as JSON lines in `config_dir/audit/`, each
+  chained to the one before by its hash. `server audit-verify <dir>` checks the chain. A Server
+  that cannot write the record admits no one and runs no operator act until it can. **What to
+  do:** keep `config_dir/audit/` on a disk with room for `[audit] max_file_bytes` times
+  `keep_files` (1 GiB by default), and copy it off the host if an intruder must not be able to
+  rewrite it unseen.
+
+- **`server.toml` holds no credential that authenticates on its own**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md),
+  [ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md)). `[auth]`
+  `bearer_tokens` are listed as `sha256:<hex>`, Basic passwords in `[auth]` and `[rest.auth]` as
+  Argon2id hashes; `server hash-credential --bearer|--basic` makes the entries. The credential
+  `[connection_offer]` hands the fleet is read from `bearer_token_file` or `password_file`, a file
+  readable by its owner alone. **What to do:** before upgrading, replace every token and password
+  in `server.toml` with the entry `hash-credential` prints, and move an offered credential into
+  its own `0600` file; a Server with a credential in clear refuses to start, naming the entry.
+
 - **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
   signature** ([ADR-0051](docs/adr/0051-a-delivered-block-brings-nothing-past-the-signature.md)).
   It may set `env`, `args` and `version_args` only as the running block of the same name already

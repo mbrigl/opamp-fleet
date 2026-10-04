@@ -160,10 +160,15 @@ client_ca_file = "client-ca.pem"
 # certificate; anything else is answered 401. Both schemes may be configured at once; several valid
 # credentials allow overlapping rotation. The REST API and the UI are not guarded by this — that is
 # [rest.auth] at the end of this file.
+#
+# NO CREDENTIAL IS KEPT IN CLEAR (ADR-0039): a token is listed by its SHA-256, a password by its
+# Argon2id hash, and a value in clear is refused at startup. Make each entry with
+#   printf '%s' "$TOKEN" | server hash-credential --bearer     (a token of 32 characters or more)
+#   server hash-credential --basic                              (asks for the password)
 [auth]
-bearer_tokens = ["a-long-random-token"]
+bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f"]
 # [auth.basic_users]
-# fleet = "a-strong-password"
+# fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
 
 # Repeated admission failures from one peer address (ADR-0039): past max_failures 401s within
 # window_secs, the address is answered 429 with Retry-After for backoff_secs, before its credential
@@ -173,14 +178,24 @@ bearer_tokens = ["a-long-random-token"]
 # window_secs = 60
 # backoff_secs = 300
 
+# The audit record (ADR-0052): one JSON line per security decision — admissions and refusals,
+# enrolment, issuance, revocation, rotation, operator acts, package outcomes — in
+# <config_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
+#   server audit-verify <config_dir>/audit
+# A Server that cannot write it admits no one until it can. Bounded by size, never switched off.
+# [audit]
+# max_file_bytes = 67108864   # a file this large is closed and the next one started
+# keep_files = 16             # the oldest past this is deleted, its last hash recorded first
+
 # Optional connection settings offered to the fleet (ADR-0018): every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and
 # switches only on success. Any subset of the keys works, but not an empty section. To rotate
-# credentials: add the new token to [auth] (old and new both accepted), point the offer at it,
-# restart the Server, and drop the old token once the fleet has migrated. Unless endpoint points
-# to another Server, the offered credential must be in the [auth] accepted set.
+# credentials: add the new token's hash to [auth] (old and new both accepted), write the token to
+# a file only this Server's account can read (mode 0600) and name it below, restart the Server, and
+# drop the old hash once the fleet has migrated. The token itself is never in this file
+# (ADR-0041). Unless endpoint points to another Server, [auth] must accept the offered credential.
 # [connection_offer]
-# bearer_token = "a-long-random-token"     # or username = "..." / password = "..."
+# bearer_token_file = "/etc/opamp-fleet/offered-token"   # or username = "..." / password_file = "..."
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
 
@@ -279,6 +294,7 @@ max_connections = 256
 # operator tools carry it in the URL they are given: --server https://fleet-admin:secret@host:4321
 #
 # This is authentication, not authorization: everyone listed can do everything the plane offers.
-# Basic sends the password on every request; the plane's TLS is what keeps it off the wire.
+# Basic sends the password on every request; the plane's TLS is what keeps it off the wire. The
+# password is listed by its Argon2id hash: `server hash-credential --basic` (ADR-0039).
 # [rest.auth.basic_users]
-# fleet-admin = "a-strong-password"
+# fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"

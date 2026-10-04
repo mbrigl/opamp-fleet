@@ -86,9 +86,10 @@ each WebSocket session as soon as a proof that admitted it is revoked or its cer
 5. **A revoked credential is named by its value and kept by its hash.** `POST /api/v1/revocations`
    with `{"credential": "<the Authorization value>"}` revokes one; the Server stores the SHA-256 of
    the exact `Authorization` header value and never the value itself. A credential is revoked only
-   while it is also in `[auth]`; one that is not is answered `400`, so a typo cannot pass for a
-   revocation. A revoked credential still in `server.toml` is named at startup by the first eight
-   hex digits of its hash, and stays revoked.
+   while `[auth]` accepts it; one it does not is answered `400`, so a typo cannot pass for a
+   revocation. `server.toml` keeps only hashes
+   ([ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)), so removing a
+   revoked credential's hash from it is the operator's to remember; until then it stays revoked.
 
 6. **The list is persisted and bounded.** It lives under `config_dir`, written atomically before
    the request is answered, and survives a restart. It holds at most 100 000 entries, and a

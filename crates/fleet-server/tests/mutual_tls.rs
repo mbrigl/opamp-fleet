@@ -119,6 +119,8 @@ struct Setup<'a> {
     operator_auth: Option<fleet_server::api::OperatorAuth>,
     /// The register and the revocation list (ADR-0049).
     revocations: bool,
+    /// The audit record (ADR-0052).
+    audit: Option<Arc<dyn fleet_server::audit::Audit>>,
 }
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
@@ -168,7 +170,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
                         .expect("ledger"),
                 ),
                 clock.clone(),
-                &accepted,
+                Arc::new(move |authorization: &str| accepted.iter().any(|a| a == authorization)),
                 authorities(pki, setup.bootstrap),
             )
             .expect("revocations"),
@@ -180,7 +182,8 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .with_client_ca(setup.client_ca)
             .with_connection_offer(setup.offer)
             .with_enrolment(enrolment.clone())
-            .with_revocations(revocations.clone()),
+            .with_revocations(revocations.clone())
+            .with_audit(setup.audit.clone()),
     );
     let (server_cert, server_key) = pki.issue("localhost");
 
@@ -215,14 +218,17 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
     let auth = setup.token.map(|token| {
         OpampAuth::from_config(
             &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
-                "bearer_tokens = [{token:?}]"
+                "bearer_tokens = [{:?}]",
+                fleet_server::credentials::bearer_entry(token)
             ))
             .expect("auth config"),
         )
+        .expect("auth")
     });
     let mut admission = Admission::new(auth, true)
         .with_enrolment(planes.issuers, enrolment)
-        .with_revocations(revocations.clone());
+        .with_revocations(revocations.clone())
+        .with_audit(setup.audit.clone());
     if let Some(limits) = setup.throttle {
         admission = admission.with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
             limits,
@@ -559,9 +565,19 @@ async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
 async fn an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval() {
     let pki = Pki::new();
     let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
-    let offer =
-        toml::from_str::<fleet_server::config::ConnectionOfferConfig>("bearer_token = \"rotated\"")
-            .expect("offer config");
+    let secrets = tempfile::tempdir().expect("tempdir");
+    let rotated = secrets.path().join("rotated");
+    std::fs::write(&rotated, "rotated\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let offer = toml::from_str::<fleet_server::config::ConnectionOfferConfig>(&format!(
+        "bearer_token_file = {:?}",
+        rotated.display().to_string()
+    ))
+    .expect("offer config");
     let served = serve(
         &pki,
         Setup {
@@ -833,15 +849,17 @@ async fn the_operator_plane_counts_its_failures_in_a_table_of_its_own() {
         window_secs: 60,
         backoff_secs: 300,
     };
-    let rest_auth =
-        toml::from_str::<fleet_server::config::RestAuthConfig>("[basic_users]\nops = \"s3cret\"\n")
-            .expect("rest auth config");
-    let operator_auth = fleet_server::api::OperatorAuth::from_config(&rest_auth).with_throttle(
-        Arc::new(fleet_server::throttle::Throttle::new(
+    let rest_auth = toml::from_str::<fleet_server::config::RestAuthConfig>(&format!(
+        "[basic_users]\nops = {:?}\n",
+        fleet_server::credentials::hash_basic("s3cret").expect("hash")
+    ))
+    .expect("rest auth config");
+    let operator_auth = fleet_server::api::OperatorAuth::from_config(&rest_auth)
+        .expect("operator auth")
+        .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
             limits(),
             Arc::new(fleet_server::clock::SystemClock),
-        )),
-    );
+        )));
     let served = serve(
         &pki,
         Setup {
@@ -1454,4 +1472,260 @@ async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate()
         revocations.is_certificate_revoked(&issued[0].facts.id),
         "a renewal under another instance_uid escaped its chain"
     );
+}
+
+// ---- The audit record (ADR-0052) ----
+
+/// An audit record on the filesystem, in `dir`.
+fn audit_in(dir: &std::path::Path) -> Arc<dyn fleet_server::audit::Audit> {
+    Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(fleet_server::fs::FsAuditStore::open(dir.to_path_buf()).expect("store")),
+            fleet_server::audit_log::Limits::default(),
+            Arc::new(fleet_server::clock::SystemClock),
+        )
+        .expect("audit"),
+    )
+}
+
+/// Every entry written so far, once the writer has caught up.
+async fn entries(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    fleet_server::fs::audit_files(dir)
+        .expect("files")
+        .iter()
+        .flat_map(|file| {
+            std::fs::read_to_string(file)
+                .expect("read")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("json"))
+                .collect::<Vec<serde_json::Value>>()
+        })
+        .collect()
+}
+
+fn named<'a>(entries: &'a [serde_json::Value], event: &str) -> Vec<&'a serde_json::Value> {
+    entries.iter().filter(|e| e["event"] == event).collect()
+}
+
+/// A WebSocket admission and a refusal each leave exactly one entry, the refusal naming the
+/// check that refused and never the credential presented.
+/// Verifies: ADR-0052
+#[tokio::test]
+async fn an_admission_and_its_refusal_each_leave_one_entry() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let mut socket = websocket(&served, &cert, &key, Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    assert!(websocket(&served, &cert, &key, Some("wrong-guess"))
+        .await
+        .is_err());
+
+    let all = entries(dir.path()).await;
+    let admitted = named(&all, "admission.admitted");
+    assert_eq!(admitted.len(), 1, "{all:#?}");
+    assert_eq!(admitted[0]["transport"], "websocket");
+    assert_eq!(admitted[0]["serial"], cert_id(&cert).serial.as_str());
+    let refused = named(&all, "admission.refused");
+    assert_eq!(refused.len(), 1, "{all:#?}");
+    assert_eq!(refused[0]["check"], "credential");
+    let text = serde_json::to_string(&all).expect("json");
+    assert!(
+        !text.contains("wrong-guess") && !text.contains("secret\""),
+        "{text}"
+    );
+}
+
+/// A renewal is recorded with the certificate it issued and the one it renewed.
+/// Verifies: ADR-0052
+#[tokio::test]
+async fn an_issued_certificate_is_recorded_with_its_predecessor() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let reply = decode(
+        post_as(
+            &http,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), csr_claiming("edge-01")),
+        )
+        .await,
+    )
+    .await;
+    assert!(reply.connection_settings.is_some(), "signed");
+    let all = entries(dir.path()).await;
+    let signed = named(&all, "issuance.signed");
+    assert_eq!(signed.len(), 1, "{all:#?}");
+    assert_eq!(signed[0]["kind"], "renewal");
+    assert_eq!(
+        signed[0]["predecessor_serial"],
+        cert_id(&cert).serial.as_str()
+    );
+}
+
+/// A revocation records the session it ended.
+/// Verifies: ADR-0052
+#[tokio::test]
+async fn a_revocation_records_the_sessions_it_ended() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let mut socket = websocket(&served, &cert, &key, Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    let serial = cert_id(&cert).serial;
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("client", &serial)
+        .expect("revoke");
+    closed_with(&mut socket, 5).await;
+    let all = entries(dir.path()).await;
+    let ended = named(&all, "session.ended");
+    assert_eq!(ended.len(), 1, "{all:#?}");
+    assert_eq!(ended[0]["reason"], "revoked");
+    assert_eq!(ended[0]["serial"], serial.as_str());
+}
+
+/// An operator's act is recorded with the operator's name before it runs and with its outcome
+/// after, and a refused sign-in is recorded too.
+/// Verifies: ADR-0052
+#[tokio::test]
+async fn an_operator_act_names_the_operator() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let audit = audit_in(dir.path());
+    let rest_auth = toml::from_str::<fleet_server::config::RestAuthConfig>(&format!(
+        "[basic_users]\nops = {:?}\n",
+        fleet_server::credentials::hash_basic("s3cret").expect("hash")
+    ))
+    .expect("rest auth config");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit.clone()),
+            operator_auth: Some(
+                fleet_server::api::OperatorAuth::from_config(&rest_auth)
+                    .expect("operator auth")
+                    .with_audit(Some(audit)),
+            ),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let operator = client(&served.ca_pem, None);
+    let url = format!(
+        "https://localhost:{}/api/v1/revocations",
+        served.operator_port
+    );
+    let response = operator
+        .post(&url)
+        .basic_auth("ops", Some("s3cret"))
+        .json(&serde_json::json!({"certificate": {"authority": "client", "serial": "abc123"}}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let refused = operator
+        .get(&url)
+        .basic_auth("ops", Some("guess"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let all = entries(dir.path()).await;
+    let acts = named(&all, "operator.act");
+    assert_eq!(acts.len(), 2, "{all:#?}");
+    assert_eq!(acts[0]["outcome"], "requested");
+    assert_eq!(acts[0]["operator"], "ops");
+    assert_eq!(acts[0]["path"], "/api/v1/revocations");
+    assert_eq!(acts[1]["outcome"], "completed");
+    assert_eq!(acts[1]["status"], 201);
+    assert_eq!(named(&all, "revocation.revoked")[0]["serial"], "abc123");
+    let refused = named(&all, "operator.refused");
+    assert_eq!(refused.len(), 1, "{all:#?}");
+    assert_eq!(refused[0]["operator"], "ops");
+    assert!(!serde_json::to_string(&all).expect("json").contains("guess"));
+}
+
+/// A record that cannot be written stops admission: no Agent is admitted without its entry.
+/// Verifies: ADR-0052
+#[tokio::test]
+async fn an_audit_that_cannot_write_refuses_admission() {
+    struct Broken;
+    impl fleet_server::audit_log::AuditStore for Broken {
+        fn tail(&mut self) -> Result<Option<fleet_server::audit_log::Tail>, String> {
+            Ok(None)
+        }
+        fn append(&mut self, _: u64, _: &str) -> Result<(), String> {
+            Err("disk full".to_string())
+        }
+        fn current_bytes(&self) -> u64 {
+            0
+        }
+        fn rotate(&mut self, _: usize) -> Result<Vec<(String, String)>, String> {
+            Ok(Vec::new())
+        }
+    }
+    let pki = Pki::new();
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(Broken),
+            fleet_server::audit_log::Limits::default(),
+            Arc::new(fleet_server::clock::SystemClock),
+        )
+        .expect("audit"),
+    );
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    // The first admission is queued; its write fails, and from then on nothing is admitted.
+    let _ = post_as(&http, &served.endpoint, report(&InstanceUid::default())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let other = client(
+        &served.ca_pem,
+        Some(pki.issue("edge-02"))
+            .as_ref()
+            .map(|(c, k)| (c.as_str(), k.as_str())),
+    );
+    let refused = post_as(&other, &served.endpoint, report(&InstanceUid::default())).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 }

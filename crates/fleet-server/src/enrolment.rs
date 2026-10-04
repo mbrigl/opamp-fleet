@@ -107,6 +107,8 @@ pub struct Enrolment {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
+    /// Where a window that runs out records the requests that expired with it (ADR-0052).
+    audit: std::sync::OnceLock<Arc<dyn crate::audit::Audit>>,
 }
 
 impl Enrolment {
@@ -116,7 +118,13 @@ impl Enrolment {
             clock,
             state: Mutex::new(State::default()),
             changes: watch::channel(0).0,
+            audit: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Records a window that runs out in `audit`; set once, at startup.
+    pub fn set_audit(&self, audit: Arc<dyn crate::audit::Audit>) {
+        let _ = self.audit.set(audit);
     }
 
     /// Opens the window, or moves its end, to `secs` from now; answers when it closes.
@@ -279,7 +287,19 @@ impl Enrolment {
             return Some(until);
         }
         state.window_until_ms = None;
+        let expired = state
+            .entries
+            .values()
+            .filter(|entry| entry.decision.is_none())
+            .count();
         state.entries.clear();
+        if let Some(audit) = self.audit.get() {
+            audit.refusal(
+                crate::audit::Entry::new("enrolment.window", "expired")
+                    .with("until_ms", until)
+                    .with("expired_requests", expired),
+            );
+        }
         self.changes.send_modify(|rev| *rev += 1);
         None
     }

@@ -57,14 +57,24 @@ struct ApiDoc;
 /// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
 /// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
 /// page and a session.
-pub struct OperatorAuth(Credentials, Option<Arc<crate::throttle::Throttle>>);
+pub struct OperatorAuth(
+    Arc<Credentials>,
+    Option<Arc<crate::throttle::Throttle>>,
+    Option<Arc<dyn crate::audit::Audit>>,
+);
 
 impl OperatorAuth {
-    pub fn from_config(auth: &RestAuthConfig) -> Self {
-        OperatorAuth(
-            Credentials::new(auth.accepted_headers(), auth.challenge()),
-            None,
-        )
+    /// # Errors
+    /// Returns an error naming an entry of `[rest.auth]` that is not a hash this Server keeps.
+    pub fn from_config(auth: &RestAuthConfig) -> Result<Self, String> {
+        Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
+    }
+
+    /// Records refused sign-ins in `audit` (ADR-0052 clause 1).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
+        self.2 = audit;
+        self
     }
 
     /// Counts this plane's failures in a table of its own (ADR-0039 clause 24).
@@ -75,6 +85,55 @@ impl OperatorAuth {
     }
 }
 
+/// Records every mutating act on the Operator plane, before it runs and once it has run; an act
+/// that cannot be recorded is not run (ADR-0052 clauses 1, 6).
+async fn record_act(
+    State(audit): State<Arc<dyn crate::audit::Audit>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use crate::audit::Entry;
+    let method = request.method().clone();
+    if matches!(
+        method,
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let peer = crate::transport::peer_ip(&request);
+    let operator = basic_user(request.headers());
+    let path = request.uri().path().to_string();
+    let entry = |event: &str, outcome: &str| {
+        Entry::new(event, outcome)
+            .peer(peer)
+            .with("plane", "operator")
+            .with("operator", operator.clone())
+            .with("method", method.to_string())
+            .with("path", path.clone())
+    };
+    if audit.record(entry("operator.act", "requested")).is_err() {
+        return crate::transport::busy();
+    }
+    let response = next.run(request).await;
+    audit.refusal(entry("operator.act", "completed").with("status", response.status().as_u16()));
+    response
+}
+
+/// The user name of a Basic `Authorization` header, never the password.
+fn basic_user(headers: &axum::http::HeaderMap) -> Option<String> {
+    use base64::Engine as _;
+    let encoded = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    text.split_once(':').map(|(user, _)| user.to_string())
+}
+
 /// Refuses every request that carries no configured credential, before any handler sees it, and
 /// a peer address that has failed too often before its credential is compared.
 async fn authenticate(
@@ -83,15 +142,44 @@ async fn authenticate(
     next: Next,
 ) -> Response {
     let peer = crate::transport::peer_ip(&request);
+    let operator = basic_user(request.headers());
+    let refusal = |event: &str, outcome: &str| {
+        if let Some(audit) = &auth.2 {
+            audit.refusal(
+                crate::audit::Entry::new(event, outcome)
+                    .peer(peer)
+                    .with("plane", "operator")
+                    .with("operator", operator.clone()),
+            );
+        }
+    };
     if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
         if let Some(wait) = throttle.retry_after(peer) {
+            refusal("operator.throttled", "throttled");
             return crate::transport::throttled(wait);
         }
     }
-    if !auth.0.permits(request.headers()) {
+    // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
+    // the back-off check first (ADR-0039 clause 2).
+    let _attempt = match (&auth.1, peer) {
+        (Some(throttle), Some(peer)) => match throttle.begin(peer) {
+            Some(attempt) => Some(attempt),
+            None => {
+                refusal("operator.throttled", "throttled");
+                return crate::transport::throttled(throttle.retry_after(peer).unwrap_or(1));
+            }
+        },
+        _ => None,
+    };
+    let verdict = auth.0.check(request.headers()).await;
+    if verdict == crate::credentials::Verdict::Busy {
+        return crate::transport::busy();
+    }
+    if verdict == crate::credentials::Verdict::Refused {
         if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
             throttle.failed(peer);
         }
+        refusal("operator.refused", "refused");
         // The challenge is what turns this into a browser prompt rather than a dead end.
         return (
             StatusCode::UNAUTHORIZED,
@@ -168,7 +256,13 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
         .route("/", get(index))
-        .with_state(state);
+        .with_state(state.clone());
+    // Inside the guard, so an act is recorded only once it is authenticated, and named by the
+    // operator who made it (ADR-0052 clause 1).
+    let router = match state.audit().cloned() {
+        Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
+        None => router,
+    };
     match auth {
         // The outermost layer, so the guard covers every route on this listener — including the
         // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0017).
@@ -2211,6 +2305,10 @@ async fn open_enrolment_window(
     match enrolment.open(spec.open_for_secs) {
         Ok(until) => {
             info!(secs = spec.open_for_secs, "enrolment window opened");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.window", "opened").with("until_ms", until),
+            );
             window_view(Some(until))
         }
         Err(e) => error(StatusCode::BAD_REQUEST, e),
@@ -2232,8 +2330,13 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    let expired = enrolment.pending().len();
     enrolment.close();
     info!("enrolment window closed");
+    note(
+        &state,
+        crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2288,6 +2391,10 @@ async fn approve_enrolment(
     match state.approve_enrolment(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request approved");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.approved", "approved").with("id", id.clone()),
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::enrolment::DecisionError::NotFound) => error(
@@ -2321,6 +2428,10 @@ async fn reject_enrolment(
     match enrolment.reject(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request rejected");
+            note(
+                &state,
+                crate::audit::Entry::new("enrolment.rejected", "rejected").with("id", id.clone()),
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => error(
@@ -2410,6 +2521,34 @@ impl RevocationView {
                 credential_sha256_prefix: Some(sha256[..8].to_string()),
             },
         }
+    }
+}
+
+/// Records what an operator act did, beside the act itself (ADR-0052 clause 1). The act was
+/// already recorded before it ran, so a detail that cannot be recorded changes nothing.
+fn note(state: &AppState, entry: crate::audit::Entry) {
+    if let Some(audit) = state.audit() {
+        audit.refusal(entry);
+    }
+}
+
+fn revocation_entry(
+    event: &str,
+    outcome: &str,
+    entry: &crate::revocation::Revocation,
+) -> crate::audit::Entry {
+    use crate::revocation::Revoked;
+    let base = crate::audit::Entry::new(event, outcome).with("id", entry.id.clone());
+    match &entry.revoked {
+        Revoked::Certificate {
+            authority, serial, ..
+        } => base
+            .with("kind", "certificate")
+            .with("authority", authority.clone())
+            .with("serial", serial.clone()),
+        Revoked::Credential { sha256 } => base
+            .with("kind", "credential")
+            .with("credential_sha256_prefix", sha256[..8].to_string()),
     }
 }
 
@@ -2518,6 +2657,10 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
+            note(
+                &state,
+                revocation_entry("revocation.revoked", "revoked", &entry),
+            );
             (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
         }
         Err(RevokeError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
@@ -2555,6 +2698,10 @@ async fn lift_revocation(
     match revocations.lift(&id) {
         Ok(true) => {
             info!(revocation = %id, "revocation lifted");
+            note(
+                &state,
+                crate::audit::Entry::new("revocation.lifted", "lifted").with("id", id.clone()),
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),

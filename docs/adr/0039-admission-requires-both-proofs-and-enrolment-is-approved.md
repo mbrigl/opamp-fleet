@@ -1,9 +1,9 @@
-# ADR-0039: Admission requires a fleet credential and a client certificate in the handshake, every enrolment is approved by an operator, and the Operator plane is guarded beyond the loopback
+# ADR-0039: Admission requires a fleet credential and a client certificate in the handshake, every enrolment is approved by an operator, the Operator plane is guarded beyond the loopback, and server.toml holds no credential that authenticates on its own
 
 - **Status:** 🟡 proposed
-- **Date:** 2026-10-03
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, and the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`
+- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
 - **Supersedes:** [ADR-0017](0017-admission-and-authentication.md)
 
 ## Context
@@ -12,8 +12,20 @@ Supersedes [ADR-0017](0017-admission-and-authentication.md) because the
 [specification](../SPECIFICATION.md) puts security before convenience (Strategy "Security before
 convenience", Q-1 "Secure by default"). Admission no longer depends on what is configured: both
 proofs are required, the certificate in the TLS handshake, and a certificate is issued on first
-enrolment only after an operator approves it. Clauses 1, 3, 4, 5, 6, 9, 10, 13, 15 and 17 change;
-clauses 19 to 25 are new; the rest of the decision stands as it was.
+enrolment only after an operator approves it.
+
+`server.toml` holds every admission credential verbatim: the fleet's Bearer tokens and Basic
+passwords in `[auth]`, and the operators' passwords in `[rest.auth]`. The file reaches backups,
+diffs and configuration management, and anyone who reads it can admit a host or act as an
+operator. The specification puts security before convenience (Strategy *Security before
+convenience*, Q-1 *Secure by default*); measure H7 of [`HARDENING.md`](../HARDENING.md) asks that no
+credential in `server.toml` authenticate on its own.
+
+The two schemes need two answers. A Bearer token is a long random value an operator generates, so
+a plain SHA-256 is as strong as its entropy, and a password hash per plain-HTTP poll would make
+admission itself a denial-of-service lever. A Basic password is chosen by a person and needs a
+password hash: Argon2id, at least the parameters OWASP names as its minimum (`m=19456`, `t=2`,
+`p=1`). The comparison in constant time, which the plaintext form had, must survive.
 
 Goal 17 of the [specification](../SPECIFICATION.md) asks for TLS on both ends, mutual TLS, and a
 Server that accepts only authenticated Agent identities. TLS
@@ -64,13 +76,15 @@ We will admit a peer to `/v1/opamp` only when both proofs succeed — a static B
 credential and a client certificate required in the TLS handshake — issue a peer's first
 certificate only through an enrolment an operator opens and approves, treat what admission proves
 as fleet membership with no authorization between admitted Agents, and guard the Operator plane
-with a separate set of Basic credentials that is required beyond the loopback.
+with a separate set of Basic credentials that is required beyond the loopback — every one of them
+kept in `server.toml` only as a hash.
 
 LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never loopback,
 `localhost` included.
 
 1. **The Agent plane's credential is `[auth]`, and it is required.** `server.toml`'s `[auth]` holds
-   `bearer_tokens = ["…"]` and/or an `[auth.basic_users]` table of `user = "password"`; a
+   `bearer_tokens = ["sha256:<hex>"]` and/or an `[auth.basic_users]` table of
+   `user = "$argon2id$…"` (clause 26); a
    configuration without the section, or a section with no credential, is refused at startup with
    a message naming `[auth]`. Every request to `/v1/opamp` — each plain-HTTP `POST` and the
    WebSocket upgrade `GET`, checked before the upgrade completes — must carry an `Authorization`
@@ -78,10 +92,19 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    challenge naming exactly the configured schemes (`Basic realm="opamp"`, `Bearer`). Several
    accepted credentials are what make overlapping rotation possible.
 
-2. **One credential primitive for both planes.** Accepted `Authorization` values are precomputed in
-   full, and a presented header is compared against each in constant time with `constant_time_eq`
-   ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). The planes differ in what they pair
-   the check with, never in how it compares.
+2. **One credential primitive for both planes.** A presented Bearer token is hashed with SHA-256
+   and compared against each configured hash in constant time with `constant_time_eq`; a presented
+   Basic password is verified against the named user's Argon2id hash, and an unknown user costs
+   the same verification against a hash made at startup at the highest cost any user's hash has,
+   so the answer's timing does not tell which users exist. A password hash runs on a blocking
+   thread, at most four at once per plane; past that a request is answered `503` with
+   `Retry-After: 1`. Before a credential is checked, the attempt is counted against the throttle
+   of clause 24 — failures and attempts under way together may not exceed `max_failures` — and an
+   IPv6 peer is counted by its /64 ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). A Basic verification
+   that succeeded is remembered for ten minutes by the SHA-256 of the whole header value, in a table
+   of at most 1 024 entries, so an Agent polling with Basic pays the password hash once and not per
+   request; a failed one is never remembered and counts toward the throttle of clause 24. The planes
+   differ in what they pair the check with, never in how it compares.
 
 3. **The Client sends exactly one credential, and it must have one.** `supervisor.toml`'s `[auth]`
    holds either `bearer_token` or `username`/`password`; both at once, or neither, are refused at
@@ -178,7 +201,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     module docs.
 
 15. **The Operator plane is guarded as a whole by `[rest.auth]`, Basic only, required beyond the
-    loopback.** `[rest.auth] basic_users` is a map of `user = "password"`; several users allow
+    loopback.** `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (clause 26); several
+    users allow
     rotation and the withdrawal of one operator's credential. A section with no user, or an entry
     with an empty name or password, fails at startup. A `[rest] listen` that is not LOOPBACK without
     `[rest.auth]` is refused at startup with a message naming both keys. While present, every route
@@ -274,7 +298,21 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     renewal. A host behind a Gateway enrols by connecting to the Server once, or is provisioned a
     client certificate by an operator.
 
-**Out of scope:** per-Agent credentials or identity; an opt-in strict mode binding certificate
+26. **No credential in `server.toml` authenticates on its own.** A Bearer entry is `sha256:`
+    followed by the 64 hex digits of the token's SHA-256; a Basic entry, in `[auth.basic_users]`
+    and `[rest.auth] basic_users` alike, is an Argon2id PHC string with at least `m=19456`, `t=2`
+    and `p=1`, a 32-byte output and a 16-byte salt. Any other value is refused at startup with a message naming the section and the
+    entry — the user, or the position in `bearer_tokens` — and never echoing the value. `server
+    hash-credential --bearer` and `server hash-credential --basic` read the secret from standard
+    input, without echo on a terminal, and print the line to paste; `--bearer` refuses a token
+    shorter than 32 characters, since its strength is its entropy alone. The hashing adds the
+    RustCrypto `argon2` crate and no system dependency. The Client's own credential in
+    `supervisor.toml` stays in clear, because the Client must present it; that file is written
+    owner-only ([ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
+    clause 18).
+
+**Out of scope:** credential references by environment variable, which leak through process
+listings and unit files; per-Agent credentials or identity; an opt-in strict mode binding certificate
 subject to `instance_uid` where Gateway Mode and re-keying are off; verifying an `instance_uid` a
 CSR carries against its sender; proxying a CSR to an external CA (it would sit behind
 `[client_ca]`); certificate revocation, for which short validity plus renewal stands in; how an
@@ -285,6 +323,15 @@ the Operator plane (an additive key); hashed or referenced credential storage; a
 operator actions.
 
 ## Alternatives considered
+
+- **Plaintext credentials accepted with a warning** — the secret stays in backups and diffs, and a
+  warning is read after the file has travelled; the specification asks for a refusal.
+- **SHA-256 for Basic passwords as well** — a person's password falls to a dictionary run against a
+  leaked fast hash in minutes.
+- **Argon2id for Bearer tokens as well** — a password hash per plain-HTTP poll, for every Agent,
+  makes admission a denial-of-service lever and buys nothing for a value that is random already.
+- **Credentials only by file reference, unhashed** — moves the secret out of `server.toml` but
+  leaves it usable wherever that file travels; a hash is useless to whoever reads it.
 
 - **Mutual TLS as the only authentication** — forecloses Gateway Mode, where the credential is the
   only per-Agent proof that survives the hop.
@@ -358,6 +405,11 @@ operator actions.
   (`429`) and [RFC 9110 §10.2.3](https://datatracker.ietf.org/doc/html/rfc9110#name-retry-after)
   (`Retry-After`).
 - [`constant_time_eq`](https://crates.io/crates/constant_time_eq).
+- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html),
+  *Argon2id*: "m=19456 (19 MiB), t=2, p=1" as the minimum configuration;
+  [RFC 9106](https://www.rfc-editor.org/rfc/rfc9106) (Argon2); the RustCrypto
+  [`argon2`](https://crates.io/crates/argon2) crate and the
+  [PHC string format](https://github.com/P-H-C/phc-string-format/blob/master/phc-sf-spec.md).
 - [rcgen](https://docs.rs/rcgen/latest/rcgen/struct.CertificateSigningRequestParams.html) and its
   [feature flags](https://lib.rs/crates/rcgen/features); [`ring`'s build](https://docs.rs/crate/ring/latest);
   [`reqwest::tls::Identity`](https://docs.rs/reqwest/latest/reqwest/tls/struct.Identity.html)
@@ -418,14 +470,26 @@ operator actions.
 - Negative / trade-offs: a compromised admitted peer can poison another Agent's record, most easily
   over plain HTTP, which cannot tell pollers apart. Accepted within one fleet; it is not a
   cross-fleet or unauthenticated exposure.
-- Negative / trade-offs: credentials sit verbatim in operator-owned files; browsers cache Basic
-  credentials and offer no clean logout.
-- Follow-ups: hashed or referenced credential storage for `[auth]` and `[rest.auth]` together; an
-  audit record of operator actions; a strict per-Agent identity mode; an external-CA backend; a
+- Positive: a copy of `server.toml` admits no host and signs in no operator.
+- Negative / trade-offs: a Server upgraded with plaintext credentials refuses to start until each is
+  hashed; browsers cache Basic credentials and offer no clean logout.
+- Follow-ups: an audit record of operator actions; a strict per-Agent identity mode; an external-CA backend; a
   revocation story if a fleet must eject a host faster than a certificate expires; checking an
   `instance_uid` a CSR carries; a view of pending enrolments in the bundled UI.
 
 ## Enforcement
+
+- [`crates/fleet-server/src/credentials.rs`](../../crates/fleet-server/src/credentials.rs) —
+  `a_bearer_token_is_admitted_by_its_hash`, `a_basic_password_is_verified_against_its_argon2id_hash`,
+  `an_unknown_user_costs_the_same_verification`, `a_basic_verification_is_remembered_and_bounded`,
+  `password_hashes_are_bounded_and_off_the_async_workers`,
+  `the_comparison_hash_matches_the_costliest_user` (clause 2).
+- [`crates/fleet-server/src/throttle.rs`](../../crates/fleet-server/src/throttle.rs) —
+  `attempts_under_way_count_and_a_slash_64_is_one_peer` (clause 2).
+- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
+  `a_plaintext_credential_is_refused_naming_its_entry`, `a_weak_argon2id_hash_is_refused`
+  (clause 26).
+- The tests below verify the clauses that stand unchanged.
 
 - [`crates/fleet-server/tests/auth.rs`](../../crates/fleet-server/tests/auth.rs) —
   `a_request_without_credentials_is_answered_401_with_a_challenge`,

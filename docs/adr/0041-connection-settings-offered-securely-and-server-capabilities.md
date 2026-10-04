@@ -1,7 +1,7 @@
-# ADR-0041: The Server offers connection settings in the Baseline's classes under one hash and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
+# ADR-0041: The Server offers connection settings in the Baseline's classes under one hash, a credential read from a file and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
 
 - **Status:** 🟡 proposed
-- **Date:** 2026-10-03
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`
 - **Supersedes:** [ADR-0018](0018-connection-settings-and-server-capabilities.md)
@@ -11,8 +11,14 @@
 Supersedes [ADR-0018](0018-connection-settings-and-server-capabilities.md) because the
 [specification](../SPECIFICATION.md) puts security before convenience (Strategy "Security before
 convenience", Q-1 "Secure by default"): an offered endpoint is a connection that leaves the host,
-so it is TLS 1.3 unless it stays on the loopback. Clauses 1 and 5 change; the rest of the decision
-stands as it was.
+so it is TLS 1.3 unless it stays on the loopback.
+
+The credential `[connection_offer]` hands the fleet sits verbatim in `server.toml`, beside the
+hashed credentials of
+[ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 26. Unlike those,
+the Server must send it, so it cannot be a hash: it moves out of `server.toml` into a file of its
+own that only the Server's account can read. Clause 1 changes; the rest of the decision stands as
+it was.
 
 Static credentials ([ADR-0017](0017-admission-and-authentication.md)) would have to be rotated by
 editing every host's configuration file — the fleet-wide chore this project exists to remove. The
@@ -57,7 +63,8 @@ capabilities a stated rule: optimistic until the Server speaks, outranked by wha
 actually sends, and pessimistic only where a message would be an error.
 
 1. **The Server's standing offer is `[connection_offer]`.** It names any of: a canonical client
-   credential — `bearer_token`, or `username` and `password`, exactly one scheme — an optional
+   credential — `bearer_token_file`, or `username` and `password_file`, exactly one scheme — an
+   optional
    `heartbeat_interval_secs`, and an optional `endpoint` (e.g. for a Server move). The `endpoint`
    is `wss://` or `https://`; `ws://` or `http://` only when its host is a loopback IP literal —
    `127.0.0.1` or `::1`, never a host name, `localhost` included. An `endpoint` that breaks this
@@ -65,8 +72,13 @@ actually sends, and pessimistic only where a message would be an error.
    so the Server never offers a fleet a plaintext path off the host. An empty section fails at
    startup; a credential-less offer legitimately retunes only heartbeat or endpoint. Unless
    `endpoint` points elsewhere, the offered credential must be in `[auth]`'s accepted set — a
-   rotation that would lock the fleet out fails at startup. Credentials stay in `server.toml`,
-   never in the REST API.
+   rotation that would lock the fleet out fails at startup: its hash must be among `[auth]`'s
+   (ADR-0039 clause 26). The credential is read from the named file at startup, trailing
+   whitespace dropped, once — what is checked against `[auth]` is what is offered. It is opened
+   once and checked through that handle; a file that is missing, empty, readable by anyone but its
+   owner (mode wider than `0600` on Unix), or owned by another account than the Server's is
+   refused at startup naming the key. An inline `bearer_token` or
+   `password` is refused the same way. The credential never reaches the REST API.
 
 2. **One message, one SHA-256 hash, offered on mismatch.** The Server composes the OpAMP settings
    and the own-telemetry destinations into one `ConnectionSettingsOffers`, hashes the whole message,
@@ -183,6 +195,10 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 
 ## Alternatives considered
 
+- **The offered credential inline in `server.toml`** — the posture this ADR supersedes; the one
+  secret the Server must keep usable would be the one left in the file that travels.
+- **An environment variable** — visible in process listings, unit files and crash reports.
+
 - **Accepting any scheme the Server offers** — the Client would follow a Server, or whoever can
   make one send an offer, onto a plaintext endpoint off the host and hand it the fleet credential
   in the clear; Q-1 forbids that whatever the configuration, so both ends refuse it.
@@ -238,8 +254,9 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 
 ## Consequences
 
-- Positive: credentials rotate fleet-wide without touching a host — add the new token to
-  `[auth].bearer_tokens`, point `[connection_offer]` at it, restart the Server, let the fleet
+- Positive: credentials rotate fleet-wide without touching a host — add the new token's hash to
+  `[auth].bearer_tokens`, write the token to the file `[connection_offer] bearer_token_file` names,
+  restart the Server, let the fleet
   migrate connection by verified connection, then drop the old token. The Server can retune every
   Agent's heartbeat and polling cadence and move the fleet to a new endpoint.
 - Positive: a Server with only `[telemetry_offer]` reaches its Agents, and a telemetry endpoint
@@ -263,6 +280,11 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
   same rule.
 
 ## Enforcement
+
+- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
+  `an_offered_credential_is_read_from_its_file`, `an_inline_offered_credential_is_refused`,
+  `an_offered_credential_file_readable_by_others_is_refused` (clause 1).
+- The tests below verify the clauses that stand unchanged.
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
   `a_connection_offer_yields_the_expected_authorization`,

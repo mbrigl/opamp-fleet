@@ -3,6 +3,7 @@
 //! mid-write leaves the old document rather than half a new one.
 
 mod agents;
+mod audit;
 mod configs;
 mod deployments;
 mod labels;
@@ -10,6 +11,7 @@ mod packages;
 mod revocation;
 
 pub use agents::FsAgentStore;
+pub use audit::{files_in as audit_files, FsAuditStore};
 pub use configs::FsConfigBackend;
 pub use deployments::FsDeploymentBackend;
 pub use labels::FsLabelStore;

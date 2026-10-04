@@ -19,15 +19,13 @@ const PROTOBUF: &str = "application/x-protobuf";
 
 /// A server accepting one Bearer token and one Basic user.
 async fn spawn_guarded() -> TestServer {
-    let auth: AuthConfig = toml::from_str(
-        r#"
-        bearer_tokens = ["good-token"]
-        [basic_users]
-        fleet = "secret"
-        "#,
-    )
+    let auth: AuthConfig = toml::from_str(&format!(
+        "bearer_tokens = [{:?}]\n[basic_users]\nfleet = {:?}\n",
+        fleet_server::credentials::bearer_entry("good-token"),
+        fleet_server::credentials::hash_basic("secret").expect("hash"),
+    ))
     .expect("parse");
-    spawn_with_auth(Some(OpampAuth::from_config(&auth))).await
+    spawn_with_auth(Some(OpampAuth::from_config(&auth).expect("auth"))).await
 }
 
 async fn post(server: &TestServer, authorization: Option<&str>) -> reqwest::Response {

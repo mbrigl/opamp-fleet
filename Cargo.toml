@@ -85,6 +85,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Ed25519 verification of downloaded package artifacts (ADR-0019) — the same ring already vendored
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
+# Operator and fleet Basic passwords are kept as Argon2id hashes, never in clear (ADR-0039); the
+# RustCrypto implementation, pure Rust, no system library.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 # The client-certificate CSR flow (ADR-0017): the Client produces the request, the Server signs it
 # as a local CA. Pinned to the `ring` backend — the provider ADR-0012 already installs, whose C is
 # already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
