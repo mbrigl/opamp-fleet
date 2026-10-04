@@ -866,9 +866,8 @@ Enrolment then runs like this:
 1. An operator opens the Server's enrolment window (see
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).
 2. The Client connects with the bootstrap certificate and the fleet credential. It generates a key,
-   which never leaves the host, and sends a certificate signing request for it with its next
-   message: the next heartbeat on WebSocket, the next poll on plain HTTP, 30 seconds by default
-   for both.
+   which never leaves the host, and sends a certificate signing request for it as soon as the
+   Server's first answer says it signs certificates.
 3. The Client logs the SHA-256 fingerprint of that key:
 
    ```text
@@ -1017,9 +1016,12 @@ gateway for others.
 
 ### What a Gateway does not do
 
-- **It makes no authentication decision beyond its handshake.** Each downstream peer's credential
-  is forwarded upstream untouched, so policy stays on the Server and rotating a credential never
-  means visiting gateways.
+- **It makes no authentication decision of its own.** Each downstream peer's credential is
+  forwarded upstream untouched, so policy stays on the Server and rotating a credential never means
+  visiting gateways. The one refusal it makes beyond its handshake is the Server's: it fetches the
+  revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
+  `401`. Until it has a list younger than 300 seconds — at startup, while its Server is away, or
+  while the operator has not marked its host as a Gateway — it answers every peer `503`.
 - **It never speaks for an Agent.** If a downstream Client disappears without sending
   `agent_disconnect`, the Gateway forwards nothing — inventing that message would tell the Server
   the Agent said something it did not. What makes such an Agent visible instead is the Server's

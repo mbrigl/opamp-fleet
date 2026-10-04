@@ -298,7 +298,7 @@ async fn post(
 /// trust, never reaches the Agent plane — neither the OpAMP endpoint nor the package download —
 /// while the Operator plane on its own listener serves a browser that presents none (ADR-0038,
 /// ADR-0039).
-/// Verifies: ADR-0039, ADR-0038, G-17
+/// Verifies: ADR-0039, ADR-0054, G-17
 #[tokio::test]
 async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() {
     let pki = Pki::new();
@@ -1039,7 +1039,7 @@ async fn post_as(
 /// A revoked certificate is refused on plain HTTP, on the WebSocket upgrade and on the download,
 /// with the challenge and without saying which proof was revoked; revoking it through the REST API
 /// lists it, and lifting it admits the certificate again (ADR-0049 clauses 3, 7, 8).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_revoked_certificate_is_refused_on_both_transports_and_the_download() {
     let pki = Pki::new();
@@ -1112,7 +1112,7 @@ async fn a_revoked_certificate_is_refused_on_both_transports_and_the_download() 
 
 /// A revoked credential is refused, and ends every session it admitted; a credential `[auth]` does
 /// not hold cannot be revoked (ADR-0049 clauses 5, 8, 9, 11).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_revoked_credential_ends_its_session_and_is_refused() {
     let pki = Pki::new();
@@ -1139,7 +1139,7 @@ async fn a_revoked_credential_ends_its_session_and_is_refused() {
 
 /// A revocation closes the sessions it concerns at once and leaves every other one running
 /// (ADR-0049 clause 9).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_revocation_closes_the_session_it_concerns_and_no_other() {
     let pki = Pki::new();
@@ -1175,7 +1175,7 @@ async fn a_revocation_closes_the_session_it_concerns_and_no_other() {
 }
 
 /// A session ends when the certificate that admitted it expires (ADR-0049 clause 10).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_session_is_closed_when_its_certificate_expires() {
     let pki = Pki::new();
@@ -1197,7 +1197,7 @@ async fn a_session_is_closed_when_its_certificate_expires() {
 
 /// A certificate renewed before its predecessor was revoked is revoked with it: the register
 /// records the presented certificate as the issued one's predecessor (ADR-0049 clauses 1, 2, 4).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_revocation_reaches_a_certificate_renewed_before_it() {
     let pki = Pki::new();
@@ -1446,7 +1446,7 @@ async fn an_enrolment_csr_claiming_another_instance_uid_never_reaches_the_queue(
 /// The issuer is named by its role, so a CA whose subject has several parts — and a comma inside
 /// one — is revoked as simply as any other; a role the Server does not have is refused (ADR-0049
 /// clause 3).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
     let pki = Pki::with_organisation();
@@ -1486,7 +1486,7 @@ async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
 /// A CSR descends from the certificate the connection presented, whichever Agent the message
 /// names: a self-asserted `instance_uid` cannot lift a renewal out of its chain, and behind a
 /// Gateway revoking the Gateway reaches what was renewed through it (ADR-0049 clauses 2, 11).
-/// Verifies: ADR-0049
+/// Verifies: ADR-0056
 #[tokio::test]
 async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate() {
     use futures_util::{SinkExt, StreamExt};
@@ -1782,4 +1782,169 @@ async fn an_audit_that_cannot_write_refuses_admission() {
     );
     let refused = post_as(&other, &served.endpoint, report(&InstanceUid::default())).await;
     assert_eq!(refused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---- The list a Gateway refuses by (ADR-0056 clause 12) ----
+
+/// The certificate a CSR from `client` is answered with, and the key it was requested for.
+async fn issued_through(served: &Served, client: &reqwest::Client, name: &str) -> (String, String) {
+    let (csr, key) = csr_for(name);
+    let reply = decode(
+        post_as(
+            client,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), csr),
+        )
+        .await,
+    )
+    .await;
+    let cert = reply
+        .connection_settings
+        .and_then(|s| s.opamp)
+        .and_then(|o| o.certificate)
+        .expect("an issued certificate")
+        .cert;
+    (String::from_utf8(cert).expect("pem"), key.serialize_pem())
+}
+
+async fn fetch_list(
+    served: &Served,
+    client: &reqwest::Client,
+    etag: Option<&str>,
+) -> reqwest::Response {
+    let mut request = client
+        .get(
+            served
+                .endpoint
+                .replace("/v1/opamp", "/v1/gateway/revocations"),
+        )
+        .header(reqwest::header::AUTHORIZATION, "Bearer secret");
+    if let Some(etag) = etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    request.send().await.expect("send")
+}
+
+/// Only a host marked as a Gateway is handed the list, and what it is handed names every revoked
+/// certificate of the client CA with its renewals resolved; an unchanged list is answered `304`.
+/// Verifies: ADR-0056
+#[tokio::test]
+async fn a_marked_gateway_is_handed_the_revoked_certificates_with_their_renewals() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let revocations = served.revocations.clone().expect("armed");
+
+    // The Gateway's own certificate, issued by the Server so that it names a host.
+    let (provisioned, provisioned_key) = pki.issue("gateway-01");
+    let (gateway_cert, gateway_key) = issued_through(
+        &served,
+        &client(&served.ca_pem, Some((&provisioned, &provisioned_key))),
+        "gateway-01",
+    )
+    .await;
+    let gateway = client(&served.ca_pem, Some((&gateway_cert, &gateway_key)));
+    assert_eq!(
+        fetch_list(&served, &gateway, None).await.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an unmarked member is handed the list"
+    );
+    let host = fleet_server::ca::facts(
+        opamp::tls::certificates(gateway_cert.as_bytes()).expect("pem")[0].as_ref(),
+    )
+    .expect("facts")
+    .host
+    .expect("a host");
+    assert!(revocations.set_gateway(&host, true).expect("mark"));
+
+    let empty = fetch_list(&served, &gateway, None).await;
+    assert_eq!(empty.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = empty.json().await.expect("json");
+    assert_eq!(body["certificates"], serde_json::json!([]));
+
+    // A member that renewed, and then the certificate it renewed from is revoked.
+    let (member, member_key) = pki.issue("edge-02");
+    let (renewed, _) = issued_through(
+        &served,
+        &client(&served.ca_pem, Some((&member, &member_key))),
+        "edge-02",
+    )
+    .await;
+    revocations
+        .revoke_certificate("client", &cert_id(&member).serial)
+        .expect("revoke");
+
+    let listed = fetch_list(&served, &gateway, None).await;
+    let etag = listed
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .expect("an ETag")
+        .to_string();
+    let body: serde_json::Value = listed.json().await.expect("json");
+    let named: Vec<(String, String)> = body["certificates"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|c| {
+            (
+                c["issuer"].as_str().expect("issuer").to_string(),
+                c["serial"].as_str().expect("serial").to_string(),
+            )
+        })
+        .collect();
+    for id in [cert_id(&member), cert_id(&renewed)] {
+        assert!(
+            named.contains(&(id.issuer.clone(), id.serial.clone())),
+            "{id:?} not in {named:?}"
+        );
+    }
+    assert_eq!(named.len(), 2, "{named:?}");
+
+    assert_eq!(
+        fetch_list(&served, &gateway, Some(&etag)).await.status(),
+        reqwest::StatusCode::NOT_MODIFIED
+    );
+    let without_credential = gateway
+        .get(
+            served
+                .endpoint
+                .replace("/v1/opamp", "/v1/gateway/revocations"),
+        )
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        without_credential.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}
+
+/// A bootstrap certificate is admitted, while the window is open, to enrol and to nothing else:
+/// the list a Gateway refuses by is not for it.
+/// Verifies: ADR-0056
+#[tokio::test]
+async fn a_bootstrap_certificate_is_not_handed_the_list() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            bootstrap: Some(&bootstrap),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let opened = client(&served.ca_pem, None)
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    assert_eq!(opened.status(), 200);
+    let (cert, key) = bootstrap.issue("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    assert_eq!(
+        fetch_list(&served, &enrolling, None).await.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
 }

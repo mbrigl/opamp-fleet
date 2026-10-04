@@ -1,18 +1,18 @@
-# ADR-0037: Five crates in one Cargo workspace on tokio and axum — a publishable communication layer, an internal shared crate by measurement — and TOML configuration
+# ADR-0058: Five crates in one Cargo workspace on tokio and axum without its WebSocket — a publishable communication layer, an internal shared crate by measurement — and TOML configuration
 
-- **Status:** ⚪ superseded by [ADR-0058](0058-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** Cargo.toml, crates/opamp/, crates/fleet-core/, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, and every new crate, module placement or dependency
-- **Supersedes:** [ADR-0034](0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)
+- **Supersedes:** [ADR-0037](0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)
 
 ## Context
 
-Supersedes [ADR-0034](0034-five-crates-a-publishable-wire-layer-and-toml-configuration.md)
-because [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md) moves the
-whole communication layer into `opamp`. The TLS material, the listener and the PEM readers leave
-the two ends and `fleet-core`. Clauses 1, 3, 7, 8 and 12 change with them; the rest of the
-decision stands as it was.
+Supersedes [ADR-0037](0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)
+because `opamp` now upgrades and frames its WebSockets itself
+([ADR-0057](0057-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)
+clause 5), so nothing in the workspace uses axum's `ws` feature any more. Clause 3 changes; the
+rest of the decision stands as it was.
 
 The [specification](../SPECIFICATION.md) fixes the language (both ends in Rust) and the deployables:
 one Server (Linux only, API-first, with a rudimentary bundled UI) and one Client binary covering every
@@ -61,7 +61,8 @@ Client, and configure both binaries from strict TOML files.
    files.
 
 3. **`axum` is the workspace's HTTP server stack.** The Server's OpAMP endpoint, REST API and UI are
-   axum routes, with the `ws` feature so upgrades and plain routes share one router; the OpAMP
+   axum routes in one router, upgrades included: the OpAMP endpoint's upgrade is an axum route
+   whose connection `opamp` takes over through hyper (ADR-0057), so axum's `ws` feature is off; the OpAMP
    endpoint of the Server, the Gateway and the Supervisor Endpoint is `opamp::server`'s, and so is
    the listener it is served on (ADR-0036). Which listeners exist is
    [ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)'s.

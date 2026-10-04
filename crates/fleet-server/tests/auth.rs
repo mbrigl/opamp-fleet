@@ -99,7 +99,7 @@ async fn the_websocket_upgrade_is_checked_before_it_completes() {
 /// `[auth]` guards the OpAMP endpoint and nothing else: the REST API answers on the Operator
 /// plane's own listener (ADR-0012), where authenticating it is the separate decision — and it is
 /// *not* served on the Agent plane at all, which is what the split is.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn the_rest_api_stays_open_on_its_own_listener_when_the_opamp_endpoint_is_guarded() {
     let server = spawn_guarded().await;

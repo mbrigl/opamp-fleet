@@ -42,7 +42,7 @@ async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
 /// The measure itself: a connection that sends a request line and then falls silent is closed by
 /// the Server. Before ADR-0012 it was held open indefinitely — hyper's own default timeout resolves
 /// to nothing while no timer is installed, and neither `axum::serve` nor `axum_server` installs one.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
     let (addr, _dir) = spawn().await;
@@ -69,7 +69,7 @@ async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
 /// The other half, and the one worth guarding: the bound is on connection *setup*, so an
 /// established WebSocket session may sit idle far longer than it and stay up. This is what a
 /// request-level timeout would have broken.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn an_established_session_outlives_the_header_bound() {
     let (addr, _dir) = spawn().await;

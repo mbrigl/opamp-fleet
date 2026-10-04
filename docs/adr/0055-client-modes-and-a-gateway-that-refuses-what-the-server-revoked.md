@@ -1,19 +1,24 @@
-# ADR-0040: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits only over mutual TLS 1.3
+# ADR-0055: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits only over mutual TLS 1.3 and refuses what the Server revoked
 
-- **Status:** ⚪ superseded by [ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state
-- **Supersedes:** [ADR-0009](0009-client-modes-and-the-gateway.md)
+- **Supersedes:** [ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)
 
 ## Context
 
-Supersedes [ADR-0009](0009-client-modes-and-the-gateway.md) because the
-[specification](../SPECIFICATION.md) puts security before convenience (Strategy, "Security before
-convenience"; Q-1, "Secure by default"): a Gateway admits Agents, and no Agent is admitted without
-a client certificate in the handshake, over anything but TLS 1.3, or with a warning in place of a
-refusal. The decision sentence and clauses 4 and 11 change with it; the rest of the decision stands
-as it was.
+Supersedes [ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md) because a
+certificate the Server has revoked still reaches it through a Gateway. The Gateway terminates the
+downstream handshake and presents its own certificate upstream, so the Server never sees the
+downstream one and cannot refuse it
+([ADR-0049](0049-revocation-ends-sessions-and-follows-renewal.md) clause 11): an operator who revokes
+a stolen certificate has ejected the host only where it connects directly, and behind a Gateway it
+stays a member until the certificate expires. The specification puts security before convenience
+(Strategy, "Security before convenience"; G-17, "the Server accepts only authenticated Agent
+identities"). This decision rests on goal 15 of the specification as amended alongside it, which
+lets a Gateway refuse what the Server revoked. The decision sentence and clause 11 change, and
+clause 14 is new; the rest of the decision stands as it was.
 
 The [specification](../SPECIFICATION.md) asks the client side to cover three shapes: supervise
 local processes, serve a Collector that speaks OpAMP itself, and act as a gateway that carries many
@@ -47,8 +52,8 @@ startup; ten connections for a gateway in front of three Agents is worse than th
 We will ship one Client binary with exactly two independent Client Modes, Supervisor Mode and
 Gateway Mode, give every Supervisor a Supervisor Endpoint unconditionally, route by `instance_uid`
 alone on both ends, and implement Gateway Mode as a `[gateway]` section serving both transports
-downstream over mutual TLS 1.3 and a lazily grown, sticky upstream pool that forwards messages
-unchanged and synthesises none.
+downstream over mutual TLS 1.3, refusing every downstream certificate the Server has revoked, and a
+lazily grown, sticky upstream pool that forwards messages unchanged and synthesises none.
 
 1. **Two modes, freely composable, neither implying the other.** Supervisor Mode (`[[supervisor]]`
    blocks) and Gateway Mode (`[gateway]`) run alone or together in one process. A mode is a
@@ -110,10 +115,12 @@ unchanged and synthesises none.
     with a `last_seen_ms` that stops advancing, and reads as stale once its staleness budget runs out
     when it declared `ReportsHeartbeat` ([ADR-0026](0026-the-fleet-record.md)).
 
-11. **The Gateway makes no authentication decision of its own beyond the handshake; its own hop is
-    its own.** The downstream peer's `Authorization` credential is forwarded upstream untouched, so
-    admission stays on the Server ([ADR-0017](0017-admission-and-authentication.md)) and a
-    credential change never reaches a gateway's configuration. Mutual TLS is per hop and mandatory
+11. **The Gateway makes no authentication decision of its own beyond the handshake and the
+    Server's revocation list; its own hop is its own.** The downstream peer's `Authorization`
+    credential is forwarded upstream untouched, so admission stays on the Server
+    ([ADR-0017](0017-admission-and-authentication.md)) and a credential change never reaches a
+    gateway's configuration. The one refusal the Gateway makes beyond the handshake is the
+    Server's: a downstream certificate on the list of clause 14. Mutual TLS is per hop and mandatory
     downstream: the handshake requires a client certificate that chains to `client_ca_file`
     (`ClientAuth::Required` in `opamp`), so a peer without one never reaches OpAMP; upstream the
     Gateway presents the Client's own identity, so every downstream Agent arrives as a member:
@@ -128,6 +135,23 @@ unchanged and synthesises none.
     Agent's connection. Downward the Gateway looks up, per `instance_uid`, the downstream connection
     or pending plain-HTTP exchange that last carried the Agent; a `ServerToAgent` for an Agent it
     does not carry is dropped with a log line, never broadcast.
+
+14. **The Gateway refuses what the Server revoked, and admits nobody while it cannot know.** The
+    Gateway fetches the revoked certificates of the fleet's client CA from its Server
+    ([ADR-0056](0056-revocation-that-follows-renewal-and-reaches-the-gateways.md) clause 12) over
+    its own upstream origin, with its own certificate and credential, every
+    `REVOCATION_REFRESH` (30 s), conditionally on the list it holds. It keeps the list in memory
+    only. A downstream peer whose certificate is on the list is answered `401` after the handshake
+    and before anything is forwarded, on both transports; an open downstream WebSocket session
+    whose certificate the list newly names is closed with `1008` and the reason `revoked`, as the
+    Server closes its own, and a report arriving on a session the list no longer admits is not
+    forwarded. The Gateway starts serving once its first fetch has answered or failed, and at most
+    `REVOCATION_FIRST_WAIT` (5 s) after it started, so its first peers are not refused for want of
+    a list. While it holds no list fetched within `REVOCATION_MAX_AGE` (300 s) — from then until a
+    first fetch succeeds, and whenever its Server has not answered for that long — it answers every
+    downstream request `503` and closes every downstream session with `1008` and the reason
+    `revocation list stale`. The three values are named constants. A Gateway the Server refuses the
+    list to holds no list, and admits nobody.
 
 **Out of scope:** re-balancing Agents across a grown pool; consolidating the three places TLS
 material is configured on a Client.
@@ -147,6 +171,20 @@ material is configured on a Client.
   routing models in the code while the Server must support the general one anyway.
 - **Authentication in the Gateway.** The specification places authentication on the Server; a
   gateway that decides duplicates policy and forces credential rotation to reach every gateway.
+  Clause 14 takes one decision of the Server's to the Gateway, the revocation list, and the
+  credential stays the Server's alone.
+- **Forwarding the downstream certificate to the Server, which decides.** It keeps every decision
+  on the Server, but the Server would trust a certificate the Gateway asserts in a header of its own
+  invention, and a pooled upstream connection carrying many Agents could no longer be judged by one
+  certificate, so the pool would have to split per certificate. It also leaves a revoked peer on
+  the Gateway's downstream hop until the Server answers.
+- **Using the last list for as long as the Server is away.** A Gateway that cannot reach its Server
+  forwards nothing anyway, and a list kept indefinitely would admit a certificate revoked while it
+  was away the moment the Server returns, until the next fetch. A bound costs nothing a working
+  Gateway does.
+- **The list pushed in an OpAMP message.** A `CustomMessage` is `[Development]` in the Baseline and
+  not implemented here; a field of the connection-settings offer is meant for something else.
+  Either ties the list to an Agent's session rather than to the Gateway as a host.
 - **A plaintext or server-authenticated-only Gateway hop.** A Gateway admits Agents, and the
   specification admits none without a client certificate in the handshake and none over anything
   but TLS 1.3 beyond the loopback. A loopback exception would still let any local process ride the
@@ -210,8 +248,15 @@ material is configured on a Client.
   has something to say.
 - Negative / trade-offs: a downstream Client that vanishes without a goodbye stays connected in the
   fleet view; only staleness tells, and only for an Agent that declared `ReportsHeartbeat`.
-- Negative / trade-offs: the Gateway checks only the certificate, so a peer that holds one reaches
-  the Server before its credential is judged; the Server's admission stays load-bearing.
+- Positive: a revoked certificate is refused behind a Gateway within one refresh, and the session it
+  holds there is ended, as it is on the Server.
+- Negative / trade-offs: the Gateway checks only the certificate and the list, so a peer that holds
+  an unrevoked one reaches the Server before its credential is judged; the Server's admission stays
+  load-bearing.
+- Negative / trade-offs: a revocation reaches a Gateway up to `REVOCATION_REFRESH` late. A Gateway
+  whose host the operator has not marked as a Gateway, or whose Server is away for more than
+  `REVOCATION_MAX_AGE`, admits nobody; a Gateway that served before this decision stops serving
+  until its host is marked.
 - Negative / trade-offs: every Gateway needs a server certificate and a client CA, and every Client
   behind it a certificate chaining to that CA, even on a single host or in a test.
 - Negative / trade-offs: the binary carries an HTTP routing layer it uses only in Gateway Mode, and
@@ -243,7 +288,7 @@ material is configured on a Client.
 - `crates/fleet-agent/src/supervisor/endpoint.rs`: `extension_reports_are_folded_into_process_events` and
   `shutdown_stops_the_endpoint` (clause 2); `crates/fleet-agent/src/config.rs`:
   `the_gateway_agent_cap_defaults_and_rejects_zero` (clause 4).
-- Each marked `Verifies: ADR-0040`: `crates/fleet-agent/src/config.rs`
+- Each marked `Verifies: ADR-0055`: `crates/fleet-agent/src/config.rs`
   `a_gateway_without_mutual_tls_is_refused_at_load` — no `[gateway.tls]`, and a section without
   `client_ca_file` (clause 4);
   [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs)
@@ -253,6 +298,11 @@ material is configured on a Client.
   [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs)
   `a_client_offering_only_tls_1_2_is_refused`, against the listener and `ServerTls` the downstream
   endpoint is served with (clause 11).
+
+- Clause 14: tests through the real Gateway and Server that a downstream certificate revoked on
+  the Server is refused on both transports and its open session closed with `1008` within one
+  refresh, that a Gateway without a list fetched yet or within the maximum age answers `503`, and
+  that a Gateway whose host is not marked admits nobody.
 
 **Not mechanically decidable:** that no message is synthesised on an Agent's behalf (clauses 9, 10)
 is an absence; review holds it.

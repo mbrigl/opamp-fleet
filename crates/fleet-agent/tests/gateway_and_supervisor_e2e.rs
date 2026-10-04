@@ -187,7 +187,7 @@ fn install_stub(state_dir: &Path, supervisor: &str) -> String {
     name.to_string()
 }
 
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_host_supervises_and_gateways_at_the_same_time() {
     let (addr, state, dir) = spawn_server().await;
@@ -284,7 +284,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 /// settings offer ends the transport run, and the gateway task is restarted with the new
 /// configuration (ADR-0009) — because the pool dials the endpoint an offer can move. The
 /// Supervisors must live straight through it, and the Gateway must come back serving.
-/// Verifies: ADR-0040, ADR-0041
+/// Verifies: ADR-0055, ADR-0041
 #[tokio::test]
 async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -405,7 +405,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
 
 /// The Gateway binding a port must not take the Supervisors with it when it cannot: a Client whose
 /// gateway address is already taken fails loudly at startup rather than half-starting.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_gateway_that_cannot_bind_is_loud() {
     let (addr, state, dir) = spawn_server().await;

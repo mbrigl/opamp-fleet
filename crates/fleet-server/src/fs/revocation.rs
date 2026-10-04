@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::revocation::{Facts, Revoked};
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn the_ledger_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");

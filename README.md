@@ -214,9 +214,11 @@ it (AGENTS.md links here).
 
 Both binaries read a TOML configuration file ([ADR-0011](docs/adr/0011-workspace-crates-and-configuration.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
-[`config/`](config/). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these
-build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
-and the Server for Linux.
+[`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly these
+build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the `rust` job of
+[`.github/workflows/checks.yml`](.github/workflows/checks.yml);
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) additionally checks the Client on Windows and
+macOS and release-builds the Client for Linux, Windows, and macOS and the Server for Linux.
 
 **Releases** ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md),
 [ADR-0013](docs/adr/0013-versions.md)): the version is
@@ -484,7 +486,7 @@ configured once by a maintainer and worth re-checking after a repository move or
 
 - a **ruleset on `main`** that requires pull requests, requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
-  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, and `shell`
+  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, and `rust`
   <!-- required-checks end -->
   jobs of the **Checks** workflow as required status checks (rulesets list checks by their job
   name), and blocks force pushes and branch deletion;

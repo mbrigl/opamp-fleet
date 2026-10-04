@@ -37,9 +37,10 @@ than anywhere else, and none beats one that has stopped being true.
   ([ADR-0039](adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)).
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — with a client
   certificate in the TLS 1.3 handshake and the fleet credential on every request
-  ([ADR-0038](adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md),
+  ([ADR-0054](adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
   ADR-0039). A Client in Gateway Mode carries other Clients' Agents over its own upstream
-  connections ([ADR-0040](adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)).
+  connections and refuses what the Server revoked
+  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
   Supervisor started ([ADR-0053](adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)).
@@ -64,7 +65,10 @@ Five crates in one workspace ([ADR-0037](adr/0037-five-crates-a-publishable-comm
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
   HTTP client from a `Connection` the application fills in. Behind `server`, the endpoint around a
-  `Handler` and `server::listen`, the listener with its TLS and its bounds on connection setup.
+  `Handler`, `server::listen`, the listener with its TLS and its bounds on connection setup, and
+  `server::pace`, the floor every body and WebSocket message it serves is held to. The server
+  side takes a WebSocket over through hyper's upgrade and reads its frames with
+  `tokio-tungstenite`, the library the client side uses too.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
@@ -96,7 +100,7 @@ core module names an adapter or a technology, and when a module has no role.
   plane serves with — the Agent plane requiring a client certificate in the handshake, the
   Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
-  ([ADR-0038](adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).
+  ([ADR-0054](adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Server admission** — `transport::Admission` requires the fleet credential and the client
   certificate on every request to `/v1/opamp`, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Two core
@@ -132,9 +136,11 @@ core module names an adapter or a technology, and when a module has no role.
   describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
   settings verification in `connection`, the Gateway's upstream pool and its downstream listener,
   and the Supervisor Endpoint use the same `opamp` building blocks
-  ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)).
+  ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). The Gateway's
+  `revocations` keeps the list it fetches from its Server and refuses what that list names
+  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0040](adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)). The transports, the Gateway, telemetry
+  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client self-update** — `update` is the Client updating itself
   ([ADR-0044](adr/0044-the-client-updates-itself-from-a-signed-package.md)). It owns the port `SelfUpdater` and

@@ -193,7 +193,7 @@ fn report(uid: &InstanceUid, sequence: u64) -> AgentToServer {
 
 /// Two Agents, two downstream transports, one upstream connection — and the Server tells them
 /// apart by `instance_uid` alone, which is the whole premise of Gateway Mode.
-/// Verifies: ADR-0040, G-14, G-15
+/// Verifies: ADR-0055, G-14, G-15
 #[tokio::test]
 async fn two_agents_reach_the_server_over_one_folded_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -247,7 +247,7 @@ async fn two_agents_reach_the_server_over_one_folded_connection() {
 
 /// The pool grows lazily to its cap and no further: one Agent means one upstream connection, even
 /// with a cap of ten (ADR-0009 rule 8).
-/// Verifies: ADR-0040, G-15
+/// Verifies: ADR-0055, G-15
 #[tokio::test]
 async fn one_agent_opens_one_upstream_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -273,7 +273,7 @@ async fn one_agent_opens_one_upstream_connection() {
 /// report for a new Agent is dropped rather than growing the routing state, while the Agents already
 /// carried keep being served. This is what stops one hostile peer streaming endless fabricated
 /// `instance_uid`s from inflating the registry and pool maps without limit.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_downstream_connection_carries_no_more_than_its_agent_cap() {
     let (server, state, _dir) = spawn_server().await;
@@ -362,7 +362,7 @@ async fn a_downstream_connection_carries_no_more_than_its_agent_cap() {
 
 /// A downstream peer that speaks the wrong content type is refused by the Gateway rather than
 /// forwarded — the Baseline's rule for the plain-HTTP transport, enforced per hop.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
     let (server, _state, _dir) = spawn_server().await;
@@ -389,7 +389,7 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
 /// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
 /// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
 /// (ADR-0011).
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_downstream_peer_may_gzip_its_report() {
     let (server, state, _dir) = spawn_server().await;
@@ -422,7 +422,7 @@ async fn a_downstream_peer_may_gzip_its_report() {
 
 /// The other half of that MUST: the size limit applies *after* decompression, so a few kilobytes
 /// of gzip cannot buy the hop gigabytes of memory. Refused rather than expanded.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_gzip_bomb_is_refused_by_the_gateway() {
     let (server, state, _dir) = spawn_server().await;
@@ -458,7 +458,7 @@ async fn a_gzip_bomb_is_refused_by_the_gateway() {
 /// `docs/CONFORMANCE.md` claims the `1009 Message Too Big` close as implemented. The Server's
 /// endpoint did it; this one hung up with no status at all, so a downstream Client saw its
 /// connection drop and could not tell an oversized report from a Gateway that had died.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn an_oversized_downstream_message_closes_with_1009() {
     let (server, _state, _dir) = spawn_server().await;

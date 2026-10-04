@@ -177,8 +177,9 @@ Use these exact words in code, comments, documentation, and ADRs.
 - **Gateway Mode** — the Client accepts OpAMP connections from other Clients and forwards their
   messages upstream over a **Connection Pool**, so a large number of agents reaches the Server over a
   small number of connections. A Gateway forwards messages unchanged and holds **no authentication
-  logic of its own**: it passes the connecting peer's headers and remote address upstream so that all
-  authentication policy stays on the Server. Agents behind a Gateway remain distinct Agents.
+  policy of its own**: it passes the connecting peer's headers and remote address upstream so that all
+  authentication policy stays on the Server, and the one refusal it makes is the Server's — a
+  certificate the Server has revoked. Agents behind a Gateway remain distinct Agents.
 - **Supervisor Endpoint** — the OpAMP endpoint a Supervisor exposes on the loopback interface so that
   a Managed Process carrying an OpAMP client of its own can report to it. It exists because such a
   client — notably the OpenTelemetry Collector's `opampextension` — is a **client only** and therefore
@@ -307,7 +308,8 @@ Use these exact words in code, comments, documentation, and ADRs.
     `instance_uid` and behaves identically either way.
 15. **G-15** — **A Gateway scales connections, not identities.** Many Clients reaching the Server
     through a Client in Gateway Mode appear as their own Agents, fully manageable, while sharing a
-    small Connection Pool — and the Gateway itself makes no authentication decisions.
+    small Connection Pool — and the Gateway makes no authentication decision of its own: it refuses
+    only what the Server has revoked, and admits no one while it cannot learn what that is.
 16. **G-16** — **A Collector reports through its own OpAMP client.** A Collector carrying the
     `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays its description,
     health, and effective configuration upstream — so the Collector's own reporting, rather than

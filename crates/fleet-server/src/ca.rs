@@ -581,7 +581,7 @@ mod tests {
         assert!(error.contains("does not parse"), "{error}");
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn two_certificates_from_one_key_have_two_serials() {
         let ca = client_ca(90);

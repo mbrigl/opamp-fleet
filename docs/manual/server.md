@@ -119,8 +119,8 @@ key is optional. An unknown key fails startup rather than being ignored.
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
 | `config_dir` | `"fleet-configs"` | Where Configurations are persisted — one JSON file per Configuration, named after it. Written atomically; read back at startup. |
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
-| `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
-| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. |
+| `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
+| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
 | `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) on both proofs; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
@@ -320,7 +320,9 @@ proves with its current key which certificate it renews, through a Gateway too. 
 to the host that first reported it: a connection with another host's certificate that reports
 for it is given an `instance_uid` of its own instead. A host holds at most three valid
 certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
-host:
+host. **A Gateway admits nobody until its host is marked:** only a marked host is handed the
+revocation list a Gateway refuses by (see
+[Revocation](#revocation-withdrawing-a-certificate-or-a-credential)):
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/hosts
@@ -383,9 +385,8 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 
 The Server lists each pending request with that fingerprint as its `id`, beside its arrival time,
 the peer address, the subject it asks for, and the bootstrap certificate's subject and fingerprint.
-The request rides the Client's next message after it connects — its next heartbeat on WebSocket,
-its next poll on plain HTTP, 30 seconds by default for both — so it is listed that long after the
-host starts:
+The Client sends its request as soon as the Server's first answer says it signs certificates,
+so the request is listed moments after the host connects:
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
@@ -466,10 +467,14 @@ Every WebSocket session also ends when the certificate that admitted it expires,
 the reason `certificate expired`. A Client renews at two thirds of the life and reconnects with
 the new certificate, so a healthy fleet never sees this.
 
-Behind a Gateway the Server sees the Gateway's certificate, not the Agent's. Revoke a gatewayed
-Agent through its credential, its own certificate — which stops its renewals at once and its
-sessions once it connects directly — or the Gateway's certificate, which ends every Agent it
-carries.
+Behind a Gateway the Server sees the Gateway's certificate, not the Agent's, so the Gateway refuses
+for it. Every host marked as a Gateway fetches the revoked certificates of the client CA from
+`GET /v1/gateway/revocations` on the Agent plane every 30 seconds, renewals already resolved, and
+refuses a downstream peer whose certificate is on it with `401`, closing its sessions with `1008`
+and the reason `revoked`. A revocation therefore reaches a gatewayed Agent within about 30
+seconds. A Gateway that has held no list younger than 300 seconds — its Server unreachable, or its
+host not marked — answers every downstream peer `503` and closes their sessions with the reason
+`revocation list stale`. Revoking the Gateway's own certificate ends every Agent it carries.
 
 ## The audit record
 

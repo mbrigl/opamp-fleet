@@ -244,9 +244,10 @@ none of it is a capability bit.
 - **Revocation is Server state, as the Baseline's *Revoking Access* describes.** The Server keeps
   a list of revoked certificates, by issuing CA and serial and extended along every renewal it signed,
   and of revoked credentials, by hash; it refuses them at admission and closes every WebSocket
-  session they admitted with `1008` (ADR-0049). There is no CRL and no OCSP: the Server is the only
-  party that verifies anything on this link. Behind a Gateway the Server sees the Gateway's
-  certificate, so a gatewayed Agent is revoked through its credential.
+  session they admitted with `1008` (ADR-0056). There is no CRL and no OCSP. Behind a Gateway the
+  Server sees the Gateway's certificate, so it hands its Gateways the revoked certificates on a
+  route of their own and the Gateway refuses them (ADR-0055) — no message of the protocol is
+  involved.
 
 - **A CSR that names an `instance_uid` is checked against its sender.** The Baseline: *"When the
   Server receives a CSR containing the instance_uid in CSR fields the Server MUST verify that the

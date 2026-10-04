@@ -270,7 +270,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     /// A fake `opampextension`: connects, reports, and expects the capability echo.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0055
     #[tokio::test]
     async fn extension_reports_are_folded_into_process_events() {
         let (event_tx, mut events) = mpsc::channel(16);
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(decoded.capabilities, ENDPOINT_CAPABILITIES);
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0055
     #[tokio::test]
     async fn shutdown_stops_the_endpoint() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -398,7 +398,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0036
+    /// Verifies: ADR-0057
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -177,7 +177,7 @@ fn client(pki: &Pki, identity: Option<(String, String)>) -> reqwest::Client {
 /// With a client CA configured, a downstream Agent that presents a certificate reaches the Server
 /// through the Gateway over TLS — and its reply comes back addressed to it. This is the hop working
 /// end to end, encrypted, with the CA accepting a valid peer.
-/// Verifies: ADR-0040, ADR-0039, G-15, G-17
+/// Verifies: ADR-0055, ADR-0039, G-15, G-17
 #[tokio::test]
 async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
     let (server, state, _server_dir) = spawn_server().await;
@@ -210,7 +210,7 @@ async fn a_downstream_agent_with_a_certificate_reaches_the_server_over_tls() {
 
 /// A peer presenting *no* certificate is turned away at the handshake.
 ///
-/// Verifies: ADR-0040, ADR-0039
+/// Verifies: ADR-0055, ADR-0039
 #[tokio::test]
 async fn a_downstream_peer_without_a_certificate_is_refused() {
     let (server, _state, _server_dir) = spawn_server().await;
@@ -231,7 +231,7 @@ async fn a_downstream_peer_without_a_certificate_is_refused() {
 
 /// A Gateway serving TLS does not also answer plaintext on the same port: a cleartext HTTP request
 /// fails rather than exposing the hop the section was configured to protect.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn the_tls_endpoint_does_not_answer_plaintext() {
     opamp::tls::install_ring_provider();
@@ -254,7 +254,7 @@ async fn the_tls_endpoint_does_not_answer_plaintext() {
 /// A peer presenting a certificate from *another* CA is turned away at the handshake: only the
 /// configured `client_ca_file` admits.
 ///
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_downstream_peer_with_a_certificate_from_another_ca_is_refused() {
     let (server, state, _server_dir) = spawn_server().await;
@@ -278,7 +278,7 @@ async fn a_downstream_peer_with_a_certificate_from_another_ca_is_refused() {
 /// A Gateway whose `[gateway.tls]` lacks `client_ca_file` does not start: the load refuses the
 /// file, and `run_on` refuses the configuration rather than serving without client certificates.
 ///
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_gateway_without_a_client_ca_does_not_start() {
     let (server, _state, _server_dir) = spawn_server().await;
@@ -309,7 +309,7 @@ async fn a_gateway_without_a_client_ca_does_not_start() {
 /// A Gateway without `[gateway.tls]` does not start, on the loopback too: `run_on` refuses the
 /// configuration rather than serving the downstream endpoint in plaintext.
 ///
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn a_gateway_without_tls_on_loopback_does_not_start() {
     let (server, _state, _server_dir) = spawn_server().await;
@@ -335,7 +335,7 @@ async fn a_gateway_without_tls_on_loopback_does_not_start() {
 /// the mutual-TLS handshake and then never finishes its request headers is hung up on, as the
 /// Server's Agent plane does (`connection_setup.rs`). The handshake bound is 10 seconds; closing well
 /// inside it shows the header bound did the work.
-/// Verifies: ADR-0036, ADR-0040
+/// Verifies: ADR-0057, ADR-0055
 #[tokio::test]
 async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on() {
     use std::io::{Read as _, Write as _};
@@ -410,7 +410,7 @@ async fn spawn_server_requiring(token: &str) -> (SocketAddr, Arc<AppState>, temp
 /// The Gateway decides nothing about a credential: each downstream peer's own `Authorization`
 /// reaches the Server, and a peer with a wrong one, or none, is not admitted — even when the one
 /// upstream connection the pool may hold was opened with another peer's valid credential.
-/// Verifies: ADR-0040, ADR-0039, G-15, Q-1
+/// Verifies: ADR-0055, ADR-0039, G-15, Q-1
 #[tokio::test]
 async fn each_downstream_peer_is_admitted_on_its_own_credential() {
     const TOKEN: &str = "the-fleet-token-of-at-least-32-chars";
@@ -419,8 +419,11 @@ async fn each_downstream_peer_is_admitted_on_its_own_credential() {
     let dir = tempfile::tempdir().expect("tempdir");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let listen = listener.local_addr().expect("addr");
+    // The Gateway's own credential, which it fetches the revocation list with (ADR-0055 clause
+    // 14); what it forwards upstream is each peer's.
     let toml = gateway_toml(server, listen, &pki, dir.path(), true)
-        .replace("upstream_connections = 4", "upstream_connections = 1");
+        .replace("upstream_connections = 4", "upstream_connections = 1")
+        + &format!("\n[auth]\nbearer_token = \"{TOKEN}\"\n");
     let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
     let (_stop, shutdown) = shutdown_channel();
     tokio::spawn(async move {

@@ -74,9 +74,11 @@ state_dir = "client-state"
 # upstream_connections is a CAP, not a count: connections are opened as Agents appear, so a Gateway
 # in front of three Agents holds three. Each Agent sticks to its connection while that lives.
 #
-# The Gateway makes no authentication decisions — it forwards each peer's credential upstream
-# untouched. Mutual TLS is per hop: [gateway.tls] verifies the Agents connecting to *this* Client,
-# while the identity presented to the Server is the one in [tls] below. The endpoint above must be
+# The Gateway makes no authentication decisions of its own — it forwards each peer's credential
+# upstream untouched, and refuses only a certificate the Server revoked. It admits nobody until the
+# operator marks its host as a Gateway on the Server (PUT /api/v1/hosts/<host>/gateway). Mutual
+# TLS is per hop: [gateway.tls] verifies the Agents connecting to *this* Client, while the identity
+# presented to the Server is the one in [tls] below. The endpoint above must be
 # ws:// or wss://, since a polling connection cannot carry the Server's pushes to the Agents behind
 # a Gateway.
 # [gateway]

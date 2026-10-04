@@ -1,17 +1,16 @@
-# ADR-0038: Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, and a Server on two listeners split by audience with bounded connections
+# ADR-0054: Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, and a Server on two listeners split by audience with bounded connections, bodies and messages
 
-- **Status:** ⚪ superseded by [ADR-0054](0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, how the Server binds and serves in `crates/opamp/src/server/listen.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the package URL probe in `crates/fleet-server/src/api.rs`, the `rustls` features in `Cargo.toml`, and the `listen`, `max_connections`, `[rest]` and `[tls]` keys of `server.toml`
-- **Supersedes:** [ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the package URL probe in `crates/fleet-server/src/api.rs`, the `rustls` features in `Cargo.toml`, and the `listen`, `max_connections`, `[rest]` and `[tls]` keys of `server.toml`
+- **Supersedes:** [ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)
 
 ## Context
 
-Supersedes [ADR-0012](0012-transports-tls-and-the-servers-two-planes.md) because the
-[specification](../SPECIFICATION.md) puts security before convenience (Strategy "Security before
-convenience", quality goal Q-1 "Secure by default"). Clauses 2, 5, 6, 7, 8, 9 and 11 change, and
-clauses 15 to 18 are new; the rest of the decision stands as it was.
+Supersedes [ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md), whose
+clause 14 left request bodies and WebSocket messages without any bound in time. Clause 14 is the
+one that changes; the rest of the decision stands as it was.
 
 The Baseline defines two transports: *"Server implementations SHOULD accept both plain HTTP
 connections and WebSocket connections. OpAMP Client implementations may choose to support
@@ -72,12 +71,23 @@ Two more bounds are missing. Nothing limits how many connections a peer may hold
 header-read timeout is HTTP/1 only; an HTTP/2 peer is bounded by the message size and by nothing
 else. [`HARDENING.md`](../HARDENING.md) names these H16 and H17.
 
+Once the headers are in, nothing bounds the body either. A peer can send the headers of a `POST`
+and then nothing, or a byte a minute, and hold the connection and its task for as long as it
+likes: on the Agent plane, which faces the estate, up to `max_message_size_bytes`; on the Operator
+plane up to axum's 2 MiB JSON limit, or `max_package_size_bytes` on the upload; on the Gateway
+endpoint and the Supervisor Endpoint the same as the Agent plane. A WebSocket message can be
+trickled the same way, frame by frame, before it is ever handed to the handler. The connection cap
+bounds how many such peers there are, not how long each one stays. A deadline is still the wrong
+instrument — a large upload over a slow link and a long-lived session are both legitimate — but a
+floor on the pace is not: a body that has started arriving must keep arriving.
+
 ## Decision
 
 We will implement both OpAMP transports on both ends over rustls with the `ring` provider and TLS
 1.3 alone, accept plaintext only on LOOPBACK, and serve the Server on two listeners split by
 audience — an Agent plane that always serves TLS and a loopback-default Operator plane — each built
-in one place that bounds connection setup, the number of connections and HTTP/2.
+in one place that bounds connection setup, the number of connections, HTTP/2, and the pace of every
+request body and WebSocket message.
 
 1. **One endpoint, both transports, detected per request.** The Server serves `/v1/opamp` on its
    Agent plane: a WebSocket upgrade (`GET`) starts the WebSocket transport, a `POST` carrying
@@ -130,7 +140,7 @@ in one place that bounds connection setup, the number of connections and HTTP/2.
 
    | Plane | Key | Default | TLS | Serves |
    |---|---|---|---|---|
-   | Agent | `listen` | `127.0.0.1:4320` | always | `/v1/opamp` and the package download route |
+   | Agent | `listen` | `127.0.0.1:4320` | always | `/v1/opamp`, the package download route, and the Gateways' revocation list ([ADR-0056](0056-revocation-that-follows-renewal-and-reaches-the-gateways.md) clause 12) |
    | Operator | `[rest] listen` | `127.0.0.1:4321` | always | `/api/v1/…`, `/api/v1/openapi.json`, `/api/v1/docs` with its vendored Redoc bundle, and the bundled UI at `/` |
 
    The Agent plane listens on LOOPBACK by default. Serving the estate is one deliberate line in
@@ -187,9 +197,19 @@ in one place that bounds connection setup, the number of connections and HTTP/2.
     ended by then is cut, and the Agent-record flush of
     [ADR-0026](0026-the-fleet-record.md) runs afterwards.
 
-14. **No request timeout, no body timeout, no `tower-http`, no `server.toml` key for these
-    bounds.** The long routes stay long. A knob is added when a deployment needs a value other than
-    the framework default, not before.
+14. **No request timeout, but a floor on the pace of every body and every message; no
+    `tower-http`, no `server.toml` key for these bounds.** The long routes stay long: nothing has a
+    deadline, and a connection with nothing in flight — an idle WebSocket session between messages,
+    a keep-alive connection between requests — is not bounded by this clause. A request body
+    begins when its headers end, and a WebSocket message with its first byte; from then on it must
+    deliver at least `MIN_PACE_BYTES` (64 KiB) within every `PACE_WINDOW` (60 s), each window
+    measured from the end of the one before, or have ended. A body announced in the headers but
+    never sent is therefore bounded as one that stops. A body that falls behind is answered `408` and whatever was staged
+    from it is removed; a WebSocket message that falls behind closes its connection with `1008`.
+    The floor holds on every listener `opamp`'s server serves — the Agent plane, the Operator
+    plane, the Gateway endpoint and the Supervisor Endpoint — for every route, the package upload
+    included, and on both HTTP versions. The two values are named constants, the same everywhere: a
+    knob is added when a deployment needs a value other than these, not before.
 
 15. **Plaintext on LOOPBACK alone, refused at startup elsewhere.** A listener without TLS is
     accepted only on a LOOPBACK address. `opamp`'s `Listener::serve` refuses a plaintext listener
@@ -259,6 +279,17 @@ endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s lis
 - **A `tower-http` `TimeoutLayer`** — middleware runs after hyper has parsed the request line and
   headers, so it cannot see the phase at issue, and it would need exclusions for the WebSocket, the
   download and the upload.
+- **A deadline per body** — refuses the large upload over a slow link, which is legitimate; any
+  value long enough for it leaves the trickle in place.
+- **An idle timeout between chunks** — catches a body that stops, not one that sends a byte just
+  inside the timeout, which is the cheaper attack.
+- **The floor on the package upload alone** — the upload is the longest body, not the only one: the
+  Agent plane's `POST`, which faces the estate, and the Operator plane's JSON routes can be trickled
+  the same way.
+- **A sliding window** — bounds the gap between two bytes more tightly, at the price of keeping the
+  arrival times of every chunk; consecutive windows bound the same attack to twice the window.
+- **A `server.toml` and `supervisor.toml` key for the floor** — the value depends on what a link
+  can carry, which is the same everywhere a program can be delivered at all.
 - **Waiting for the axum release carrying the timer** — fixes only `axum::serve`; the TLS listeners
   run on `axum_server` anyway.
 - **Keeping `axum::serve` and hand-rolling the accept loop on `hyper-util`** — the same knob for the
@@ -331,6 +362,11 @@ endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s lis
   and nginx's `client_header_timeout` (60 s) — the range 30 s sits in.
 - [`cargo-deny` — `bans.features`](https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html)
   — denies a crate feature anywhere in the graph.
+- [nginx `client_body_timeout`](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout)
+  — a timeout between two successive reads of the body, not for the whole body; the same shape
+  without a floor on the amount.
+- [Apache `mod_reqtimeout`](https://httpd.apache.org/docs/2.4/mod/mod_reqtimeout.html) — `body=20,MinRate=500`:
+  a minimum data rate for the body, the measure this clause takes.
 - [`HARDENING.md`](../HARDENING.md) — H9 (the handshake-level client-certificate requirement), H11
   (the TLS version floor), H16 (connection cap), H17 (HTTP/2 bounds), H18 (the Client's own
   listeners).
@@ -348,6 +384,8 @@ endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s lis
 - Positive: an unauthenticated peer cannot pin a connection open indefinitely on either plane,
   cannot hold more connections than the cap, and cannot hold an HTTP/2 connection with silent or
   unbounded streams. Both planes drain on shutdown within a bound.
+- Positive: no peer holds a connection by stalling or trickling a body or a message, on any
+  listener, while a large upload over a slow link and an idle session are left alone.
 - Negative / trade-offs: a Server with no configuration no longer starts. The operator provides a
   certificate and key before the first start, and sets `listen` before an Agent from another host
   can connect.
@@ -360,6 +398,9 @@ endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s lis
   another host takes a deliberate `[rest] listen` with TLS and authentication. On LOOPBACK the
   Operator plane serves plaintext even when `[tls]` is set. The download route is absent from the
   OpenAPI document, so a generated client has no method for it — no operator flow calls it.
+- Negative / trade-offs: a body or a message over a link slower than about a kilobyte a second is
+  refused, and a peer that holds the floor exactly still holds its connection for as long as its
+  body lasts — about eleven days for a 1 GiB upload — bounded by the connection cap alone.
 - Negative / trade-offs: a peer needing more than 30 s for its headers is hung up on. A fleet
   reconnecting after a restart meets the connection cap if it is larger than the cap, and the
   HTTP/2 numbers are chosen, not yet measured against a real fleet.
@@ -397,8 +438,18 @@ endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s lis
 - [`crates/fleet-server/tests/connection_setup.rs`](../../crates/fleet-server/tests/connection_setup.rs) —
   `a_connection_that_never_finishes_its_headers_is_hung_up_on`,
   `an_established_session_outlives_the_header_bound` (clauses 11, 14).
+- Clause 14's floor, over real connections to `opamp`'s listener with the floor driven short —
+  real time, since a paused clock fires a socket's timeouts at once:
+  [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs) —
+  `a_body_that_never_arrives_is_answered_408`, `a_body_that_trickles_is_answered_408`,
+  `a_slow_body_above_the_floor_is_taken_whole`,
+  `a_websocket_message_that_trickles_closes_with_1008`,
+  `a_message_kept_open_by_pings_between_its_fragments_closes_with_1008`,
+  `an_idle_websocket_stays_open`;
+  [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs) —
+  `an_upload_that_stops_is_answered_408_and_leaves_nothing_staged`, on the Operator plane.
 
-These tests carry `Verifies: ADR-0038`:
+These tests carry `Verifies: ADR-0054`:
 
 - [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs) —
   `the_provider_offers_tls_1_3_suites_alone` (clause 5);

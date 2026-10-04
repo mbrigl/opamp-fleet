@@ -121,6 +121,9 @@ pub async fn after_reply<S: ReportSink>(
     // request queued after an earlier reply has left already: an offer always owes a report, which
     // goes out before this runs on WebSocket and is the report the offer answers on plain HTTP.
     engine.request_certificate(|| crate::csr::request(config));
+    if flush_owed(engine, sink).await.is_err() {
+        return AfterReply::ConnectionLost;
+    }
     if process_package_downloads(engine, config, sink).await
         && flush_owed(engine, sink).await.is_err()
     {

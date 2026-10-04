@@ -18,7 +18,7 @@ publish = false
 opamp = { path = "crates/opamp", version = "0.20" }
 fleet-core = { path = "crates/fleet-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 prost = "0.14"
 prost-build = "0.14"
 # Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0010).
@@ -149,6 +149,9 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 # `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
 # adds an entry to a manifest and no code to either binary.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+# The upgrade `opamp` takes a WebSocket over with, so it reads the frames itself (ADR-0057). Already
+# in the tree as axum's own dependency, with these features.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 # Code-first OpenAPI for the REST API (ADR-0016): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
 utoipa = "5"

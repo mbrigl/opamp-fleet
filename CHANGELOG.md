@@ -78,6 +78,17 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Changed
 
+- **A Gateway refuses a certificate the Server revoked, and admits nobody until its host is
+  marked** ([ADR-0055](docs/adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md),
+  [ADR-0056](docs/adr/0056-revocation-that-follows-renewal-and-reaches-the-gateways.md)). A host
+  marked as a Gateway fetches the revoked certificates of the client CA from
+  `GET /v1/gateway/revocations` every 30 s and refuses them downstream with `401`, closing their
+  sessions with `1008`. A Gateway with no list younger than 300 s answers every downstream peer
+  `503`. **What to do:** upgrade the Server before its Gateways — an older Server has no list to
+  hand out. Give each Gateway a certificate the Server issued, by enrolment or by a renewal, since
+  only such a certificate names the host there is to mark; then mark that host with
+  `PUT /api/v1/hosts/<host>/gateway` before the Gateway is upgraded. An unmarked Gateway admits
+  nobody.
 - **A package signature now covers the Agent type, the version and the SHA-256**
   ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md)), and a
   Supervisor refuses a package for another Agent type or older than the one it runs. **What to
@@ -160,12 +171,24 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **A request body or a WebSocket message that stalls is cut off**
+  ([ADR-0054](docs/adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+  Once its headers had arrived, a peer could hold any connection of the Server, a Gateway or a
+  Supervisor Endpoint by sending its body, or a WebSocket message, a byte at a time or not at all.
+  Every body and message that has begun must now deliver 64 KiB within each minute: a body that
+  falls behind is answered `408`, a message closes its connection with `1008`. Nothing has a
+  deadline, so a large upload over a slow link still completes, and an idle connection is left
+  alone. **What to do:** nothing.
 - **An enrolment and a renewal each issue one certificate, not two**
   ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)). A
   Client that received its certificate sent the request it had just been answered for once more
   on its next connection, and the Server signed it again, so every host held a second valid
   certificate it never used. **What to do:** nothing; a duplicate already issued expires with its
   life, or can be revoked by its serial from `GET /api/v1/certificates`.
+- **A certificate request goes out at once, with or without heartbeats.** A Client sent a new
+  request only with its next heartbeat or poll, so an enrolment waited up to 30 s for its request
+  to be listed, and a Client with `heartbeat_interval_secs = 0` on WebSocket never sent it. **What
+  to do:** nothing.
 - **The certificate register lists a key by the fingerprint its enrolment request carried.**
   `key_fingerprint` in `GET /api/v1/certificates` and in the audit record's issuance lines is now
   the SHA-256 of the public key, as the Client logs it and `GET /api/v1/enrolments` lists it, not

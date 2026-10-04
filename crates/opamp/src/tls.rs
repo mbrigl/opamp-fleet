@@ -138,7 +138,7 @@ mod tests {
         (cert.pem(), key.serialize_pem())
     }
 
-    /// Verifies: ADR-0036
+    /// Verifies: ADR-0057
     #[test]
     fn reads_a_certificate_and_a_key() {
         let (cert_pem, key_pem) = pair();
@@ -159,7 +159,7 @@ mod tests {
     }
 
     /// Fail closed: a file with no certificate in it is not an empty trust store.
-    /// Verifies: ADR-0036, ADR-0037
+    /// Verifies: ADR-0057, ADR-0058
     #[test]
     fn a_file_holding_no_certificate_is_an_error() {
         assert!(certificates(b"").is_err());
@@ -181,7 +181,7 @@ mod tests {
         assert!(!format!("{identity:?}").contains("PRIVATE KEY"));
     }
 
-    /// Verifies: ADR-0036, ADR-0038, ADR-0041, Q-3
+    /// Verifies: ADR-0057, ADR-0054, ADR-0041, Q-3
     #[test]
     fn the_provider_offers_tls_1_3_suites_alone() {
         let provider = provider();

@@ -52,7 +52,7 @@ async fn recv(socket: &mut Socket) -> ServerToAgent {
     }
 }
 
-/// Verifies: ADR-0038
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn a_framed_report_is_answered() {
     let server = spawn().await;
@@ -335,7 +335,7 @@ async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
     panic!("the rekeyed clone never went down alone — or took the original with it");
 }
 
-/// Verifies: ADR-0040
+/// Verifies: ADR-0055
 #[tokio::test]
 async fn two_agents_share_one_connection() {
     // The multiplexing provision of ADR-0009: n Agents over one connection, told apart by
@@ -360,7 +360,7 @@ async fn two_agents_share_one_connection() {
 
 /// The Baseline (message size limits): a WebSocket message past the receive limit is malformed,
 /// and the Server closes the connection with status code 1009 rather than acting on it.
-/// Verifies: ADR-0038
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn an_oversized_frame_closes_the_connection_with_1009() {
     let server = support::spawn_with_limit(1024).await;

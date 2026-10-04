@@ -117,7 +117,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 /// A Configuration rollout reaches a poller and is applied — `APPLIED`, in sync, and the managed
 /// process restarted on the written file. No Server push is involved: the offer rides the reply to
 /// the Client's own next poll, which is the whole of how this transport learns anything.
-/// Verifies: ADR-0038, G-1
+/// Verifies: ADR-0054, G-1
 #[tokio::test]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");

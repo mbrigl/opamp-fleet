@@ -1412,7 +1412,7 @@ mod tests {
     /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
     /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
     /// so it fails startup.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0055
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1442,7 +1442,7 @@ mod tests {
 
     /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
     /// them against — on the loopback neither (ADR-0040).
-    /// Verifies: ADR-0040, Q-1
+    /// Verifies: ADR-0055, Q-1
     #[test]
     fn a_gateway_without_mutual_tls_is_refused_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1675,7 +1675,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
@@ -1692,7 +1692,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn the_default_endpoint_is_wss_on_the_loopback() {
         assert_eq!(
@@ -1701,7 +1701,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0038, Q-1
+    /// Verifies: ADR-0054, Q-1
     #[test]
     fn a_plaintext_endpoint_off_the_loopback_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1718,7 +1718,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: ADR-0038, ADR-0037
+    /// Verifies: ADR-0054, ADR-0058
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {

@@ -36,6 +36,7 @@ use tokio::net::TcpStream;
 
 pub use axum_server::Handle;
 
+use super::pace::{self, Pace, MIN_PACE_BYTES, PACE_WINDOW};
 use crate::endpoint::is_loopback_literal;
 use crate::tls::{certificates, private_key, provider, root_store, server_builder, Identity};
 
@@ -143,6 +144,7 @@ pub struct Listener {
     tls: Option<Arc<ServerConfig>>,
     header_read_timeout: Duration,
     max_connections: usize,
+    pace: (Duration, u64),
 }
 
 impl Listener {
@@ -154,6 +156,7 @@ impl Listener {
             handle,
             tls: None,
             header_read_timeout: HEADER_READ_TIMEOUT,
+            pace: (PACE_WINDOW, MIN_PACE_BYTES),
             max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
@@ -170,6 +173,15 @@ impl Listener {
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Sets the floor on the pace of bodies and messages, [`PACE_WINDOW`] and [`MIN_PACE_BYTES`]
+    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0054 clause 14).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_pace(mut self, window: Duration, min_bytes: u64) -> Self {
+        self.pace = (window, min_bytes);
         self
     }
 
@@ -200,7 +212,8 @@ impl Listener {
             }
         }
         let server = axum_server::from_tcp(self.listener).handle(self.handle);
-        let slots = Slots::new(self.max_connections);
+        let slots = Slots::new(self.max_connections, self.pace);
+        let router = router.layer(axum::middleware::from_fn(pace::bodies));
         match self.tls {
             None => {
                 bounded(server.acceptor(Plain(slots)), self.header_read_timeout)
@@ -244,13 +257,15 @@ fn bounded<A>(mut server: Server<A>, header_read_timeout: Duration) -> Server<A>
 struct Slots {
     held: Arc<AtomicUsize>,
     max: usize,
+    pace: (Duration, u64),
 }
 
 impl Slots {
-    fn new(max: usize) -> Self {
+    fn new(max: usize, pace: (Duration, u64)) -> Self {
         Slots {
             held: Arc::new(AtomicUsize::new(0)),
             max,
+            pace,
         }
     }
 
@@ -265,6 +280,14 @@ impl Slots {
             stream,
             held: self.held.clone(),
         })
+    }
+
+    /// The floor every connection of this listener is held to.
+    fn pace(&self) -> Pace {
+        Pace {
+            window: self.pace.0,
+            min_bytes: self.pace.1,
+        }
     }
 }
 
@@ -334,8 +357,11 @@ fn with_connection(
     service: Router,
     peer: Option<SocketAddr>,
     certificate: Option<CertificateDer<'static>>,
+    pace: Pace,
 ) -> Router {
-    let service = service.layer(Extension(PeerCertificate(certificate)));
+    let service = service
+        .layer(Extension(PeerCertificate(certificate)))
+        .layer(Extension(pace));
     match peer {
         Some(peer) => service.layer(Extension(ConnectInfo(peer))),
         None => service,
@@ -353,7 +379,7 @@ impl Accept<TcpStream, Router> for Plain {
     fn accept(&self, stream: TcpStream, service: Router) -> Self::Future {
         let peer = stream.peer_addr().ok();
         std::future::ready(match self.0.take(stream) {
-            Some(stream) => Ok((stream, with_connection(service, peer, None))),
+            Some(stream) => Ok((stream, with_connection(service, peer, None, self.0.pace()))),
             None => Err(full()),
         })
     }
@@ -372,6 +398,7 @@ impl Accept<TcpStream, Router> for Tls {
         let peer = stream.peer_addr().ok();
         // The slot is taken before the handshake: a peer that never completes one still counts.
         let counted = self.1.take(stream);
+        let pace = self.1.pace();
         Box::pin(async move {
             let stream = counted.ok_or_else(full)?;
             let (stream, service) = inner.accept(stream, service).await?;
@@ -382,7 +409,7 @@ impl Accept<TcpStream, Router> for Tls {
                 .1
                 .peer_certificates()
                 .and_then(|chain| chain.first().cloned());
-            Ok((stream, with_connection(service, peer, certificate)))
+            Ok((stream, with_connection(service, peer, certificate, pace)))
         })
     }
 }

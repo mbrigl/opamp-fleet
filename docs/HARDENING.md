@@ -72,11 +72,14 @@ has:
   and therefore before Admission ever runs.
 - Package content hashed always, and Ed25519-verified when a key is configured; archive members
   validated before anything is written.
-- **Revocation that ends sessions** (ADR-0049): the Server keeps a persisted
+- **Revocation that ends sessions** (ADR-0056): the Server keeps a persisted
   list of revoked certificates, by issuing CA and serial and extended along every renewal it signed,
   and of revoked credentials, by hash. Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, and every
   session ends when the certificate that admitted it expires.
+- **A Gateway refuses what the Server revoked** (ADR-0055, ADR-0056): a host marked as a Gateway
+  fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
+  the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0050): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
@@ -120,16 +123,19 @@ The list above is per mechanism; this is the same state per **surface**, since a
 one listener and not on its neighbour is the failure mode worth seeing at a glance. ✅ in force,
 ⚠️ partial, ❌ absent.
 
-- **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0038).
+- **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`, ADR-0054
+  clause 14): ✅ a body or WebSocket message that has begun delivers 64 KiB in every 60 s or is cut
+  off — `408`, or a `1008` close — while nothing has a deadline and an idle connection is left alone.
+- **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0054).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
     ✅ gzip bounded *after* decompression · ✅ Admission, cumulative
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
   - ✅ failed admissions throttled per address
-- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0038).
+- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0054).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ optional Basic over the whole plane (ADR-0017) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
-  - ⚠️ the package upload is unbounded in **time** and, by decision, in size (ADR-0011) — the one
-    route where that is intended · ✅ capped, HTTP/2-bounded and throttled as above
+  - ✅ the package upload has no deadline, but is held to the floor above, and its size to
+    `max_package_size_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
 - **Client → Server**, outbound (`opamp::client::connection`, ADR-0036).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
@@ -154,13 +160,6 @@ which a withdrawn credential still works**, and **shrink the surface that sits b
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
 way the connection-setup bound did when ADR-0012 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
-
-## Revocation behind a Gateway
-
-Revocation and the CSR check are in force and listed under
-[What already holds](#what-already-holds). What remains of revocation is the Gateway: the Server sees the Gateway's certificate, so a downstream
-certificate is revoked only once that Agent connects directly. Handing the list to Gateways would
-make the Gateway take an admission decision, and is a measure of its own when a fleet needs it.
 
 ## The channels that put code on the host
 

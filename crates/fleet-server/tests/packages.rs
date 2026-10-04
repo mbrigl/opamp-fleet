@@ -284,7 +284,7 @@ async fn the_act_names_the_version_it_releases() {
 /// ADR-0012: the offered `download_url` is a path the Client resolves against **its own OpAMP
 /// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
 /// the Operator plane, which is where authentication is going and where no Agent will ever look.
-/// Verifies: ADR-0043, ADR-0038
+/// Verifies: ADR-0043, ADR-0054
 #[tokio::test]
 async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1423,7 +1423,7 @@ async fn a_source_url_aimed_at_an_internal_address_is_refused() {
 
 /// A referenced source is `https://`; plaintext is accepted on a loopback literal alone, and a host
 /// name never counts as one. Each refusal is a `400` that names the rule, before any probe.
-/// Verifies: ADR-0043, ADR-0038
+/// Verifies: ADR-0043, ADR-0054
 #[tokio::test]
 async fn a_plaintext_source_off_the_loopback_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2415,5 +2415,87 @@ async fn the_probe_follows_no_redirect() {
         followed.load(Ordering::SeqCst),
         0,
         "the probe followed the redirect"
+    );
+}
+
+/// Every `*.upload` file under `dir` — what an upload in progress stages its artifact into.
+fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "upload") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// An upload that stops arriving is answered `408` and leaves nothing staged behind: the floor
+/// on every body holds on the Operator plane's longest route too (ADR-0054 clause 14).
+/// Verifies: ADR-0054
+#[tokio::test]
+async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    opamp::tls::install_ring_provider();
+    let window = std::time::Duration::from_millis(300);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let operators = fleet_server::operator_app(state, None);
+    tokio::spawn(
+        opamp::server::listen::Listener::new(listener, opamp::server::listen::Handle::new())
+            .with_pace(window, 1024)
+            .serve(operators),
+    );
+    let set = format!(
+        "http://127.0.0.1:{port}/api/v1/packages/{}/1.0.0",
+        support::AGENT_TYPE
+    );
+    let created = reqwest::Client::new()
+        .put(&set)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(created.status(), 200);
+
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    socket
+        .write_all(
+            format!(
+                "PUT /api/v1/packages/{}/1.0.0/entries/linux/amd64 HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Length: 100000\r\n\r\npartial",
+                support::AGENT_TYPE
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    let mut buffer = vec![0u8; 1024];
+    let read = tokio::time::timeout(window * 10, socket.read(&mut buffer))
+        .await
+        .expect("an answer in time")
+        .expect("read");
+    assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("HTTP/1.1 408"));
+    assert!(
+        staged_uploads(dir.path()).is_empty(),
+        "{:?}",
+        staged_uploads(dir.path())
     );
 }

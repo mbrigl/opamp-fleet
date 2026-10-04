@@ -967,7 +967,7 @@ mod tests {
 
     /// ADR-0012: the Operator plane is a second listener, and by default it is on loopback — the
     /// only protection it has while nothing authenticates it.
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn the_operator_plane_defaults_to_loopback_and_is_configurable() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -983,7 +983,7 @@ mod tests {
 
     /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,
     /// and it is named as one rather than surfacing as "address already in use" (ADR-0012).
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn two_planes_on_one_address_are_refused() {
         assert!(listeners_collide(
@@ -1079,7 +1079,7 @@ mod tests {
         assert!(err.contains("at least one"), "{err}");
     }
 
-    /// Verifies: ADR-0037
+    /// Verifies: ADR-0058
     #[test]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<ServerConfig>("listne = \"0.0.0.0:1\"").is_err());
@@ -1370,7 +1370,7 @@ mod tests {
         assert!(err.contains("[enrolment] needs [client_ca]"), "{err}");
     }
 
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn max_connections_defaults_per_plane_and_zero_is_refused() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -1385,14 +1385,14 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0038
+    /// Verifies: ADR-0054
     #[test]
     fn the_agent_plane_defaults_to_the_loopback() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen, "127.0.0.1:4320".parse().expect("address"));
     }
 
-    /// Verifies: ADR-0038, ADR-0039, Q-1
+    /// Verifies: ADR-0054, ADR-0039, Q-1
     #[test]
     fn a_server_without_tls_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1405,7 +1405,7 @@ mod tests {
         assert!(err.contains("[tls] is required"), "{err}");
     }
 
-    /// Verifies: ADR-0038, ADR-0039
+    /// Verifies: ADR-0054, ADR-0039
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
         let tls = format!(

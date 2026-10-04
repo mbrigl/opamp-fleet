@@ -1,11 +1,19 @@
-# ADR-0049: The Server keeps a revocation list that follows renewal, and a session ends when what admitted it is revoked or its certificate expires
+# ADR-0056: The Server keeps a revocation list that follows renewal and hands it to the Gateways, and a session ends when what admitted it is revoked or its certificate expires
 
-- **Status:** ⚪ superseded by [ADR-0056](0056-revocation-that-follows-renewal-and-reaches-the-gateways.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** admission on `/v1/opamp` and on the download route in `crates/fleet-server/src/transport.rs`, the WebSocket session loop there, the certificate register and revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the `/api/v1/revocations` and `/api/v1/certificates` routes in `crates/fleet-server/src/api.rs`, and the files they persist under `config_dir`
+- **Applies to:** admission on `/v1/opamp` and on the download route in `crates/fleet-server/src/transport.rs`, the WebSocket session loop there, the certificate register and revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the `/api/v1/revocations` and `/api/v1/certificates` routes in `crates/fleet-server/src/api.rs`, the Gateways' `/v1/gateway/revocations` route on the Agent plane, and the files they persist under `config_dir`
+- **Supersedes:** [ADR-0049](0049-revocation-ends-sessions-and-follows-renewal.md)
 
 ## Context
+
+Supersedes [ADR-0049](0049-revocation-ends-sessions-and-follows-renewal.md), which left a downstream
+certificate revocable only where its Agent connects directly (its clause 11) and kept the list from
+the Gateways. A Gateway now refuses what the Server revoked
+([ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md) clause 14), and
+needs the list to do it. Clause 11 changes and clause 12 is new; the rest of the decision stands as
+it was.
 
 [ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) admits an Agent with
 two proofs, a client certificate in the handshake and a fleet credential, and leaves revocation out
@@ -49,8 +57,10 @@ Four facts shape the decision:
 ## Decision
 
 We will keep a persisted revocation list of certificates, by issuing CA and serial and extended
-along every renewal the Server signed, and of credentials, by hash, check it at every admission, and end
-each WebSocket session as soon as a proof that admitted it is revoked or its certificate expires.
+along every renewal the Server signed, and of credentials, by hash, check it at every admission, end
+each WebSocket session as soon as a proof that admitted it is revoked or its certificate expires, and
+hand the certificates on it, resolved along their chains, to every host an operator marked as a
+Gateway.
 
 1. **The Server gives every certificate it signs a random serial.** 16 bytes from the system's
    secure random source, the top bit cleared so the encoding stays positive. Two certificates from
@@ -126,13 +136,28 @@ each WebSocket session as soon as a proof that admitted it is revoked or its cer
     Client renews at two thirds of the life and reconnects to prove the new certificate, so a
     healthy fleet never meets this close; it ends what renewal did not replace.
 
-11. **Behind a Gateway the Server revokes what it sees.** A downstream Agent is revoked through
-    its credential, by revoking the Gateway's certificate, which ends every Agent the Gateway
-    carries and every certificate renewed through it without a proof (clause 2), or by revoking its
-    own certificate: a revoked certificate's proof renews nothing. Revoking a downstream
-    certificate ends its sessions only once that Agent connects directly.
+11. **Behind a Gateway the Gateway refuses what the Server revoked.** A downstream Agent is
+    revoked through its credential, which the Server checks itself; by revoking the Gateway's
+    certificate, which ends every Agent the Gateway carries and every certificate renewed through it
+    without a proof (clause 2); or by revoking its own certificate, which the Gateway refuses from
+    the list of clause 12
+    ([ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md) clause 14),
+    and whose proof renews nothing.
 
-**Out of scope:** CRL and OCSP for third parties; distributing the list to Gateways; per-Agent
+12. **The list reaches the Gateways from a route of their own.** `GET /v1/gateway/revocations` on
+    the Agent plane is admitted as `/v1/opamp` is — the handshake's client certificate from the
+    client CA and the fleet credential, each checked against the list — and is answered only to a
+    certificate whose host an operator marked as a Gateway (`PUT /api/v1/hosts/{host}/gateway`);
+    any other is answered `403`. The body is JSON: every certificate of the client CA that is
+    revoked by clause 4, its own entry or a predecessor's, each by the SHA-256 of its issuer's name
+    and its serial, so the Gateway resolves no chain; and a version that changes with every change
+    to the list, carried as an `ETag`, so a fetch with `If-None-Match` is answered `304`. Bootstrap
+    certificates and credentials are not on it: a Gateway admits no bootstrap certificate, and
+    forwards the credential for the Server to judge. The route is outside the OpenAPI document, as
+    the package download is.
+
+**Out of scope:** CRL and OCSP for third parties; what a Gateway does with the list
+([ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)); per-Agent
 credentials; binding a certificate to an `instance_uid`
 ([ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 7 stands);
 shortening certificate validity, which the H6 measure of `HARDENING.md` takes up once this is in
@@ -166,9 +191,12 @@ force; a revocation view in the bundled UI; an audit record of revocations.
   `instance_uid`.
 - **CRL or OCSP.** Rejected: both serve relying parties other than the issuer. Here the issuer is
   the only relying party, and an online responder would be infrastructure guarding nothing extra.
-- **Distributing the list to Gateways through a custom message.** Rejected for now: it adds a
-  protocol extension and makes the Gateway take an admission decision, which ADR-0040 keeps on the
-  Server. Recorded as a follow-up.
+- **Distributing the list to Gateways through a custom message.** Rejected: a `CustomMessage` is
+  `[Development]` in the Baseline and not implemented here, and it would tie the list to an Agent's
+  session rather than to the Gateway as a host. A route of its own on the plane the Gateway
+  already reaches carries it with the admission that plane already has.
+- **The list for every member, not only marked Gateways.** Rejected: only a Gateway acts on it, and
+  every member that could fetch it would learn which certificates of the fleet were withdrawn.
 - **Ending a session by a re-authentication the Server pushes.** Rejected: the Baseline has no
   message for it, and the specification forbids a private side channel.
 - **Refusing to start while a revoked credential is still in `server.toml`.** Rejected: the
@@ -198,13 +226,14 @@ force; a revocation view in the bundled UI; an audit record of revocations.
 - Negative / trade-offs: the Server gains two persisted stores and a check per admission; the
   register grows with the fleet times its renewals within one validity period. Revoking the
   credential shuts out every Agent still presenting it, so it must follow a completed rotation.
-  Behind a Gateway only the credential and the Gateway's own certificate are revocable. The
+  Behind a Gateway a revocation takes effect when the Gateway next fetches the list, and a Gateway
+  needs its host marked before it admits anyone. The
   register's bounds turn an admitted member that loops CSRs into a refusal of renewals within its
   chain, and a host holds at most three valid certificates (ADR-0039 clause 7). A downstream Agent
   that renews with a proof renews in its own chain and host; one without a proof renews in the
   Gateway's, and can stop renewal for the Gateway and every Agent it carries until the certificates
   it obtained expire. The bounds keep the damage to one chain and away from enrolment.
-- Follow-ups: distributing the list to Gateways; revocation by Agent as a convenience in the
+- Follow-ups: revocation by Agent as a convenience in the
   bundled UI; an audit record of each revocation and each session it closed; shortening
   certificate validity once renewal is proven; bounding issuance per Agent rather than per chain,
   which needs the per-Agent identity this decision leaves out.
@@ -229,3 +258,6 @@ force; a revocation view in the bundled UI; an audit record of revocations.
   `a_revocation_reaches_a_certificate_renewed_before_it` (clauses 1, 2, 4),
   `a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called` (clause 3),
   `a_csr_for_another_agent_still_descends_from_the_presented_certificate` (clauses 2, 11).
+- Clause 12: tests over the real Agent plane that a marked Gateway receives every revoked
+  certificate of the client CA with its renewals resolved, that the same version is answered `304`,
+  and that an unmarked member, a bootstrap certificate and a missing credential are refused.

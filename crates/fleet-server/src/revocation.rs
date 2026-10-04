@@ -258,6 +258,45 @@ struct State {
 }
 
 impl State {
+    /// Every revoked certificate, by issuer and serial.
+    fn revoked_certificates(&self) -> BTreeSet<CertId> {
+        self.revocations
+            .iter()
+            .flat_map(|entry| match &entry.revoked {
+                Revoked::Certificate {
+                    issuers, serial, ..
+                } => issuers
+                    .iter()
+                    .map(|issuer| CertId {
+                        issuer: issuer.clone(),
+                        serial: serial.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                Revoked::Credential { .. } => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Whether `id`, or a certificate it renewed, is in `revoked` (clause 4).
+    fn descends_from(&self, id: &CertId, revoked: &BTreeSet<CertId>) -> bool {
+        let mut current = Some(id);
+        // A chain is never longer than the register; the bound also ends a cycle a damaged file
+        // could hold.
+        for _ in 0..=self.issued.len() {
+            let Some(id) = current else {
+                return false;
+            };
+            if revoked.contains(id) {
+                return true;
+            }
+            current = self
+                .issued
+                .get(id)
+                .and_then(|issued| issued.predecessor.as_ref());
+        }
+        false
+    }
+
     /// The root of a registered entry's chain, by walking its predecessor links.
     fn chain_root(&self, id: &CertId) -> CertId {
         let mut current = id.clone();
@@ -659,38 +698,51 @@ impl Revocations {
     #[must_use]
     pub fn is_certificate_revoked(&self, certificate: &CertId) -> bool {
         let state = self.state.lock().expect("revocation lock");
-        let revoked: BTreeSet<(&str, &str)> = state
-            .revocations
+        let revoked = state.revoked_certificates();
+        !revoked.is_empty() && state.descends_from(certificate, &revoked)
+    }
+
+    /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
+    /// renewed, with its chain already resolved: what a Gateway refuses
+    /// (ADR-0056 clause 12). A certificate the register never held is on it as revoked.
+    #[must_use]
+    pub fn revoked_certificates(&self, role: &str) -> BTreeSet<CertId> {
+        let issuers: BTreeSet<&str> = self
+            .authorities
             .iter()
-            .flat_map(|entry| match &entry.revoked {
-                Revoked::Certificate {
-                    issuers, serial, ..
-                } => issuers
-                    .iter()
-                    .map(|issuer| (issuer.as_str(), serial.as_str()))
-                    .collect::<Vec<_>>(),
-                Revoked::Credential { .. } => Vec::new(),
-            })
+            .filter(|authority| authority.role == role)
+            .map(|authority| authority.subject.as_str())
             .collect();
+        let state = self.state.lock().expect("revocation lock");
+        let revoked = state.revoked_certificates();
         if revoked.is_empty() {
-            return false;
+            return revoked;
         }
-        let mut current = Some(certificate);
-        // A chain is never longer than the register; the bound also ends a cycle a damaged file
-        // could hold.
-        for _ in 0..=state.issued.len() {
-            let Some(id) = current else {
-                return false;
-            };
-            if revoked.contains(&(id.issuer.as_str(), id.serial.as_str())) {
-                return true;
-            }
-            current = state
+        let mut named: BTreeSet<CertId> = revoked
+            .iter()
+            .filter(|id| issuers.contains(id.issuer.as_str()))
+            .cloned()
+            .collect();
+        named.extend(
+            state
                 .issued
-                .get(id)
-                .and_then(|issued| issued.predecessor.as_ref());
-        }
-        false
+                .keys()
+                .filter(|id| issuers.contains(id.issuer.as_str()))
+                .filter(|id| state.descends_from(id, &revoked))
+                .cloned(),
+        );
+        named
+    }
+
+    /// Whether `host` is marked as a Gateway.
+    #[must_use]
+    pub fn is_gateway(&self, host: &str) -> bool {
+        self.state
+            .lock()
+            .expect("revocation lock")
+            .hosts
+            .get(host)
+            .is_some_and(|host| host.gateway)
     }
 
     /// Whether the `Authorization` value with this hash is revoked.
@@ -925,7 +977,7 @@ mod tests {
             .expect("still a Gateway");
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn a_revocation_follows_every_renewal() {
         let (revocations, _) = open(&Memory::default());
@@ -960,7 +1012,7 @@ mod tests {
 
     /// The revoked ancestor of a valid renewal outlives its own expiry, and so does every link
     /// between them.
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn a_renewal_stays_revoked_after_its_revoked_ancestor_expires() {
         let (revocations, clock) = open(&Memory::default());
@@ -987,7 +1039,7 @@ mod tests {
         assert_eq!(revocations.list().len(), 1);
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn a_credential_is_kept_by_its_hash_alone() {
         let store = Memory::default();
@@ -1007,7 +1059,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn the_list_survives_a_restart_and_can_be_lifted() {
         let store = Memory::default();
@@ -1030,7 +1082,7 @@ mod tests {
         assert!(reopened.list().is_empty());
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn the_list_and_the_register_are_bounded() {
         let store = Memory::default();
@@ -1077,7 +1129,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn an_expired_register_entry_is_dropped_with_its_revocation() {
         let (revocations, clock) = open(&Memory::default());
@@ -1110,7 +1162,7 @@ mod tests {
     }
 
     /// A reload finds every chain's root from its links, whatever order the entries load in.
-    /// Verifies: ADR-0049
+    /// Verifies: ADR-0056
     #[test]
     fn a_reload_keeps_each_chain_under_its_root() {
         let store = Memory::default();

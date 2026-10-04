@@ -1,12 +1,23 @@
-# ADR-0036: The whole OpAMP communication layer lives in the `opamp` crate — wire layer, both sides, their TLS and their listener — built from material the application hands it
+# ADR-0057: The whole OpAMP communication layer lives in the `opamp` crate — wire layer, both sides, their TLS, their listener and their WebSocket framing — built from material the application hands it
 
-- **Status:** ⚪ superseded by [ADR-0057](0057-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, and the per-feature lint in `.github/workflows/ci.yml` and `README.md`
-- **Supersedes:** [ADR-0031](0031-one-opamp-crate-a-publishable-wire-layer-with-client-and-server-features.md), [ADR-0032](0032-one-opamp-server-endpoint-for-every-server-surface.md), [ADR-0033](0033-an-agents-side-of-opamp-is-one-reusable-client.md)
+- **Supersedes:** [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)
 
 ## Context
+
+Supersedes [ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md) for two
+reasons. The floor on the pace of every request body and every WebSocket message
+([ADR-0054](0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+clause 14) has to see a message's data frames: judged by the bytes a connection reads, a message
+that has begun stays open for ever while its peer sends a Ping between its fragments, which
+RFC 6455 allows, and every Ping looks like progress. axum's WebSocket hands over whole messages
+only, so `opamp` upgrades the connection itself and reads the frames with the library its client
+already uses. And clause 9 ordered the Client's flows after a reply with the certificate first: a
+request queued there rode the next connection after the offer that answered it, and was signed a
+second time. Clauses 3, 5 and 9 change; the rest of the decision stands as it was.
 
 Three accepted ADRs put the OpAMP communication into `crates/opamp`. ADR-0031 made it one
 publishable crate with a `client` and a `server` feature. ADR-0032 gave every server surface one
@@ -56,7 +67,9 @@ from values the application hands it and never from a file or a configuration fo
 
 3. **Two features, neither on by default, each linted alone.** `client` adds `tokio`, `tracing`,
    `ring`, `tokio-tungstenite`, `futures-util`, `reqwest`, `rustls` and `webpki-roots`. `server`
-   adds `tokio`, `tracing`, `axum`, `axum-server`, `hyper-util` and `rustls`. The lint runs with no
+   adds `tokio`, `tracing`, `axum`, `axum-server`, `hyper`, `hyper-util`, `tokio-tungstenite`,
+   `futures-util` and `rustls`. `hyper` is named for its upgrade, which axum carries anyway;
+   `tokio-tungstenite` is the client's own WebSocket library, so both sides frame alike. The lint runs with no
    feature, with `client` and with `server`. docs.rs builds with all features.
 
 4. **`opamp::tls` is the TLS both sides share,** compiled with either feature. It installs the ring
@@ -74,7 +87,11 @@ from values the application hands it and never from a file or a configuration fo
    gzip, the limit in both directions, framing, the 1009 close and the per-connection loop. The
    application implements `Handler`: `on_connecting`, `on_message`, `outbound`, `on_outbound`,
    `on_unreadable` and `on_closed`. `router` returns an axum `Router`. The application may add
-   routes and admission layers to it.
+   routes and admission layers to it. The WebSocket upgrade is an axum route that answers the
+   handshake and takes the connection through hyper's upgrade; `opamp` frames it with
+   `tokio-tungstenite` over a reader that follows the frame headers as they arrive, so it knows
+   whether a data message has begun and how much of it has come, apart from the control frames
+   between its fragments (ADR-0054 clause 14).
 
 6. **The server listener.** `opamp::server::listen` builds the rustls `ServerConfig` from a
    certificate, a key and a client-certificate rule: none, optional or required against a CA. It
@@ -108,8 +125,10 @@ from values the application hands it and never from a file or a configuration fo
    rotates. It parses `server.toml` and `supervisor.toml`. It persists and merges connection
    settings (ADR-0018). It runs the CSR flow and the CA, and it decides admission (ADR-0017). Its
    `AgentState` keeps the Client's decisions over one protocol state machine. Its flows after a
-   reply run in one order: certificate, connection settings, packages, the self-update restart, the
-   Supervisor set ([ADR-0021](0021-the-client-updates-itself.md)).
+   reply run in one order: connection settings, certificate, packages, the self-update restart, the
+   Supervisor set ([ADR-0021](0021-the-client-updates-itself.md)). Connection settings come before
+   the certificate because an offer may carry the certificate a request asked for, and a request
+   queued before it is taken in would ride the next connection and be signed again.
 
 10. **Behaviour stays, with these deliberate exceptions.** The suites of the three surfaces and of
     the Client run unchanged on the moved code. The exceptions follow from one listener and one
@@ -129,6 +148,16 @@ finer features, such as one per transport; a release routine for the crate; and 
 material comes from on disk.
 
 ## Alternatives considered
+
+- **axum's WebSocket, judged by the bytes the connection reads.** A Ping between two fragments of
+  a message looks like progress, so a message stays open for ever; treating control frames as no
+  progress closes a peer that only pings. TLS records and the bytes read with the upgrade request
+  blur the count too.
+- **Parsing the frames below hyper, in the listener's stream.** Below TLS the bytes are encrypted;
+  above it, hyper reads ahead of the upgrade request and the parser would have to follow every
+  HTTP/1 request on the connection to find where the frames begin.
+- **A residual written down instead.** The floor would hold for bodies and not for the transport
+  that carries the fleet.
 
 - **Keep the material with the application, as ADR-0033 decided.** Rejected: three surfaces write
   the same connect, and two listeners lack the bounds the third has. The policy argument is met by
@@ -190,7 +219,11 @@ material comes from on disk.
   with `client` and with `server` (clauses 1–3).
 - `crates/opamp/src/tls.rs` tests that an empty or foreign PEM is an error and a bundle keeps its
   order (clause 4).
-- `crates/opamp/tests/server_endpoint.rs` drives the endpoint over both transports (clause 5).
+- `crates/opamp/tests/server_endpoint.rs` drives the endpoint over both transports (clause 5);
+  `crates/opamp/tests/server_listen.rs` holds a message whose fragments are interleaved with Pings
+  to the floor, and leaves a peer that only pings open (clause 5).
+- `crates/fleet-agent/tests/enrolment_e2e.rs` issues one certificate per enrolment and per renewal
+  (clause 9).
 - `crates/opamp/tests/server_listen.rs` proves the header-read bound, the required and the optional
   client certificate, and the peer certificate in the request (clause 6).
 - `crates/opamp/src/client/protocol.rs`, `ws.rs`, `http.rs` and `backoff.rs` keep the client-side

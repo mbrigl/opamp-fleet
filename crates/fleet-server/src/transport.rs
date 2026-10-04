@@ -310,16 +310,80 @@ async fn admit_download(
     next.run(request).await
 }
 
+/// Where a Gateway fetches the revoked certificates it refuses (ADR-0056 clause 12).
+pub const GATEWAY_REVOCATIONS_PATH: &str = "/v1/gateway/revocations";
+
 pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     // The limits the Baseline requires of the Server, on both transports and in both directions.
     let settings = Settings::new(state.max_message_size());
-    let mut router = opamp::server::router(Arc::new(Fleet(state)), settings);
+    let gateways = Router::new()
+        .route(
+            GATEWAY_REVOCATIONS_PATH,
+            axum::routing::get(gateway_revocations),
+        )
+        .with_state(state.clone());
+    let mut router = opamp::server::router(Arc::new(Fleet(state)), settings).merge(gateways);
     if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
         // WebSocket upgrade completes — answers 401 when a required proof is missing.
         router = router.layer(middleware::from_fn_with_state(Arc::new(admission), admit));
     }
     router
+}
+
+/// The revoked certificates of the client CA, chains resolved, for a host marked as a Gateway
+/// (ADR-0056 clause 12). Admitted as `/v1/opamp` is, by the layer around both; what is checked
+/// here is that the member is a Gateway. The `ETag` is the SHA-256 of the body, so it changes with
+/// the list and survives a restart.
+async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    use sha2::Digest as _;
+
+    let forbidden = || {
+        (
+            StatusCode::FORBIDDEN,
+            "the revocation list is for hosts marked as Gateways",
+        )
+            .into_response()
+    };
+    // Without a register nothing is revoked, so the empty list reveals nothing to anyone. With one,
+    // the list is a member's whose host is marked as a Gateway, and nobody else's.
+    let certificates: Vec<serde_json::Value> = match state.revocations() {
+        None => Vec::new(),
+        Some(revocations) => {
+            let host = match request.extensions().get::<Peer>() {
+                Some(Peer::Member) => request
+                    .extensions()
+                    .get::<Proofs>()
+                    .and_then(|proofs| proofs.host.clone()),
+                _ => None,
+            };
+            if !host.is_some_and(|host| revocations.is_gateway(&host)) {
+                return forbidden();
+            }
+            revocations
+                .revoked_certificates("client")
+                .into_iter()
+                .map(|id| serde_json::json!({ "issuer": id.issuer, "serial": id.serial }))
+                .collect()
+        }
+    };
+    let body = serde_json::json!({ "certificates": certificates }).to_string();
+    let etag = format!("\"{}\"", hex::encode(sha2::Sha256::digest(body.as_bytes())));
+    if request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .is_some_and(|value| value.as_bytes() == etag.as_bytes())
+    {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::ETAG, etag),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// The peer's address, as the listener put it into the request.
