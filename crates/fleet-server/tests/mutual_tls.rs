@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use fleet_server::ca::ClientCa;
 use fleet_server::fleet::AppState;
+use fleet_server::revocation::{CertId, Revocations};
 use fleet_server::transport::{Admission, OpampAuth};
 use opamp::proto::{
     AgentCapabilities, AgentToServer, CertificateRequest, ConnectionSettingsRequest,
@@ -47,6 +48,28 @@ impl Pki {
     fn issuer(&self) -> Issuer<'static, KeyPair> {
         let key = KeyPair::from_pem(&self.ca_key_pem).expect("ca key");
         Issuer::from_ca_cert_pem(&self.ca_pem, key).expect("issuer")
+    }
+
+    /// A CA whose subject has several parts, one with a comma in it — what an issuer typed as
+    /// text would fail to match.
+    fn with_organisation() -> Self {
+        let key = KeyPair::generate().expect("ca key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CountryName, "DE");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Acme, Inc.");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "fleet client CA");
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).expect("ca");
+        Pki {
+            ca_pem: cert.pem(),
+            ca_key_pem: key.serialize_pem(),
+        }
     }
 
     /// A certificate and key signed by this CA, for `name`.
@@ -94,6 +117,24 @@ struct Setup<'a> {
     offer: Option<fleet_server::fleet::ConnectionOffer>,
     /// `[rest.auth]`, guarding the Operator plane.
     operator_auth: Option<fleet_server::api::OperatorAuth>,
+    /// The register and the revocation list (ADR-0049).
+    revocations: bool,
+}
+
+/// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
+fn authorities(pki: &Pki, bootstrap: Option<&Pki>) -> Vec<fleet_server::revocation::Authority> {
+    let of = |role: &str, ca: &Pki| {
+        let der = opamp::tls::certificates(ca.ca_pem.as_bytes()).expect("pem");
+        let facts = fleet_server::ca::facts(der[0].as_ref()).expect("facts");
+        fleet_server::revocation::Authority {
+            role: role.to_string(),
+            subject: facts.id.issuer,
+            name: facts.issuer_name,
+        }
+    };
+    let mut authorities = vec![of("client", pki)];
+    authorities.extend(bootstrap.map(|b| of("bootstrap", b)));
+    authorities
 }
 
 /// What `serve` hands a test.
@@ -102,6 +143,7 @@ struct Served {
     operator_port: u16,
     ca_pem: String,
     state: Arc<AppState>,
+    revocations: Option<Arc<Revocations>>,
 }
 
 /// Serves both planes over TLS on ephemeral ports (ADR-0038), the Agent plane requiring a client
@@ -113,12 +155,32 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
     let enrolment = setup
         .bootstrap
         .map(|_| Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone())));
+    let revocations = setup.revocations.then(|| {
+        let accepted: Vec<String> = setup
+            .token
+            .map(|token| format!("Bearer {token}"))
+            .into_iter()
+            .collect();
+        Arc::new(
+            Revocations::open(
+                Box::new(
+                    fleet_server::fs::FsLedgerStore::open(dir.path().join("revocation"))
+                        .expect("ledger"),
+                ),
+                clock.clone(),
+                &accepted,
+                authorities(pki, setup.bootstrap),
+            )
+            .expect("revocations"),
+        )
+    });
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("state")
             .with_client_ca(setup.client_ca)
             .with_connection_offer(setup.offer)
-            .with_enrolment(enrolment.clone()),
+            .with_enrolment(enrolment.clone())
+            .with_revocations(revocations.clone()),
     );
     let (server_cert, server_key) = pki.issue("localhost");
 
@@ -158,7 +220,9 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .expect("auth config"),
         )
     });
-    let mut admission = Admission::new(auth, true).with_enrolment(planes.issuers, enrolment);
+    let mut admission = Admission::new(auth, true)
+        .with_enrolment(planes.issuers, enrolment)
+        .with_revocations(revocations.clone());
     if let Some(limits) = setup.throttle {
         admission = admission.with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
             limits,
@@ -188,6 +252,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         operator_port: operator_addr.port(),
         ca_pem: pki.ca_pem.clone(),
         state,
+        revocations,
     }
 }
 
@@ -814,5 +879,579 @@ async fn the_operator_plane_counts_its_failures_in_a_table_of_its_own() {
         response.status().is_success(),
         "the Agent plane's count is its own: {:?}",
         response.status()
+    );
+}
+
+// ---- Revocation and the end of a session (ADR-0049) ----
+
+/// The issuer and serial of a certificate in PEM.
+fn cert_id(pem: &str) -> CertId {
+    let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
+    fleet_server::ca::facts(der[0].as_ref()).expect("facts").id
+}
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A WebSocket to the Agent plane presenting `cert`, with `token` as the credential when given.
+async fn websocket(
+    served: &Served,
+    cert: &str,
+    key: &str,
+    token: Option<&str>,
+) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    opamp::tls::install_ring_provider();
+    let config = opamp::tls::client_builder()
+        .with_root_certificates(opamp::tls::root_store(served.ca_pem.as_bytes()).expect("roots"))
+        .with_client_auth_cert(
+            opamp::tls::certificates(cert.as_bytes()).expect("cert"),
+            opamp::tls::private_key(key.as_bytes()).expect("key"),
+        )
+        .expect("client auth");
+    let mut request = served
+        .endpoint
+        .replace("https://", "wss://")
+        .into_client_request()
+        .expect("request");
+    if let Some(token) = token {
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}").parse().expect("header"),
+        );
+    }
+    let port = served
+        .endpoint
+        .rsplit(':')
+        .next()
+        .and_then(|rest| rest.split('/').next())
+        .expect("port")
+        .to_string();
+    let tcp = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("tcp");
+    tokio_tungstenite::client_async_tls_with_config(
+        request,
+        tcp,
+        None,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+    )
+    .await
+    .map(|(socket, _)| socket)
+}
+
+/// Sends one report and waits for its reply, so the session is known to be up.
+async fn exchange(socket: &mut Socket, uid: &InstanceUid) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let framed = opamp::frame::encode_within(&report(uid), usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("a reply in time")
+        {
+            Some(Ok(Ws::Binary(_))) => return,
+            Some(Ok(_)) => continue,
+            other => panic!("the session ended early: {other:?}"),
+        }
+    }
+}
+
+/// The close frame the Server ends `socket` with, within `secs`.
+async fn closed_with(socket: &mut Socket, secs: u64) -> (u16, String) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("closed in time");
+        match message {
+            Some(Ok(Ws::Close(Some(frame)))) => {
+                return (frame.code.into(), frame.reason.to_string())
+            }
+            Some(Ok(Ws::Close(None))) | None => panic!("closed without a code"),
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => panic!("{e}"),
+        }
+    }
+}
+
+/// Whether `socket` is still open after `millis`: nothing arrives that ends it.
+async fn still_open(socket: &mut Socket, millis: u64) -> bool {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    match tokio::time::timeout(std::time::Duration::from_millis(millis), socket.next()).await {
+        Err(_) => true,
+        Ok(Some(Ok(Ws::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => false,
+        Ok(Some(Ok(_))) => true,
+    }
+}
+
+fn revocations_setup(pki: &Pki) -> Setup<'static> {
+    Setup {
+        token: Some("secret"),
+        client_ca: Some(client_ca_of(pki)),
+        revocations: true,
+        ..Setup::default()
+    }
+}
+
+fn authorized(message: AgentToServer) -> (AgentToServer, &'static str) {
+    (message, "Bearer secret")
+}
+
+async fn post_as(
+    client: &reqwest::Client,
+    endpoint: &str,
+    message: AgentToServer,
+) -> reqwest::Response {
+    let (message, authorization) = authorized(message);
+    client
+        .post(endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .body(message.encode_to_vec())
+        .send()
+        .await
+        .expect("send")
+}
+
+/// A revoked certificate is refused on plain HTTP, on the WebSocket upgrade and on the download,
+/// with the challenge and without saying which proof was revoked; revoking it through the REST API
+/// lists it, and lifting it admits the certificate again (ADR-0049 clauses 3, 7, 8).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_revoked_certificate_is_refused_on_both_transports_and_the_download() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let uid = InstanceUid::default();
+    assert!(post_as(&http, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+
+    let id = cert_id(&cert);
+    let operator = client(&served.ca_pem, None);
+    let revocations = format!(
+        "https://localhost:{}/api/v1/revocations",
+        served.operator_port
+    );
+    let response = operator
+        .post(&revocations)
+        .json(&serde_json::json!({"certificate": {"authority": "client", "serial": id.serial}}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let entry: serde_json::Value = response.json().await.expect("json");
+
+    let refused = post_as(&http, &served.endpoint, report(&uid)).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(refused
+        .headers()
+        .contains_key(reqwest::header::WWW_AUTHENTICATE));
+    assert!(!refused.text().await.expect("body").contains("revoked"));
+    assert!(
+        websocket(&served, &cert, &key, Some("secret"))
+            .await
+            .is_err(),
+        "a revoked certificate passed the upgrade"
+    );
+    let download = served.endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    let response = http.get(&download).send().await.expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let listed: serde_json::Value = operator
+        .get(&revocations)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed[0]["id"], entry["id"]);
+    let lifted = operator
+        .delete(format!(
+            "{revocations}/{}",
+            entry["id"].as_str().expect("id")
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(lifted.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(post_as(&http, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+}
+
+/// A revoked credential is refused, and ends every session it admitted; a credential `[auth]` does
+/// not hold cannot be revoked (ADR-0049 clauses 5, 8, 9, 11).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_revoked_credential_ends_its_session_and_is_refused() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let revocations = served.revocations.clone().expect("armed");
+    let (cert, key) = pki.issue("edge-01");
+    let mut socket = websocket(&served, &cert, &key, Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+
+    assert!(revocations.revoke_credential("Bearer typo").is_err());
+    revocations
+        .revoke_credential("Bearer secret")
+        .expect("revoke");
+    assert_eq!(
+        closed_with(&mut socket, 5).await,
+        (1008, "revoked".to_string())
+    );
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let refused = post_as(&http, &served.endpoint, report(&InstanceUid::default())).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A revocation closes the sessions it concerns at once and leaves every other one running
+/// (ADR-0049 clause 9).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_revocation_closes_the_session_it_concerns_and_no_other() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (revoked_cert, revoked_key) = pki.issue("edge-01");
+    let (kept_cert, kept_key) = pki.issue("edge-02");
+    let mut revoked = websocket(&served, &revoked_cert, &revoked_key, Some("secret"))
+        .await
+        .expect("admitted");
+    let mut kept = websocket(&served, &kept_cert, &kept_key, Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut revoked, &InstanceUid::default()).await;
+    let kept_uid = InstanceUid::default();
+    exchange(&mut kept, &kept_uid).await;
+
+    let id = cert_id(&revoked_cert);
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("client", &id.serial)
+        .expect("revoke");
+    assert_eq!(
+        closed_with(&mut revoked, 5).await,
+        (1008, "revoked".to_string())
+    );
+    assert!(
+        still_open(&mut kept, 300).await,
+        "an unrelated session was closed"
+    );
+    exchange(&mut kept, &kept_uid).await;
+}
+
+/// A session ends when the certificate that admitted it expires (ADR-0049 clause 10).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_session_is_closed_when_its_certificate_expires() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(vec!["edge-01".to_string()]).expect("params");
+    params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
+    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::seconds(3);
+    let cert = params.signed_by(&key, &pki.issuer()).expect("signed").pem();
+    let mut socket = websocket(&served, &cert, &key.serialize_pem(), Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    assert_eq!(
+        closed_with(&mut socket, 10).await,
+        (1008, "certificate expired".to_string())
+    );
+}
+
+/// A certificate renewed before its predecessor was revoked is revoked with it: the register
+/// records the presented certificate as the issued one's predecessor (ADR-0049 clauses 1, 2, 4).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_revocation_reaches_a_certificate_renewed_before_it() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (old_cert, old_key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&old_cert, &old_key)));
+    let uid = InstanceUid::default();
+    let (csr, new_key) = csr_for("edge-01");
+    let mut message = report(&uid);
+    message.connection_settings_request = Some(ConnectionSettingsRequest {
+        opamp: Some(OpAmpConnectionSettingsRequest {
+            certificate_request: Some(CertificateRequest { csr }),
+        }),
+    });
+    let reply = decode(post_as(&http, &served.endpoint, message).await).await;
+    let new_cert = String::from_utf8(
+        reply
+            .connection_settings
+            .and_then(|s| s.opamp)
+            .and_then(|o| o.certificate)
+            .expect("renewed")
+            .cert,
+    )
+    .expect("pem");
+
+    let register: serde_json::Value = client(&served.ca_pem, None)
+        .get(format!(
+            "https://localhost:{}/api/v1/certificates",
+            served.operator_port
+        ))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let old = cert_id(&old_cert);
+    let new = cert_id(&new_cert);
+    assert_eq!(register[0]["serial"], new.serial.as_str());
+    assert_eq!(register[0]["predecessor"]["serial"], old.serial.as_str());
+    assert_eq!(register[0]["instance_uid"], hex::encode(uid.as_bytes()));
+
+    let renewed = client(&served.ca_pem, Some((&new_cert, &new_key.serialize_pem())));
+    assert!(post_as(&renewed, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("client", &old.serial)
+        .expect("revoke");
+    let refused = post_as(&renewed, &served.endpoint, report(&uid)).await;
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a renewal escaped the revocation of its predecessor"
+    );
+}
+
+// ---- A CSR's claim to an instance_uid (ADR-0050) ----
+
+fn csr_claiming(subject: &str) -> Vec<u8> {
+    let key = KeyPair::generate().expect("client key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, subject);
+    params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("csr pem")
+        .into_bytes()
+}
+
+fn with_csr(uid: &InstanceUid, csr: Vec<u8>) -> AgentToServer {
+    let mut message = report(uid);
+    message.connection_settings_request = Some(ConnectionSettingsRequest {
+        opamp: Some(OpAmpConnectionSettingsRequest {
+            certificate_request: Some(CertificateRequest { csr }),
+        }),
+    });
+    message
+}
+
+/// Verifies: ADR-0050
+#[tokio::test]
+async fn a_csr_claiming_another_instance_uid_is_a_bad_request() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let sender = InstanceUid::default();
+    let other = InstanceUid::default();
+    let reply = decode(
+        post_as(
+            &http,
+            &served.endpoint,
+            with_csr(&sender, csr_claiming(&format!("agent {other}"))),
+        )
+        .await,
+    )
+    .await;
+    let error = reply.error_response.expect("an error");
+    assert_eq!(error.r#type, ServerErrorResponseType::BadRequest as i32);
+    assert!(reply.connection_settings.is_none(), "nothing was signed");
+    assert!(served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .issued()
+        .is_empty());
+}
+
+/// Verifies: ADR-0050
+#[tokio::test]
+async fn a_csr_claiming_its_own_instance_uid_is_signed() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let sender = InstanceUid::default();
+    let reply = decode(
+        post_as(
+            &http,
+            &served.endpoint,
+            with_csr(&sender, csr_claiming(&format!("urn:uuid:{sender}"))),
+        )
+        .await,
+    )
+    .await;
+    assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+    assert!(reply.connection_settings.is_some(), "signed");
+}
+
+/// The regression guard: this project's own Client claims nothing (ADR-0050 clause 4).
+/// Verifies: ADR-0050
+#[tokio::test]
+async fn a_csr_claiming_nothing_is_signed_as_before() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let reply = decode(
+        post_as(
+            &http,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), csr_claiming("edge-01")),
+        )
+        .await,
+    )
+    .await;
+    assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+    assert!(reply.connection_settings.is_some(), "signed");
+}
+
+/// Verifies: ADR-0050
+#[tokio::test]
+async fn an_enrolment_csr_claiming_another_instance_uid_never_reaches_the_queue() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let enrolment = served.state.enrolment().expect("enrolment").clone();
+    enrolment.open(60).expect("open");
+    let (cert, key) = bootstrap.issue("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let other = InstanceUid::default();
+    let reply = decode(
+        post(
+            &enrolling,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), csr_claiming(&other.to_string())),
+        )
+        .await,
+    )
+    .await;
+    let error = reply.error_response.expect("an error");
+    assert_eq!(error.r#type, ServerErrorResponseType::BadRequest as i32);
+    assert!(enrolment.pending().is_empty(), "it reached the queue");
+}
+
+/// The issuer is named by its role, so a CA whose subject has several parts — and a comma inside
+/// one — is revoked as simply as any other; a role the Server does not have is refused (ADR-0049
+/// clause 3).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
+    let pki = Pki::with_organisation();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let revocations = format!(
+        "https://localhost:{}/api/v1/revocations",
+        served.operator_port
+    );
+    let operator = client(&served.ca_pem, None);
+    let unknown = operator
+        .post(&revocations)
+        .json(&serde_json::json!({"certificate": {"authority": "bootstrap", "serial": "01"}}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+    let serial = cert_id(&cert).serial;
+    let colons: String = serial
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).expect("hex").to_uppercase())
+        .collect::<Vec<_>>()
+        .join(":");
+    let response = operator
+        .post(&revocations)
+        .json(&serde_json::json!({"certificate": {"authority": "client", "serial": colons}}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let refused = post_as(&http, &served.endpoint, report(&InstanceUid::default())).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A CSR descends from the certificate the connection presented, whichever Agent the message
+/// names: a self-asserted `instance_uid` cannot lift a renewal out of its chain, and behind a
+/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0049 clauses 2, 11).
+/// Verifies: ADR-0049
+#[tokio::test]
+async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("gateway-01");
+    let mut socket = websocket(&served, &cert, &key, Some("secret"))
+        .await
+        .expect("admitted");
+    exchange(&mut socket, &InstanceUid::default()).await;
+    let downstream = InstanceUid::default();
+    let framed =
+        opamp::frame::encode_within(&with_csr(&downstream, csr_claiming("edge-02")), usize::MAX)
+            .expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("a reply in time")
+        {
+            Some(Ok(Ws::Binary(_))) => break,
+            Some(Ok(_)) => continue,
+            other => panic!("the session ended early: {other:?}"),
+        }
+    }
+    let revocations = served.revocations.as_ref().expect("armed");
+    let issued = revocations.issued();
+    assert_eq!(issued.len(), 1, "the CSR was signed");
+    let presented = cert_id(&cert);
+    assert_eq!(issued[0].predecessor.as_ref(), Some(&presented));
+    assert_eq!(issued[0].instance_uid, hex::encode(downstream.as_bytes()));
+    revocations
+        .revoke_certificate("client", &presented.serial)
+        .expect("revoke");
+    assert!(
+        revocations.is_certificate_revoked(&issued[0].facts.id),
+        "a renewal under another instance_uid escaped its chain"
     );
 }

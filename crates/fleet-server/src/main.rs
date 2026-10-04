@@ -13,7 +13,7 @@ use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
-use tracing::info;
+use tracing::{info, warn};
 
 fn usage() -> ! {
     eprintln!("Usage: server [--config <server.toml>] [--version]");
@@ -89,7 +89,7 @@ async fn main() {
         .and_then(|planes| {
             let agent = planes.agent.rustls_config()?;
             let operator = planes.operator.rustls_config()?;
-            Ok((agent, operator, planes.issuers))
+            Ok((agent, operator, planes.issuers, planes.authorities))
         }) {
         Ok(planes) => planes,
         Err(e) => {
@@ -171,12 +171,43 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // What the client CA signed and what is revoked (ADR-0049), kept beside the fleet's records.
+    let accepted = config
+        .auth
+        .as_ref()
+        .map(|auth| auth.accepted_headers())
+        .unwrap_or_default();
+    let revocations = match fleet_server::fs::FsLedgerStore::open(
+        config.config_dir.join("revocation"),
+    )
+    .and_then(|store| {
+        fleet_server::revocation::Revocations::open(
+            Box::new(store),
+            clock.clone(),
+            &accepted,
+            planes.3.clone(),
+        )
+    }) {
+        Ok(revocations) => Arc::new(revocations),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    for prefix in revocations.revoked_but_configured() {
+        // Still refused; the line in server.toml is only dead weight (ADR-0049 clause 5).
+        warn!(
+            credential = %prefix,
+            "a revoked credential is still in [auth] — remove it from server.toml"
+        );
+    }
     let state = match AppState::new(config.config_dir.clone()) {
         Ok(state) => Arc::new(
             state
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
                 .with_enrolment(enrolment.clone())
+                .with_revocations(Some(revocations.clone()))
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
@@ -198,11 +229,12 @@ async fn main() {
     info!("the OpAMP endpoint requires the fleet credential and a client certificate");
     // Two planes, two listeners (ADR-0038): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
-    let (agent_tls, operator_tls, issuers) = planes;
+    let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
         fleet_server::transport::Admission::new(auth, true)
             .with_enrolment(issuers, enrolment)
+            .with_revocations(Some(revocations))
             .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
                 limits,
                 clock.clone(),

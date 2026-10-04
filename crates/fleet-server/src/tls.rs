@@ -14,12 +14,15 @@ use opamp::tls::Identity;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::{EnrolmentConfig, TlsConfig};
+use crate::revocation::{name_hash, Authority};
 
 /// The material each plane serves with, and who issued what the Agent plane admits.
 pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
+    /// The CAs whose certificates can be revoked (ADR-0049 clause 3).
+    pub authorities: Vec<Authority>,
 }
 
 /// The subjects of both CA files. Without a bootstrap CA the handshake trusts the client CA alone,
@@ -93,11 +96,15 @@ pub fn server_tls(
         .as_ref()
         .ok_or("[tls] client_ca_file is required")?;
     let mut ca_pem = read(client_ca_file)?;
-    let client_subjects = subjects(client_ca_file, &ca_pem)?;
+    let client_names = subjects(client_ca_file, &ca_pem)?;
+    let mut authorities = authorities_of("client", &client_names);
+    let client_subjects: Vec<Vec<u8>> = client_names.into_iter().map(|(raw, _)| raw).collect();
     let mut issuers = Issuers::default();
     if let Some(enrolment) = enrolment {
         let bootstrap_pem = read(&enrolment.bootstrap_ca_file)?;
-        let bootstrap = subjects(&enrolment.bootstrap_ca_file, &bootstrap_pem)?;
+        let bootstrap_names = subjects(&enrolment.bootstrap_ca_file, &bootstrap_pem)?;
+        authorities.extend(authorities_of("bootstrap", &bootstrap_names));
+        let bootstrap: Vec<Vec<u8>> = bootstrap_names.into_iter().map(|(raw, _)| raw).collect();
         if bootstrap
             .iter()
             .any(|subject| client_subjects.contains(subject))
@@ -126,17 +133,29 @@ pub fn server_tls(
             client_auth: ClientAuth::None,
         },
         issuers,
+        authorities,
     })
 }
 
-/// The raw subject of every certificate in a CA file.
-fn subjects(path: &Path, pem: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+fn authorities_of(role: &str, names: &[(Vec<u8>, String)]) -> Vec<Authority> {
+    names
+        .iter()
+        .map(|(raw, name)| Authority {
+            role: role.to_string(),
+            subject: name_hash(raw),
+            name: name.clone(),
+        })
+        .collect()
+}
+
+/// The raw subject of every certificate in a CA file, and its text.
+fn subjects(path: &Path, pem: &[u8]) -> Result<Vec<(Vec<u8>, String)>, String> {
     opamp::tls::certificates(pem)
         .map_err(|e| in_file(path, &e))?
         .iter()
         .map(|der| {
             X509Certificate::from_der(der.as_ref())
-                .map(|(_, cert)| cert.subject().as_raw().to_vec())
+                .map(|(_, cert)| (cert.subject().as_raw().to_vec(), cert.subject().to_string()))
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))
         })
         .collect()

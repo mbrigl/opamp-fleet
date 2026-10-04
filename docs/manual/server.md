@@ -377,11 +377,74 @@ Approving signs the request with `[client_ca]` and offers the certificate on tha
 connection. The host stores it as `client-cert.pem` in its state directory and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
 closes the connection. An unknown or expired id is answered `404`, and every enrolment route
-answers `404` while `[enrolment]` is not configured. A request that arrives while the window is
-closed is answered `401`.
+answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
+the window is closed is answered `503`, and does not count toward the throttle.
+
+A request whose subject or SANs name an `instance_uid` other than the host's own is answered
+`BadRequest` and never enters the queue. The same holds for a renewal.
 
 The bootstrap certificate stays in the host's `supervisor.toml`, unused once the issued pair is
 stored. Approve only what you can match to a host you are setting up.
+
+## Revocation: withdrawing a certificate or a credential
+
+A certificate stays valid until it expires, and the credential until it leaves `server.toml`. To
+shut a host out sooner, revoke what it presents. The Server refuses it from then on, on both
+transports and on the package download, and closes at once every WebSocket session it admitted,
+with close code `1008`. No other session is touched, and no restart is needed. The list lives
+under `config_dir` and survives a restart.
+
+Every certificate the client CA signs is in a register, with the certificate the host presented
+when it renewed:
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
+[{"authority":"client","issuer":"CN=fleet client CA","serial":"5c0f…","subject":"CN=host-01",
+  "key_fingerprint":"…","not_after_ms":1797772400000,"instance_uid":"0192…",
+  "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"}}]
+```
+
+Revoke a certificate by the CA that issued it — `client` for the client CA, `bootstrap` for the
+bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every renewal of that
+certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
+stays in force until the last of those renewals has expired. `openssl x509 -noout -serial` prints
+the serial of a certificate you hold; colons, case and leading zeros do not matter. A renewal
+descends from the certificate its connection presented, so a renewal made through a Gateway
+descends from the Gateway's: revoking a Gateway revokes the certificates its Agents renewed
+through it as well, and those Agents enrol again.
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"certificate": {"authority": "client", "serial": "5c0f…"}}' \
+       https://127.0.0.1:4321/api/v1/revocations
+{"id":"9d2e…","kind":"certificate","revoked_ms":1790000000000,
+ "certificate":{"authority":"client","serial":"5c0f…"}}
+```
+
+Revoke a credential by its exact `Authorization` value. Only one that `[auth]` holds can be
+revoked, and only its SHA-256 is stored. The credential is the fleet's, so revoke it only after a
+rotation through `[connection_offer]` has reached the fleet; every Agent still presenting it is
+shut out. Then remove it from `server.toml`; until you do, the Server names it at startup by the
+first eight digits of its hash.
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"credential": "Bearer old-fleet-token"}' https://127.0.0.1:4321/api/v1/revocations
+```
+
+`GET /api/v1/revocations` lists every entry, and `DELETE /api/v1/revocations/<id>` lifts one; the
+next connection is admitted again. The list holds at most 100 000 entries; an entry for a
+certificate the register held is dropped once neither that certificate nor any renewal of it is
+valid. The register holds at most 100 000 certificates and at most 10 000 in one renewal chain,
+and keeps the last 1 000 places for enrolments.
+
+Every WebSocket session also ends when the certificate that admitted it expires, with `1008` and
+the reason `certificate expired`. A Client renews at two thirds of the life and reconnects with
+the new certificate, so a healthy fleet never sees this.
+
+Behind a Gateway the Server sees the Gateway's certificate, not the Agent's. Revoke a gatewayed
+Agent through its credential, or revoke the Gateway's certificate, which ends every Agent it
+carries.
 
 ## Configurations: what the fleet runs
 

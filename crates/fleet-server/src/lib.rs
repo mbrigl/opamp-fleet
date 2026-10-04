@@ -17,6 +17,7 @@ pub mod fs;
 pub mod labels;
 pub mod listen;
 pub mod packages;
+pub mod revocation;
 pub mod throttle;
 pub mod tls;
 pub mod transport;

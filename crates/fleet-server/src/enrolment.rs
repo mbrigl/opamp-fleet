@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use crate::fleet::{CertificateSigner, Clock};
+use crate::revocation::Signed;
 
 /// The longest an enrolment window may stay open.
 pub const MAX_WINDOW_SECS: u64 = 86_400;
@@ -33,6 +34,8 @@ pub struct Request {
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0049 clause 2).
+    pub instance_uid: Vec<u8>,
 }
 
 /// Who asked: the bootstrap certificate the connection carried, and from where.
@@ -52,6 +55,9 @@ pub struct Pending {
     pub key_fingerprint: String,
     pub requester: Requester,
 }
+
+/// Keeps what was signed, and the `instance_uid` it was asked under, before a host can collect it.
+pub type Record<'a> = dyn Fn(&Signed, &[u8]) -> Result<(), String> + 'a;
 
 /// What a submitted request comes to.
 #[derive(Debug, PartialEq, Eq)]
@@ -85,6 +91,7 @@ enum Decision {
 struct Entry {
     pending: Pending,
     csr_pem: String,
+    instance_uid: Vec<u8>,
     decision: Option<Decision>,
 }
 
@@ -177,6 +184,7 @@ impl Enrolment {
             Entry {
                 pending,
                 csr_pem: request.csr_pem,
+                instance_uid: request.instance_uid,
                 decision: None,
             },
         );
@@ -204,7 +212,15 @@ impl Enrolment {
     /// # Errors
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and
     /// [`DecisionError::Sign`] when the CA refuses the request.
-    pub fn approve(&self, id: &str, signer: &dyn CertificateSigner) -> Result<(), DecisionError> {
+    /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
+    /// `record` keeps what was signed before the host can collect it (ADR-0049 clause 2); a
+    /// failure there leaves the request pending.
+    pub fn approve(
+        &self,
+        id: &str,
+        signer: &dyn CertificateSigner,
+        record: &Record<'_>,
+    ) -> Result<(), DecisionError> {
         let mut state = self.state.lock().expect("enrolment lock");
         self.expire(&mut state);
         let entry = state
@@ -212,8 +228,9 @@ impl Enrolment {
             .get_mut(id)
             .filter(|entry| entry.decision.is_none())
             .ok_or(DecisionError::NotFound)?;
-        let cert = signer.sign(&entry.csr_pem).map_err(DecisionError::Sign)?;
-        entry.decision = Some(Decision::Approved(cert));
+        let signed = signer.sign(&entry.csr_pem).map_err(DecisionError::Sign)?;
+        record(&signed, &entry.instance_uid).map_err(DecisionError::Sign)?;
+        entry.decision = Some(Decision::Approved(signed.pem));
         drop(state);
         self.changed();
         Ok(())
@@ -288,8 +305,21 @@ mod tests {
     struct Echo;
 
     impl CertificateSigner for Echo {
-        fn sign(&self, csr_pem: &str) -> Result<String, String> {
-            Ok(format!("issued for {csr_pem}"))
+        fn sign(&self, csr_pem: &str) -> Result<Signed, String> {
+            Ok(Signed {
+                pem: format!("issued for {csr_pem}"),
+                facts: crate::revocation::Facts {
+                    id: crate::revocation::CertId::new(b"test CA", "1"),
+                    issuer_name: "CN=test CA".to_string(),
+                    subject: String::new(),
+                    key_fingerprint: String::new(),
+                    not_after_ms: u64::MAX,
+                },
+            })
+        }
+
+        fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -303,6 +333,7 @@ mod tests {
             csr_pem: format!("csr-{key}"),
             subject: "CN=edge-01".to_string(),
             key_fingerprint: key.to_string(),
+            instance_uid: vec![7; 16],
         }
     }
 
@@ -346,7 +377,9 @@ mod tests {
             "a re-sent request joins its own entry"
         );
         assert_eq!(enrolment.pending().len(), 1);
-        enrolment.approve("a", &Echo).expect("approve");
+        enrolment
+            .approve("a", &Echo, &|_, _| Ok(()))
+            .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
             Submitted::Issued("issued for csr-a".to_string())
@@ -355,7 +388,10 @@ mod tests {
             enrolment.pending().is_empty(),
             "a decided request is no longer pending"
         );
-        assert_eq!(enrolment.approve("a", &Echo), Err(DecisionError::NotFound));
+        assert_eq!(
+            enrolment.approve("a", &Echo, &|_, _| Ok(())),
+            Err(DecisionError::NotFound)
+        );
 
         enrolment.submit(request("b"), requester());
         enrolment.reject("b").expect("reject");
@@ -377,7 +413,10 @@ mod tests {
         enrolment.open(60).expect("open");
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
-        assert_eq!(enrolment.approve("b", &Echo), Err(DecisionError::NotFound));
+        assert_eq!(
+            enrolment.approve("b", &Echo, &|_, _| Ok(())),
+            Err(DecisionError::NotFound)
+        );
     }
 
     /// Verifies: ADR-0039

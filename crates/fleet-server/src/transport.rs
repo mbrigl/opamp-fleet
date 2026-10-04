@@ -16,7 +16,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::server::listen::PeerCertificate;
-use opamp::server::{Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Unreadable};
+use opamp::server::{
+    Closing, Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Unreadable,
+};
 use opamp::uid::InstanceUid;
 use tokio::sync::watch;
 use tracing::{debug, info};
@@ -25,6 +27,7 @@ use crate::config::AuthConfig;
 use crate::credentials::Credentials;
 use crate::enrolment::{Enrolment, Requester, Submitted};
 use crate::fleet::{bad_request, unavailable, AppState, ConnId, Transport};
+use crate::revocation::{credential_hash, CertId, Revocations};
 use crate::throttle::Throttle;
 use crate::tls::{Issuers, Peer};
 
@@ -61,6 +64,28 @@ pub struct Admission {
     issuers: Issuers,
     enrolment: Option<Arc<Enrolment>>,
     throttle: Option<Arc<Throttle>>,
+    revocations: Option<Arc<Revocations>>,
+}
+
+/// The proofs that admitted a connection (ADR-0049 clause 9): the certificate, with when it
+/// expires, and the hash of the credential. A WebSocket session ends when either is revoked, or when
+/// the certificate expires.
+#[derive(Clone, Debug, Default)]
+pub struct Proofs {
+    pub certificate: Option<(CertId, u64)>,
+    pub credential: Option<String>,
+}
+
+impl Proofs {
+    fn revoked(&self, revocations: &Revocations) -> bool {
+        self.certificate
+            .as_ref()
+            .is_some_and(|(id, _)| revocations.is_certificate_revoked(id))
+            || self
+                .credential
+                .as_ref()
+                .is_some_and(|hash| revocations.is_credential_revoked(hash))
+    }
 }
 
 impl Admission {
@@ -94,8 +119,31 @@ impl Admission {
         self
     }
 
+    /// Refuses a revoked certificate or credential (ADR-0049 clause 8).
+    #[must_use]
+    pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
+        self.revocations = revocations;
+        self
+    }
+
     fn required(&self) -> bool {
-        self.auth.is_some() || self.require_client_certificate || self.throttle.is_some()
+        self.auth.is_some()
+            || self.require_client_certificate
+            || self.throttle.is_some()
+            || self.revocations.is_some()
+    }
+
+    /// `401`, with the challenge when a credential is required.
+    fn unauthorized(&self, text: &'static str) -> Response {
+        match &self.auth {
+            Some(auth) => (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
+                text,
+            )
+                .into_response(),
+            None => (StatusCode::UNAUTHORIZED, text).into_response(),
+        }
     }
 }
 
@@ -106,6 +154,7 @@ pub struct DownloadGuard {
     require_client_certificate: bool,
     issuers: Issuers,
     throttle: Option<Arc<Throttle>>,
+    revocations: Option<Arc<Revocations>>,
 }
 
 impl Admission {
@@ -116,6 +165,7 @@ impl Admission {
             require_client_certificate: self.require_client_certificate,
             issuers: self.issuers.clone(),
             throttle: self.throttle.clone(),
+            revocations: self.revocations.clone(),
         }
     }
 }
@@ -147,7 +197,13 @@ async fn admit_download(
         .get::<PeerCertificate>()
         .and_then(|peer| peer.0.as_ref())
     {
-        Some(cert) => guard.issuers.classify(cert.as_ref()) == Peer::Member,
+        Some(cert) => {
+            guard.issuers.classify(cert.as_ref()) == Peer::Member
+                && !guard.revocations.as_ref().is_some_and(|revocations| {
+                    crate::ca::facts(cert.as_ref())
+                        .map_or(true, |facts| revocations.is_certificate_revoked(&facts.id))
+                })
+        }
         None => !guard.require_client_certificate,
     };
     if !member {
@@ -227,6 +283,35 @@ async fn admit(
                 .into_response(),
         );
     }
+    let presented = match certificate
+        .as_ref()
+        .map(|cert| crate::ca::facts(cert.as_ref()))
+    {
+        None => None,
+        Some(Ok(facts)) => Some(facts),
+        // The handshake verified it, so it parses; one that does not is not admitted.
+        Some(Err(_)) => {
+            return refuse(admission.unauthorized("the OpAMP endpoint requires authentication"))
+        }
+    };
+    let credential = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(credential_hash);
+    if let Some(revocations) = &admission.revocations {
+        let proofs = Proofs {
+            certificate: presented
+                .as_ref()
+                .map(|facts| (facts.id.clone(), facts.not_after_ms)),
+            credential: credential.clone(),
+        };
+        // Which proof was revoked is not said (ADR-0049 clause 8).
+        if proofs.revoked(revocations) {
+            debug!("refused: a revoked certificate or credential");
+            return refuse(admission.unauthorized("the OpAMP endpoint requires authentication"));
+        }
+    }
     if let Some(auth) = &admission.auth {
         if !auth.0.permits(request.headers()) {
             return refuse(
@@ -256,6 +341,10 @@ async fn admit(
         }
     }
     request.extensions_mut().insert(classified);
+    request.extensions_mut().insert(Proofs {
+        certificate: presented.map(|facts| (facts.id, facts.not_after_ms)),
+        credential,
+    });
     next.run(request).await
 }
 
@@ -275,6 +364,11 @@ struct Carrier {
     /// The Agents this socket carried, any number of them told apart by `instance_uid` alone
     /// (ADR-0009), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
+    /// What admitted the connection: re-checked before a CSR is signed, and the presented
+    /// certificate is the predecessor of one it renews (ADR-0049 clauses 2, 4).
+    proofs: Proofs,
+    /// Why the session was ended, once its [`Guard`] has ended it.
+    ended: Arc<Mutex<Option<&'static str>>>,
 }
 
 /// What an enrolling connection carried, and what it has asked for.
@@ -296,15 +390,107 @@ enum Pushes {
     },
 }
 
+/// A WebSocket session's outbound side, and what ends it: a revocation of what admitted it, or the
+/// expiry of its certificate (ADR-0049 clauses 9, 10).
+struct Session {
+    pushes: Pushes,
+    guard: Option<Guard>,
+}
+
+struct Guard {
+    revocations: Arc<Revocations>,
+    changes: watch::Receiver<u64>,
+    proofs: Proofs,
+    expires: Option<tokio::time::Instant>,
+    ended: Arc<Mutex<Option<&'static str>>>,
+}
+
+impl Guard {
+    fn new(
+        revocations: Arc<Revocations>,
+        proofs: Proofs,
+        ended: Arc<Mutex<Option<&'static str>>>,
+    ) -> Self {
+        let expires = proofs.certificate.as_ref().map(|(_, not_after_ms)| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            tokio::time::Instant::now()
+                + std::time::Duration::from_millis(not_after_ms.saturating_sub(now_ms))
+        });
+        let mut changes = revocations.subscribe();
+        // A revocation that landed between admission and here is checked at once.
+        changes.mark_changed();
+        Guard {
+            changes,
+            revocations,
+            proofs,
+            expires,
+            ended,
+        }
+    }
+
+    /// Waits until the session must end, and says why.
+    async fn tripped(&mut self) -> &'static str {
+        let Guard {
+            revocations,
+            changes,
+            proofs,
+            expires,
+            ..
+        } = self;
+        let expiry = async {
+            match expires {
+                Some(at) => tokio::time::sleep_until(*at).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(expiry);
+        loop {
+            tokio::select! {
+                () = &mut expiry => return "certificate expired",
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        // The list is gone with the Server; only the expiry is left to wait for.
+                        (&mut expiry).await;
+                        return "certificate expired";
+                    }
+                    if proofs.revoked(revocations) {
+                        return "revoked";
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Outbound for Session {
+    type Item = Push;
+
+    async fn next(&mut self) -> Option<Push> {
+        let Session { pushes, guard } = self;
+        let Some(guard) = guard else {
+            return pushes.next().await;
+        };
+        let ended = guard.ended.clone();
+        tokio::select! {
+            item = pushes.next() => item,
+            reason = guard.tripped() => {
+                info!(reason, "ending a session");
+                *ended.lock().expect("ended lock") = Some(reason);
+                None
+            }
+        }
+    }
+}
+
 /// One occasion to push.
 enum Push {
     Desired,
     Enrolment,
 }
 
-impl Outbound for Pushes {
-    type Item = Push;
-
+impl Pushes {
     async fn next(&mut self) -> Option<Push> {
         match self {
             Pushes::Desired(changes) => changes.changed().await.ok().map(|()| Push::Desired),
@@ -330,12 +516,25 @@ impl Outbound for Pushes {
 
 impl Handler for Fleet {
     type Connection = Carrier;
-    type Outbound = Pushes;
+    type Outbound = Session;
 
     fn on_connecting(
         &self,
         request: &RequestInfo<'_>,
-    ) -> Result<(Carrier, Option<Pushes>), Rejection> {
+    ) -> Result<(Carrier, Option<Session>), Rejection> {
+        let proofs = request
+            .extensions
+            .get::<Proofs>()
+            .cloned()
+            .unwrap_or_default();
+        let ended = Arc::new(Mutex::new(None));
+        let session = |pushes: Pushes| Session {
+            pushes,
+            guard: self
+                .0
+                .revocations()
+                .map(|revocations| Guard::new(revocations.clone(), proofs.clone(), ended.clone())),
+        };
         let websocket = request.transport == opamp::server::Transport::WebSocket;
         if let (
             Some(Peer::Enrolling {
@@ -354,10 +553,12 @@ impl Handler for Fleet {
                 request: Arc::new(Mutex::new(None)),
                 instance_uid: Arc::new(Mutex::new(Vec::new())),
             };
-            let outbound = websocket.then(|| Pushes::Enrolment {
-                changes: enrolment.subscribe(),
-                enrolment: enrolment.clone(),
-                request: enrolling.request.clone(),
+            let outbound = websocket.then(|| {
+                session(Pushes::Enrolment {
+                    changes: enrolment.subscribe(),
+                    enrolment: enrolment.clone(),
+                    request: enrolling.request.clone(),
+                })
             });
             return Ok((
                 Carrier {
@@ -369,6 +570,8 @@ impl Handler for Fleet {
                     enrolling: Some(enrolling),
                     conn: None,
                     seen: Vec::new(),
+                    proofs: proofs.clone(),
+                    ended,
                 },
                 outbound,
             ));
@@ -377,7 +580,7 @@ impl Handler for Fleet {
             (
                 Transport::WebSocket,
                 Some(self.0.connection_id()),
-                Some(Pushes::Desired(self.0.subscribe())),
+                Some(session(Pushes::Desired(self.0.subscribe()))),
             )
         } else {
             (Transport::Http, None, None)
@@ -388,6 +591,8 @@ impl Handler for Fleet {
                 enrolling: None,
                 conn,
                 seen: Vec::new(),
+                proofs,
+                ended,
             },
             outbound,
         ))
@@ -397,7 +602,35 @@ impl Handler for Fleet {
         if let Some(enrolling) = &carrier.enrolling {
             return Reply::Send(self.enrol(enrolling, &report));
         }
-        let outcome = self.0.process(report, carrier.transport, carrier.conn);
+        let csr = report
+            .connection_settings_request
+            .as_ref()
+            .and_then(|request| request.opamp.as_ref())
+            .is_some_and(|opamp| opamp.certificate_request.is_some());
+        let mut predecessor = None;
+        if csr {
+            if let Some(revocations) = self.0.revocations() {
+                // A session whose proof was revoked a moment ago is not handed a certificate
+                // before its guard closes it (ADR-0049 clause 4).
+                if carrier.proofs.revoked(revocations) {
+                    return Reply::Send(bad_request("this connection is no longer admitted"));
+                }
+                // The connection's own certificate, whatever the message claims to be: behind a
+                // Gateway that is the Gateway's, so revoking it reaches what was renewed through it
+                // (ADR-0049 clauses 2, 11).
+                predecessor = carrier
+                    .proofs
+                    .certificate
+                    .as_ref()
+                    .map(|(id, _)| id.clone());
+            }
+        }
+        let outcome = self.0.process_presented(
+            report,
+            carrier.transport,
+            carrier.conn,
+            predecessor.as_ref(),
+        );
         if let (Some(uid), Some(_)) = (outcome.uid, carrier.conn) {
             if outcome.disconnected {
                 carrier.seen.retain(|s| s != &uid);
@@ -446,6 +679,11 @@ impl Handler for Fleet {
         }))
     }
 
+    fn closing(&self, carrier: &Carrier) -> Option<Closing> {
+        let reason = (*carrier.ended.lock().expect("ended lock"))?;
+        Some(Closing::policy(reason))
+    }
+
     /// The connection is gone; every Agent it carried is unreachable until it reports again.
     /// An enrolling host was never one of the fleet's Agents, so there is nothing to mark.
     fn on_closed(&self, carrier: Carrier) {
@@ -473,10 +711,13 @@ impl Fleet {
             // The capabilities say a request may be sent; nothing else is answered.
             return self.0.enrolment_answer(&report.instance_uid, None);
         };
+        // A request claiming another identity never reaches the queue (ADR-0050).
         let request = match String::from_utf8(csr.csr.clone())
             .map_err(|_| "the certificate signing request is not PEM".to_string())
-            .and_then(|pem| crate::ca::enrolment_request(&pem))
-        {
+            .and_then(|pem| {
+                crate::ca::check_claims(&pem, &report.instance_uid)?;
+                crate::ca::enrolment_request(&pem, &report.instance_uid)
+            }) {
             Ok(request) => request,
             Err(e) => return bad_request(&e),
         };

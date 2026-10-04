@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use axum::http::{header, StatusCode};
 use opamp::proto::{AgentToServer, ServerToAgent};
-use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls};
+use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls, HEADER_READ_TIMEOUT};
 use opamp::server::{
     Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Transport, Unreadable,
 };
@@ -84,6 +84,20 @@ pub async fn run_on(
     listener: std::net::TcpListener,
     shutdown: Shutdown,
 ) -> Result<(), String> {
+    run_on_bounded(config, listener, shutdown, HEADER_READ_TIMEOUT).await
+}
+
+/// [`run_on`] with the header bound tightened — what a test waits out instead of the 30 seconds
+/// every OpAMP listener applies (ADR-0036).
+///
+/// # Errors
+/// As [`run_on`].
+pub async fn run_on_bounded(
+    config: Arc<ClientConfig>,
+    listener: std::net::TcpListener,
+    shutdown: Shutdown,
+    header_read_timeout: std::time::Duration,
+) -> Result<(), String> {
     let Some(gateway) = &config.gateway else {
         return Ok(());
     };
@@ -112,7 +126,9 @@ pub async fn run_on(
         .rustls_config()
         .map_err(|e| format!("the gateway endpoint: {e}"))?;
     let handle = Handle::new();
-    let downstream = Listener::new(listener, handle.clone()).with_tls(config);
+    let downstream = Listener::new(listener, handle.clone())
+        .with_tls(config)
+        .with_header_read_timeout(header_read_timeout);
     info!(%listen, upstream_cap, "gateway listening over mutual TLS");
     // The listener drains rather than drops: on shutdown in-flight exchanges finish, up to the
     // grace, instead of every downstream connection being torn down mid-message.

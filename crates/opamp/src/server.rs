@@ -184,9 +184,33 @@ pub trait Handler: Send + Sync + 'static {
         Reply::Nothing
     }
 
+    /// The close frame to send when the outbound side ends the connection; by default one with no
+    /// code.
+    fn closing(&self, _connection: &Self::Connection) -> Option<Closing> {
+        None
+    }
+
     /// The connection is gone: after its one exchange on plain HTTP, when the socket closes on a
     /// WebSocket.
     fn on_closed(&self, _connection: Self::Connection) {}
+}
+
+/// Why the endpoint closes a WebSocket: a close code of RFC 6455 and a reason for the peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Closing {
+    pub code: u16,
+    pub reason: String,
+}
+
+impl Closing {
+    /// `1008`: the connection violates the endpoint's policy — what a revoked proof does.
+    #[must_use]
+    pub fn policy(reason: &str) -> Self {
+        Closing {
+            code: close_code::POLICY,
+            reason: reason.to_string(),
+        }
+    }
 }
 
 struct Endpoint<H> {
@@ -302,7 +326,11 @@ async fn serve_socket<H: Handler>(
             }
             item = next_outbound(&mut outbound) => {
                 let Some(item) = item else {
-                    let _ = socket.send(Message::Close(None)).await;
+                    let frame = handler.closing(&connection).map(|closing| CloseFrame {
+                        code: closing.code,
+                        reason: closing.reason.into(),
+                    });
+                    let _ = socket.send(Message::Close(frame)).await;
                     break;
                 };
                 let mut gone = false;

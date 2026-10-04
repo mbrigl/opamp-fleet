@@ -234,6 +234,18 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
 
+    // On Windows every local user inherits read access under %ProgramData%; the data root, and a
+    // state directory placed elsewhere, are cut off from it before anyone is granted anything
+    // (H8). Unix needs nothing here: the Client writes its secrets owner-only itself.
+    std::fs::create_dir_all(&data_root)
+        .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
+    windows_rights::restrict_data_root(level, &data_root)?;
+    if !state_dir.starts_with(&data_root) {
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        windows_rights::restrict_data_root(level, &state_dir)?;
+    }
+
     // The handover (ADR-0014 clause 13, carrying ADR-0014): both roots belong to the account —
     // config and state because the service reads and rewrites them (ADR-0022), the executable
     // layout because the self-update that stages into it *is* the service (ADR-0021). The state

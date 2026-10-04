@@ -12,10 +12,12 @@
 
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, SanType, SerialNumber,
 };
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::ClientCaConfig;
+use crate::revocation::{CertId, Facts, Signed};
 
 /// The issuing authority, loaded once at startup. Holding it parsed is what makes `AppState`'s
 /// capability honest: `AcceptsConnectionSettingsRequest` is declared only while this exists.
@@ -60,7 +62,7 @@ impl ClientCa {
     /// # Errors
     /// A request that cannot be parsed, or that this CA cannot sign, is an error the caller turns
     /// into the Baseline's `ServerErrorResponse` of type `BadRequest`.
-    pub fn sign(&self, csr_pem: &str) -> Result<String, String> {
+    pub fn sign(&self, csr_pem: &str) -> Result<Signed, String> {
         let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
@@ -73,15 +75,129 @@ impl ClientCa {
         request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         request.params.subject_alt_names.clear();
+        // A serial of its own for every certificate, so two certificates from one key are two
+        // revocable things (ADR-0049 clause 1). rcgen would derive it from the key.
+        request.params.serial_number = Some(random_serial()?);
         let certificate = request
             .signed_by(&self.issuer)
             .map_err(|e| format!("cannot sign the certificate signing request: {e}"))?;
-        Ok(certificate.pem())
+        Ok(Signed {
+            facts: facts(certificate.der())?,
+            pem: certificate.pem(),
+        })
     }
 
     pub fn validity_days(&self) -> u32 {
         self.validity_days
     }
+}
+
+/// 16 bytes from the system's secure random source, the top bit cleared so the serial is a
+/// positive integer (RFC 5280 §4.1.2.2).
+fn random_serial() -> Result<SerialNumber, String> {
+    use ring::rand::SecureRandom as _;
+    let mut bytes = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| "no secure random source for a serial number".to_string())?;
+    bytes[0] &= 0x7f;
+    Ok(SerialNumber::from_slice(&bytes))
+}
+
+/// What a certificate (DER) says about itself: issuer and serial, subject, the SHA-256 of its
+/// public key, and when it expires — for the register, and for a peer's certificate at admission.
+///
+/// # Errors
+/// Returns an error when the certificate does not parse.
+pub fn facts(der: &[u8]) -> Result<Facts, String> {
+    use sha2::{Digest, Sha256};
+    let (_, cert) = X509Certificate::from_der(der)
+        .map_err(|e| format!("the certificate does not parse: {e}"))?;
+    let not_after = cert.validity().not_after.timestamp();
+    Ok(Facts {
+        id: CertId::new(cert.issuer().as_raw(), &hex::encode(cert.raw_serial())),
+        issuer_name: cert.issuer().to_string(),
+        subject: cert.subject().to_string(),
+        key_fingerprint: hex::encode(Sha256::digest(cert.public_key().raw)),
+        not_after_ms: u64::try_from(not_after).unwrap_or(0).saturating_mul(1000),
+    })
+}
+
+/// Checks a CSR's claims to an `instance_uid` against its sender's (ADR-0050): every canonical
+/// UUID in the subject or in a requested SAN that carries text must be `sender`.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a request that does not parse or claims another identity.
+pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+    let request = CertificateSigningRequestParams::from_pem(csr_pem)
+        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let mut values: Vec<String> = request
+        .params
+        .distinguished_name
+        .iter()
+        .map(|(_, value)| dn_text(value))
+        .collect();
+    for san in &request.params.subject_alt_names {
+        match san {
+            SanType::DnsName(name) => values.push(name.as_str().to_string()),
+            SanType::URI(uri) => values.push(uri.as_str().to_string()),
+            SanType::Rfc822Name(mail) => values.push(mail.as_str().to_string()),
+            _ => {}
+        }
+    }
+    for value in &values {
+        for claim in uuid_claims(value) {
+            if claim.as_slice() != sender {
+                return Err(format!(
+                    "the certificate signing request claims the instance_uid {}, which is not \
+                     the sender's",
+                    opamp::uid::InstanceUid::from_wire(&claim)
+                        .map_or_else(|| hex::encode(claim), |uid| uid.to_string())
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every canonical UUID text — 8-4-4-4-12 hex digits, either case — in `value`, standing alone or
+/// inside a longer value, but not as part of a longer run of hex digits (ADR-0050 clause 1).
+fn uuid_claims(value: &str) -> Vec<[u8; 16]> {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let bytes = value.as_bytes();
+    let mut claims = Vec::new();
+    let mut start = 0;
+    while start + 36 <= bytes.len() {
+        let bounded_before = start == 0 || !bytes[start - 1].is_ascii_hexdigit();
+        let bounded_after = bytes.get(start + 36).is_none_or(|b| !b.is_ascii_hexdigit());
+        let mut at = start;
+        let mut shaped = bounded_before && bounded_after;
+        for (index, len) in GROUPS.iter().enumerate() {
+            if !shaped {
+                break;
+            }
+            shaped = bytes[at..at + len].iter().all(u8::is_ascii_hexdigit);
+            at += len;
+            if index < 4 {
+                shaped = shaped && bytes[at] == b'-';
+                at += 1;
+            }
+        }
+        if shaped {
+            let hex: String = value[start..start + 36]
+                .chars()
+                .filter(|c| *c != '-')
+                .collect();
+            let mut uid = [0u8; 16];
+            if hex::decode_to_slice(&hex, &mut uid).is_ok() {
+                claims.push(uid);
+            }
+            start += 36;
+        } else {
+            start += 1;
+        }
+    }
+    claims
 }
 
 /// How far an issued certificate's life starts before the moment it is signed, so an Agent whose
@@ -102,7 +218,10 @@ fn not_after(validity_days: u32) -> Result<time::OffsetDateTime, String> {
 ///
 /// # Errors
 /// Returns an error when the request does not parse or its signature does not verify.
-pub fn enrolment_request(csr_pem: &str) -> Result<crate::enrolment::Request, String> {
+pub fn enrolment_request(
+    csr_pem: &str,
+    instance_uid: &[u8],
+) -> Result<crate::enrolment::Request, String> {
     use rcgen::PublicKeyData as _;
     use sha2::{Digest, Sha256};
     let request = CertificateSigningRequestParams::from_pem(csr_pem)
@@ -119,6 +238,7 @@ pub fn enrolment_request(csr_pem: &str) -> Result<crate::enrolment::Request, Str
         csr_pem: csr_pem.to_string(),
         subject,
         key_fingerprint: hex::encode(Sha256::digest(request.public_key.der_bytes())),
+        instance_uid: instance_uid.to_vec(),
     })
 }
 
@@ -128,13 +248,36 @@ fn dn_text(value: &rcgen::DnValue) -> String {
         rcgen::DnValue::Utf8String(s) => s.clone(),
         rcgen::DnValue::PrintableString(s) => s.as_str().to_string(),
         rcgen::DnValue::Ia5String(s) => s.as_str().to_string(),
+        rcgen::DnValue::TeletexString(s) => s.as_str().to_string(),
+        // Read as text, so a claim in either is found as in any other (ADR-0050 clause 2).
+        rcgen::DnValue::BmpString(s) => String::from_utf16_lossy(
+            &s.as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
+                .collect::<Vec<_>>(),
+        ),
+        rcgen::DnValue::UniversalString(s) => s
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|quad| {
+                char::from_u32(u32::from_be_bytes(*quad)).unwrap_or(char::REPLACEMENT_CHARACTER)
+            })
+            .collect(),
         other => format!("{other:?}"),
     }
 }
 
 impl crate::fleet::CertificateSigner for ClientCa {
-    fn sign(&self, csr_pem: &str) -> Result<String, String> {
+    fn sign(&self, csr_pem: &str) -> Result<Signed, String> {
         ClientCa::sign(self, csr_pem)
+    }
+
+    fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+        check_claims(csr_pem, sender)
     }
 }
 
@@ -195,7 +338,7 @@ mod tests {
     /// Verifies: ADR-0039
     #[test]
     fn signs_a_request_into_a_certificate() {
-        let issued = client_ca(90).sign(&csr("edge-01")).expect("issued");
+        let issued = client_ca(90).sign(&csr("edge-01")).expect("issued").pem;
         assert!(issued.starts_with("-----BEGIN CERTIFICATE-----"));
         // What came back is a certificate, not the request echoed back.
         assert!(!issued.contains("CERTIFICATE REQUEST"));
@@ -207,7 +350,7 @@ mod tests {
     /// Verifies: ADR-0039
     #[test]
     fn the_request_cannot_dictate_the_certificates_powers() {
-        let issued = client_ca(90).sign(&hostile_csr()).expect("issued");
+        let issued = client_ca(90).sign(&hostile_csr()).expect("issued").pem;
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
         let cert = pem.parse_x509().expect("der");
 
@@ -239,7 +382,7 @@ mod tests {
     /// asking again and again.
     #[test]
     fn an_issued_certificate_lives_validity_days_from_now() {
-        let issued = client_ca(90).sign(&csr("edge-01")).expect("issued");
+        let issued = client_ca(90).sign(&csr("edge-01")).expect("issued").pem;
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
         let cert = pem.parse_x509().expect("der");
         let now = time::OffsetDateTime::now_utc();
@@ -266,5 +409,109 @@ mod tests {
             .sign("-----BEGIN CERTIFICATE REQUEST-----\nnot base64\n-----END CERTIFICATE REQUEST-----")
             .expect_err("refused");
         assert!(error.contains("does not parse"), "{error}");
+    }
+
+    /// Verifies: ADR-0049
+    #[test]
+    fn two_certificates_from_one_key_have_two_serials() {
+        let ca = client_ca(90);
+        let request = csr("edge-01");
+        let first = ca.sign(&request).expect("first");
+        let second = ca.sign(&request).expect("second");
+        assert_ne!(first.facts.id.serial, second.facts.id.serial);
+        assert_eq!(first.facts.key_fingerprint, second.facts.key_fingerprint);
+        assert_eq!(first.facts.id.issuer, second.facts.id.issuer);
+        assert!(
+            first.facts.issuer_name.starts_with("CN="),
+            "{}",
+            first.facts.issuer_name
+        );
+    }
+
+    const UID: &str = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
+
+    fn uid_bytes() -> Vec<u8> {
+        hex::decode(UID.replace('-', "")).expect("hex")
+    }
+
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_canonical_uuid_anywhere_in_a_value_is_a_claim() {
+        let upper = UID.to_uppercase();
+        for value in [
+            UID.to_string(),
+            format!("agent {UID}"),
+            format!("urn:uuid:{upper}"),
+        ] {
+            assert_eq!(
+                uuid_claims(&value),
+                vec![<[u8; 16]>::try_from(uid_bytes()).expect("16")]
+            );
+        }
+        assert!(
+            uuid_claims(&format!("a{UID}")).is_empty(),
+            "a longer run of hex digits is no claim"
+        );
+    }
+
+    /// Verifies: ADR-0050
+    #[test]
+    fn hex_without_hyphens_is_no_claim() {
+        assert!(uuid_claims(&UID.replace('-', "")).is_empty());
+        assert!(uuid_claims("edge-01.example").is_empty());
+    }
+
+    fn csr_with(common_name: &str, sans: Vec<SanType>) -> String {
+        let key = KeyPair::generate().expect("client key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params.subject_alt_names = sans;
+        params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("csr pem")
+    }
+
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_san_is_read_for_claims() {
+        let other = "0192a3b4-c5d6-7e8f-9a0b-000000000000";
+        let request = csr_with(
+            "edge-01",
+            vec![SanType::URI(
+                format!("urn:uuid:{other}").try_into().expect("uri"),
+            )],
+        );
+        let error = check_claims(&request, &uid_bytes()).expect_err("another identity");
+        assert!(error.contains(other), "{error}");
+        assert!(check_claims(&csr_with(UID, Vec::new()), &uid_bytes()).is_ok());
+        assert!(check_claims(&csr_with("edge-01", Vec::new()), &uid_bytes()).is_ok());
+    }
+
+    /// A claim in a subject attribute of another string type is read as any other.
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_claim_in_a_bmp_or_universal_string_is_read() {
+        let other = "0192a3b4-c5d6-7e8f-9a0b-000000000000";
+        for value in [
+            rcgen::DnValue::BmpString(other.try_into().expect("bmp")),
+            rcgen::DnValue::UniversalString(other.try_into().expect("universal")),
+        ] {
+            let key = KeyPair::generate().expect("client key");
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, value);
+            let request = params
+                .serialize_request(&key)
+                .expect("csr")
+                .pem()
+                .expect("pem");
+            let error = check_claims(&request, &uid_bytes()).expect_err("a hidden claim");
+            assert!(error.contains(other), "{error}");
+        }
     }
 }

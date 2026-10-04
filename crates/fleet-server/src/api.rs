@@ -46,7 +46,9 @@ use crate::packages::{PackageId, PackageSummary, Platform, Source};
                                               rolled out (ADR-0030)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
-                                            (ADR-0039)")
+                                            (ADR-0039)"),
+        (name = "revocation", description = "What the client CA signed, and the certificates and \
+                                             credentials the Server no longer admits (ADR-0049)")
     )
 )]
 struct ApiDoc;
@@ -143,6 +145,9 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .routes(routes!(list_enrolments))
         .routes(routes!(approve_enrolment))
         .routes(routes!(reject_enrolment))
+        .routes(routes!(list_certificates))
+        .routes(routes!(list_revocations, revoke))
+        .routes(routes!(lift_revocation))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -2322,5 +2327,237 @@ async fn reject_enrolment(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),
         ),
+    }
+}
+
+/// One certificate the client CA signed (ADR-0049 clause 2).
+#[derive(Serialize, ToSchema)]
+struct CertificateView {
+    /// `client` — the CA that signed it, as a revocation names it.
+    authority: String,
+    /// The issuer's name, for reading.
+    issuer: String,
+    /// The serial, lowercase hex.
+    serial: String,
+    subject: String,
+    /// The SHA-256 fingerprint of the certified public key, hex.
+    key_fingerprint: String,
+    not_after_ms: u64,
+    /// The `instance_uid` of the message that carried the CSR, hex.
+    instance_uid: String,
+    issued_ms: u64,
+    /// On a renewal, the certificate it renewed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predecessor: Option<CertificateRef>,
+}
+
+/// A certificate by the CA that issued it and its serial.
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct CertificateRef {
+    /// `client` for the client CA, `bootstrap` for the bootstrap CA of `[enrolment]`.
+    authority: String,
+    /// The serial in hex, as `openssl x509 -noout -serial` prints it; colons, spaces, case and
+    /// leading zeros are ignored.
+    serial: String,
+}
+
+/// What to revoke: exactly one of the two.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct RevokeRequest {
+    #[serde(default)]
+    certificate: Option<CertificateRef>,
+    /// The exact `Authorization` value of a credential in `[auth]`, e.g. `Bearer …`. Only its
+    /// SHA-256 is kept.
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+/// One revocation (ADR-0049 clause 7).
+#[derive(Serialize, ToSchema)]
+struct RevocationView {
+    /// What `DELETE` names.
+    id: String,
+    /// `certificate` or `credential`.
+    kind: &'static str,
+    revoked_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate: Option<CertificateRef>,
+    /// The first eight hex digits of the credential's SHA-256.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_sha256_prefix: Option<String>,
+}
+
+impl RevocationView {
+    fn of(entry: crate::revocation::Revocation) -> Self {
+        use crate::revocation::Revoked;
+        match entry.revoked {
+            Revoked::Certificate {
+                authority, serial, ..
+            } => RevocationView {
+                id: entry.id,
+                kind: "certificate",
+                revoked_ms: entry.revoked_ms,
+                certificate: Some(CertificateRef { authority, serial }),
+                credential_sha256_prefix: None,
+            },
+            Revoked::Credential { sha256 } => RevocationView {
+                id: entry.id,
+                kind: "credential",
+                revoked_ms: entry.revoked_ms,
+                certificate: None,
+                credential_sha256_prefix: Some(sha256[..8].to_string()),
+            },
+        }
+    }
+}
+
+fn revocation_off() -> Response {
+    error(StatusCode::NOT_FOUND, "revocation is not configured")
+}
+
+/// Every certificate the client CA signed that has not yet expired, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<CertificateView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let authority = |id: &crate::revocation::CertId| {
+        revocations
+            .authority_of(&id.issuer)
+            .map_or_else(|| "unknown".to_string(), |a| a.role.clone())
+    };
+    let issued: Vec<CertificateView> = revocations
+        .issued()
+        .into_iter()
+        .map(|issued| CertificateView {
+            authority: authority(&issued.facts.id),
+            issuer: issued.facts.issuer_name,
+            serial: issued.facts.id.serial,
+            subject: issued.facts.subject,
+            key_fingerprint: issued.facts.key_fingerprint,
+            not_after_ms: issued.facts.not_after_ms,
+            instance_uid: issued.instance_uid,
+            issued_ms: issued.issued_ms,
+            predecessor: issued.predecessor.map(|id| CertificateRef {
+                authority: authority(&id),
+                serial: id.serial,
+            }),
+        })
+        .collect();
+    Json(issued).into_response()
+}
+
+/// The revocation list, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/revocations",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<RevocationView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let list: Vec<RevocationView> = revocations
+        .list()
+        .into_iter()
+        .map(RevocationView::of)
+        .collect();
+    Json(list).into_response()
+}
+
+/// Revokes a certificate, and every renewal of it, or a credential of `[auth]`. Every session it
+/// admitted ends at once, and no new one is admitted.
+#[utoipa::path(
+    post,
+    path = "/api/v1/revocations",
+    tag = "revocation",
+    request_body = RevokeRequest,
+    responses(
+        (status = 201, body = RevocationView),
+        (status = 400, description = "Not exactly one of the two, an authority this Server does not have, a serial that is not hex, or a credential [auth] does not hold", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody),
+        (status = 507, description = "The list is full", body = ErrorBody)
+    )
+)]
+async fn revoke(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Json(request): Json<RevokeRequest>,
+) -> Response {
+    use crate::revocation::RevokeError;
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let outcome = match (request.certificate, request.credential) {
+        (Some(certificate), None) => {
+            revocations.revoke_certificate(&certificate.authority, &certificate.serial)
+        }
+        (None, Some(credential)) => revocations.revoke_credential(&credential),
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "name exactly one of certificate and credential",
+            )
+        }
+    };
+    match outcome {
+        Ok(entry) => {
+            info!(revocation = %entry.id, "revoked");
+            (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
+        }
+        Err(RevokeError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(RevokeError::Full) => error(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "the revocation list holds {} entries already",
+                crate::revocation::MAX_REVOCATIONS
+            ),
+        ),
+        Err(RevokeError::Store(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Lifts one revocation. It takes effect at the next connection.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/revocations/{id}",
+    tag = "revocation",
+    params(("id" = String, Path, description = "the revocation's id")),
+    responses(
+        (status = 204, description = "Lifted"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such revocation, or revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn lift_revocation(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    match revocations.lift(&id) {
+        Ok(true) => {
+            info!(revocation = %id, "revocation lifted");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }

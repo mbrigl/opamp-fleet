@@ -16,6 +16,20 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ## [0.5.0]
 
+### Added
+
+- **Revocation that takes effect at once**
+  ([ADR-0049](docs/adr/0049-revocation-ends-sessions-and-follows-renewal.md)).
+  `POST /api/v1/revocations` revokes a certificate, by issuing CA (`client` or `bootstrap`) and
+  serial and with every renewal of it, or a credential of `[auth]`; the Server refuses it and closes every session it admitted.
+  `GET /api/v1/certificates` lists what the client CA signed. Every certificate the client CA
+  signs now carries a random serial. A WebSocket session ends when its certificate expires. The
+  list is kept in `config_dir/revocation/`. **What to do:** nothing; back that directory up with
+  the rest of `config_dir`.
+- **A CSR naming another Agent's `instance_uid` is refused**
+  ([ADR-0050](docs/adr/0050-a-csr-naming-an-instance-uid-must-name-its-sender.md)). The Client of
+  this project names none and is not affected.
+
 ### Changed
 
 - **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
@@ -85,8 +99,22 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **On Windows, a system-scope install no longer leaves its secrets readable by every local user.**
+  Every folder under `%ProgramData%` grants `BUILTIN\Users` read access by inheritance, so
+  `supervisor.toml` with the fleet credential, the private key and the stored connection settings
+  were readable by any account on the host. `service install` now removes the inherited rights
+  from the data root and leaves it to LocalSystem, the Administrators and the service account
+  ([ADR-0046](docs/adr/0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
+  clause 18). **What to do:** re-run `service install` on every Windows host, or apply the same
+  with `icacls "%ProgramData%\<product>" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r
+  *S-1-5-32-544:(OI)(CI)F` followed by a grant to the service account. Rotate the fleet credential
+  if other people can log on to those hosts.
 - **A configuration entry named only with dots (`.`, `...`) is stored** as the entry file `config`,
   as an empty name already was. It used to fail the whole configuration with an I/O error.
+- **A package is no longer refused as one that "cannot be run" when another program starts at the
+  same moment.** The check that runs a staged package before it replaces the running one, and the
+  version probe, now wait out the moment Linux refuses to run a freshly written file, as a start
+  already did.
 
 ## [0.4.5] - 2026-08-24
 

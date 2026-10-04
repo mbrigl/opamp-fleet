@@ -29,6 +29,7 @@ use crate::deployments::{deployment_for, Deployment, DeploymentError, Deployment
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
+use crate::revocation::{CertId, Revocations, Signed};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -321,11 +322,17 @@ pub trait Clock: Send + Sync {
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
-    /// The signed certificate, PEM, for a CSR in PEM.
+    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself.
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str) -> Result<String, String>;
+    fn sign(&self, csr_pem: &str) -> Result<Signed, String>;
+
+    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0050).
+    ///
+    /// # Errors
+    /// Returns the `BadRequest` text for a request that claims another identity.
+    fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
 }
 
 /// Why the package store refuses an upload: its whole-store ceiling (ADR-0019).
@@ -416,6 +423,9 @@ pub struct AppState {
     /// The enrolment window and its queue (ADR-0039); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
+    /// What the client CA signed and what is revoked (ADR-0049); `None` only where a test serves
+    /// without it.
+    revocations: Option<Arc<Revocations>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
@@ -489,6 +499,7 @@ impl AppState {
             packages: None,
             client_ca: None,
             enrolment: None,
+            revocations: None,
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -636,6 +647,33 @@ impl AppState {
         self
     }
 
+    /// Arms the register and the revocation list (ADR-0049).
+    #[must_use]
+    pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
+        self.revocations = revocations;
+        self
+    }
+
+    /// The register and the revocation list.
+    pub fn revocations(&self) -> Option<&Arc<Revocations>> {
+        self.revocations.as_ref()
+    }
+
+    /// Records a certificate the client CA signed, before it is offered (ADR-0049 clause 2).
+    fn record_issued(
+        &self,
+        signed: &Signed,
+        instance_uid: &[u8],
+        predecessor: Option<CertId>,
+    ) -> Result<(), String> {
+        match &self.revocations {
+            Some(revocations) => revocations
+                .record(signed.facts.clone(), instance_uid, predecessor)
+                .map_err(|e| format!("cannot record the issued certificate: {e}")),
+            None => Ok(()),
+        }
+    }
+
     /// The enrolment window and its queue, while `[enrolment]` is set.
     pub fn enrolment(&self) -> Option<&Arc<Enrolment>> {
         self.enrolment.as_ref()
@@ -651,7 +689,9 @@ impl AppState {
         let signer = self.client_ca.as_deref().ok_or_else(|| {
             DecisionError::Sign("this Server issues no client certificates".into())
         })?;
-        enrolment.approve(id, signer)
+        enrolment.approve(id, signer, &|signed, instance_uid| {
+            self.record_issued(signed, instance_uid, None)
+        })
     }
 
     /// What an enrolment connection is told (ADR-0039 clause 21): the capabilities that say it may
@@ -1232,6 +1272,19 @@ impl AppState {
         transport: Transport,
         conn: Option<ConnId>,
     ) -> Processed {
+        self.process_presented(msg, transport, conn, None)
+    }
+
+    /// [`process`](Self::process) for a CSR that renews `predecessor`, which becomes the issued
+    /// certificate's predecessor in the register (ADR-0049 clause 2).
+    pub fn process_presented(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+        predecessor: Option<&CertId>,
+    ) -> Processed {
+        let sender = msg.instance_uid.clone();
         let Some(mut uid) = InstanceUid::from_wire(&msg.instance_uid) else {
             warn!(
                 len = msg.instance_uid.len(),
@@ -1412,13 +1465,23 @@ impl AppState {
                     None => Err("this Server issues no client certificates".to_string()),
                     Some(ca) => String::from_utf8(request.csr.clone())
                         .map_err(|_| "the certificate signing request is not PEM".to_string())
-                        .and_then(|csr| ca.sign(&csr)),
+                        .and_then(|csr| {
+                            // The message's own instance_uid, before any re-key (ADR-0050).
+                            ca.check_claims(&csr, &sender)?;
+                            let signed = ca.sign(&csr)?;
+                            self.record_issued(&signed, &sender, predecessor.cloned())?;
+                            Ok(signed)
+                        }),
                 };
                 match outcome {
-                    Ok(cert) => {
-                        info!(agent = %uid, "issued a client certificate");
+                    Ok(signed) => {
+                        info!(
+                            agent = %uid,
+                            serial = %signed.facts.id.serial,
+                            "issued a client certificate"
+                        );
                         Some(TlsCertificate {
-                            cert: cert.into_bytes(),
+                            cert: signed.pem.into_bytes(),
                             // The Agent generated its own key and keeps it — the point of the CSR
                             // flow — so the Server has nothing to put here and must not invent it.
                             private_key: Vec::new(),

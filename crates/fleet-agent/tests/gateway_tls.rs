@@ -110,6 +110,19 @@ async fn spawn_tls_gateway(
     tokio::sync::watch::Sender<bool>,
     tempfile::TempDir,
 ) {
+    spawn_bounded_gateway(server, pki, opamp::server::listen::HEADER_READ_TIMEOUT).await
+}
+
+/// [`spawn_tls_gateway`], with the header bound tightened to `header_read_timeout`.
+async fn spawn_bounded_gateway(
+    server: SocketAddr,
+    pki: &Pki,
+    header_read_timeout: Duration,
+) -> (
+    SocketAddr,
+    tokio::sync::watch::Sender<bool>,
+    tempfile::TempDir,
+) {
     let dir = tempfile::tempdir().expect("tempdir");
     // Bound here and handed over, so no parallel test can take the port before the Gateway uses it.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -118,9 +131,14 @@ async fn spawn_tls_gateway(
     let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
     let (tx, shutdown) = shutdown_channel();
     tokio::spawn(async move {
-        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
-            .await
-            .expect("gateway");
+        fleet_agent::gateway::run_on_bounded(
+            Arc::new(config),
+            listener,
+            shutdown,
+            header_read_timeout,
+        )
+        .await
+        .expect("gateway");
     });
     // Wait for the listener to accept before anyone dials it.
     for _ in 0..100 {
@@ -311,4 +329,54 @@ async fn a_gateway_without_tls_on_loopback_does_not_start() {
     .expect("run_on returns rather than serving");
     let err = result.expect_err("a Gateway without TLS must not serve");
     assert!(err.contains("[gateway.tls] is required"), "{err}");
+}
+
+/// The connection-setup bound on the Gateway's own surface (H18): a downstream peer that completes
+/// the mutual-TLS handshake and then never finishes its request headers is hung up on, as the
+/// Server's Agent plane does (`connection_setup.rs`). The handshake bound is 10 seconds; closing well
+/// inside it shows the header bound did the work.
+/// Verifies: ADR-0036, ADR-0040
+#[tokio::test]
+async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on() {
+    use std::io::{Read as _, Write as _};
+    let (server, _state, _server_dir) = spawn_server().await;
+    let pki = Pki::new();
+    let (listen, _shutdown, _dir) =
+        spawn_bounded_gateway(server, &pki, Duration::from_secs(1)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let ca = pki.ca_pem.clone();
+    let (read, elapsed) = tokio::task::spawn_blocking(move || {
+        opamp::tls::install_ring_provider();
+        let config = opamp::tls::client_builder()
+            .with_root_certificates(opamp::tls::root_store(ca.as_bytes()).expect("roots"))
+            .with_client_auth_cert(
+                opamp::tls::certificates(cert.as_bytes()).expect("cert"),
+                opamp::tls::private_key(key.as_bytes()).expect("key"),
+            )
+            .expect("client auth");
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").expect("name");
+        let connection = rustls::ClientConnection::new(Arc::new(config), name).expect("tls");
+        let tcp = std::net::TcpStream::connect(listen).expect("connect");
+        tcp.set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("read timeout");
+        let mut tls = rustls::StreamOwned::new(connection, tcp);
+        // The handshake runs on the first write; a request line and one header, never ended.
+        tls.write_all(b"GET /v1/opamp HTTP/1.1\r\nHost: localhost\r\n")
+            .expect("handshake and a partial request");
+        tls.flush().expect("flush");
+        let started = std::time::Instant::now();
+        let mut buffer = Vec::new();
+        (tls.read_to_end(&mut buffer), started.elapsed())
+    })
+    .await
+    .expect("join");
+    let timed_out = matches!(&read, Err(e) if matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert!(
+        !timed_out,
+        "the Gateway left a connection open that never finished its headers"
+    );
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
 }

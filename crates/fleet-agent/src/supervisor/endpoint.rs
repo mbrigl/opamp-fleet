@@ -11,9 +11,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use opamp::proto::{AgentToServer, ServerCapabilities, ServerToAgent};
-use opamp::server::listen::{Handle, Listener};
+use opamp::server::listen::{Handle, Listener, HEADER_READ_TIMEOUT};
 use opamp::server::{Handler, Outbound, Rejection, Reply, RequestInfo, Settings, Transports};
 use tracing::{debug, info, warn};
 
@@ -32,6 +33,8 @@ pub struct Endpoint {
     /// The message size limit this endpoint enforces in both directions. It speaks the Server
     /// side of the protocol, so the Baseline's limits bind it exactly as they bind the Server.
     max_message_size: usize,
+    /// How long a connection may take to send its request headers.
+    header_read_timeout: Duration,
 }
 
 impl Endpoint {
@@ -55,7 +58,16 @@ impl Endpoint {
             name,
             events,
             max_message_size,
+            header_read_timeout: HEADER_READ_TIMEOUT,
         })
+    }
+
+    /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
+    /// listener applies (ADR-0036).
+    #[must_use]
+    pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
+        self.header_read_timeout = timeout;
+        self
     }
 
     /// The bound address — logged so an operator can point the `opampextension` at it.
@@ -93,7 +105,10 @@ impl Endpoint {
             shutdown.requested().await;
             trigger.graceful_shutdown(None);
         });
-        let served = Listener::new(self.listener, handle).serve(app).await;
+        let served = Listener::new(self.listener, handle)
+            .with_header_read_timeout(self.header_read_timeout)
+            .serve(app)
+            .await;
         if let Err(e) = served {
             warn!(supervisor = %self.name, error = %e, "the endpoint stopped");
         }
@@ -303,5 +318,63 @@ mod tests {
                 .is_err(),
             "a stopped endpoint accepts no connections"
         );
+    }
+
+    /// A connection that completes the upgrade and is answered: the endpoint is serving.
+    async fn served(addr: SocketAddr) {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
+            .await
+            .expect("connects");
+        let report = AgentToServer {
+            instance_uid: opamp::uid::InstanceUid::default().as_bytes().to_vec(),
+            ..Default::default()
+        };
+        let framed = frame::encode_within(&report, frame::DEFAULT_MAX_MESSAGE_SIZE).expect("frame");
+        socket
+            .send(Message::Binary(framed.into()))
+            .await
+            .expect("send");
+        let reply = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("answered in time");
+        assert!(matches!(reply, Some(Ok(Message::Binary(_)))), "{reply:?}");
+    }
+
+    /// The connection-setup bound on this surface (H18): a local connection that never completes
+    /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
+    /// endpoint serves the next one afterwards — the measure, since a listener that died would
+    /// drop the first connection too.
+    /// Verifies: ADR-0036
+    #[tokio::test]
+    async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (event_tx, _events) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown) = shutdown_channel();
+        let endpoint = Endpoint::bind(
+            "test".to_string(),
+            0,
+            EventSender::new(0, event_tx),
+            frame::DEFAULT_MAX_MESSAGE_SIZE,
+        )
+        .expect("binds")
+        .with_header_read_timeout(Duration::from_secs(1));
+        let addr = endpoint.local_addr().expect("addr");
+        tokio::spawn(endpoint.run(shutdown));
+
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stalled
+            .write_all(b"GET /v1/opamp HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n")
+            .await
+            .expect("a partial upgrade");
+        served(addr).await;
+
+        let mut buffer = Vec::new();
+        let closed =
+            tokio::time::timeout(Duration::from_secs(8), stalled.read_to_end(&mut buffer)).await;
+        assert!(
+            closed.is_ok(),
+            "the endpoint left a half-finished upgrade open"
+        );
+        served(addr).await;
     }
 }
