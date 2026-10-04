@@ -8,6 +8,10 @@
 //!
 //! The pool is WebSocket-only, and the configuration refuses anything else at startup: a polling
 //! upstream could not carry the Server's pushes to the Agents behind the Gateway.
+//!
+//! A connection carries only Agents whose peer presented the credential it was opened with: the
+//! Server checks a credential once, at the handshake, so a report on another peer's connection
+//! would be admitted on that peer's credential (ADR-0026 clause 13).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +30,8 @@ use crate::gateway::registry::Registry;
 /// One upstream connection: a sender into its writer task, and who rides it.
 struct Upstream {
     outbound: mpsc::Sender<Vec<u8>>,
+    /// The downstream `Authorization` the connection was opened with — the only one it carries.
+    authorization: Option<String>,
     /// The Agents assigned to this connection — the count least-connections balances on, and the
     /// set to re-home when it drops.
     carries: Vec<InstanceUid>,
@@ -98,36 +104,61 @@ impl Pool {
         authorization: Option<&str>,
     ) -> Result<mpsc::Sender<Vec<u8>>, String> {
         {
-            let inner = self.inner.lock().expect("pool lock");
+            let mut inner = self.inner.lock().expect("pool lock");
             if let Some(&index) = inner.assigned.get(&uid) {
                 if let Some(upstream) = inner.connections.get(index) {
-                    if upstream.alive.load(Ordering::Relaxed) {
+                    if upstream.alive.load(Ordering::Relaxed)
+                        && upstream.authorization.as_deref() == authorization
+                    {
                         return Ok(upstream.outbound.clone());
                     }
+                }
+                // Gone, or opened with another credential than this report came with: re-home.
+                inner.assigned.remove(&uid);
+                if let Some(upstream) = inner.connections.get_mut(index) {
+                    upstream.carries.retain(|carried| *carried != uid);
                 }
             }
             // Grow only when every existing connection already carries something, and only to the
             // cap: the pool costs what it uses (ADR-0034 rule 8).
+            let live = inner
+                .connections
+                .iter()
+                .filter(|c| c.alive.load(Ordering::Relaxed))
+                .count();
+            let at_cap = live >= self.limit_connections();
             let idle = inner
                 .connections
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.alive.load(Ordering::Relaxed))
+                .filter(|(_, c)| {
+                    c.alive.load(Ordering::Relaxed) && c.authorization.as_deref() == authorization
+                })
                 .min_by_key(|(_, c)| c.carries.len());
             let reuse = match idle {
-                Some((index, connection))
-                    if connection.carries.is_empty()
-                        || inner.connections.len() >= self.limit_connections() =>
-                {
-                    Some(index)
-                }
+                Some((index, connection)) if connection.carries.is_empty() || at_cap => Some(index),
                 _ => None,
             };
             if let Some(index) = reuse {
-                let mut inner = inner;
                 inner.assigned.insert(uid, index);
                 inner.connections[index].carries.push(uid);
                 return Ok(inner.connections[index].outbound.clone());
+            }
+            if at_cap {
+                // A connection of another credential that carries nobody gives up its place.
+                let Some(spare) = inner
+                    .connections
+                    .iter_mut()
+                    .find(|c| c.alive.load(Ordering::Relaxed) && c.carries.is_empty())
+                else {
+                    return Err(format!(
+                        "cannot forward a report of {uid}: every upstream connection carries \
+                         Agents of another credential"
+                    ));
+                };
+                spare.alive.store(false, Ordering::Relaxed);
+                // Dropping the last sender ends its writer, which closes the socket.
+                spare.outbound = mpsc::channel(1).0;
             }
         }
         self.open(uid, authorization).await
@@ -195,12 +226,33 @@ impl Pool {
         });
 
         let mut inner = self.inner.lock().expect("pool lock");
-        inner.connections.push(Upstream {
+        let upstream = Upstream {
             outbound: tx.clone(),
+            authorization: authorization.map(str::to_string),
             carries: vec![uid],
             alive,
-        });
-        let index = inner.connections.len() - 1;
+        };
+        // A closed connection's place is taken rather than the list growing; what it still
+        // carried re-homes on its next report.
+        let index = match inner
+            .connections
+            .iter()
+            .position(|c| !c.alive.load(Ordering::Relaxed))
+        {
+            Some(index) => {
+                let stale = std::mem::replace(&mut inner.connections[index], upstream);
+                for carried in stale.carries {
+                    if inner.assigned.get(&carried) == Some(&index) {
+                        inner.assigned.remove(&carried);
+                    }
+                }
+                index
+            }
+            None => {
+                inner.connections.push(upstream);
+                inner.connections.len() - 1
+            }
+        };
         inner.assigned.insert(uid, index);
         info!(
             connections = inner.connections.len(),

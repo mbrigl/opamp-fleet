@@ -190,6 +190,17 @@ pub async fn verify(
     } else {
         settings.destination_endpoint.clone()
     };
+    // A move to another TLS endpoint is taken only where this Client's own CA file can vouch for
+    // it: under the public roots alone, a Server could move the fleet to any host a public CA
+    // ever certified, and keep it there (ADR-0027 clause 5).
+    let moves = endpoint != config.endpoint;
+    let over_tls = endpoint.starts_with("wss://") || endpoint.starts_with("https://");
+    if moves && over_tls && config.ca_file().is_none() {
+        return Err(format!(
+            "refusing the offered endpoint {endpoint}: a move to another endpoint needs [tls] \
+             ca_file, so that only a server certificate from the fleet's own CA is trusted"
+        ));
+    }
     let authorization = match offered_authorization(settings) {
         Some(offered) => Some(offered.to_string()),
         None => config.authorization_value()?,
@@ -252,6 +263,7 @@ mod tests {
     /// Clause 6: what is persisted says only what was offered. A telemetry-only offer against a
     /// fresh state directory must not leave behind an empty `opamp` block claiming the Server
     /// offered settings it never sent.
+    /// Verifies: ADR-0027
     #[test]
     fn merge_leaves_opamp_absent_when_neither_side_has_one() {
         let merged = merge(None, &telemetry_only(b"t1", "https://x/v1/metrics"));
@@ -263,6 +275,7 @@ mod tests {
     /// ADR-0022 rule 17: an offer that names any telemetry destination states all three. The
     /// traces endpoint in force is *stopped* by a metrics-only offer, not carried forward — which
     /// is the whole difference between a fleet that can turn a signal off and one that cannot.
+    /// Verifies: ADR-0022
     #[test]
     fn an_offer_naming_one_signal_stops_the_others() {
         let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -291,6 +304,7 @@ mod tests {
     /// rotation must not take the exporters down with it — that is what keeps the classes of
     /// ADR-0027 independent, and it is the schema's own "not set means unchanged", held at the
     /// level it still holds at.
+    /// Verifies: ADR-0022
     #[test]
     fn an_offer_silent_about_telemetry_leaves_all_three_alone() {
         let mut stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -314,6 +328,7 @@ mod tests {
     /// Rule 3: an endpoint offered empty withdraws that signal — the only way to say "all three
     /// off", since by rule 2 an offer that names nothing means "unchanged". The withdrawal leaves
     /// the persisted state, so a restart does not bring the destination back.
+    /// Verifies: ADR-0022
     #[test]
     fn an_empty_endpoint_withdraws_the_signal() {
         let stored = telemetry_only(b"t1", "https://x/v1/metrics");
@@ -328,6 +343,7 @@ mod tests {
 
     /// And the fold still works the other way: a telemetry-only offer arriving over settings
     /// already in force leaves the OpAMP endpoint and credential exactly where they were.
+    /// Verifies: ADR-0027
     #[test]
     fn merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward() {
         let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("Bearer t"), 20);
@@ -344,6 +360,7 @@ mod tests {
         assert_eq!(merged.hash, b"t2", "the new offer's hash is acknowledged");
     }
 
+    /// Verifies: ADR-0027
     #[test]
     fn load_store_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -360,6 +377,7 @@ mod tests {
 
     /// The persisted file holds the live, Server-rotated credential, so it — and the directory it
     /// sits in — must not be readable by another user on the host.
+    /// Verifies: ADR-0027
     #[cfg(unix)]
     #[test]
     fn stored_settings_and_their_directory_are_owner_only() {
@@ -392,6 +410,7 @@ mod tests {
         assert_eq!(dir_mode & 0o777, 0o700, "the state directory is owner-only");
     }
 
+    /// Verifies: ADR-0027
     #[test]
     fn merge_keeps_unchanged_fields_from_the_previous_settings() {
         let stored = offer_with(b"h1", "wss://old/v1/opamp", Some("Bearer old"), 30);
@@ -411,6 +430,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0027
     #[test]
     fn apply_overrides_client_toml_where_the_server_spoke() {
         let mut config = ClientConfig {
@@ -436,6 +456,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0027
     #[test]
     fn apply_leaves_untouched_what_the_offer_omits() {
         let mut config = ClientConfig {
@@ -449,5 +470,191 @@ mod tests {
         assert_eq!(config.endpoint, "wss://server/v1/opamp");
         assert_eq!(config.heartbeat_interval_secs, 30);
         assert_eq!(config.authorization_override, None);
+    }
+
+    /// An offer's `tls` and `proxy` are not taken: what is stored carries neither, so the
+    /// connection keeps the operator's trust, and the report names both rather than claiming the
+    /// offer was applied whole.
+    /// Verifies: ADR-0027
+    #[test]
+    fn offered_tls_and_proxy_are_neither_stored_nor_claimed() {
+        use opamp::proto::{ProxyConnectionSettings, TlsConnectionSettings};
+        let mut offer = offer_with(b"h1", "wss://server.example/v1/opamp", None, 0);
+        if let Some(settings) = offer.opamp.as_mut() {
+            settings.tls = Some(TlsConnectionSettings {
+                insecure_skip_verify: true,
+                ca_pem_contents: "-----BEGIN CERTIFICATE-----".to_string(),
+                ..Default::default()
+            });
+            settings.proxy = Some(ProxyConnectionSettings {
+                url: "http://proxy.example:3128".to_string(),
+                ..Default::default()
+            });
+        }
+        let stored = merge(None, &offer);
+        let settings = stored.opamp.as_ref().expect("the OpAMP half");
+        assert_eq!(
+            settings.destination_endpoint,
+            "wss://server.example/v1/opamp"
+        );
+        assert!(settings.tls.is_none(), "an offered tls was stored");
+        assert!(settings.proxy.is_none(), "an offered proxy was stored");
+
+        let mut config = ClientConfig::default();
+        apply(&mut config, &stored);
+        assert_eq!(config.endpoint, "wss://server.example/v1/opamp");
+
+        let reported = unhonoured(offer.opamp.as_ref().expect("offer")).expect_err("named");
+        assert!(reported.contains("tls and proxy"), "{reported}");
+    }
+
+    fn endpoint_only(endpoint: &str) -> OpAmpConnectionSettings {
+        OpAmpConnectionSettings {
+            destination_endpoint: endpoint.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn never_reported() -> Option<AgentToServer> {
+        panic!("a refused endpoint must not get as far as a probe report")
+    }
+
+    /// A move to another TLS endpoint is refused without the Client's own CA file: the public
+    /// roots would let any publicly certified host take the fleet.
+    /// Verifies: ADR-0027
+    #[tokio::test]
+    async fn an_offered_move_needs_the_clients_own_ca() {
+        let config: ClientConfig =
+            toml::from_str("endpoint = \"wss://fleet.example/v1/opamp\"").expect("config");
+        let error = verify(
+            &endpoint_only("wss://elsewhere.example/v1/opamp"),
+            &config,
+            never_reported,
+        )
+        .await
+        .expect_err("no ca_file");
+        assert!(error.contains("ca_file"), "{error}");
+    }
+
+    /// An offered plaintext endpoint off the loopback is refused before anything is dialled, on
+    /// either transport: the probe report a plain-HTTP exchange would send is never built.
+    /// Verifies: ADR-0027
+    #[tokio::test]
+    async fn verify_refuses_a_plaintext_endpoint_off_loopback_without_connecting() {
+        let config = ClientConfig::default();
+        for endpoint in ["ws://192.0.2.1:9/v1/opamp", "http://192.0.2.1:9/v1/opamp"] {
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                verify(&endpoint_only(endpoint), &config, never_reported),
+            )
+            .await
+            .expect("refused without waiting on a connect")
+            .expect_err(endpoint);
+            assert!(error.starts_with("refusing"), "{endpoint}: {error}");
+            assert!(error.contains(endpoint), "{error} names the endpoint");
+        }
+    }
+
+    /// A host name never counts as the loopback, not even `localhost`: an offered plaintext
+    /// endpoint naming one is refused, and the listener behind it is never dialled.
+    /// Verifies: ADR-0027
+    #[tokio::test]
+    async fn verify_refuses_a_plaintext_endpoint_on_a_host_name() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let config = ClientConfig::default();
+        for endpoint in [
+            format!("ws://localhost:{port}/v1/opamp"),
+            format!("http://localhost:{port}/v1/opamp"),
+        ] {
+            let error = verify(&endpoint_only(&endpoint), &config, never_reported)
+                .await
+                .expect_err("a plaintext host name was accepted");
+            assert!(error.starts_with("refusing"), "{endpoint}: {error}");
+            assert!(
+                error.contains(endpoint.as_str()),
+                "{error} names the endpoint"
+            );
+        }
+        let dialled =
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
+        assert!(dialled.is_err(), "the refused endpoint was dialled");
+    }
+
+    /// The verification connect presents the client certificate in force: a listener that
+    /// requires one admits the probe with it and refuses the same probe without it.
+    /// Verifies: ADR-0027
+    #[tokio::test]
+    async fn verify_presents_the_client_certificate_in_force() {
+        use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls};
+        use opamp::tls::Identity;
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+
+        opamp::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut params = CertificateParams::new(vec!["test-ca".to_string()]).expect("params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = params.self_signed(&ca_key).expect("ca");
+        let issuer = Issuer::from_ca_cert_pem(&ca.pem(), ca_key).expect("issuer");
+        let issue = |name: &str| {
+            let key = KeyPair::generate().expect("key");
+            let cert = CertificateParams::new(vec![name.to_string()])
+                .expect("params")
+                .signed_by(&key, &issuer)
+                .expect("signed");
+            (cert.pem(), key.serialize_pem())
+        };
+
+        let (server_cert, server_key) = issue("localhost");
+        let tls = ServerTls {
+            identity: Identity {
+                cert_pem: server_cert.into_bytes(),
+                key_pem: server_key.into_bytes(),
+            },
+            client_auth: ClientAuth::Required {
+                ca_pem: ca.pem().into_bytes(),
+            },
+        }
+        .rustls_config()
+        .expect("server config");
+        let router = axum::Router::new().route("/v1/opamp", axum::routing::post(|| async { "" }));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(
+            Listener::new(listener, Handle::new())
+                .with_tls(tls)
+                .serve(router),
+        );
+
+        let (client_cert, client_key) = issue("agent");
+        let ca_file = dir.path().join("ca.pem");
+        let cert_file = dir.path().join("cert.pem");
+        let key_file = dir.path().join("key.pem");
+        std::fs::write(&ca_file, ca.pem()).expect("ca");
+        std::fs::write(&cert_file, client_cert).expect("cert");
+        std::fs::write(&key_file, client_key).expect("key");
+        let with_identity = |identity: bool| ClientConfig {
+            endpoint: format!("https://localhost:{port}/v1/opamp"),
+            state_dir: dir.path().join("state"),
+            tls: Some(crate::config::TlsConfig {
+                ca_file: Some(ca_file.clone()),
+                cert_file: identity.then(|| cert_file.clone()),
+                key_file: identity.then(|| key_file.clone()),
+            }),
+            ..ClientConfig::default()
+        };
+        let report = || Some(AgentToServer::default());
+        let keep = OpAmpConnectionSettings::default();
+
+        verify(&keep, &with_identity(true), report)
+            .await
+            .expect("the certificate in force is presented");
+        assert!(
+            verify(&keep, &with_identity(false), report).await.is_err(),
+            "a listener requiring a certificate admitted a probe without one"
+        );
     }
 }

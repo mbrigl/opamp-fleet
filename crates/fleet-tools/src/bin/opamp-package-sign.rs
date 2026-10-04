@@ -1,8 +1,10 @@
 //! `opamp-package-sign` — an operator helper for building and signing OpAMP Fleet packages
 //! (ADR-0018).
 //!
-//! Package signatures are **raw Ed25519** over the artifact bytes, verified by the Client with the
-//! `ring` provider (see `fleet_agent::packages::verify`). This tool produces exactly that format — a
+//! Package signatures are **raw Ed25519** over a statement of what the artifact is — its Agent
+//! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0018) — verified by
+//! the Client with the `ring` provider. A signature therefore holds only for the type and version
+//! it was made for. This tool produces exactly that format — a
 //! `keygen`/`sign` counterpart to the Client's verify. `pack` is the same idea one step earlier:
 //! it writes container formats [`fleet_agent::archive`] can open, with the member named the way the
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
@@ -16,7 +18,8 @@
 //! opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
 //! # put that hex in the Client's `[packages] verification_key`
 //! sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-//! sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+//! sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+//!       promtail-3.0.0.tar.gz)
 //! curl -X PUT "http://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
 //!      --data-binary @promtail-3.0.0.tar.gz
 //! ```
@@ -55,6 +58,13 @@ enum Command {
         /// The PKCS#8 private key from `keygen`.
         #[arg(long)]
         key: PathBuf,
+        /// The Agent type the artifact is for — the Package's type on the Server. The signature
+        /// holds for this type alone.
+        #[arg(long)]
+        agent_type: String,
+        /// The Package's version. The signature holds for this version alone.
+        #[arg(long)]
+        version: String,
         /// The package artifact to sign (the exact bytes uploaded to the Server).
         artifact: PathBuf,
     },
@@ -153,11 +163,18 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("{}", hex::encode(keypair.public_key().as_ref()));
             Ok(())
         }
-        Command::Sign { key, artifact } => {
+        Command::Sign {
+            key,
+            agent_type,
+            version,
+            artifact,
+        } => {
             let keypair = load_key(&key)?;
             let bytes = std::fs::read(&artifact)
                 .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-            println!("{}", hex::encode(keypair.sign(&bytes).as_ref()));
+            let statement =
+                fleet_core::package::statement(&agent_type, &version, &Sha256::digest(&bytes));
+            println!("{}", hex::encode(keypair.sign(&statement).as_ref()));
             Ok(())
         }
         Command::PublicKey { key } => {

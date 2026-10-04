@@ -70,6 +70,7 @@ mod tests {
 
     /// The ceiling still doubles and still caps; each delay lands in the lower-bounded half of its
     /// ceiling. Bounds rather than exact values, because the jitter is the point.
+    /// Verifies: ADR-0023
     #[test]
     fn backoff_doubles_and_caps_within_its_jittered_bounds() {
         // `half + rand(0, half)` never reaches `half + half`, so the ceiling is exclusive.
@@ -100,6 +101,7 @@ mod tests {
     /// the same instant. Drawn over enough attempts that an accidental tie is not a flake — with a
     /// nanosecond-resolution draw over half a second, ten matching pairs is not something that
     /// happens.
+    /// Verifies: ADR-0023
     #[test]
     fn two_backoffs_do_not_produce_the_same_ladder() {
         let mut one = Backoff::new();

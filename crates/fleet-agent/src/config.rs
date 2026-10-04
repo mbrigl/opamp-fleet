@@ -472,12 +472,30 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 
 /// The `[auth]` block (ADR-0026): exactly one scheme — `bearer_token`, or `username` and
 /// `password` together. Mixing or halving them fails loudly at startup (ADR-0025).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     pub bearer_token: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// Names what is configured, never the secret itself.
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |value: &Option<String>| {
+            if value.is_some() {
+                "<redacted>"
+            } else {
+                "None"
+            }
+        };
+        f.debug_struct("AuthConfig")
+            .field("bearer_token", &redacted(&self.bearer_token))
+            .field("username", &self.username)
+            .field("password", &redacted(&self.password))
+            .finish()
+    }
 }
 
 impl AuthConfig {
@@ -541,14 +559,18 @@ pub fn redact_secrets(text: &str) -> String {
     out
 }
 
-/// The `[packages]` block (ADR-0018): how downloaded package artifacts are verified.
-#[derive(Debug, Clone, Deserialize)]
+/// The `[packages]` block (ADR-0018): how downloaded package artifacts are verified, and where they may come from.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
-    /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
-    /// signature against it; when unset, an unsigned package is accepted on its content hash alone
-    /// and a *signed* one is refused (there is nothing to check it with).
+    /// Hex-encoded Ed25519 public key. Every offered package MUST carry a valid signature against
+    /// it; without it this Client takes no packages at all, its own self-update included
+    /// (ADR-0018, ADR-0020).
     pub verification_key: Option<String>,
+    /// The `https://` URL prefixes a download may come from besides the Server's own origin
+    /// (ADR-0018). Every redirect hop is checked against them; empty allows the Server alone.
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
     /// The key that opens an encrypted `.7z` package artifact (ADR-0018). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
@@ -675,6 +697,15 @@ pub struct SupervisorsConfig {
     /// configuration is acknowledged `APPLIED`; `0` acknowledges on start.
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
+    /// The environment variables a Server-delivered block may set, each name exact or ending in
+    /// `*` as a prefix (ADR-0032 clause 18). Empty — the default — lets a delivered block keep only
+    /// the environment its running block already has.
+    #[serde(default)]
+    pub delivered_env: Vec<String>,
+    /// Whether a Server-delivered block may state `args` and `version_args` its running block does
+    /// not already have (ADR-0032 clause 18).
+    #[serde(default)]
+    pub delivered_args: bool,
 }
 
 impl Default for SupervisorsConfig {
@@ -682,6 +713,8 @@ impl Default for SupervisorsConfig {
         SupervisorsConfig {
             stop_timeout_secs: default_stop_timeout_secs(),
             apply_grace_secs: default_apply_grace_secs(),
+            delivered_env: Vec::new(),
+            delivered_args: false,
         }
     }
 }
@@ -732,8 +765,9 @@ pub struct GatewayConfig {
     /// is refused at load.
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
-    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0026): what this verifies is the
-    /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    /// TLS for the downstream hop, required (ADR-0034). Mutual TLS is per hop: what this verifies
+    /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
 }
 
@@ -746,8 +780,8 @@ pub struct GatewayTlsConfig {
     pub cert_file: PathBuf,
     /// PEM private key for it.
     pub key_file: PathBuf,
-    /// Optional PEM bundle a downstream Agent's client certificate must chain to. Absent accepts
-    /// any peer at the TLS layer, which is what a fleet still bootstrapping wants.
+    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0034): a
+    /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
 }
 
@@ -772,7 +806,21 @@ impl GatewayConfig {
                  Gateway"
             ));
         }
-        Ok(())
+        // A Gateway admits Agents, so the downstream hop is mutual TLS 1.3 and nothing less — on the
+        // loopback too (ADR-0034).
+        match &self.tls {
+            None => Err(
+                "[gateway.tls] is required — a Gateway admits Agents over mutual TLS only; set \
+                 cert_file, key_file and client_ca_file"
+                    .to_string(),
+            ),
+            Some(tls) if tls.client_ca_file.is_none() => Err(
+                "[gateway.tls] client_ca_file is required — every downstream Agent presents a \
+                 certificate that chains to it"
+                    .to_string(),
+            ),
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -814,8 +862,9 @@ pub enum TransportKind {
 }
 
 fn default_endpoint() -> String {
-    // The Baseline's default port and path.
-    "ws://127.0.0.1:4320/v1/opamp".to_string()
+    // The Baseline's default port and path, over TLS: the Agent plane serves nothing else
+    // (ADR-0023).
+    "wss://127.0.0.1:4320/v1/opamp".to_string()
 }
 
 fn default_name() -> String {
@@ -922,6 +971,10 @@ impl ClientConfig {
     pub fn checked(self, path: &Path) -> Result<Self, String> {
         let mut config = self;
         config.check_supervisor_names()?;
+        // Plaintext is for the loopback alone, and refused rather than warned about (ADR-0023).
+        config
+            .transport()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if let Some(auth) = &config.auth {
             // A half-configured block must fail now, not at the first exchange.
             auth.authorization()
@@ -1064,14 +1117,13 @@ impl ClientConfig {
         self.auth.as_ref().map(|a| a.authorization()).transpose()
     }
 
+    /// The transport the endpoint names, held to the specification's rule: `wss://` or `https://`,
+    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (ADR-0023).
     pub fn transport(&self) -> Result<TransportKind, String> {
+        opamp::endpoint::check_url(&self.endpoint).map_err(|e| format!("endpoint {e}"))?;
         match self.endpoint.split("://").next() {
             Some("ws") | Some("wss") => Ok(TransportKind::WebSocket),
-            Some("http") | Some("https") => Ok(TransportKind::Http),
-            _ => Err(format!(
-                "endpoint {} must start with ws://, wss://, http:// or https://",
-                self.endpoint
-            )),
+            _ => Ok(TransportKind::Http),
         }
     }
 }
@@ -1160,7 +1212,7 @@ mod tests {
     fn the_service_namespace_is_a_top_level_key_and_absent_by_default() {
         assert!(ClientConfig::default().service_namespace.is_none());
         let untouched: ClientConfig =
-            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+            toml::from_str("endpoint = \"wss://h/v1/opamp\"").expect("parse");
         assert!(untouched.service_namespace.is_none());
 
         let configured: ClientConfig =
@@ -1176,6 +1228,7 @@ mod tests {
     /// ADR-0028. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
+    /// Verifies: ADR-0028
     #[test]
     fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
         let defaults = ClientConfig::default().logging;
@@ -1220,6 +1273,7 @@ mod tests {
     /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
     /// beside it is an upgraded host that would otherwise come up on the development endpoint and
     /// manage nothing, which is the failure nobody sees.
+    /// Verifies: ADR-0029
     #[test]
     fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1230,7 +1284,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join(LEGACY_CONFIG_FILE_NAME),
-            "endpoint = \"ws://h/v1/opamp\"\n",
+            "endpoint = \"wss://h/v1/opamp\"\n",
         )
         .expect("write the file this host was configured with");
         let error = ClientConfig::load(&expected).expect_err("an upgraded host must not go quiet");
@@ -1244,7 +1298,7 @@ mod tests {
         std::fs::rename(dir.path().join(LEGACY_CONFIG_FILE_NAME), &expected).expect("rename");
         assert_eq!(
             ClientConfig::load(&expected).expect("loads").endpoint,
-            "ws://h/v1/opamp"
+            "wss://h/v1/opamp"
         );
     }
 
@@ -1252,6 +1306,7 @@ mod tests {
     /// either way — the Client's own Agent type when the file names none, which since ADR-0029 is
     /// `supervisor`. A withdrawal is a written `enabled = false`, so a Client the fleet cannot
     /// update says so in its own configuration instead of saying nothing at all.
+    /// Verifies: ADR-0020
     #[test]
     fn self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name() {
         let default = ClientConfig::default();
@@ -1263,7 +1318,7 @@ mod tests {
 
         // A file that never mentions the section is the common case, and it is consent.
         let untouched: ClientConfig =
-            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+            toml::from_str("endpoint = \"wss://h/v1/opamp\"").expect("parse");
         assert_eq!(
             untouched.self_update_package(),
             Some(crate::supervisor::agent::CLIENT_AGENT_TYPE)
@@ -1300,6 +1355,7 @@ mod tests {
     /// The name is the whole of the narrowing (ADR-0020), so an empty one with the consent standing
     /// is refused at load rather than left to widen the consent to every package the Server offers.
     /// Withdrawn, the name is not read at all and an empty one is simply unused.
+    /// Verifies: ADR-0020
     #[test]
     fn an_empty_self_update_package_is_refused_while_the_consent_stands() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1338,6 +1394,7 @@ mod tests {
     /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
     /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
     /// a bound that could carry nothing rather than "unlimited", so it fails startup.
+    /// Verifies: ADR-0018
     #[test]
     fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
         assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
@@ -1355,14 +1412,17 @@ mod tests {
     /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
     /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
     /// so it fails startup.
+    /// Verifies: ADR-0034
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("supervisor.toml");
 
+        let tls = "[gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                   client_ca_file = \"ca.pem\"\n";
         std::fs::write(
             &path,
-            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+            format!("endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n{tls}"),
         )
         .expect("write");
         let config = ClientConfig::load(&path).expect("loads with the default cap");
@@ -1370,18 +1430,46 @@ mod tests {
 
         std::fs::write(
             &path,
-            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
-             max_carried_agents = 0\n",
+            format!(
+                "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                 max_carried_agents = 0\n{tls}"
+            ),
         )
         .expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_carried_agents"), "{err}");
     }
 
+    /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
+    /// them against — on the loopback neither (ADR-0034).
+    /// Verifies: ADR-0034, Q-1
+    #[test]
+    fn a_gateway_without_mutual_tls_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(
+            &path,
+            "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("no TLS");
+        assert!(err.contains("[gateway.tls] is required"), "{err}");
+
+        std::fs::write(
+            &path,
+            "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+             [gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("no client CA");
+        assert!(err.contains("client_ca_file is required"), "{err}");
+    }
+
     /// Both keys that once configured package delivery on the host are refused rather than
     /// ignored: `package` named the artifact (ADR-0019 moved that to the Server's Selector), and
     /// `accepts_packages` said whether to take one (ADR-0032 derives that from the program's
     /// path). An operator who still has either in a file believes it does something.
+    /// Verifies: ADR-0019
     #[test]
     fn the_retired_package_keys_are_refused() {
         let block = |extra: &str| {
@@ -1450,6 +1538,7 @@ mod tests {
     /// With a tree (ADR-0018) the program is one file *inside* the package, so the spawn path is
     /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0032
     /// made it mean, which is consent and nothing else.
+    /// Verifies: ADR-0018
     #[test]
     fn a_tree_spawns_from_the_path_written_inside_the_package() {
         let dir = PathBuf::from("/srv/fleet/fluent-bit");
@@ -1473,6 +1562,7 @@ mod tests {
 
     /// Refused at startup, where the operator is still looking at the file — not at rollout time
     /// on every matched host, which is where the archive sanitizer would catch the same thing.
+    /// Verifies: ADR-0018
     #[test]
     fn a_program_path_must_stay_inside_the_package() {
         assert_eq!(
@@ -1585,12 +1675,13 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0023
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
-            ("ws://x/v1/opamp", TransportKind::WebSocket),
+            ("ws://127.0.0.1/v1/opamp", TransportKind::WebSocket),
             ("wss://x/v1/opamp", TransportKind::WebSocket),
-            ("http://x/v1/opamp", TransportKind::Http),
+            ("http://[::1]/v1/opamp", TransportKind::Http),
             ("https://x/v1/opamp", TransportKind::Http),
         ] {
             let cfg = ClientConfig {
@@ -1601,6 +1692,33 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_default_endpoint_is_wss_on_the_loopback() {
+        assert_eq!(
+            ClientConfig::default().endpoint,
+            "wss://127.0.0.1:4320/v1/opamp"
+        );
+    }
+
+    /// Verifies: ADR-0023, Q-1
+    #[test]
+    fn a_plaintext_endpoint_off_the_loopback_is_refused_at_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        for endpoint in [
+            "ws://fleet.example/v1/opamp",
+            "http://localhost:4320/v1/opamp",
+        ] {
+            std::fs::write(&path, format!("endpoint = \"{endpoint}\"\n")).expect("write");
+            let err = ClientConfig::load(&path).expect_err(endpoint);
+            assert!(err.contains("plaintext"), "{err}");
+        }
+        std::fs::write(&path, "endpoint = \"ws://127.0.0.1:4320/v1/opamp\"\n").expect("write");
+        ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
+    }
+
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {
@@ -1653,6 +1771,7 @@ mod tests {
 
     /// ADR-0018: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
     /// block overrides it for itself — the shape `apply_grace_secs` has.
+    /// Verifies: ADR-0018
     #[test]
     fn retention_defaults_globally_and_is_overridable_per_supervisor() {
         let default: ClientConfig = toml::from_str("").expect("parse");
@@ -1824,6 +1943,7 @@ mod tests {
         assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
     }
 
+    /// Verifies: ADR-0026
     #[test]
     fn auth_yields_exactly_one_authorization_scheme() {
         let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
@@ -1912,13 +2032,13 @@ mod tests {
         let path = dir.path().join(crate::config_init::FILE_NAME);
         std::fs::write(
             &path,
-            "endpoint = \"ws://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",
+            "endpoint = \"wss://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",
         )
         .expect("write");
         let cfg = ClientConfig::load(&path).expect("loads");
         let source = cfg.source.expect("the file's text is kept");
         assert!(!source.contains("s3cret"), "{source}");
-        assert!(source.contains("endpoint = \"ws://fleet:4320/v1/opamp\""));
+        assert!(source.contains("endpoint = \"wss://fleet:4320/v1/opamp\""));
 
         // No file, no text: the defaults run and there is nothing truthful to report.
         assert!(ClientConfig::load(&dir.path().join("absent.toml"))

@@ -211,6 +211,7 @@ mod tests {
 
     /// ADR-0028: the accepted Windows forms are exactly the passwordless ones, and the refusal
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
+    /// Verifies: ADR-0028
     #[test]
     fn windows_forms_are_the_passwordless_ones() {
         let svc = "supervisor";
@@ -237,6 +238,7 @@ mod tests {
 
     /// The refusal for a missing Unix account is the actionable message ADR-0028 asks installs to
     /// fail with — and it must promise that nothing was written, because resolution runs first.
+    /// Verifies: ADR-0028
     #[cfg(unix)]
     #[test]
     fn a_missing_account_is_refused_with_the_way_out() {
@@ -252,6 +254,7 @@ mod tests {
     /// The handover re-owns a tree including a symlink as a link — to the account's own ids here,
     /// because a test does not run as root, and a chown to the current owner is the one chown an
     /// unprivileged process is allowed.
+    /// Verifies: ADR-0028
     #[cfg(unix)]
     #[test]
     fn the_handover_walks_the_tree_and_skips_what_is_missing() {

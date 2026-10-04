@@ -11,6 +11,7 @@ a service.
 - [Running it](#running-it)
 - [Configuration reference](#configuration-reference)
 - [Mutual TLS: proving who is on the connection](#mutual-tls-proving-who-is-on-the-connection)
+- [Enrolment: a new host, approved by an operator](#enrolment-a-new-host-approved-by-an-operator)
 - [Configurations: what the fleet runs](#configurations-what-the-fleet-runs)
 - [Packages and Deployments: distributing software](#packages-and-deployments-distributing-software)
 - [The REST API](#the-rest-api)
@@ -35,8 +36,11 @@ a service.
   command.
 - **Offers new connection settings**: a credential, a heartbeat interval, or an entirely
   different endpoint, which each Agent verifies by connecting before it switches.
-- **Serves one listener for everything**: OpAMP over both transports, the REST API, the OpenAPI
-  document and its docs page, and a rudimentary UI.
+- **Admits an Agent on two proofs**: a client certificate in the TLS handshake and the fleet
+  credential. It signs Agent certificates as a local CA, and enrols a new host only on an
+  operator's approval.
+- **Serves two listeners over TLS 1.3**: OpAMP over both transports and the package download on
+  one, the REST API, the OpenAPI document and its docs page, and a rudimentary UI on the other.
 
 ## Running it
 
@@ -47,7 +51,7 @@ $ server --version
 
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory; a missing file is not an error, since every setting has a default. |
+| `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory. A missing file means the defaults, and the defaults hold no `[tls]` and no `[auth]`, so the Server refuses to start and names `[tls]`. |
 | `--version` | Print the version and exit — the full string, `1.2.3+<commit>` for a release and `1.2.3-dev+<commit>` for a build on the way to one. |
 
 Any other argument prints usage and exits with status 2. Logging goes to stderr and is controlled by
@@ -56,15 +60,28 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
 
-There are **two listeners, split by audience** (ADR-0023): the one the fleet talks to, and the one
-you talk to.
+The Server refuses to start without `[tls]`, `[tls] client_ca_file` and `[auth]`, and the refusal
+names what is missing. For a first run on one machine,
+[`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development set of certificates and
+a `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
+walks through it.
 
-**The Agent plane** — `listen`, `0.0.0.0:4320` by default:
+There are **two listeners, split by audience**
+([ADR-0023](../adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)): the one
+the fleet talks to, and the one you talk to. Both serve TLS 1.3 and nothing older, with the same
+certificate.
+
+**The Agent plane** — `listen`, `127.0.0.1:4320` by default. Serving the fleet is one deliberate
+line, `listen = "0.0.0.0:4320"`.
 
 | Path | What it is |
 |---|---|
 | `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both. |
-| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. Unauthenticated on purpose — a downloading Client presents no credential, and the content hash and signature are what protect the bytes. |
+| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. It sits outside the credential check and behind the same TLS handshake as `/v1/opamp`, so a downloading Client presents its client certificate. A certificate from the client CA is required; a bootstrap certificate is answered `401`. |
+
+The Agent plane asks every peer for a client certificate in the TLS handshake. A peer without one
+fails the handshake and reaches no route (see
+[Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 
 **The Operator plane** — `[rest] listen`, `127.0.0.1:4321` by default:
 
@@ -76,28 +93,36 @@ you talk to.
 | `/` | The bundled UI: one embedded page, no frontend toolchain. It is deliberately rudimentary — the API is the product. |
 
 `[auth]` guards the OpAMP endpoint and nothing else; the Operator plane has its own credential,
-[`[rest.auth]`](#the-operator-plane-restauth), and without it that plane is open to whoever reaches
-it. That is why its default address is **loopback**: this port carries the authority to reconfigure
-and re-package the whole fleet. Reach it from another host through an SSH tunnel
-(`ssh -L 4321:127.0.0.1:4321 <server-host>`), or publish it deliberately with
-`[rest] listen = "0.0.0.0:4321"` — and then guard it.
+[`[rest.auth]`](#the-operator-plane-restauth). This port carries the authority to reconfigure and
+re-package the whole fleet, so its default address is the **loopback**. There `[rest.auth]` is
+optional, and the address is what protects the plane. Reach it from another host through an SSH
+tunnel (`ssh -L 4321:127.0.0.1:4321 <server-host>`), or publish it deliberately with
+`[rest] listen = "0.0.0.0:4321"`. Off the loopback `[rest.auth]` is required, and a Server without
+it is refused at startup with a message naming both keys.
+
+Each plane holds a bounded number of connections: `max_connections` for the Agent plane and
+`[rest] max_connections` for the Operator plane. A connection past the cap is closed on accept,
+before the TLS handshake, and the connections already held keep working. See
+[Bounds on every listener](#bounds-on-every-listener).
 
 ## Configuration reference
 
-The full annotated example is [`config/server.toml`](../../config/server.toml). Every key is
-optional and shown below with its default; an unknown key fails startup rather than being ignored.
+The full annotated example is [`config/server.toml`](../../config/server.toml). Every key is shown
+below with its default. `[tls]` with its `client_ca_file`, and `[auth]`, are required; every other
+key is optional. An unknown key fails startup rather than being ignored.
 
 ### Top level
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"0.0.0.0:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. |
+| `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
+| `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
 | `config_dir` | `"fleet-configs"` | Where Configurations are persisted — one JSON file per Configuration, named after it. Written atomically; read back at startup. |
 | `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
-| `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. |
-| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. |
+| `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
+| `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
-| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so a peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The real defence against an anonymous flood is [`[auth]`](#authentication) — this is the backstop while it is off. `0` is refused at startup. |
+| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) on both proofs; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 | `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset in the ordinary case: the Client then resolves the offered path against its own OpAMP endpoint, which is exactly where the download is served. Set it only when downloads must go through a different host, such as a mirror. |
 
@@ -107,39 +132,42 @@ The Operator plane's listener. Absent means the default.
 
 ```toml
 [rest]
-listen = "127.0.0.1:4321"   # "0.0.0.0:4321" publishes the REST API and the UI to the network
+listen = "127.0.0.1:4321"   # "0.0.0.0:4321" publishes the plane, and then needs [rest.auth]
+max_connections = 256
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. |
+| `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served, over the TLS of `[tls]`. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. An address other than `127.0.0.1` or `::1` requires `[rest.auth]`. |
+| `max_connections` | `256` | The connections the Operator plane holds at once. `0` is refused at startup. |
 
 #### `[rest.auth]`
 
-Optional Basic authentication over that whole plane — see
-[Authentication](#the-operator-plane-restauth). Absent means open.
+Basic authentication over that whole plane — see
+[Authentication](#the-operator-plane-restauth). Optional on a loopback `listen`, required on any
+other.
 
 ```toml
 [rest.auth.basic_users]
-fleet-admin = "a-strong-password"
+fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "password"`. A section without one, or an entry with an empty name or password, fails startup. |
+| `basic_users` | *(empty)* | Accepted Basic credentials, `user = "<Argon2id hash>"` — see [Credentials are kept as hashes](#credentials-are-kept-as-hashes). A section without one, or an entry that is not such a hash, fails startup. |
 
 ### `[tls]`
 
-Present means **both listeners** serve HTTPS and WSS instead of plain HTTP and WS, with the same
-certificate and key. `cert_file` and `key_file` are required together; `client_ca_file` is optional,
-belongs to the Agent plane alone, and turns on mutual TLS (see
-[Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
+Required. **Both listeners** serve HTTPS and WSS in TLS 1.3, with this certificate and key. A
+Server without the section is refused at startup with a message naming it. `client_ca_file` is
+required too. It belongs to the Agent plane alone, which asks every peer for a client certificate
+in the handshake (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
 
 ```toml
 [tls]
 cert_file = "cert.pem"
 key_file = "key.pem"
-client_ca_file = "client-ca.pem"   # optional: require a client certificate on /v1/opamp
+client_ca_file = "client-ca.pem"   # the CA every Agent's certificate chains to
 ```
 
 ### `[telemetry_offer]`
@@ -164,36 +192,61 @@ Optional. Present makes the Server a local CA that signs Agent certificate reque
 [client_ca]
 cert_file = "client-ca.pem"
 key_file = "client-ca-key.pem"
-validity_days = 90
+validity_days = 30
+```
+
+### `[enrolment]`
+
+Optional. Present lets a new host enrol with a bootstrap certificate from this CA — see
+[Enrolment](#enrolment-a-new-host-approved-by-an-operator). It needs `[client_ca]`, which signs
+the approved request.
+
+```toml
+[enrolment]
+bootstrap_ca_file = "bootstrap-ca.pem"
+```
+
+### `[admission_throttle]`
+
+Optional; absent means the defaults shown. See
+[Repeated failures are throttled](#repeated-failures-are-throttled).
+
+```toml
+[admission_throttle]
+max_failures = 10
+window_secs = 60
+backoff_secs = 300
 ```
 
 ### `[auth]`
 
-See [Authentication](#authentication).
+Required. See [Authentication](#authentication).
 
 ```toml
 [auth]
-bearer_tokens = ["a-long-random-token", "the-previous-one-during-rotation"]
+bearer_tokens = ["sha256:<hex of the new token>", "sha256:<hex of the previous one>"]
 [auth.basic_users]
-fleet = "a-strong-password"
+fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 ### `[connection_offer]`
 
 See [Moving the fleet](#moving-the-fleet-connection-settings). Any subset of the keys is valid, but
-not an empty section.
+not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http://` only to
+`127.0.0.1` or `::1`.
 
 ```toml
 [connection_offer]
-bearer_token = "a-long-random-token"           # or username = "…" / password = "…"
+bearer_token_file = "/etc/opamp-fleet/offered-token"   # or username = "…" / password_file = "…"
 heartbeat_interval_secs = 30
 endpoint = "wss://fleet.example:4320/v1/opamp"
 ```
 
 ## Mutual TLS: proving who is on the connection
 
-`[tls]` gains an optional `client_ca_file`. With it set, every request to `/v1/opamp`
-must arrive over a connection carrying a client certificate that bundle verifies:
+`[tls] client_ca_file` is required, and the Agent plane asks every peer for a client certificate
+**in the TLS handshake**
+([ADR-0026](../adr/0026-admission-by-a-client-certificate-alone.md)):
 
 ```toml
 [tls]
@@ -202,15 +255,15 @@ key_file = "key.pem"
 client_ca_file = "client-ca.pem"
 ```
 
-Client authentication stays **optional at the TLS layer** and required on the OpAMP route alone.
-That is deliberate: the Agent plane also serves the package download, and a Client fetching an
-artifact presents no certificate — the content hash and the signature are what protect those bytes. A certificate that *is* presented is always verified — rustls refuses one it cannot
-chain before any route sees it.
+The handshake accepts a certificate that chains to `client_ca_file`, and, while `[enrolment]` is
+configured, one that chains to the bootstrap CA. A peer that presents no certificate, or one that
+chains to neither, fails the handshake and reaches no route. That covers the package download as
+much as `/v1/opamp`. The Operator plane asks for no client certificate; a browser reaches it with
+the password of [`[rest.auth]`](#the-operator-plane-restauth).
 
-**Every configured proof must succeed.** `[auth]` alone behaves as it always has. `client_ca_file`
-alone makes the endpoint certificate-only. Both configured means **both** are required of every
-request, not either one — so turning mutual TLS on can never widen admission. What it can do is shut
-out a host that has no certificate yet, which is what the next section is for.
+**Both proofs must always succeed.** Every request to `/v1/opamp` needs a connection bearing a
+valid certificate **and** an `Authorization` header matching `[auth]`. No configuration drops
+either proof, and neither stands in for the other.
 
 A certificate proves **fleet membership, not identity**. The Server does not match its subject
 against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
@@ -224,7 +277,7 @@ Add a `[client_ca]` section and the Server becomes a local CA:
 [client_ca]
 cert_file = "client-ca.pem"
 key_file = "client-ca-key.pem"
-validity_days = 90
+validity_days = 30
 ```
 
 Use a **separate** CA, not the listener's certificate and key: a CA private key stored where the
@@ -232,33 +285,223 @@ server certificate lives means compromising the Server mints fleet members at wi
 `[tls] client_ca_file` at that CA's certificate, so the certificates it issues are the ones the
 listener accepts.
 
-With the section present the Server declares `AcceptsConnectionSettingsRequest`. A Client that has
-no certificate, or holds one two thirds through its validity, generates a key **that never leaves
-its host**, sends a signing request, and receives the certificate as an ordinary connection-settings
-offer — which it proves by connecting with before it replaces the one in force. Admission is the
-approval: a request that got this far already satisfied every proof the endpoint requires. There is
-no approval queue.
+With the section present the Server declares `AcceptsConnectionSettingsRequest`. A Client whose
+certificate is two thirds through its validity generates a key **that never leaves its host**,
+sends a signing request, and receives the certificate as an ordinary connection-settings offer. It
+proves the new certificate by connecting with it before it replaces the one in force. A request
+from a peer whose certificate chains to the client CA is signed at once: renewal is automatic. A
+request from a host that holds only a bootstrap certificate waits for an operator, as the next
+section describes. The Server signs a client-authentication certificate only, and drops any
+alternative names the request asks for.
 
 A request that does not parse, or one arriving at a Server with no `[client_ca]`, is answered with
 the protocol's `BadRequest` error response.
 
-### The order that does not lock anyone out
+### The first certificate on a host
 
-1. Configure `[client_ca]` and restart. Nothing is required of anyone yet; Clients begin enrolling
-   on their next connection.
-2. Watch them come back with certificates — each Client writes `client-cert.pem` into its state
-   directory.
-3. Set `[tls] client_ca_file` and restart. Now a certificate is required.
-4. Once every host is on one, delete `[auth]` if you want the endpoint to be certificate-only.
+A host needs a certificate before it can connect at all, and it gets one in one of two ways:
 
-Step 4 is not for every fleet. **Keep `[auth]` if you will run Gateways**: a Gateway terminates TLS,
-so a client certificate cannot reach the Server through it, and the credential — forwarded unchanged
-— is the only per-Agent proof that survives the hop.
+1. **An operator provisions it.** Sign a client certificate with the client CA and write it, with
+   its key, into the Client's `[tls] cert_file` and `key_file`. The Client connects with it at
+   once and renews it through the CSR flow.
+2. **The host enrols.** It is given a bootstrap certificate, and an operator approves its request —
+   see [Enrolment](#enrolment-a-new-host-approved-by-an-operator).
 
-**There is no revocation.** Short `validity_days` plus renewal is what bounds a certificate; ejecting
-a host faster than its certificate expires means rotating the CA. And an expired certificate locks a
-host out even with a valid credential: a Client switched off longer than its validity needs
-`client_ca_file` unset for as long as it takes to re-enrol.
+**Behind a Gateway the credential travels end to end.** Mutual TLS is per hop: the Gateway checks
+the Agents connecting to it, and presents its own certificate to the Server. The `Authorization`
+header is the only per-Agent proof that reaches the Server through it. A Gateway trusts the client
+CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
+provisioned a certificate by an operator.
+
+**A certificate names its host.** The Server puts `urn:opamp-fleet:host:<id>` into every
+certificate it signs: a host is minted when an operator approves an enrolment, a certificate an
+operator provisioned is given one on its first renewal, and every renewal keeps it — the Client
+proves with its current key which certificate it renews, through a Gateway too. An Agent belongs
+to the host that first reported it: a connection with another host's certificate that reports
+for it is given an `instance_uid` of its own instead. A host holds at most three valid
+certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
+host. **A Gateway admits nobody until its host is marked:** only a marked host is handed the
+revocation list a Gateway refuses by (see
+[Revocation](#revocation-withdrawing-a-certificate-or-a-credential)):
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/hosts
+[{"host":"0192…","gateway":false,"instance_uids":["0192…","0193…"],"certificates":1}]
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway": true}' \
+       https://127.0.0.1:4321/api/v1/hosts/0192…/gateway
+```
+
+A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
+proves. A third-party client that sends no renewal proof renews the certificate it presents.
+
+**A certificate lives 30 days by default** and is renewed at two thirds of that; a host is ejected
+sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate-or-a-credential)).
+An expired certificate locks a host out even with a valid credential: a Client switched off longer than its validity enrols again
+with a bootstrap certificate, or is given a new certificate by an operator.
+
+## Enrolment: a new host, approved by an operator
+
+Enrolment is how a fresh host obtains its first certificate without an operator signing one by
+hand. It is armed by `[enrolment]`, and it needs `[client_ca]`, which signs the approved request:
+
+```toml
+[enrolment]
+bootstrap_ca_file = "bootstrap-ca.pem"
+```
+
+The **bootstrap CA** is a CA of its own, never the client CA; a bootstrap CA that shares a
+certificate with `client_ca_file` is refused at startup. A bootstrap certificate opens nothing by
+itself. It needs the fleet credential beside it, an open enrolment window, and an operator's
+approval, so one bootstrap certificate may serve the whole fleet. Keep its validity short.
+Without `[enrolment]` no bootstrap certificate passes the handshake.
+
+**The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
+86400 seconds:
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"open_for_secs": 3600}' https://127.0.0.1:4321/api/v1/enrolment/window
+{"open":true,"until_ms":1790000000000}
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolment/window
+$ curl --cacert ca.pem -X DELETE https://127.0.0.1:4321/api/v1/enrolment/window
+```
+
+`POST` opens the window, or moves its end to `open_for_secs` from now. `GET` says whether it is
+open and until when. `DELETE` closes it early. The window and its pending requests live in memory
+only, so a Server restart closes it. When it closes, every enrolling connection is closed and every
+pending request expires.
+
+**While it is open, an enrolling host may send a certificate request and nothing else.** The
+Server creates no Agent record for it and offers it nothing but the issued certificate. The request
+waits in a queue of at most 1024. The Client keeps its pending key and re-sends the same request
+until it is answered.
+
+**Match the request to the host by its fingerprint.** The enrolling Client logs the SHA-256
+fingerprint of the key it generated:
+
+```text
+INFO certificate request generated; an enrolling host waits for an operator's approval key_fingerprint=3f9a…
+```
+
+The Server lists each pending request with that fingerprint as its `id`, beside its arrival time,
+the peer address, the subject it asks for, and the bootstrap certificate's subject and fingerprint.
+The Client sends its request as soon as the Server's first answer says it signs certificates,
+so the request is listed moments after the host connects:
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
+[{"id":"3f9a…","arrived_ms":1789996400000,"peer":"10.0.4.17","subject":"CN=host-01",
+  "key_fingerprint":"3f9a…","bootstrap_subject":"CN=fleet bootstrap","bootstrap_fingerprint":"…"}]
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/reject
+```
+
+Approving signs the request with `[client_ca]` and offers the certificate on that host's
+connection. The host stores it as `client-cert.pem` in its state directory and reconnects with it
+as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
+closes the connection. An unknown or expired id is answered `404`, and every enrolment route
+answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
+the window is closed is answered `503`, and does not count toward the throttle.
+
+A request whose subject or SANs name an `instance_uid` other than the host's own is answered
+`BadRequest` and never enters the queue. The same holds for a renewal.
+
+The bootstrap certificate stays in the host's `supervisor.toml`, unused once the issued pair is
+stored. Approve only what you can match to a host you are setting up.
+
+## Revocation: withdrawing a certificate or a credential
+
+A certificate stays valid until it expires, and the credential until it leaves `server.toml`. To
+shut a host out sooner, revoke what it presents. The Server refuses it from then on, on both
+transports and on the package download, and closes at once every WebSocket session it admitted,
+with close code `1008`. No other session is touched, and no restart is needed. The list lives
+under `config_dir` and survives a restart.
+
+Every certificate the client CA signs is in a register, with the certificate the host presented
+when it renewed. Its `key_fingerprint` is the one the request was listed and approved by:
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
+[{"authority":"client","issuer":"CN=fleet client CA","serial":"5c0f…","subject":"CN=host-01",
+  "key_fingerprint":"…","not_after_ms":1797772400000,"instance_uid":"0192…",
+  "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"},
+  "host":"0192…"}]
+```
+
+Revoke a certificate by the CA that issued it — `client` for the client CA, `bootstrap` for the
+bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every renewal of that
+certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
+stays in force until the last of those renewals has expired. `openssl x509 -noout -serial` prints
+the serial of a certificate you hold; colons, case and leading zeros do not matter. A renewal
+descends from the certificate its renewal proof names, through a Gateway too; a client that sends
+no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
+revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
+certificate's proof renews nothing.
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"certificate": {"authority": "client", "serial": "5c0f…"}}' \
+       https://127.0.0.1:4321/api/v1/revocations
+{"id":"9d2e…","kind":"certificate","revoked_ms":1790000000000,
+ "certificate":{"authority":"client","serial":"5c0f…"}}
+```
+
+Revoke a credential by its exact `Authorization` value. Only one that `[auth]` holds can be
+revoked, and only its SHA-256 is stored. The credential is the fleet's, so revoke it only after a
+rotation through `[connection_offer]` has reached the fleet; every Agent still presenting it is
+shut out. Then remove it from `server.toml`; until you do, the Server names it at startup by the
+first eight digits of its hash.
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"credential": "Bearer old-fleet-token"}' https://127.0.0.1:4321/api/v1/revocations
+```
+
+`GET /api/v1/revocations` lists every entry, and `DELETE /api/v1/revocations/<id>` lifts one; the
+next connection is admitted again. The list holds at most 100 000 entries; an entry for a
+certificate the register held is dropped once neither that certificate nor any renewal of it is
+valid. The register holds at most 100 000 certificates and at most 10 000 in one renewal chain,
+and keeps the last 1 000 places for enrolments.
+
+Every WebSocket session also ends when the certificate that admitted it expires, with `1008` and
+the reason `certificate expired`. A Client renews at two thirds of the life and reconnects with
+the new certificate, so a healthy fleet never sees this.
+
+Behind a Gateway the Server sees the Gateway's certificate, not the Agent's, so the Gateway refuses
+for it. Every host marked as a Gateway fetches the revoked certificates of the client CA from
+`GET /v1/gateway/revocations` on the Agent plane every 30 seconds, renewals already resolved, and
+refuses a downstream peer whose certificate is on it with `401`, closing its sessions with `1008`
+and the reason `revoked`. A revocation therefore reaches a gatewayed Agent within about 30
+seconds. A Gateway that has held no list younger than 300 seconds — its Server unreachable, or its
+host not marked — answers every downstream peer `503` and closes their sessions with the reason
+`revocation list stale`. Revoking the Gateway's own certificate ends every Agent it carries.
+
+## The audit record
+
+Every security decision leaves one line in `config_dir/audit/`: each admission and refusal on the
+Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
+certificate issued, each revocation and the session it ended, each credential rotation, each
+operator act with the operator's name, and each package an Agent reports installed or failed. A
+plain-HTTP Agent's admission is recorded once an hour per address and certificate, a WebSocket
+session every time. No line holds a credential, a key or a CSR body.
+
+```console
+$ tail -n1 /var/lib/opamp-fleet-server/audit/audit-1.jsonl
+{"event":"revocation.revoked","id":"9d2e…","kind":"certificate","authority":"client",
+ "serial":"5c0f…","outcome":"revoked","prev":"41b7…","seq":5113,"time":"2026-10-04T09:12:44Z"}
+$ server audit-verify /var/lib/opamp-fleet-server/audit
+5113 entries in 1 files, the chain holds
+```
+
+Each line carries the SHA-256 of the line before it, so a line edited or removed afterwards breaks
+the chain where it happened; `audit-verify` names the first entry that does not follow. Against an
+intruder on the Server host that only helps with a copy taken before, so ship the directory off the
+host. The record also goes to the Server's log under the target `audit`.
+
+The Server never takes a decision it cannot record: when the record cannot be written — a full
+disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
+can. Refusals past ten a second from one address are counted into one line, not dropped.
+`[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
 
 ## Configurations: what the fleet runs
 
@@ -294,11 +537,15 @@ say the same thing.)
 reported — identifying or non-identifying, both are matched. An empty Selector targets every
 Agent of the type (or every Agent, if no type is set either).
 
+The examples on this page call the Operator plane on the loopback, over TLS. `--cacert ca.pem`
+names the CA that signed the Server's certificate. Off the loopback, add the
+[`[rest.auth]`](#the-operator-plane-restauth) credential with `-u`.
+
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "otelcol-contrib", "selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
-       http://127.0.0.1:4321/api/v1/configurations/linux-prod
-$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/linux-prod/rollout
+       https://127.0.0.1:4321/api/v1/configurations/linux-prod
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/linux-prod/rollout
 ```
 
 **Several Configurations may match one Agent.** It receives all of them, as named entries in one
@@ -313,9 +560,9 @@ before the option existed. Any other non-empty value travels to the Agent verbat
 like `supplementary`.
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
-       http://127.0.0.1:4321/api/v1/configurations/ruleset
+       https://127.0.0.1:4321/api/v1/configurations/ruleset
 ```
 
 **Nothing is sent twice.** The Server composes the entries an Agent was **rolled out**, hashes
@@ -368,8 +615,8 @@ are examples, not a schema.
 channel = "stable"
 
 # or from here, without touching the host
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"labels": {"channel": "beta"}}' \
-       http://127.0.0.1:4321/api/v1/agents/<uid>/labels
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"labels": {"channel": "beta"}}' \
+       https://127.0.0.1:4321/api/v1/agents/<uid>/labels
 ```
 
 Which key you pick is a decision about *what the partition means*, and three shapes cover most
@@ -405,10 +652,10 @@ report — there is no canonical set of Agent types, so spell it exactly as they
 has no writable field; `{}` is the whole of it.
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0
-$ curl -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64"
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
+       https://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0
+$ curl --cacert ca.pem -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64.tar.gz \
+       "https://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64"
 ```
 
 Platform spellings are accepted and stored canonically, so the tokens off an upstream release's
@@ -417,19 +664,24 @@ file name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` 
 than refused — the fleet may run a system nobody here anticipated.
 
 **Or reference an artifact hosted elsewhere**. The Server stores the address and your SHA-256,
-offers them verbatim, and never downloads the artifact — so the hash, and the signature when one is
-configured, is the whole of the protection:
+offers them verbatim, and never downloads the artifact — so the hash and the signature are the whole
+of the protection. The `url` is `https://`; `http://` is accepted only when its host is
+`127.0.0.1` or `[::1]`, and any other is refused `400` naming the rule
+([ADR-0019](../adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)).
+So neither the artifact nor the headers an Agent sends for it cross a network in plaintext:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…"}' \
-       http://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64/source
+       https://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64/source
 ```
 
-The URL is probed once, to catch a typo while you are still looking at the screen. A definitive
-refusal from the source (a `4xx`) fails the request; a source this Server cannot reach does not,
-because the Server is not in the download path and its reachability says nothing about the Agents'.
-A private source can be given headers to send.
+The URL is probed once, with one `HEAD` over TLS 1.3 that follows no redirect, to catch a typo
+while you are still looking at the screen. A definitive refusal from the source (a `4xx`) fails the
+request; a source this Server cannot reach does not, because the Server is not in the download path
+and its reachability says nothing about the Agents'. A private source can be given headers to send.
+A Client fetches from such a source only when its `[packages] allowed_sources` lists it (see
+[the Client](client.md#where-a-download-may-come-from)).
 
 The store keeps its Deployments in `<packages_dir>/deployments/`; every *other* entry there is a
 Package directory, and one this Server does not recognise **fails the start naming the path**
@@ -443,12 +695,12 @@ matching no one used to be.
 ### Put it in a channel, sign it there, roll it out
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
-       http://127.0.0.1:4321/api/v1/deployments/beta
-$ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/canary/packages/otelcol-contrib/0.109.0
-$ curl -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       http://127.0.0.1:4321/api/v1/deployments/canary/signatures/otelcol-contrib/0.109.0/linux/amd64
-$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/canary/rollout
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
+       https://127.0.0.1:4321/api/v1/deployments/beta
+$ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/packages/otelcol-contrib/0.109.0
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/otelcol-contrib/0.109.0/linux/amd64
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
 **Nothing is offered before that last line.** Everything above stores; the **rollout act** is the
@@ -463,12 +715,15 @@ the version the channel runs. Adding the same one again is the same request arri
 succeeds.
 
 **The signature belongs to the Deployment**, not to the artifact: what an operator signs off on is
-a release to a set of machines, so the same Package in two channels is signed in each. A channel holding
-no signature offers the artifact unsigned — not refused, because an unsigned fleet is a legitimate
-policy, but a Client with `[packages] verification_key` set will refuse it on arrival. The
-deployment view reports which platforms are covered (`signed_platforms`), and the UI marks an
-unsigned package `⚠`; supplying a signature on the artifact upload instead answers `400` naming
-the route that takes it.
+a release to a set of machines, so the same Package in two channels is signed in each. **The Server
+never offers an unsigned entry**
+([ADR-0021](../adr/0021-packages-and-deployments-that-sign-every-package.md)). An entry its
+Deployment holds no signature for is no candidate, and the fleet view says the signature is
+missing. A rollout of a Deployment that lacks a signature for any entry is refused `409`, naming
+each Package and the platforms it is unsigned for, and nothing is released. The deployment view
+reports which platforms are covered (`signed_platforms`), and the UI marks an unsigned package
+`⚠`. Supplying a signature on the artifact upload instead answers `400` naming the route that
+takes it.
 
 **While a Package is rolled out to at least one Agent its entries are frozen** (the fleet is
 installing those bytes; uploads answer `409`); ship a change as the next version, which is a new
@@ -484,8 +739,8 @@ uninstalled** — an Agent keeps running what it installed. Deleting a Deploymen
 Two channels, disjoint by label, each holding its own version:
 
 ```console
-$ curl -X PUT -d '{"selector": {"channel": "stable"}}' … /api/v1/deployments/stable
-$ curl -X PUT -d '{"selector": {"channel": "beta"}}'   … /api/v1/deployments/beta
+$ curl --cacert ca.pem -X PUT -d '{"selector": {"channel": "stable"}}' … /api/v1/deployments/stable
+$ curl --cacert ca.pem -X PUT -d '{"selector": {"channel": "beta"}}'   … /api/v1/deployments/beta
 ```
 
 There are two ways to move, and with a `channel` key the second is the ordinary one:
@@ -527,7 +782,7 @@ in each:
 | the row shows | what it means | what to do |
 |---|---|---|
 | no `deployment`, no conflict | no channel's Selector matches this host | label it, or give it a `channel` attribute |
-| a `deployment`, nothing assigned, nothing pending | the channel holds nothing this Agent can take — no Package for its type, or none for its platform | upload the entry, or put the right Package in the channel |
+| a `deployment`, nothing assigned, nothing pending | the channel holds nothing this Agent can take — no Package for its type, none for its platform, or an entry without a signature | upload the entry, put the right Package in the channel, or sign the entry |
 | a `deployment` and something pending | it is waiting for a rollout act | press it |
 | `package_conflict` | two channels claim it | narrow one Selector |
 
@@ -592,29 +847,32 @@ artifact, hashes it, and signs it:
 ```console
 $ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
 $ opamp-package-sign keygen --out fleet-signing.pk8                # prints the public key
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
-`pack` writes `.tar.gz` or an AES-256-encrypted `.7z` — the only two containers a Client can open —
-and names the member the way the receiving Supervisor will look for it. There is no ZIP support and
-no way to add one: an artifact that is neither gzip nor 7z is taken to *be* the program.
-[The rollout walkthrough](rollout.md) puts the whole sequence together.
+`pack` writes `.tar.gz` or an AES-256-encrypted `.7z`, and names the member the way the receiving
+Supervisor will look for it. A Client opens those two and `.zip`; an artifact that is none of the
+three is taken to *be* the program. [The rollout walkthrough](rollout.md) puts the whole sequence
+together.
 
-The download route sits on the **Agent plane**, unauthenticated, deliberately: the content hash and
-the signature are what protect an installed binary, not who was allowed to fetch it — and a Client
-downloading one presents no credential, which is exactly why guarding the Operator plane cannot
-break a rollout.
+The download route sits on the **Agent plane**, outside the credential check and behind the same
+TLS handshake as `/v1/opamp`. A downloading Client presents its client certificate, and it presents
+it to this Server's own origin and to no other host. Guarding the Operator plane therefore cannot
+break a rollout. The content hash and the signature are what protect an installed binary.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
-Once a Client has a key configured, an unsigned package is refused; without one, a *signed* package
-is refused too. Decide fleet-wide, not per host.
+A Client without it takes no package at all, its own update included, and says so at startup
+([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)). Give every Client the
+key.
 
 ## The REST API
 
 The OpenAPI document at `/api/v1/openapi.json` is the contract; `/api/v1/docs` renders it. Every
 error response carries a JSON body with an `error` field, so a generated client has something to
-show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) and, when
-[`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic credentials.
+show. All of it is served on the Operator plane (`127.0.0.1:4321` by default), over TLS 1.3, and,
+when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic credentials.
+`[rest.auth]` is required whenever the plane listens off the loopback.
 
 | Method & path | What it does |
 |---|---|
@@ -635,7 +893,7 @@ show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) an
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "headers": {…}}`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package — and every per-Agent assignment that referenced it. Uninstalls nothing. |
-| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. |
+| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. |
 | `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
 | `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
@@ -643,7 +901,11 @@ show. All of it is served on the Operator plane (`127.0.0.1:4321` by default) an
 | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Put a Package in the channel. `409` on a second of an Agent type it already holds; `?replace=true` swaps it. `404` for a Package nobody uploaded. |
 | `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out, and its signatures with it. |
 | `PUT` / `DELETE /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}` | Record or remove one artifact's Ed25519 signature. Body: `{"signature": "<hex>"}`. |
-| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Packages. |
+| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Packages, and `409` naming each Package and platform while any entry lacks a signature. |
+| `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
+| `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
+| `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
+| `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 
@@ -670,9 +932,9 @@ editing a file **on that host** and restarting it.
 **Labels are that attribute, set from here**:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"labels": {"channel": "beta"}}' \
-       http://127.0.0.1:4321/api/v1/agents/<instance-uid>/labels
+       https://127.0.0.1:4321/api/v1/agents/<instance-uid>/labels
 ```
 
 A label is matched exactly like a reported attribute, by **both** halves of the targeting: the
@@ -735,41 +997,90 @@ until someone forgets it.
 
 ## Authentication
 
-`[auth]` guards **the OpAMP endpoint only**. Without the section the endpoint is open;
-with it, every OpAMP request — plain-HTTP `POST` or WebSocket upgrade — needs an `Authorization`
-header matching one of the listed credentials, and anything else is answered `401`.
+`[auth]` guards **the OpAMP endpoint**, and it is required
+([ADR-0026](../adr/0026-admission-by-a-client-certificate-alone.md)). A
+configuration without the section, or with a section holding no credential, is refused at startup
+with a message naming `[auth]`. Every OpAMP request — plain-HTTP `POST` or WebSocket upgrade —
+needs an `Authorization` header matching one of the listed credentials, and anything else is
+answered `401`. The header is the second proof: the client certificate in the handshake is the
+first, and both are always required.
 
 ```toml
 [auth]
-bearer_tokens = ["a-long-random-token"]
+bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f"]
 [auth.basic_users]
-fleet = "a-strong-password"
+fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 Both schemes may be configured at once, and several valid credentials may be listed — which is what
 makes an overlapping rotation possible.
 
-**The REST API and the UI are not guarded by this** — they are a different plane with a credential
-of their own, `[rest.auth]` below. Neither is the package download route, deliberately: an Agent
-fetches an artifact without presenting anything, and its content hash and signature are what protect
-it.
+### Credentials are kept as hashes
 
-Without TLS the credentials travel in cleartext — a Client warns when it sends one beyond the
-loopback interface, but it still sends it. Pair `[auth]` with `[tls]` for anything real.
+No credential in `server.toml` authenticates on its own, so a copy of the file — in a backup, a
+diff, configuration management — admits no host and signs in no operator. A Bearer token is listed
+by its SHA-256 as `sha256:<64 hex digits>`; a Basic password, in `[auth]` and `[rest.auth]` alike,
+by its Argon2id hash. A value in clear is refused at startup, naming the section and the entry
+without repeating the value. Make each entry with the Server itself:
+
+```console
+$ printf '%s' "$TOKEN" | server hash-credential --bearer
+sha256:2c0c8f8b…
+$ server hash-credential --basic
+secret:
+$argon2id$v=19$m=19456,t=2,p=1$…
+```
+
+`--bearer` refuses a token shorter than 32 characters: a token's strength is its randomness alone,
+so make one with `openssl rand -base64 33`. `--basic` asks for the password without showing it on
+a terminal. A Client keeps its own credential in clear in `supervisor.toml`, because it has to
+present it; that file is readable by its owner alone.
+
+The one credential the Server must still be able to send — the rotated one `[connection_offer]`
+hands the fleet — is read from a file of its own named by `bearer_token_file` or `password_file`.
+The file must be readable by its owner alone (`0600`), or the Server does not start.
+
+**The REST API and the UI are not guarded by this** — they are a different plane with a credential
+of their own, `[rest.auth]` below. The package download route sits outside the credential check:
+it is guarded by the client certificate the handshake requires, and its content hash and signature
+protect what it serves.
+
+The credential never crosses a network in plaintext. The Agent plane serves TLS 1.3 alone, and a
+Client refuses at startup to send it over `ws://` or `http://` to any host but `127.0.0.1` or
+`::1`.
+
+### Repeated failures are throttled
+
+`[admission_throttle]` limits how often one peer address may fail admission:
+
+```toml
+[admission_throttle]
+max_failures = 10      # failures within the window that start a back-off
+window_secs = 60
+backoff_secs = 300     # how long the address is answered 429
+```
+
+Every `401` on `/v1/opamp` and on the download route counts as a failure of the peer's IP address.
+An address that reaches `max_failures` within `window_secs` is in back-off for `backoff_secs`.
+During the back-off each request is answered `429` with `Retry-After` set to the seconds remaining,
+before its credential is compared. A WebSocket upgrade is refused the same way before it completes.
+A successful admission clears the address's count. The Operator plane counts its own `401`s the same
+way, in a table of its own. `0` for any of the three keys is refused at startup.
 
 ### The Operator plane: `[rest.auth]`
 
 `[rest.auth]` guards **the whole Operator plane** — `/api/v1/…`, the OpenAPI document, the API docs,
-and the UI at `/`. Without the section that plane is open, which is why its default address is
-loopback; with it, every request needs Basic credentials and anything else is answered `401` with a
-`WWW-Authenticate: Basic` challenge.
+and the UI at `/`. With it, every request needs Basic credentials and anything else is answered
+`401` with a `WWW-Authenticate: Basic` challenge. On a loopback `[rest] listen` the section is
+optional, and the plane's address is what protects it. On any other address it is required: a
+Server without it is refused at startup with a message naming both keys.
 
 ```toml
 [rest]
-listen = "0.0.0.0:4321"          # publishing it is the reason to add the section below
+listen = "0.0.0.0:4321"          # publishing it requires the section below
 
 [rest.auth.basic_users]
-fleet-admin = "a-strong-password"
+fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 ```
 
 Basic, and only Basic, because the audience is a browser and `curl`: the browser answers the
@@ -780,25 +1091,41 @@ operator's is withdrawn without touching anyone else's.
 **The operator tools carry it in the URL** they are given, which needs no new flag:
 
 ```console
-$ curl -u fleet-admin:secret http://127.0.0.1:4321/api/v1/agents
-$ opamp-package-fetch … --server http://fleet-admin:secret@127.0.0.1:4321
+$ curl --cacert ca.pem -u fleet-admin:secret https://127.0.0.1:4321/api/v1/agents
+$ opamp-package-fetch … --server https://fleet-admin:secret@127.0.0.1:4321
 ```
 
 Two limits worth stating plainly. It is **authentication, not authorization**: everyone listed can
 do everything the plane offers — there are no roles, and one Server still manages one fleet. And
-Basic sends a reusable password on **every** request, so it is only as private as the channel under
-it: pair `[rest.auth]` with `[tls]`, or put a TLS-terminating proxy in front. The Server logs a
-warning at startup when the plane is published in cleartext with a credential configured. Passwords
-are stored in `server.toml` verbatim, exactly as `[auth]`'s are.
+Basic sends a reusable password on **every** request. The plane always serves TLS 1.3, so the
+password never crosses the network in cleartext, and `server.toml` holds only its Argon2id hash.
 
 ## TLS
 
-`[tls]` turns **both listeners** into HTTPS/WSS listeners, with one certificate and key — there is
-no plaintext port left open beside either of them. Clients then use `wss://` or `https://` endpoints, and
-Clients trusting a private CA additionally set `ca_file` in their own `[tls]` section.
+`[tls]` is required, and it turns **both listeners** into HTTPS/WSS listeners with one certificate
+and key ([ADR-0023](../adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+There is no plaintext port beside either of them. Every connection speaks TLS 1.3 alone, with the
+three TLS 1.3 suites of the `ring` provider; a peer that speaks only TLS 1.2 cannot connect. Clients
+use `wss://` or `https://` endpoints, and Clients trusting a private CA set `ca_file` in their own
+`[tls]` section.
 
-The Server can also **verify a client certificate**, which is the other half of the same section:
+The same section names the CA a **client certificate** must chain to:
 see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection).
+
+### Bounds on every listener
+
+Each plane is bounded before a request is parsed:
+
+- **A connection cap per plane**: `max_connections` (default 10 000) for the Agent plane and
+  `[rest] max_connections` (default 256) for the Operator plane. A connection past the cap is
+  closed on accept, before the TLS handshake, while the ones already held keep working.
+- **The TLS handshake** must complete within 10 seconds, and a peer has 30 seconds to send its
+  HTTP/1 request headers.
+- **HTTP/2** allows 100 concurrent streams per connection. A keep-alive ping goes out every 30
+  seconds, and a peer that leaves one unanswered for 20 seconds is dropped.
+
+Only the caps are keys, because they depend on the size of the fleet. The other bounds are the
+same in every deployment.
 
 ## The fleet's own telemetry
 
@@ -822,7 +1149,7 @@ guessing a receiver's routing is how telemetry disappears into a `404` nobody lo
 destination *you* name", so this section is the only place a destination comes from — and with no
 section, no Agent sends anything.
 
-What arrives: process metrics every 30 seconds (CPU, memory, uptime) for each Client's own process
+What arrives: process metrics every 10 seconds (CPU, memory, uptime) for each Client's own process
 *and* for every process it supervises; each Client's own log output as OTLP records; and a trace per
 fleet operation — `package.install`, `config.apply` (a Managed Process's configuration, and a
 Client's Supervisor set), `connection.settings.apply`, and `self.update`. Each carries its phases as
@@ -837,14 +1164,15 @@ receiving end.
 
 Two limits worth knowing before you point this somewhere:
 
-- **A cleartext destination is refused outside the private address space.** `http://` is accepted to
-  loopback and to the private ranges — `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — and rejected
-  anywhere else by the Agent and reported back, because the stream carries identifying attributes and
-  whatever the Client logs. The protocol permits exactly this refusal. The judgement is made on the
-  **address**: a host name over `http://` is refused whatever it resolves to, since a name can be
-  re-pointed after the offer was admitted. So a Collector one hop away on the LAN needs no
-  certificate — `http://192.168.10.5:4318/v1/metrics` is accepted — and one reached by name, or
-  across anything public, needs TLS in front of it.
+- **A cleartext destination is refused anywhere but the loopback**
+  ([ADR-0022](../adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
+  `http://` is accepted only to the IP literals `127.0.0.1` and `::1`. The rest of `127.0.0.0/8`,
+  the private ranges `10/8`, `172.16/12`, `192.168/16` and `fc00::/7`, link-local and carrier-grade
+  NAT addresses are refused. The judgement is made on the parsed **address**: a host name over
+  `http://` is refused, `localhost` included, and no name is resolved. The Agent refuses such a
+  destination and reports the refusal back on the offer; it never warns and sends anyway. Every
+  other destination is `https://` in TLS 1.3, so a Collector on the LAN, or one reached by name,
+  needs TLS 1.3 in front of it. A destination that speaks only TLS 1.2 fails the handshake.
 - **A Collector's internal telemetry does not come this way.** The Client must not touch a Managed
   Process's configuration, so what it reports about a Collector is what it can see from
   outside. Configure the Collector for its own internals as you would without OpAMP.
@@ -855,7 +1183,9 @@ Two limits worth knowing before you point this somewhere:
 interval, or a new endpoint without touching every host. The Server compiles the section into one
 hash-gated offer, and every Agent that accepts connection settings gets it, **verifies it by
 actually connecting**, and switches only on success. An Agent that cannot connect with the offered
-settings keeps the ones it has and reports the failure.
+settings keeps the ones it has and reports the failure. A credential-bearing offer goes only to an
+Agent admitted on both proofs with a certificate from the client CA; an enrolling host receives
+none.
 
 Rotating a credential is therefore a sequence with no window in which the fleet is locked out:
 
@@ -868,15 +1198,22 @@ Unless `endpoint` points at a *different* Server, the offered credential must be
 accepted set — a Server that offered a credential it would itself reject would lock out the fleet,
 so it fails at startup instead.
 
-The offer never carries `certificate`, `tls`, or `proxy`: there is no configuration surface for
-them, which is the Server half of the missing mutual-TLS support.
+**The offered `endpoint` is never plaintext off the host**
+([ADR-0027](../adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)). It is
+`wss://` or `https://`; `ws://` or `http://` only when its host is `127.0.0.1` or `::1`. Any other
+`endpoint` is refused at startup with a message naming `[connection_offer] endpoint`.
+
+The standing offer carries no `tls` and no `proxy`: there is no configuration surface for them. A
+`certificate` travels in an offer only as the answer to an Agent's signing request.
 
 ## What the Server does not do
 
-- **It authenticates the REST API and the UI only if you ask it to** — `[rest.auth]`, Basic, off by
-  default, with the plane on loopback until you publish it.
-- **It does not throttle.** It honours the protocol's error and retry semantics and answers
-  malformed input with `BAD_REQUEST`, but it never tells an Agent to slow down.
+- **It does not require a password on a loopback Operator plane.** `[rest.auth]` is optional
+  there, because the address is the guard; it is required the moment the plane listens anywhere
+  else.
+- **It throttles failed admission and nothing else.** A peer address past `[admission_throttle]`'s
+  failures is answered `429`; an admitted Agent is never told to slow down. It honours the
+  protocol's error and retry semantics and answers malformed input with `BAD_REQUEST`.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;
   the Agents fetch it.
 - **It does not install itself as a service.** Run it under whatever supervises services on the

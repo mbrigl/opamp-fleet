@@ -232,6 +232,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // restarted it, and the host stayed on a version that never reached the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
+    // Without the credential and a certificate the Server refuses this Client; it says so and
+    // stops rather than retrying for ever (ADR-0026).
+    config
+        .check_admission()
+        .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
     if spec.service {
         start_log_file(&config);
     }
@@ -259,16 +264,14 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             probation,
         ));
     }
-    // Signing is opt-in (ADR-0018): with no `[packages] verification_key`, an offered artifact — a
-    // managed process's package or this Client's own self-update — is accepted on the Server-supplied
-    // content hash alone, with no signature binding those bytes to a key the operator holds. That is
-    // a deliberate posture, not a bug, but it is one an operator should choose knowingly, so say so
-    // loudly at startup rather than only in the code path that acts on it.
-    if config.package_key().is_none() && engine.installs_packages() {
+    // There is no unsigned posture (ADR-0018, ADR-0020): without `[packages] verification_key` no
+    // Agent of this Client takes packages, its own self-update included. Said once at startup, since
+    // the Server only sees an Agent that declares no package capability.
+    if config.package_key().is_none() {
         tracing::warn!(
-            "accepting packages without a signature check: no [packages] verification_key is set, so \
-             an offered package or self-update is trusted on the Server's content hash alone \
-             (ADR-0018). Set verification_key to require an Ed25519 signature."
+            "taking no packages and no self-update: [packages] verification_key is not set, and \
+             nothing is installed without a signature (ADR-0018). Set it to the hex Ed25519 key \
+             your packages are signed with."
         );
     }
     if let Some(outcome) = &owed_outcome {
@@ -503,6 +506,7 @@ mod tests {
     /// The test binary does not run from an install layout, so the resolution takes the "the new
     /// version did not take over" path: the marker is cleared and an outcome recorded. What is
     /// asserted is that the marker was *seen at all*, which before this change it was not.
+    /// Verifies: ADR-0020
     #[test]
     fn an_unreadable_configuration_resolves_the_update_in_flight() {
         let dir = tempfile::tempdir().expect("tempdir");

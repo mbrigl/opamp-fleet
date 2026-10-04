@@ -124,6 +124,7 @@ impl Plugin for CollectorPlugin {
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,

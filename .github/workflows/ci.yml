@@ -1,9 +1,11 @@
 name: CI
 
-# Enforces the Definition of Done (AGENTS.md §5) on the stack decided in ADR-0025: build, test,
-# lint, and format on Linux, plus release builds of the Client on every platform it ships on —
-# Linux, Windows, and macOS — and of the Server on Linux only (docs/SPECIFICATION.md).
-# The commands MUST match README.md → "Build, Test & Run", the single source of truth.
+# What the Definition of Done (AGENTS.md §5) asks beyond Linux, on the stack of ADR-0025: the
+# Client checked and tested on Windows and macOS, and release builds of the Client on every
+# platform it ships on — Linux, Windows, and macOS — and of the Server on Linux only
+# (docs/SPECIFICATION.md). Build, test and lint on Linux are the 'rust' job of checks.yml, which
+# runs scripts/check-rust.sh as the local gate does. The commands MUST match README.md →
+# "Build, Test & Run", the single source of truth.
 
 on:
   pull_request:
@@ -14,27 +16,6 @@ permissions:
   contents: read
 
 jobs:
-  build-test-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # rustup honours rust-toolchain.toml (stable + rustfmt + clippy) on first use.
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace --locked
-      - name: Test
-        run: cargo test --workspace --locked
-      - name: Lint & format check
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-      # ADR-0024: the workspace build unifies `opamp`'s features, so each one is linted on its own.
-      - name: Lint opamp per feature
-        run: |
-          for f in "" client server; do
-            cargo clippy -p opamp --all-targets --locked --no-default-features --features "$f" -- -D warnings
-          done
-
   # ADR-0028: the client carries platform-specific service paths (the Windows SCM shim, launchd
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist

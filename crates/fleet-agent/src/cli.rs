@@ -266,6 +266,7 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0028
     #[test]
     fn bare_invocation_has_no_subcommand() {
         // No subcommand → the caller (main) defaults to `run`.
@@ -277,6 +278,7 @@ mod tests {
     /// ADR-0028 clause 6: removed, not hidden and not accepted-and-ignored. A unit written by an
     /// older install would carry it, and this is what makes that fail loudly instead of running a
     /// Client whose paths silently mean something else.
+    /// Verifies: ADR-0028
     #[test]
     fn instance_is_not_a_flag_any_more() {
         assert!(
@@ -307,6 +309,7 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from("x.toml"));
     }
 
+    /// Verifies: ADR-0028
     #[test]
     fn the_installed_command_line_parses() {
         // What `service install` writes into the unit (ADR-0028).
@@ -333,6 +336,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0028
     #[test]
     fn service_verbs_parse_with_scope_and_root() {
         let cli = parse(&["client", "service", "install", "--user", "--root", "/opt/x"]);
@@ -357,6 +361,7 @@ mod tests {
 
     /// ADR-0028 clause 8: the two halves can be named apart, which is what the Linux system-scope
     /// split needs and what the manual tells an operator to do on a host that wants them apart.
+    /// Verifies: ADR-0028
     #[test]
     fn both_roots_can_be_named() {
         let args = install(&[
@@ -374,6 +379,7 @@ mod tests {
 
     /// ADR-0028: interactivity is something the operator asks for. Every invocation that existed
     /// before this flag keeps meaning what it meant.
+    /// Verifies: ADR-0028
     #[test]
     fn install_is_not_interactive_unless_asked() {
         let quiet = parse(&["client", "service", "install"]);
@@ -400,6 +406,7 @@ mod tests {
     /// stands unless the install withdraws it. The two flags are mutually exclusive — naming a
     /// package while withdrawing the consent is a contradiction, not a precedence to resolve — and
     /// neither may ride `--interactive`, which asks instead.
+    /// Verifies: ADR-0020
     #[test]
     fn install_carries_the_self_update_answer_without_a_terminal() {
         let standing = install(&[
@@ -467,6 +474,7 @@ mod tests {
 
     /// ADR-0029 clause 18: a packaged install passes the answer it collected. The endpoint is not
     /// validated here — the loader's own rule does that, once, in `config_init`.
+    /// Verifies: ADR-0029
     #[test]
     fn install_takes_an_endpoint_without_a_terminal() {
         let told = parse(&[
@@ -491,6 +499,7 @@ mod tests {
 
     /// The two ways of writing the first configuration cannot both be asked for: one blocks on a
     /// terminal and the other exists precisely because there is none.
+    /// Verifies: ADR-0029
     #[test]
     fn an_endpoint_and_interactive_are_refused_together() {
         let err = Cli::try_parse_from([

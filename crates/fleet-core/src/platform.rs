@@ -62,6 +62,7 @@ mod tests {
 
     /// The pairs both ends depend on agreeing: the Client writes the left, the Server matches an
     /// artifact's platform against the right (ADR-0019).
+    /// Verifies: ADR-0019
     #[test]
     fn folds_the_spellings_this_project_does_not_control() {
         assert_eq!(canonical_os("macos"), "darwin");
@@ -77,6 +78,7 @@ mod tests {
 
     /// Rust names the host one way and the semantic conventions another, and this is the table that
     /// bridges them — so what a Client compiled by rustc reports is a token the Server knows.
+    /// Verifies: ADR-0019
     #[test]
     fn what_rust_calls_this_machine_folds_onto_a_canonical_token() {
         assert_eq!(
@@ -94,6 +96,7 @@ mod tests {
 
     /// A system the table has never heard of is served under its own name rather than refused: a
     /// fleet may run one, and offering it nothing would be the worse failure.
+    /// Verifies: ADR-0019
     #[test]
     fn an_unknown_token_passes_through_unchanged() {
         assert_eq!(canonical_os("plan9"), "plan9");

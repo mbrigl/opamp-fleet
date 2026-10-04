@@ -96,7 +96,7 @@ Which platforms (space to select, enter to confirm)
   [x] windows/amd64
   [ ] darwin/arm64
 Upload these to a fleet Server? yes
-Server base URL› http://127.0.0.1:4321
+Server base URL› https://127.0.0.1:4321
 ```
 
 The systems beside each agent are what it is published for — enough to see before the choice that
@@ -144,7 +144,7 @@ Every prompt has a flag; give all of them and nothing is asked:
 ```console
 $ opamp-package-fetch --agent telegraf --version 1.39.3 \
       --platform linux/amd64 --platform windows/amd64 \
-      --out-dir ./artifacts --server http://127.0.0.1:4321
+      --out-dir ./artifacts --server https://127.0.0.1:4321
 ```
 
 | Option | Meaning |
@@ -153,7 +153,7 @@ $ opamp-package-fetch --agent telegraf --version 1.39.3 \
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
-| `--server <url>` | Create the Package and upload each artifact as its platform's entry. It stops there: putting the Package in a deployment is an operator act, and the tool prints the call that does it. Cannot be combined with `--no-upload`. |
+| `--server <url>` | The Operator plane's `https://` URL. Create the Package and upload each artifact as its platform's entry. It stops there: putting the Package in a deployment is an operator act, and the tool prints the call that does it. Cannot be combined with `--no-upload`. |
 | `--no-upload` | Write the artifacts and stop, without the upload question. |
 
 `--version` names the *release to fetch*, not this tool's own version — `--version 1.19`, not a
@@ -261,6 +261,12 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 
 - **Network egress** to `api.github.com`, to the release asset host, and — for Telegraf — to
   `dl.influxdata.com`.
+- **The upload speaks TLS to the Operator plane**, so the Server's URL is `https://`; type it so
+  at the prompt, which suggests `http://`. The tool has no CA option and trusts the Server's
+  certificate through this machine's own trust store, so a Server whose certificate comes from a
+  private CA needs that CA trusted here. Off the loopback, carry the
+  [`[rest.auth]`](server.md#the-operator-plane-restauth) credential in the URL:
+  `https://fleet-admin:secret@fleet.example:4321`.
 - **GitHub rate-limits unauthenticated requests to 60 per hour** per address. A run costs two
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
@@ -277,14 +283,15 @@ For a program the other tool does not know: it builds the container, and it owns
 ```console
 $ opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex)
 $ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
 | Command | What it prints | Use it for |
 |---|---|---|
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
-| `sign --key <file> <artifact>` | the signature (hex) | the `signature` query parameter of the upload |
+| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0018) |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
 
@@ -292,6 +299,8 @@ The options of `pack`, and why a `.tar.gz` packed twice gives the same bytes, ar
 [step 2 of the rollout walkthrough](rollout.md#2-build-the-artifact), which runs the whole path
 from packing to a running agent.
 
-**Signing is fleet-wide, and it cuts both ways.** With `[packages] verification_key` configured,
-a Client refuses an *unsigned* package; without it, it refuses a *signed* one. Decide once, for
-all hosts.
+**Signing is required, fleet-wide.** A Client takes a package only while `[packages]
+verification_key` is set, and only when the artifact's signature verifies against it. The Server
+offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
+unsigned entry ([ADR-0021](../adr/0021-packages-and-deployments-that-sign-every-package.md)). Give
+every Client the same public key, and sign every entry of every Deployment.

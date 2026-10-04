@@ -1,0 +1,72 @@
+# cargo-deny: the supply-chain gate (specification Q-3). README → "Build, Test & Run" runs it; the
+# security workflow runs it on every dependency change and weekly.
+#
+# Four checks, each failing the build: a known vulnerability, a licence outside the list below, a
+# crate from anywhere but crates.io, and a crate this project has decided never to link.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory fails, the unmaintained and unsound kinds included, except those reviewed below. A
+# new advisory against one of these same crates carries a new id and fails again.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # `paste`: unmaintained. A transitive proc-macro helper with no first-party use, no security
+    # impact, and no maintained drop-in.
+    { id = "RUSTSEC-2024-0436", reason = "transitive proc-macro, no runtime code" },
+    # `rustls-pemfile`: unmaintained. This project reads PEM with `rustls-pki-types` itself
+    # (crates/opamp/src/tls.rs); the crate remains only through `axum-server`.
+    { id = "RUSTSEC-2025-0134", reason = "transitive through axum-server only" },
+    # `git2`: unsound `Remote::list()` and buffer-created `BlameHunk`. Neither API is used; git2 runs
+    # only in crates/fleet-core/build.rs, which reads tags and HEAD at build time.
+    { id = "RUSTSEC-2026-0183", reason = "build script only, API unused" },
+    { id = "RUSTSEC-2026-0184", reason = "build script only, API unused" },
+]
+
+[licenses]
+# Permissive licences only. A crate offering several licences passes when one of them is here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# libFuzzer itself is LLVM's, under the permissive NCSA licence. It is linked into the fuzz targets
+# only, never into a shipped binary.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# The workspace's own crates depend on each other by path; only unpublished crates may, so a path
+# never reaches crates.io as a wildcard.
+allow-wildcard-paths = true
+# The TLS stack is rustls on ring and nothing else (ADR-0023): no system OpenSSL, and no aws-lc,
+# whose cmake and C build this project keeps out.
+deny = [
+    { name = "openssl", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "openssl-sys", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "native-tls", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "aws-lc-rs", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "aws-lc-sys", reason = "TLS is rustls on ring (ADR-0023)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

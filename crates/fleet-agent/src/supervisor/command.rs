@@ -131,6 +131,7 @@ impl Plugin for CommandPlugin {
             "foreign agent invocation"
         );
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,

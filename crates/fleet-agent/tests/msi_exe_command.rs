@@ -178,6 +178,7 @@ fn install_args(parsed: cli::Parsed) -> cli::InstallArgs {
     }
 }
 
+/// Verifies: ADR-0029
 #[test]
 fn register_service_with_endpoint_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterServiceWithEndpoint"]));
@@ -185,6 +186,7 @@ fn register_service_with_endpoint_survives_the_crt() {
     assert!(!args.interactive);
 }
 
+/// Verifies: ADR-0029
 #[test]
 fn register_service_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterService"]));
@@ -196,6 +198,7 @@ fn register_service_survives_the_crt() {
 ///
 /// This is also what keeps error 1722 retired. A directory property resolves with a trailing
 /// backslash, and there is now no command line for one to reach.
+/// Verifies: ADR-0028, ADR-0029
 #[test]
 fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     for (id, command) in exe_commands() {
@@ -215,17 +218,18 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     assert_eq!(args.data_root, None);
 }
 
-/// The endpoint prefill (ADR-0029): the development Server in its `http://` form, held to the
-/// loader's own endpoint rule so the dialog can never offer a value that `service install
+/// The endpoint prefill (ADR-0029): the development Server over TLS on the loopback literal, held
+/// to the loader's own endpoint rule so the dialog can never offer a value that `service install
 /// --endpoint` would then reject. And it must stay confined to the UI sequence: leaking it into a
 /// silent install would write the development default on every unattended host, the state
 /// ADR-0029 refuses to manufacture.
+/// Verifies: ADR-0029
 #[test]
 fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     let element = set_property("ENDPOINT");
     let element = element.as_str();
     let value = attribute(element, "Value").expect("the prefill has no Value");
-    assert_eq!(value, "http://localhost:4320/v1/opamp");
+    assert_eq!(value, "wss://127.0.0.1:4320/v1/opamp");
     fleet_agent::config::ClientConfig {
         endpoint: value,
         ..Default::default()
@@ -240,6 +244,7 @@ fn endpoint_prefill_is_the_development_server_and_interactive_only() {
 /// that would break silently: the withdrawing line must parse to `--no-self-update`, and the
 /// *consenting* line must be character for character what this package sent before the flag
 /// existed — an unset formatted property resolves to nothing, so no `--` argument may appear.
+/// Verifies: ADR-0020
 #[test]
 fn the_self_update_answer_rides_both_register_actions() {
     let commands = exe_commands();
@@ -281,6 +286,7 @@ fn the_self_update_answer_rides_both_register_actions() {
 /// non-empty value, so the withdrawal has to test for the literal `"0"` an administrator types as
 /// well as for the empty property a cleared checkbox leaves. A condition of just `NOT SELFUPDATE`
 /// would honour the checkbox and silently ignore `SELFUPDATE=0`.
+/// Verifies: ADR-0020
 #[test]
 fn the_withdrawal_condition_reads_both_spellings_of_off() {
     let condition = attribute(&set_property("SELFUPDATEFLAG"), "Condition")
@@ -315,6 +321,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
     );
 }
 
+/// Verifies: ADR-0029
 #[test]
 fn stop_and_unregister_survive_the_crt() {
     let commands = exe_commands();

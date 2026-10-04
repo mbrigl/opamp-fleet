@@ -9,6 +9,7 @@ fn url(addr: std::net::SocketAddr, path: &str) -> String {
     format!("http://{addr}{path}")
 }
 
+/// Verifies: G-5
 #[tokio::test]
 async fn configurations_crud_round_trips() {
     let server = spawn().await;
@@ -386,6 +387,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
+/// Verifies: ADR-0021, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -623,6 +625,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 /// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
 /// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
 /// callers pass. The guard runs before the handler, so it decides regardless of the target.
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn a_cross_site_state_changing_post_is_refused() {
     let server = spawn().await;
@@ -814,6 +817,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
 /// is actually running. The view must carry it whole: the flag, the Agent's own status string,
 /// and the reason (`ComponentHealth.last_error`, which the Baseline says SHOULD be set when
 /// unhealthy).
+/// Verifies: G-2
 #[tokio::test]
 async fn the_view_carries_the_reported_health_and_its_reason() {
     let server = spawn().await;
@@ -858,6 +862,55 @@ async fn the_view_carries_the_reported_health_and_its_reason() {
     assert_eq!(view["healthy"], true);
     assert_eq!(view["health_status"], "running");
     assert_eq!(view["health_error"], "");
+}
+
+/// What the Server knows of an Agent reaches the API whole: its identity, the configuration it
+/// holds, and — when it refuses one — that it did, and the Agent's own reason.
+/// Verifies: G-2, G-4
+#[tokio::test]
+async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason() {
+    use opamp::proto::{
+        AgentConfigMap, AgentConfigObject, EffectiveConfig, RemoteConfigStatus,
+        RemoteConfigStatuses,
+    };
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+
+    let mut held = support::full_report(&uid, "host", 1);
+    held.effective_config = Some(EffectiveConfig {
+        config_map: Some(AgentConfigMap {
+            config_map: [(
+                "fleet".to_string(),
+                AgentConfigObject {
+                    body: b"receivers: {otlp: {}}\n".to_vec(),
+                    content_type: "text/yaml".to_string(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        }),
+    });
+    held.remote_config_status = Some(RemoteConfigStatus {
+        last_remote_config_hash: vec![7; 32],
+        status: RemoteConfigStatuses::Failed as i32,
+        error_message: "line 3: unknown receiver \"otlpp\"".to_string(),
+    });
+    report(&client, server.addr, &held).await;
+
+    let view = &agents(&client, server.rest_addr).await[0];
+    assert_eq!(view["instance_uid"], uid.to_string());
+    assert!(
+        view["effective_config"]
+            .as_str()
+            .is_some_and(|config| config.contains("receivers: {otlp: {}}")),
+        "{view}"
+    );
+    assert_eq!(view["remote_config_status"], "FAILED");
+    assert_eq!(
+        view["remote_config_error"],
+        "line 3: unknown receiver \"otlpp\""
+    );
 }
 
 /// Labels are the operator's decision, not something the Server learned, so forgetting an Agent

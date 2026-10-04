@@ -16,8 +16,134 @@ use opamp::server::listen::Handle;
 use tracing::info;
 
 fn usage() -> ! {
-    eprintln!("Usage: server [--config <server.toml>] [--version]");
+    eprintln!(
+        "Usage: server [--config <server.toml>] [--version]\n       \
+         server hash-credential --bearer|--basic   (reads the secret from standard input)\n       \
+         server audit-verify <config_dir>/audit"
+    );
     std::process::exit(2);
+}
+
+/// `server audit-verify <dir>` (ADR-0030 clause 3): walks the audit record's files in order and
+/// names the first entry whose `prev` does not match the entry before it.
+fn audit_verify(dir: Option<String>) -> ! {
+    let Some(dir) = dir else { usage() };
+    let files = match fleet_server::fs::audit_files(std::path::Path::new(&dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let mut texts = Vec::new();
+    for file in &files {
+        match std::fs::read_to_string(file) {
+            Ok(text) => texts.push((file.display().to_string(), text)),
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", file.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    let lines = texts.iter().flat_map(|(name, text)| {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(move |(index, line)| (format!("{name}:{}", index + 1), line))
+    });
+    match fleet_server::audit_log::verify(lines) {
+        Ok(count) => {
+            println!("{count} entries in {} files, the chain holds", files.len());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("the chain breaks at {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `server hash-credential --bearer|--basic` (ADR-0026 clause 26): reads the secret from standard
+/// input — without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
+fn hash_credential(scheme: Option<String>) -> ! {
+    let hash: fn(&str) -> Result<String, String> = match scheme.as_deref() {
+        Some("--bearer") => fleet_server::credentials::hash_bearer,
+        Some("--basic") => fleet_server::credentials::hash_basic,
+        _ => usage(),
+    };
+    let secret = match read_secret() {
+        Ok(secret) => secret,
+        Err(e) => {
+            eprintln!("cannot read the secret: {e}");
+            std::process::exit(1);
+        }
+    };
+    match hash(&secret) {
+        Ok(entry) => {
+            println!("{entry}");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One line from standard input, the trailing newline dropped. On a Unix terminal echo is off while
+/// it is typed, so the secret does not stand on the screen.
+fn read_secret() -> std::io::Result<String> {
+    use std::io::{BufRead as _, IsTerminal as _};
+    let stdin = std::io::stdin();
+    let terminal = stdin.is_terminal();
+    if terminal {
+        eprint!("secret: ");
+    }
+    let _echo = terminal.then(EchoOff::new).flatten();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    if terminal {
+        eprintln!();
+    }
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Terminal echo switched off for as long as it lives.
+struct EchoOff {
+    #[cfg(unix)]
+    saved: libc::termios,
+}
+
+impl EchoOff {
+    #[cfg(unix)]
+    fn new() -> Option<Self> {
+        // SAFETY: tcgetattr/tcsetattr on standard input with a termios this function owns.
+        unsafe {
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut saved) != 0 {
+                return None;
+            }
+            let mut silent = saved;
+            silent.c_lflag &= !libc::ECHO;
+            (libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &silent) == 0)
+                .then_some(EchoOff { saved })
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: restores the termios read in `new`.
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
+        }
+    }
 }
 
 fn parse_args() -> PathBuf {
@@ -25,6 +151,8 @@ fn parse_args() -> PathBuf {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "hash-credential" => hash_credential(args.next()),
+            "audit-verify" => audit_verify(args.next()),
             "--config" => match args.next() {
                 Some(path) => config = PathBuf::from(path),
                 None => usage(),
@@ -79,17 +207,31 @@ async fn main() {
         }
     };
 
-    // A credential-bearing offer with no [auth] in front of it hands that credential to anyone who
-    // connects (ADR-0026/0018/0025). Open by default is intentional; leaking a backend token by
-    // default is not — so it is surfaced loudly rather than gated, which would break zero-config.
-    let unguarded = config.unauthenticated_secret_offers();
-    if !unguarded.is_empty() {
-        tracing::warn!(
-            offers = %unguarded.join(", "),
-            "these offers hand a credential to any Agent that connects, but [auth] is unset so the \
-             OpAMP endpoint admits anyone — set [auth] to gate credential delivery (ADR-0026)"
-        );
-    }
+    // The TLS material first: a Server that cannot serve it does not start, and admission needs
+    // to know which CA issued what (ADR-0023, ADR-0026).
+    let planes = match config
+        .tls
+        .as_ref()
+        .ok_or_else(|| "[tls] is required".to_string())
+        .and_then(|tls| fleet_server::tls::server_tls(tls, config.enrolment.as_ref()))
+        .and_then(|planes| {
+            let agent = planes.agent.rustls_config()?;
+            let operator = planes.operator.rustls_config()?;
+            Ok((agent, operator, planes.issuers, planes.authorities))
+        }) {
+        Ok(planes) => planes,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
+    let enrolment = config.enrolment.as_ref().map(|_| {
+        // ADR-0026: closed until an operator opens it.
+        info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
+        Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()))
+    });
+    let limits = config.admission_throttle.limits();
 
     let connection_offer = match config
         .connection_offer
@@ -157,11 +299,71 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // The fleet credential's check (ADR-0026), built once: admission runs it, and the revocation
+    // list revokes only what it accepts. The configuration was refused at load without `[auth]`.
+    let auth = match config
+        .auth
+        .as_ref()
+        .map(fleet_server::transport::OpampAuth::from_config)
+        .transpose()
+    {
+        Ok(auth) => auth,
+        Err(e) => {
+            eprintln!("{}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    };
+    let accepts: fleet_server::revocation::Accepts = match &auth {
+        Some(auth) => {
+            let credentials = auth.credentials();
+            Arc::new(move |authorization: &str| credentials.verify(authorization))
+        }
+        None => Arc::new(|_: &str| false),
+    };
+    // What the client CA signed and what is revoked (ADR-0031), kept beside the fleet's records.
+    let revocations = match fleet_server::fs::FsLedgerStore::open(
+        config.config_dir.join("revocation"),
+    )
+    .and_then(|store| {
+        fleet_server::revocation::Revocations::open(
+            Box::new(store),
+            clock.clone(),
+            accepts,
+            planes.3.clone(),
+        )
+    }) {
+        Ok(revocations) => Arc::new(revocations),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    // The audit record (ADR-0030), opened before anything is decided.
+    let audit = match fleet_server::fs::FsAuditStore::open(config.config_dir.join("audit"))
+        .and_then(|store| {
+            fleet_server::audit_log::AuditLog::start(
+                Box::new(store),
+                config.audit.limits(),
+                clock.clone(),
+            )
+        }) {
+        Ok(audit) => Arc::new(audit) as Arc<dyn fleet_server::audit::Audit>,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(enrolment) = &enrolment {
+        enrolment.set_audit(audit.clone());
+    }
     let state = match AppState::new(config.config_dir.clone()) {
         Ok(state) => Arc::new(
             state
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
+                .with_enrolment(enrolment.clone())
+                .with_revocations(Some(revocations.clone()))
+                .with_audit(Some(audit.clone()))
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
                 .with_max_message_size(config.max_message_size_bytes)
@@ -175,46 +377,43 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let auth = config
-        .auth
-        .as_ref()
-        .map(fleet_server::transport::OpampAuth::from_config);
-    if auth.is_some() {
-        // ADR-0026.
-        info!("the OpAMP endpoint requires authentication");
-    }
-    // Mutual TLS is on when the listener has a CA to verify client certificates against; the
-    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0026).
-    let mutual_tls = config
-        .tls
-        .as_ref()
-        .is_some_and(|tls| tls.client_ca_file.is_some());
-    if mutual_tls {
-        info!("the OpAMP endpoint requires a client certificate");
-    }
+    // Both proofs, always (ADR-0026): the configuration was refused at load without either.
+    info!("the OpAMP endpoint requires the fleet credential and a client certificate");
     // Two planes, two listeners (ADR-0023): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
+    let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
-        fleet_server::transport::Admission::new(auth, mutual_tls),
+        fleet_server::transport::Admission::new(auth, true)
+            .with_enrolment(issuers, enrolment)
+            .with_revocations(Some(revocations))
+            .with_audit(Some(audit.clone()))
+            .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
+                limits,
+                clock.clone(),
+            ))),
     );
-    let operator_auth = config
+    let operator_auth = match config
         .rest
         .auth
         .as_ref()
-        .map(fleet_server::api::OperatorAuth::from_config);
-    if operator_auth.is_some() {
-        // ADR-0026.
-        info!("the REST API and the UI require authentication");
-        // Basic puts a reusable password on the wire on every request. On loopback that stays on
-        // the host; published in cleartext it does not, and the operator should hear so once.
-        if config.tls.is_none() && !config.rest.listen.ip().is_loopback() {
-            tracing::warn!(
-                listen = %config.rest.listen,
-                "[rest.auth] sends its password in the clear on a listener that is not loopback — \
-                 add [tls], or put a TLS-terminating proxy in front (ADR-0026)"
-            );
+        .map(fleet_server::api::OperatorAuth::from_config)
+        .transpose()
+    {
+        Ok(auth) => auth.map(|auth| {
+            auth.with_audit(Some(audit.clone())).with_throttle(Arc::new(
+                fleet_server::throttle::Throttle::new(limits, clock.clone()),
+            ))
+        }),
+        Err(e) => {
+            eprintln!("{}: {e}", config_path.display());
+            std::process::exit(1);
         }
+    };
+    if operator_auth.is_some() {
+        // ADR-0026. Both planes serve TLS, so the password never crosses a network in clear
+        // (ADR-0023).
+        info!("the REST API and the UI require authentication");
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
@@ -232,28 +431,23 @@ async fn main() {
         }
     });
 
-    // Both planes serve with the same certificate and key (ADR-0023). Only the OpAMP route reads
-    // the peer certificate the listener carries into each request (ADR-0026).
-    let tls = match config.tls.as_ref().map(fleet_server::tls::server_tls) {
-        None => None,
-        Some(Ok(material)) => match material.rustls_config() {
-            Ok(rustls_config) => Some(rustls_config),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        },
-        Some(Err(e)) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    let over = if tls.is_some() { " over TLS" } else { "" };
-    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads{over}");
-    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI{over}");
+    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
+    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
     let (agents, operators) = tokio::join!(
-        listen::plane(agent_listener, tls.clone(), handle.clone()).serve(agents),
-        listen::plane(operator_listener, tls, handle).serve(operators),
+        listen::plane(
+            agent_listener,
+            Some(agent_tls),
+            config.max_connections,
+            handle.clone()
+        )
+        .serve(agents),
+        listen::plane(
+            operator_listener,
+            Some(operator_tls),
+            config.rest.max_connections,
+            handle
+        )
+        .serve(operators),
     );
     agents.expect("serve the Agent plane");
     operators.expect("serve the Operator plane");

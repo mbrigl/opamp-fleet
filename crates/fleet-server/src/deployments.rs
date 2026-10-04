@@ -422,6 +422,7 @@ pub(crate) mod tests {
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
     /// why (ADR-0021 point 12).
+    /// Verifies: ADR-0021
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
         let memory = Memory::default();
@@ -448,6 +449,7 @@ pub(crate) mod tests {
 
     /// Specificity does not break the tie, and that is the decision — not an oversight. The wider
     /// Selector used to win by being narrower; now neither does.
+    /// Verifies: ADR-0021
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {
         let memory = Memory::default();
@@ -468,6 +470,7 @@ pub(crate) mod tests {
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
     /// ordinary state (ADR-0021 point 11).
+    /// Verifies: ADR-0021
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
         let memory = Memory::default();
@@ -486,6 +489,7 @@ pub(crate) mod tests {
 
     /// An empty Selector is refused, and the message says what to write instead. It is the channel
     /// that collides with every other, and it is what a forgotten field looks like.
+    /// Verifies: ADR-0021
     #[test]
     fn a_deployment_must_name_the_ring_it_aims_at() {
         let memory = Memory::default();
@@ -511,6 +515,7 @@ pub(crate) mod tests {
 
     /// One Package per Agent type, refused at the write rather than puzzled over at resolution —
     /// and the refusal names what is already held.
+    /// Verifies: ADR-0021
     #[test]
     fn a_deployment_holds_one_package_per_agent_type() {
         let memory = Memory::default();
@@ -547,6 +552,7 @@ pub(crate) mod tests {
 
     /// A signature belongs to an artifact this Deployment actually offers, and it goes when the
     /// Package does — a signature over something no longer offered has nothing left to say.
+    /// Verifies: ADR-0021
     #[test]
     fn a_signature_needs_its_package_and_leaves_with_it() {
         let memory = Memory::default();
@@ -579,6 +585,7 @@ pub(crate) mod tests {
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
     /// changing it keeps everything the channel holds.
+    /// Verifies: ADR-0021
     #[test]
     fn the_selector_stays_editable_and_keeps_what_the_ring_holds() {
         let memory = Memory::default();

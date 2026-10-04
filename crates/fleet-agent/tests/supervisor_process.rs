@@ -108,6 +108,7 @@ fn runner_full(
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
     let runner = Runner {
+        endpoint_token: String::new(),
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
@@ -490,6 +491,52 @@ async fn wait_until_started(marker: &Path) {
     }
 }
 
+/// The Managed Process finds the Supervisor Endpoint's token in its environment, and no block's
+/// `env` can put another one in its place.
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn the_managed_process_is_handed_the_endpoint_token() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: "the-token".to_string(),
+        name: "test".to_string(),
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: vec![(
+                    "OPAMP_SUPERVISOR_TOKEN".to_string(),
+                    "a-block-tried".to_string(),
+                )],
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let task = tokio::spawn(runner.run(shutdown));
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(text.contains("token=the-token\n"), "{text}");
+    task.abort();
+}
+
 /// A kind that declared a reload applies a configuration in place (ADR-0010): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
@@ -846,6 +893,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     let _ = harness.task.await;
 }
 
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -879,6 +927,7 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
 
 /// The case ADR-0018 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -923,6 +972,7 @@ async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -957,7 +1007,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let _ = harness.task.await;
 }
 
-// Verifies: ADR-0018
+// Verifies: ADR-0018, G-10
 #[tokio::test]
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -989,6 +1039,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
 /// ADR-0018: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
 /// empty the directory and set the Server re-offering the same artifact in a loop.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1051,6 +1102,7 @@ async fn a_program_that_keeps_crashing_is_held_not_looped() {
 
 /// ADR-0018: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1146,6 +1198,7 @@ fn tree_harness(root: &Path) -> Harness {
 
 /// The case ADR-0018 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1200,6 +1253,7 @@ async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1245,6 +1299,7 @@ async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1354,6 +1409,7 @@ fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> 
 /// of its own and "which phase failed" — the question the dashboard is built around — would have no
 /// span to answer with. Asserted against the real Runner swapping a real program, because the hand
 /// -over is the thing under test and a mock of it would test the mock.
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let recorded = recorder();

@@ -13,6 +13,8 @@
 //! `poll_interval_secs`, 30 by default. These tests set it to 1 so they measure the mechanism
 //! rather than the wait.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -115,6 +117,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 /// A Configuration rollout reaches a poller and is applied — `APPLIED`, in sync, and the managed
 /// process restarted on the written file. No Server push is involved: the offer rides the reply to
 /// the Client's own next poll, which is the whole of how this transport learns anything.
+/// Verifies: ADR-0023, G-1
 #[tokio::test]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -147,7 +150,7 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
     stage_owned_program(&state_dir, "otelcol", &program);
 
     let _client = spawn_client(&config_path);
@@ -193,7 +196,14 @@ async fn a_package_rollout_reaches_a_polling_client() {
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
     let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
     let public_key_hex = hex::encode(keypair.public_key().as_ref());
-    let signature = keypair.sign(&artifact).as_ref().to_vec();
+    let signature = keypair
+        .sign(&fleet_core::package::statement(
+            "managed-agent",
+            "2.0.0",
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
@@ -250,7 +260,8 @@ async fn a_package_rollout_reaches_a_polling_client() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+        .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
 

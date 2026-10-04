@@ -12,6 +12,7 @@
 //! setup.
 
 pub mod listen;
+pub mod pace;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -20,14 +21,18 @@ use std::sync::Arc;
 use crate::endpoint::{BodyError, OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 use crate::frame::{self, FrameError};
 use crate::proto::{AgentToServer, ServerToAgent};
-use axum::body::Bytes;
-use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
-use axum::http::{header, Extensions, HeaderMap, StatusCode};
+use axum::body::{Body, Bytes};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
+use axum::http::{header, Extensions, HeaderMap, StatusCode, Version};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
 use axum::Router;
+use futures_util::{SinkExt as _, StreamExt as _};
 use prost::Message as _;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 use tracing::warn;
 
 /// The transport one connection arrived on.
@@ -184,9 +189,33 @@ pub trait Handler: Send + Sync + 'static {
         Reply::Nothing
     }
 
+    /// The close frame to send when the outbound side ends the connection; by default one with no
+    /// code.
+    fn closing(&self, _connection: &Self::Connection) -> Option<Closing> {
+        None
+    }
+
     /// The connection is gone: after its one exchange on plain HTTP, when the socket closes on a
     /// WebSocket.
     fn on_closed(&self, _connection: Self::Connection) {}
+}
+
+/// Why the endpoint closes a WebSocket: a close code of RFC 6455 and a reason for the peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Closing {
+    pub code: u16,
+    pub reason: String,
+}
+
+impl Closing {
+    /// `1008`: the connection violates the endpoint's policy — what a revoked proof does.
+    #[must_use]
+    pub fn policy(reason: &str) -> Self {
+        Closing {
+            code: u16::from(CloseCode::Policy),
+            reason: reason.to_string(),
+        }
+    }
 }
 
 struct Endpoint<H> {
@@ -222,45 +251,126 @@ fn peer_of(extensions: &Extensions) -> Option<SocketAddr> {
         .map(|ConnectInfo(peer)| *peer)
 }
 
+/// The WebSocket upgrade, answered here and taken over through hyper, so that `opamp` reads the
+/// frames itself and can judge a message by its data (ADR-0024 clause 5).
 async fn upgrade<H: Handler>(
     State(endpoint): State<Arc<Endpoint<H>>>,
-    headers: HeaderMap,
-    extensions: Extensions,
-    upgrade: WebSocketUpgrade,
+    mut request: Request,
 ) -> Response {
-    let request = RequestInfo {
-        transport: Transport::WebSocket,
-        headers: &headers,
-        extensions: &extensions,
-        peer: peer_of(&extensions),
+    let refuse = |why: &str| (StatusCode::BAD_REQUEST, why.to_string()).into_response();
+    // `get` routes HEAD here too; an upgrade is a GET (RFC 6455 §4.1).
+    if request.method() != axum::http::Method::GET {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "a WebSocket upgrade is a GET",
+        )
+            .into_response();
+    }
+    let headers = request.headers();
+    let has_token = |name: &header::HeaderName, token: &str| {
+        headers.get_all(name).iter().any(|value| {
+            value.to_str().is_ok_and(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(token))
+            })
+        })
     };
-    let (connection, outbound) = match endpoint.handler.on_connecting(&request) {
+    if request.version() != Version::HTTP_11 {
+        return refuse("a WebSocket upgrade needs HTTP/1.1");
+    }
+    if !has_token(&header::CONNECTION, "upgrade") || !has_token(&header::UPGRADE, "websocket") {
+        return refuse("expected a WebSocket upgrade");
+    }
+    if header_str(headers, &header::SEC_WEBSOCKET_VERSION) != "13" {
+        return refuse("the WebSocket version must be 13");
+    }
+    let Some(key) = headers.get(header::SEC_WEBSOCKET_KEY) else {
+        return refuse("the WebSocket key is missing");
+    };
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    let info = RequestInfo {
+        transport: Transport::WebSocket,
+        headers,
+        extensions: request.extensions(),
+        peer: peer_of(request.extensions()),
+    };
+    let (connection, outbound) = match endpoint.handler.on_connecting(&info) {
         Ok(accepted) => accepted,
         Err(refusal) => return refusal.into_response(),
     };
+    let floor = request.extensions().get::<pace::Pace>().copied();
+    let Some(on_upgrade) = request
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>()
+    else {
+        endpoint.handler.on_closed(connection);
+        return (
+            StatusCode::UPGRADE_REQUIRED,
+            "this connection cannot be upgraded",
+        )
+            .into_response();
+    };
     let limit = endpoint.limit;
-    upgrade
+    tokio::spawn(async move {
+        let upgraded = match on_upgrade.await {
+            Ok(upgraded) => upgraded,
+            Err(e) => {
+                warn!(error = %e, "a WebSocket upgrade failed");
+                endpoint.handler.on_closed(connection);
+                return;
+            }
+        };
+        let stream = pace::FrameMeter::new(hyper_util::rt::TokioIo::new(upgraded));
         // The transport's own guard, so an oversized frame is refused before it is buffered whole;
         // the loop still checks, because that is what turns the refusal into the 1009 close. The
         // per-frame cap moves with it: left at its default it would refuse messages *below* the
         // configured limit, which is the limit's business.
-        .max_message_size(limit)
-        .max_frame_size(limit)
-        .on_upgrade(move |socket| serve_socket(socket, endpoint, connection, outbound))
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
+        let socket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
+        let messages = floor.map(pace::Messages::new);
+        serve_socket(socket, endpoint, connection, outbound, messages).await;
+    });
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "websocket")
+        .header(header::SEC_WEBSOCKET_ACCEPT, accept)
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// One WebSocket connection, until the peer closes it, it fails, or its outbound side ends.
-async fn serve_socket<H: Handler>(
-    mut socket: WebSocket,
+async fn serve_socket<H: Handler, S>(
+    mut socket: WebSocketStream<pace::FrameMeter<S>>,
     endpoint: Arc<Endpoint<H>>,
     mut connection: H::Connection,
     mut outbound: Option<H::Outbound>,
-) {
+    mut messages: Option<pace::Messages>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let handler = &endpoint.handler;
     let limit = endpoint.limit;
+    // A listener that holds its connections to a floor (ADR-0023 clause 14) is judged once a window.
+    let mut check = messages.as_ref().map(|messages| {
+        let mut check = tokio::time::interval_at(
+            tokio::time::Instant::now() + messages.window(),
+            messages.window(),
+        );
+        // Checks a busy loop missed are not made up in a burst: two in a row would judge a message
+        // by what arrived in no time at all.
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        check
+    });
     loop {
         tokio::select! {
-            incoming = socket.recv() => {
+            // What has arrived is read before a check judges it, so bytes that waited on this side
+            // while the loop was busy count for the peer.
+            biased;
+            incoming = socket.next() => {
                 let message = match incoming {
                     Some(Ok(message)) => message,
                     // The upgrade capped what this socket will buffer, so a peer past the limit
@@ -277,7 +387,7 @@ async fn serve_socket<H: Handler>(
                 let data = match message {
                     Message::Binary(data) => data,
                     Message::Close(_) => break,
-                    // axum answers pings itself; pongs and text need nothing from us.
+                    // The library answers pings itself; pongs and text need nothing from us.
                     _ => continue,
                 };
                 let reply = match frame::decode::<AgentToServer>(&data, limit) {
@@ -302,7 +412,11 @@ async fn serve_socket<H: Handler>(
             }
             item = next_outbound(&mut outbound) => {
                 let Some(item) = item else {
-                    let _ = socket.send(Message::Close(None)).await;
+                    let frame = handler.closing(&connection).map(|closing| CloseFrame {
+                        code: CloseCode::from(closing.code),
+                        reason: closing.reason.into(),
+                    });
+                    let _ = socket.send(Message::Close(frame)).await;
                     break;
                 };
                 let mut gone = false;
@@ -316,9 +430,37 @@ async fn serve_socket<H: Handler>(
                     break;
                 }
             }
+            scheduled = next_check(&mut check) => {
+                let Some(messages) = messages.as_mut() else { continue };
+                let now = socket.get_ref().progress();
+                // A check this late means the loop was busy and read nothing meanwhile: the peer is
+                // judged from here, not by what waited on this side.
+                if scheduled.elapsed() > messages.window() / 4 {
+                    messages.rebase(now);
+                    continue;
+                }
+                if messages.check(now) {
+                    warn!("closing the WebSocket: a message fell below its pace");
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CloseCode::Policy,
+                            reason: "message below its pace".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
         }
     }
     handler.on_closed(connection);
+}
+
+/// The next check of a paced socket, and when it was due; never, for one without a floor.
+async fn next_check(check: &mut Option<tokio::time::Interval>) -> tokio::time::Instant {
+    match check {
+        Some(check) => check.tick().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn next_outbound<O: Outbound>(outbound: &mut Option<O>) -> Option<O::Item> {
@@ -332,7 +474,14 @@ async fn next_outbound<O: Outbound>(outbound: &mut Option<O>) -> Option<O::Item>
 /// the specification's MUST for the outbound direction — but discarded with a log line, since the
 /// fault is on this end and the connection is fine. Returns `false` only when the connection is
 /// gone.
-async fn send_framed(socket: &mut WebSocket, message: &ServerToAgent, limit: usize) -> bool {
+async fn send_framed<S>(
+    socket: &mut WebSocketStream<S>,
+    message: &ServerToAgent,
+    limit: usize,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     match frame::encode_within(message, limit) {
         Ok(framed) => socket.send(Message::Binary(framed.into())).await.is_ok(),
         Err(e) => {
@@ -345,7 +494,7 @@ async fn send_framed(socket: &mut WebSocket, message: &ServerToAgent, limit: usi
 /// The close the specification names for a message past the size limit: 1009, Message Too Big.
 fn too_big_close() -> Message {
     Message::Close(Some(CloseFrame {
-        code: close_code::SIZE,
+        code: CloseCode::Size,
         reason: frame::TOO_BIG_CLOSE_REASON.into(),
     }))
 }

@@ -91,6 +91,7 @@ mod tests {
 
     /// Until a directory is named, the writer swallows everything rather than failing: it is
     /// consulted from the first line of `main`, before any instance exists.
+    /// Verifies: ADR-0028
     #[test]
     fn the_writer_discards_until_a_file_is_opened() {
         // `FILE` is process-global and another test may have opened it, so this asserts the
@@ -102,6 +103,7 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0028
     #[test]
     fn the_log_directory_hangs_off_the_state_directory() {
         assert_eq!(

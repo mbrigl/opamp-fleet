@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opamp::attributes;
@@ -24,10 +24,13 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::agent_store::{AgentStore, PersistedAgent};
+use crate::audit::{Audit, Entry};
 use crate::configs::{self, ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{deployment_for, Deployment, DeploymentError, DeploymentStore};
+use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
+use crate::revocation::{CertId, Facts, Presented, Revocations, Signed};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -320,11 +323,24 @@ pub trait Clock: Send + Sync {
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
-    /// The signed certificate, PEM, for a CSR in PEM.
+    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself.
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str) -> Result<String, String>;
+    fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String>;
+
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0026
+    /// clause 27); `Ok(None)` when it carries none.
+    ///
+    /// # Errors
+    /// Returns the `BadRequest` text for a proof that does not hold.
+    fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String>;
+
+    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0026).
+    ///
+    /// # Errors
+    /// Returns the `BadRequest` text for a request that claims another identity.
+    fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
 }
 
 /// Why the package store refuses an upload: its whole-store ceiling (ADR-0018).
@@ -412,6 +428,17 @@ pub struct AppState {
     /// The authority that signs Agent CSRs (ADR-0026); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
+    /// The enrolment window and its queue (ADR-0026); `None` while `[enrolment]` is not set, and no
+    /// host enrols.
+    enrolment: Option<Arc<Enrolment>>,
+    /// What the client CA signed and what is revoked (ADR-0031); `None` only where a test serves
+    /// without it.
+    revocations: Option<Arc<Revocations>>,
+    /// The audit record every security decision goes to (ADR-0030); `None` only in tests.
+    audit: Option<Arc<dyn Audit>>,
+    /// The connection-settings hash last recorded as offered to each Agent, so a rotation is
+    /// recorded once per offer and not once per poll.
+    offered: Mutex<HashMap<InstanceUid, Vec<u8>>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0022); empty offers no destination.
@@ -484,6 +511,10 @@ impl AppState {
             connection_offer: None,
             packages: None,
             client_ca: None,
+            enrolment: None,
+            revocations: None,
+            audit: None,
+            offered: Mutex::new(HashMap::new()),
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -623,6 +654,194 @@ impl AppState {
         self
     }
 
+    /// Arms enrolment (ADR-0026): a host with a bootstrap certificate may ask for its first one,
+    /// and an operator decides.
+    #[must_use]
+    pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
+        self.enrolment = enrolment;
+        self
+    }
+
+    /// Arms the register and the revocation list (ADR-0031).
+    #[must_use]
+    pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
+        self.revocations = revocations;
+        self
+    }
+
+    /// The register and the revocation list.
+    pub fn revocations(&self) -> Option<&Arc<Revocations>> {
+        self.revocations.as_ref()
+    }
+
+    /// Arms the audit record (ADR-0030).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    /// The audit record.
+    pub fn audit(&self) -> Option<&Arc<dyn Audit>> {
+        self.audit.as_ref()
+    }
+
+    /// Records a decision this Server is about to act on; without a record it is not taken
+    /// (ADR-0030 clause 6).
+    fn audited(&self, entry: Entry) -> Result<(), String> {
+        match &self.audit {
+            Some(audit) => audit
+                .record(entry)
+                .map_err(|_| "the audit record is unavailable — retry shortly".to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// Records a refusal; it is refused either way.
+    fn audit_refusal(&self, entry: Entry) {
+        if let Some(audit) = &self.audit {
+            audit.refusal(entry);
+        }
+    }
+
+    /// Records a certificate the client CA signed, before it is offered (ADR-0031 clause 2,
+    /// ADR-0030 clause 1).
+    fn record_issued(
+        &self,
+        signed: &Signed,
+        instance_uid: &[u8],
+        predecessor: Option<CertId>,
+    ) -> Result<(), String> {
+        self.audited(
+            Entry::new("issuance.signed", "issued")
+                .with(
+                    "kind",
+                    if predecessor.is_some() {
+                        "renewal"
+                    } else {
+                        "enrolment"
+                    },
+                )
+                .with("issuer", signed.facts.issuer_name.clone())
+                .with(
+                    "authority",
+                    self.revocations.as_ref().and_then(|revocations| {
+                        revocations
+                            .authority_of(&signed.facts.id.issuer)
+                            .map(|authority| authority.role.clone())
+                    }),
+                )
+                .with("serial", signed.facts.id.serial.clone())
+                .with("subject", signed.facts.subject.clone())
+                .with("key_fingerprint", signed.facts.key_fingerprint.clone())
+                .with("instance_uid", hex::encode(instance_uid))
+                .with(
+                    "predecessor_serial",
+                    predecessor.as_ref().map(|id| id.serial.clone()),
+                ),
+        )?;
+        match &self.revocations {
+            Some(revocations) => revocations
+                .record(signed.facts.clone(), instance_uid, predecessor)
+                .map_err(|e| format!("cannot record the issued certificate: {e}")),
+            None => Ok(()),
+        }
+    }
+
+    /// What a CSR renews, and the host the new certificate is for (ADR-0026 clause 27). A renewal
+    /// proof names the certificate whose key signed the new one — through a Gateway too — and the
+    /// host carries on from it; without one, the certificate the connection presented is renewed.
+    /// A certificate that names no host — one an operator provisioned — gets a host derived from
+    /// its issuer and serial, the same on every retry.
+    fn renews(
+        &self,
+        ca: &dyn CertificateSigner,
+        csr: &str,
+        presented: Option<&Presented>,
+    ) -> Result<(Option<CertId>, String), String> {
+        let derived = |id: &CertId| {
+            use sha2::Digest as _;
+            let digest = sha2::Sha256::digest(format!("{}\n{}", id.issuer, id.serial));
+            InstanceUid::from_wire(&digest[..16])
+                .map_or_else(|| hex::encode(&digest[..16]), |uid| uid.to_string())
+        };
+        if let Some(old) = ca.renewal_proof(csr)? {
+            if self
+                .revocations
+                .as_ref()
+                .is_some_and(|revocations| revocations.is_certificate_revoked(&old.id))
+            {
+                return Err("the certificate this request renews is revoked".to_string());
+            }
+            let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
+            return Ok((Some(old.id), host));
+        }
+        Ok(match presented {
+            Some(presented) => (
+                Some(presented.id.clone()),
+                presented
+                    .host
+                    .clone()
+                    .unwrap_or_else(|| derived(&presented.id)),
+            ),
+            None => (None, InstanceUid::default().to_string()),
+        })
+    }
+
+    /// The enrolment window and its queue, while `[enrolment]` is set.
+    pub fn enrolment(&self) -> Option<&Arc<Enrolment>> {
+        self.enrolment.as_ref()
+    }
+
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0026 clause 22).
+    ///
+    /// # Errors
+    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
+    /// [`DecisionError::Sign`] when no CA is configured or it refuses the request.
+    pub fn approve_enrolment(&self, id: &str) -> Result<(), DecisionError> {
+        let enrolment = self.enrolment.as_ref().ok_or(DecisionError::NotFound)?;
+        let signer = self.client_ca.as_deref().ok_or_else(|| {
+            DecisionError::Sign("this Server issues no client certificates".into())
+        })?;
+        // A new host: its identity is minted here and carried by every renewal (ADR-0026 clause 7).
+        let host = InstanceUid::default().to_string();
+        enrolment.approve(id, signer, &host, &|signed, instance_uid| {
+            self.record_issued(signed, instance_uid, None)
+        })
+    }
+
+    /// What an enrolment connection is told (ADR-0026 clause 21): the capabilities that say it may
+    /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
+    /// connection-settings offer with no private key in it.
+    pub fn enrolment_answer(
+        &self,
+        instance_uid: &[u8],
+        certificate: Option<String>,
+    ) -> ServerToAgent {
+        let mut capabilities = ServerCapabilities::AcceptsStatus as u64;
+        if self.client_ca.is_some() {
+            capabilities |= ServerCapabilities::AcceptsConnectionSettingsRequest as u64
+                | ServerCapabilities::OffersConnectionSettings as u64;
+        }
+        ServerToAgent {
+            instance_uid: instance_uid.to_vec(),
+            capabilities,
+            connection_settings: certificate.map(|cert| {
+                compose_settings_offer(
+                    Some(OpAmpConnectionSettings {
+                        certificate: Some(TlsCertificate {
+                            cert: cert.into_bytes(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    TelemetryOffer::default(),
+                )
+            }),
+            ..Default::default()
+        }
+    }
+
     /// Arms package delivery (ADR-0018); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
@@ -760,6 +979,7 @@ impl AppState {
                         )))
                     }
                 };
+                refuse_unsigned(store, &deployment)?;
                 let id = deployment
                     .package_for(
                         crate::packages::reported_agent_type(
@@ -882,6 +1102,7 @@ impl AppState {
                 "deployment {name:?} holds no packages — put one in it before rolling it out"
             )));
         }
+        refuse_unsigned(store, deployment)?;
         let mut assigned = 0usize;
         for (uid, record) in fleet.iter_mut() {
             let effective = record.effective_description().map(Cow::into_owned);
@@ -1167,6 +1388,20 @@ impl AppState {
         transport: Transport,
         conn: Option<ConnId>,
     ) -> Processed {
+        self.process_presented(msg, transport, conn, None)
+    }
+
+    /// [`process`](Self::process) for a connection that presented a certificate: the host it was
+    /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
+    /// (ADR-0031 clause 2, ADR-0026 clauses 7 and 27).
+    pub fn process_presented(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+        presented: Option<&Presented>,
+    ) -> Processed {
+        let mut sender = msg.instance_uid.clone();
         let Some(mut uid) = InstanceUid::from_wire(&msg.instance_uid) else {
             warn!(
                 len = msg.instance_uid.len(),
@@ -1183,9 +1418,44 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0026
+        // clause 7): a certificate of another host does not speak for it, nor re-keys it. Such a
+        // reporter is re-keyed — it gets an identity of its own, never the one it claimed.
+        if let (Some(host), Some(revocations)) =
+            (presented.and_then(|p| p.host.as_deref()), &self.revocations)
+        {
+            if revocations.check_report(host, uid.as_bytes()).is_err() {
+                let new_uid = InstanceUid::default();
+                warn!(
+                    claimed = %uid, new = %new_uid, host,
+                    "an Agent of another host was claimed; rekeying the reporter"
+                );
+                self.audit_refusal(
+                    Entry::new("identity.claimed", "rekeyed")
+                        .with("claimed", uid.to_string())
+                        .with("host", host.to_string()),
+                );
+                identification = Some(AgentIdentification {
+                    new_instance_uid: new_uid.as_bytes().to_vec(),
+                });
+                uid = new_uid;
+                // A CSR in the same message must not name the claimed identity either.
+                sender = uid.as_bytes().to_vec();
+                if let Err(e) = revocations.check_report(host, uid.as_bytes()) {
+                    return Processed {
+                        reply: bad_request(&e),
+                        uid: None,
+                        disconnected: false,
+                    };
+                }
+            }
+        }
+
         // The Agent asked the Server to assign its identity (AgentToServerFlags_RequestInstanceUid):
         // mint a UUID v7 and re-key the record; the reply tells the Agent to adopt it.
-        if msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0 {
+        if identification.is_none()
+            && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
+        {
             let new_uid = InstanceUid::default();
             if let Some(record) = fleet.remove(&uid) {
                 fleet.insert(new_uid, record);
@@ -1197,6 +1467,12 @@ impl AppState {
             identification = Some(AgentIdentification {
                 new_instance_uid: new_uid.as_bytes().to_vec(),
             });
+            // A re-key the Agent asked for keeps its host (ADR-0026 clause 7).
+            if let Some(revocations) = &self.revocations {
+                if let Err(e) = revocations.rebind(uid.as_bytes(), new_uid.as_bytes()) {
+                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
+                }
+            }
             uid = new_uid;
         }
 
@@ -1300,9 +1576,82 @@ impl AppState {
             if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
             }
+            let settled = status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
+                || status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32;
+            let changed = record
+                .connection_settings_status
+                .as_ref()
+                .is_none_or(|previous| {
+                    previous.status != status.status
+                        || previous.last_connection_settings_hash
+                            != status.last_connection_settings_hash
+                });
+            let rotated = self
+                .offered
+                .lock()
+                .expect("offered lock")
+                .get(&uid)
+                .is_some_and(|hash| *hash == status.last_connection_settings_hash);
+            // An acknowledgement of the standing offer when it carries a credential — recorded
+            // whether or not this Server's memory of having offered it survived a restart.
+            let credential_offered = self
+                .connection_offer
+                .as_ref()
+                .is_some_and(|offer| offer.settings.headers.is_some());
+            if settled && changed && (rotated || credential_offered) {
+                self.audit_refusal(
+                    Entry::new(
+                        "rotation.acknowledged",
+                        if status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
+                        {
+                            "applied"
+                        } else {
+                            "failed"
+                        },
+                    )
+                    .with("instance_uid", uid.to_string())
+                    .with("hash", hex::encode(&status.last_connection_settings_hash))
+                    .with(
+                        "error",
+                        (!status.error_message.is_empty()).then(|| status.error_message.clone()),
+                    ),
+                );
+            }
             record.connection_settings_status = Some(status);
         }
         if let Some(statuses) = msg.package_statuses {
+            use opamp::proto::PackageStatusEnum as P;
+            for (name, status) in &statuses.packages {
+                let before = record
+                    .package_statuses
+                    .as_ref()
+                    .and_then(|previous| previous.packages.get(name))
+                    .map(|previous| (previous.status, previous.agent_has_version.clone()));
+                let outcome = if status.status == P::Installed as i32 {
+                    Some("installed")
+                } else if status.status == P::InstallFailed as i32 {
+                    Some("failed")
+                } else {
+                    None
+                };
+                if let (Some(outcome), true) = (
+                    outcome,
+                    before != Some((status.status, status.agent_has_version.clone())),
+                ) {
+                    self.audit_refusal(
+                        Entry::new("package.outcome", outcome)
+                            .with("instance_uid", uid.to_string())
+                            .with("package", name.clone())
+                            .with("version", status.agent_has_version.clone())
+                            .with("offered_version", status.server_offered_version.clone())
+                            .with(
+                                "error",
+                                (!status.error_message.is_empty())
+                                    .then(|| status.error_message.clone()),
+                            ),
+                    );
+                }
+            }
             for status in statuses.packages.values() {
                 if status.status == opamp::proto::PackageStatusEnum::InstallFailed as i32 {
                     warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
@@ -1347,13 +1696,24 @@ impl AppState {
                     None => Err("this Server issues no client certificates".to_string()),
                     Some(ca) => String::from_utf8(request.csr.clone())
                         .map_err(|_| "the certificate signing request is not PEM".to_string())
-                        .and_then(|csr| ca.sign(&csr)),
+                        .and_then(|csr| {
+                            // The message's own instance_uid, before any re-key (ADR-0026).
+                            ca.check_claims(&csr, &sender)?;
+                            let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
+                            let signed = ca.sign(&csr, &host)?;
+                            self.record_issued(&signed, &sender, predecessor)?;
+                            Ok(signed)
+                        }),
                 };
                 match outcome {
-                    Ok(cert) => {
-                        info!(agent = %uid, "issued a client certificate");
+                    Ok(signed) => {
+                        info!(
+                            agent = %uid,
+                            serial = %signed.facts.id.serial,
+                            "issued a client certificate"
+                        );
                         Some(TlsCertificate {
-                            cert: cert.into_bytes(),
+                            cert: signed.pem.into_bytes(),
                             // The Agent generated its own key and keeps it — the point of the CSR
                             // flow — so the Server has nothing to put here and must not invent it.
                             private_key: Vec::new(),
@@ -1362,6 +1722,11 @@ impl AppState {
                     }
                     Err(e) => {
                         warn!(agent = %uid, error = %e, "refused a certificate signing request");
+                        self.audit_refusal(
+                            Entry::new("issuance.refused", "refused")
+                                .with("instance_uid", uid.to_string())
+                                .with("reason", e.clone()),
+                        );
                         // The report's updates above are already in the record, so they are
                         // persisted even though the CSR is refused (ADR-0013).
                         self.persist_if_dirty(&uid, record);
@@ -1436,7 +1801,7 @@ impl AppState {
         let connection_settings = if disconnected {
             None
         } else {
-            self.settings_offer(record, issued)
+            self.settings_offer(&uid, record, issued)
         };
 
         // The package offer (ADR-0018), gated by capability and the reported
@@ -1535,6 +1900,7 @@ impl AppState {
     /// with it, exactly as the Baseline describes.
     fn settings_offer(
         &self,
+        uid: &InstanceUid,
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
@@ -1579,7 +1945,29 @@ impl AppState {
         if settings.is_none() && telemetry.is_empty() {
             return None;
         }
-        gate(record, compose_settings_offer(settings, telemetry))
+        let carries_credential = settings
+            .as_ref()
+            .is_some_and(|settings| settings.headers.is_some());
+        let offer = gate(record, compose_settings_offer(settings, telemetry))?;
+        if carries_credential {
+            let fresh = self.offered.lock().expect("offered lock").get(uid) != Some(&offer.hash);
+            if fresh {
+                // A credential is not handed out unrecorded (ADR-0030 clause 6): without a record
+                // there is no offer this time, and the next report asks again.
+                self.audited(
+                    Entry::new("rotation.offered", "offered")
+                        .with("instance_uid", uid.to_string())
+                        .with("hash", hex::encode(&offer.hash)),
+                )
+                .ok()?;
+                let mut offered = self.offered.lock().expect("offered lock");
+                if offered.len() >= 100_000 {
+                    offered.clear();
+                }
+                offered.insert(*uid, offer.hash.clone());
+            }
+        }
+        Some(offer)
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a rollout act changes an assignment;
@@ -2539,6 +2927,23 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
         .join("\n")
 }
 
+/// Refuses a rollout of a Deployment that lacks a signature for any entry of any Package it holds,
+/// naming each such Package and its platforms; nothing is released (ADR-0021).
+fn refuse_unsigned(
+    store: &crate::packages::PackageStore,
+    deployment: &Deployment,
+) -> Result<(), RolloutError> {
+    let unsigned = store.unsigned_in(deployment);
+    if unsigned.is_empty() {
+        return Ok(());
+    }
+    Err(RolloutError::NotApplicable(format!(
+        "deployment {:?} carries no signature for {} — sign every artifact before rolling it out",
+        deployment.name,
+        unsigned.join("; ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2599,6 +3004,7 @@ mod tests {
 
     /// The offered interval wins over the configured default: it is the period this Server actually
     /// asked for, so it is the one silence should be measured against.
+    /// Verifies: ADR-0027
     #[test]
     fn an_offered_heartbeat_interval_sets_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2896,6 +3302,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment fields loads as **assigned nothing** —
     /// the Server never invents a rollout at startup — and what it could receive shows up as
     /// waiting instead, which is the one thing an operator has to act on.
+    /// Verifies: ADR-0021
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3106,5 +3513,75 @@ mod tests {
         );
         let full = state.with_max_total_package_bytes(0);
         assert_eq!(full.admit_upload(), Err(StoreFull::AtLimit { limit: 0 }));
+    }
+
+    /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
+    /// to an identity of its own, and the Agent it claimed keeps its record.
+    /// Verifies: ADR-0026, G-17
+    #[test]
+    fn a_host_cannot_report_for_another_hosts_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(
+                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
+                ),
+                Arc::new(crate::clock::SystemClock),
+                Arc::new(|_: &str| false),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations));
+        let presented = |host: &str, serial: &str| Presented {
+            id: CertId::new(b"CA", serial),
+            host: Some(host.to_string()),
+        };
+        let victim = InstanceUid::default();
+        let own = state.process_presented(
+            {
+                let mut first = AgentToServer {
+                    instance_uid: victim.as_bytes().to_vec(),
+                    ..Default::default()
+                };
+                first.capabilities = opamp::proto::AgentCapabilities::ReportsStatus as u64;
+                first
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h1", "01")),
+        );
+        assert_eq!(own.uid, Some(victim));
+        assert!(own.reply.agent_identification.is_none());
+
+        let claimed = state.process_presented(
+            AgentToServer {
+                instance_uid: victim.as_bytes().to_vec(),
+                flags: AgentToServerFlags::RequestInstanceUid as u64,
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h2", "02")),
+        );
+        let new_uid = claimed.uid.expect("an identity");
+        assert_ne!(new_uid, victim, "another host spoke for the Agent");
+        assert_eq!(
+            claimed
+                .reply
+                .agent_identification
+                .expect("told to adopt it")
+                .new_instance_uid,
+            new_uid.as_bytes().to_vec()
+        );
+        assert!(
+            state
+                .snapshot()
+                .iter()
+                .any(|agent| agent.instance_uid == victim.to_string()),
+            "the claimed Agent's record moved"
+        );
     }
 }

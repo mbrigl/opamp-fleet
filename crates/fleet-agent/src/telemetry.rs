@@ -17,7 +17,7 @@
 //! `opentelemetry-semantic-conventions` rather than string literals of this project's own.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr};
+
 use std::time::Duration;
 
 use opamp::attributes::{
@@ -458,19 +458,16 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// The Baseline's "MAY refuse to send the telemetry if the URL begins with `http://`", taken.
 ///
 /// The Resource carries the Agent's identifying attributes and the log records carry whatever this
-/// Client logs, so plaintext across a network the operator does not control is refused rather than
-/// warned about — one step firmer than the credential warning of ADR-0026, because this is a
-/// continuous stream. What that leaves is the private address space (ADR-0022): loopback, and the
-/// RFC 1918 and unique-local ranges, where the stream stays inside the boundary the operator
-/// already owns. `tls` and `proxy` are refused for the same reasons they are on the OpAMP settings
-/// (ADR-0026).
+/// Client logs, so plaintext is refused anywhere but on the host itself: the loopback literals
+/// `127.0.0.1` and `::1` (ADR-0022). A private address is not a private network, and a name is
+/// not an address. `tls` and `proxy` are refused for the same reasons they are on the OpAMP
+/// settings (ADR-0026).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
-    if endpoint.starts_with("http://") && !is_private(endpoint) {
+    if endpoint.starts_with("http://") && opamp::endpoint::check_url(endpoint).is_err() {
         return Err(format!(
             "{field}: refusing to send own telemetry to {endpoint} in cleartext — a cleartext \
-             destination must be loopback or a private address (10/8, 172.16/12, 192.168/16, \
-             fc00::/7), otherwise use https://"
+             destination must be 127.0.0.1 or ::1, otherwise use https://"
         ));
     }
     if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
@@ -566,7 +563,9 @@ impl std::fmt::Debug for RuntimeBoundClient {
 }
 
 /// The HTTP client the OTLP exporters send through: this Client's TLS trust, plus the client
-/// certificate the offer named, if it named one.
+/// certificate the offer named, if it named one. Without an offered certificate it presents none —
+/// the fleet identity is for the Server, not for a telemetry destination (ADR-0022) — and it
+/// follows no redirect, so a destination cannot steer the export to another host or to plaintext.
 ///
 /// The certificate machinery is ADR-0026's, reused as-is (ADR-0022 point 22): the offered `cert` is
 /// paired with the key already on disk — the one the CSR was made for — because that key is what
@@ -586,13 +585,18 @@ fn exporter_client(
         .as_ref()
         .map(|certificate| certificate.cert.as_slice())
         .filter(|cert| !cert.is_empty());
-    let builder = crate::tls::client_tls_for(config, offered)
+    let tls = match offered {
+        Some(cert) => crate::tls::client_tls_for(config, Some(cert)),
+        None => crate::tls::trust(config),
+    };
+    let builder = tls
         .and_then(|tls| {
             tls.apply(
                 // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps
                 // its own for the client it would have built, and never applies it to this one.
                 reqwest::Client::builder()
                     .use_rustls_tls()
+                    .redirect(reqwest::redirect::Policy::none())
                     .timeout(EXPORT_TIMEOUT),
             )
         })
@@ -606,47 +610,6 @@ fn exporter_client(
         format!("{field}: own telemetry can only be started from within the Tokio runtime")
     })?;
     Ok(RuntimeBoundClient { client, handle })
-}
-
-/// Whether a cleartext destination stays inside the private address space (ADR-0022).
-///
-/// Literal addresses only, plus `localhost` by name. A host name is **not** resolved to decide
-/// this: the answer would depend on what DNS says at the moment the offer is admitted, and an
-/// admission test that a re-resolve can flip is not one an operator can reason about. A collector
-/// reached by name over cleartext is therefore refused — name it by address, or put TLS in front
-/// of it.
-fn is_private(endpoint: &str) -> bool {
-    let host = host_of(endpoint);
-    if host == "localhost" {
-        return true;
-    }
-    match host.parse::<IpAddr>() {
-        // `is_private` is the RFC 1918 trio — 10/8, 172.16/12, 192.168/16 — and nothing else.
-        Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private(),
-        // `Ipv6Addr::is_unique_local` is still unstable, so fc00::/7 is spelled out here.
-        Ok(IpAddr::V6(v6)) => v6.is_loopback() || is_unique_local(v6),
-        Err(_) => false,
-    }
-}
-
-/// The host of an endpoint, without scheme, port, or path: `192.168.10.5:4318/v1/logs` →
-/// `192.168.10.5`, `[fd00::5]:4318/v1/logs` → `fd00::5`. An IPv6 literal is bracketed in a URL, so
-/// its own colons are only separable once the brackets are found.
-fn host_of(endpoint: &str) -> &str {
-    let authority = endpoint
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("");
-    match authority.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(""),
-    }
-}
-
-/// `fc00::/7`, IPv6's answer to RFC 1918.
-fn is_unique_local(addr: Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xfe00) == 0xfc00
 }
 
 /// The OTLP Resource: the Agent's identifying attributes, as the Baseline asks — "the combination
@@ -777,6 +740,7 @@ mod tests {
 
     /// With nothing offered nothing is built — the capability says the Client *can* report, and the
     /// Server's offer is what arms it.
+    /// Verifies: ADR-0022
     #[test]
     fn no_destination_builds_nothing() {
         let telemetry = Telemetry::new();
@@ -791,6 +755,7 @@ mod tests {
 
     /// The Baseline's "MAY refuse" for cleartext, taken — and refused *loudly*, so the Server is
     /// told rather than left believing the telemetry flows.
+    /// Verifies: ADR-0022
     #[test]
     fn a_cleartext_destination_beyond_the_private_network_is_refused() {
         let telemetry = Telemetry::new();
@@ -804,27 +769,28 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// The private address space is where cleartext is admitted and where it stops (ADR-0022).
-    /// The last two cases are the ones a prefix test would wave through: a public address that
-    /// merely reads like a private one, and a host *name* whose first labels are a private
-    /// address.
+    /// The loopback literals are where cleartext is admitted and where it stops (ADR-0022). The
+    /// private ranges, the name `localhost`, and the rest of 127.0.0.0/8 are all refused, and so is
+    /// a host *name* whose first labels read like an address.
+    /// Verifies: ADR-0022
     #[test]
     fn cleartext_is_admitted_by_address_and_nowhere_else() {
         for allowed in [
-            "http://localhost:4318/v1/metrics",
             "http://127.0.0.1:4318/v1/metrics",
             "http://[::1]:4318/v1/metrics",
+        ] {
+            assert!(
+                check(&destination(allowed), "own_metrics").is_ok(),
+                "{allowed} is a loopback literal"
+            );
+        }
+        for refused in [
+            "http://localhost:4318/v1/metrics",
+            "http://127.0.0.2:4318/v1/metrics",
             "http://192.168.10.5:4318/v1/metrics",
             "http://10.0.0.5:4318/v1/metrics",
             "http://172.16.0.5:4318/v1/metrics",
             "http://[fd00::5]:4318/v1/metrics",
-        ] {
-            assert!(
-                check(&destination(allowed), "own_metrics").is_ok(),
-                "{allowed} is inside the private address space"
-            );
-        }
-        for refused in [
             "http://collector.example:4318/v1/metrics",
             "http://203.0.113.5:4318/v1/metrics",
             "http://172.32.0.5:4318/v1/metrics",
@@ -838,10 +804,11 @@ mod tests {
         }
     }
 
-    /// A Collector on the LAN rather than on the host: the same shape as loopback, one hop out,
-    /// and still inside the boundary the operator owns (ADR-0022).
+    /// A Collector on the LAN rather than on the host is one hop out, and that hop is a network:
+    /// in cleartext it is refused and reported, and nothing is exported (ADR-0022).
+    /// Verifies: ADR-0022
     #[tokio::test]
-    async fn a_private_network_destination_is_allowed_in_cleartext() {
+    async fn a_private_network_destination_is_refused_in_cleartext() {
         opamp::tls::install_ring_provider();
         let telemetry = Telemetry::new();
         let offer = ConnectionSettingsOffers {
@@ -849,13 +816,15 @@ mod tests {
             ..Default::default()
         };
         let refused = telemetry.apply(&offer, &description(), &ClientConfig::default());
-        assert!(refused.is_empty(), "{refused:?}");
-        assert!(telemetry.reporting());
-        telemetry.shutdown();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].starts_with("own_metrics:"), "{}", refused[0]);
+        assert!(refused[0].contains("127.0.0.1 or ::1"), "{}", refused[0]);
+        assert!(!telemetry.reporting());
     }
 
     /// Loopback is the innermost case: a Collector on the same host over plain HTTP is the ordinary
     /// development and sidecar shape, and nothing leaves the machine at all.
+    /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_loopback_destination_is_allowed_in_cleartext() {
         opamp::tls::install_ring_provider();
@@ -873,6 +842,7 @@ mod tests {
     /// A destination offered with an empty endpoint is a withdrawal (ADR-0022 rule 18): the
     /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
     /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
+    /// Verifies: ADR-0022
     #[tokio::test]
     async fn an_empty_endpoint_stops_reporting_and_refuses_nothing() {
         opamp::tls::install_ring_provider();
@@ -900,6 +870,7 @@ mod tests {
 
     /// The same two fields refused on the OpAMP settings are refused here, and for the same
     /// reasons — named, not dropped in silence (ADR-0026, ADR-0022).
+    /// Verifies: ADR-0022
     #[test]
     fn offered_tls_settings_are_refused_by_name() {
         let telemetry = Telemetry::new();
@@ -924,6 +895,7 @@ mod tests {
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
+    /// Verifies: ADR-0022
     #[tokio::test]
     async fn an_offered_certificate_is_presented_by_the_exporter() {
         opamp::tls::install_ring_provider();
@@ -967,6 +939,7 @@ mod tests {
     /// And an offered certificate with no key to go with it is refused *by name* rather than
     /// dropped: without the CSR key there is nothing to prove possession with, so an exporter that
     /// silently connected without the certificate would be reporting success it did not have.
+    /// Verifies: ADR-0022
     #[test]
     fn an_offered_certificate_without_its_key_is_refused_and_named() {
         opamp::tls::install_ring_provider();
@@ -998,6 +971,7 @@ mod tests {
     /// But a private key *in the offer* is refused by name. ADR-0026's rule is that this Client's
     /// private key never leaves its host and is never handed to it — which is the whole reason the
     /// certificate is obtained through a CSR.
+    /// Verifies: ADR-0022
     #[test]
     fn an_offered_private_key_is_refused_by_name() {
         let telemetry = Telemetry::new();
@@ -1029,6 +1003,7 @@ mod tests {
     /// defaults to 60 s, so an exporter built without an explicit interval reports six times more
     /// slowly than recommended and nothing says so. Sampling and export share the constant, so this
     /// guards both.
+    /// Verifies: ADR-0022
     #[test]
     fn metrics_are_reported_at_the_interval_the_baseline_recommends() {
         assert_eq!(Telemetry::new().sample_interval(), Duration::from_secs(10));
@@ -1037,6 +1012,7 @@ mod tests {
     /// The Resource carries what identifies the Agent, which is what makes one host's several
     /// Agents distinguishable at the receiving end — and the operator's name for it beside them,
     /// which is what makes the result placeable against the fleet view.
+    /// Verifies: ADR-0022
     #[test]
     fn the_resource_carries_the_agents_identifying_attributes() {
         let resource = resource(&description());
@@ -1060,6 +1036,7 @@ mod tests {
     /// operating system and an architecture (ADR-0019) cannot be read against a fleet whose Agents
     /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
     /// host this Resource describes, so per-sample it would be a constant repeated on every point.
+    /// Verifies: ADR-0022
     #[test]
     fn the_resource_carries_the_platform() {
         let mut description = description();
@@ -1083,6 +1060,7 @@ mod tests {
     /// addresses and whatever the operator tagged this Agent with (ADR-0011) — the Resource is what
     /// leaves the host for a destination the *Server* named, so what goes in it is a named list,
     /// not the bag. This is the test that fails if that list is ever replaced by a filter.
+    /// Verifies: ADR-0022
     #[test]
     fn the_resource_carries_no_other_non_identifying_attribute() {
         let mut description = description();
@@ -1102,6 +1080,7 @@ mod tests {
 
     /// The instance name is non-identifying, so it is reported where an Agent has one and left out
     /// where it does not — an absent attribute says "unknown" where an empty one says nothing true.
+    /// Verifies: ADR-0022
     #[test]
     fn an_agent_without_an_instance_name_reports_none() {
         let mut description = description();
@@ -1115,6 +1094,7 @@ mod tests {
     /// itself — the next interval is a fresh request — so what is worth a test is the one that
     /// does not: a socket accepted and then left silent, which without this holds the exporter
     /// thread for good and takes own telemetry down until the process restarts.
+    /// Verifies: ADR-0022
     #[tokio::test]
     async fn an_export_to_a_destination_that_never_answers_gives_up() {
         opamp::tls::install_ring_provider();
@@ -1150,6 +1130,82 @@ mod tests {
         );
     }
 
+    /// The exporter's client offers TLS 1.3 and nothing older, so a destination that speaks only
+    /// TLS 1.2 cannot complete a handshake with it. Read off the wire: the ClientHello it sends
+    /// names TLS 1.3 alone in `supported_versions` and only the TLS 1.3 suites.
+    /// Verifies: ADR-0022
+    #[tokio::test]
+    async fn the_exporter_client_speaks_tls_1_3_alone() {
+        use tokio::io::AsyncReadExt as _;
+
+        opamp::tls::install_ring_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("https://{}/v1/metrics", listener.local_addr().unwrap());
+        let hello = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.expect("the exporter connects");
+            let mut header = [0u8; 5];
+            connection.read_exact(&mut header).await.expect("a record");
+            let mut record = vec![0u8; usize::from(u16::from_be_bytes([header[3], header[4]]))];
+            connection.read_exact(&mut record).await.expect("the hello");
+            record
+        });
+
+        let client = exporter_client(
+            &destination(&endpoint),
+            "own_metrics",
+            &ClientConfig::default(),
+        )
+        .expect("the client builds");
+        // Nobody answers the hello; the send fails, and what it offered is what is asserted.
+        let _ = tokio::time::timeout(Duration::from_secs(1), client.client.post(&endpoint).send())
+            .await;
+        let record = tokio::time::timeout(Duration::from_secs(5), hello)
+            .await
+            .expect("the hello arrives")
+            .expect("the reader");
+
+        assert_eq!(record[0], 1, "a ClientHello");
+        let length = |at: usize, width: usize| {
+            record[at..at + width]
+                .iter()
+                .fold(0usize, |n, b| n << 8 | usize::from(*b))
+        };
+        // handshake header (4), legacy version (2), random (32), then the session id.
+        let mut at = 4 + 2 + 32;
+        at += 1 + length(at, 1);
+        let suites: Vec<u16> = record[at + 2..at + 2 + length(at, 2)]
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        at += 2 + length(at, 2);
+        at += 1 + length(at, 1);
+        let extensions_end = at + 2 + length(at, 2);
+        at += 2;
+        let mut versions = None;
+        while at < extensions_end {
+            let (kind, size) = (length(at, 2), length(at + 2, 2));
+            if kind == 0x002b {
+                versions = Some(
+                    record[at + 5..at + 4 + size]
+                        .chunks(2)
+                        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            at += 4 + size;
+        }
+
+        assert_eq!(
+            versions,
+            Some(vec![0x0304]),
+            "supported_versions is TLS 1.3 alone"
+        );
+        assert!(
+            suites.iter().all(|suite| (0x1301..=0x1303).contains(suite)),
+            "only TLS 1.3 suites are offered: {suites:04x?}"
+        );
+    }
+
     /// The whole chain the traces half rests on (ADR-0022): a `tracing` span this Client writes,
     /// through the layer, the provider and the exporter, to the destination the Server offered.
     ///
@@ -1157,6 +1213,7 @@ mod tests {
     /// *except* the first, and the failure it guards against is silent: the exporter builds, the
     /// offer is acknowledged, the dashboard stays empty. It asserts the span's name and its
     /// recorded status, which is what makes a trace worth reading.
+    /// Verifies: ADR-0022
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_span_this_client_writes_reaches_the_offered_destination() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -1235,6 +1292,7 @@ mod tests {
     /// Asserted through the two functions the self-update uses — the ids it writes into its marker,
     /// and the parent it builds from them afterwards — because what the restart breaks is exactly
     /// the link between those two, and nothing else about it can be tested in one process.
+    /// Verifies: ADR-0022
     #[test]
     fn a_trace_survives_being_written_down_and_picked_up_again() {
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -1263,6 +1321,7 @@ mod tests {
 
     /// And an unusable pair changes nothing: the ids come from a file an older version wrote, and
     /// an update is not worth failing over a trace.
+    /// Verifies: ADR-0022
     #[test]
     fn an_unreadable_trace_reference_is_ignored() {
         use tracing_subscriber::layer::SubscriberExt as _;

@@ -128,8 +128,12 @@ pub async fn serve_guarded(
     // Through `listen::plane`, as the binary serves them (ADR-0023), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
     let handle = opamp::server::listen::Handle::new();
-    tokio::spawn(fleet_server::listen::plane(agent_listener, None, handle.clone()).serve(agents));
-    tokio::spawn(fleet_server::listen::plane(operator_listener, None, handle).serve(operators));
+    tokio::spawn(
+        fleet_server::listen::plane(agent_listener, None, 1024, handle.clone()).serve(agents),
+    );
+    tokio::spawn(
+        fleet_server::listen::plane(operator_listener, None, 1024, handle).serve(operators),
+    );
     (addr, rest_addr)
 }
 

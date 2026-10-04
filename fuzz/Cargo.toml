@@ -1,0 +1,70 @@
+# Fuzz targets for every parser that reads bytes from the network or from a downloaded artifact
+# (specification Q-2). Outside the workspace: libFuzzer needs a nightly compiler, and the workspace
+# builds on the pinned stable one. Run with `cargo +nightly fuzz run <target>` from the repository
+# root; README → "Build, Test & Run" names the command, and the fuzz workflow runs every target.
+[package]
+name = "fleet-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opamp = { path = "../crates/opamp", features = ["client", "server"] }
+fleet-agent = { path = "../crates/fleet-agent" }
+fleet-server = { path = "../crates/fleet-server" }
+prost = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+tempfile = "3"
+
+# Its own workspace, so the repository's stable build never compiles libFuzzer.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "body_decode"
+path = "fuzz_targets/body_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_receive"
+path = "fuzz_targets/client_receive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pem"
+path = "fuzz_targets/pem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csr_sign"
+path = "fuzz_targets/csr_sign.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_tree"
+path = "fuzz_targets/archive_tree.rs"
+test = false
+doc = false
+bench = false

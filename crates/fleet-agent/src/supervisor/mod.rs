@@ -99,7 +99,9 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     // Consenting to be updated names the package it will take — anything else is refused rather
     // than written over this binary (ADR-0020). Since ADR-0020 the consent stands unless the file
     // withdraws it, so this is the ordinary path rather than the opted-into one.
-    if let Some(package) = config.self_update_package() {
+    // And only from a signed package: without a verification key the consent is kept, but nothing
+    // is declared (ADR-0020) — the startup notice names the key.
+    if let (Some(package), Some(_)) = (config.self_update_package(), config.package_key()) {
         self_state.accept_packages_named(package.to_string());
     }
     // The self-Agent's effective configuration is its own file — `supervisor.toml` is what this
@@ -188,6 +190,128 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     resolved.plugin.check(&block.name, resolved.settings)
 }
 
+/// What a Server-delivered block may not bring (ADR-0032 clauses 18, 19), checked against
+/// `running` — the configuration in force, whose `[supervisors]` section the Server cannot change
+/// and whose block of the same name the delivered one may repeat.
+///
+/// # Errors
+/// Returns the reason the delivered block is refused, naming the block and what it brings.
+pub fn check_delivered_block(
+    running: &ClientConfig,
+    block: &SupervisorBlock,
+) -> Result<(), String> {
+    let current = running
+        .supervisors
+        .iter()
+        .find(|existing| existing.name == block.name && existing.kind == block.kind)
+        .map(|existing| &existing.settings);
+    let policy = &running.supervisor_defaults;
+    check_delivered_env(block, current, &policy.delivered_env)?;
+    if !policy.delivered_args {
+        for key in ["args", "version_args"] {
+            if block.settings.get(key) != current.and_then(|settings| settings.get(key)) {
+                return Err(format!(
+                    "supervisor {:?}: a delivered block may not set {key} — allow it with \
+                     [supervisors] delivered_args = true in this Client's supervisor.toml",
+                    block.name
+                ));
+            }
+        }
+    }
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
+    plugin
+        .check_delivered(&block.settings, current)
+        .map_err(|e| format!("supervisor {:?}: {e}", block.name))
+}
+
+/// Variables that steer which code a program loads — the dynamic loader's, `PATH`, the hooks of
+/// common runtimes — refused in a delivered block whatever `delivered_env` allows (ADR-0032 clause
+/// 18). Compared without regard to case, as Windows compares environment names.
+const LOADING_NAMES: &[&str] = &[
+    "PATH",
+    "GCONV_PATH",
+    "GLIBC_TUNABLES",
+    "OPENSSL_CONF",
+    "OPENSSL_ENGINES",
+    "DOTNET_STARTUP_HOOKS",
+    "NODE_OPTIONS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PERL5LIB",
+    "PERL5OPT",
+    "RUBYOPT",
+    "BASH_ENV",
+    "ENV",
+];
+
+/// Prefixes of the same kind: the loaders' own and the .NET profilers'.
+const LOADING_PREFIXES: &[&str] = &["LD_", "DYLD_", "COR_PROFILER", "CORECLR_PROFILER"];
+
+fn steers_loading(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    LOADING_NAMES.contains(&upper.as_str())
+        || LOADING_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+/// A delivered `env` entry is kept from the running block, or allowed by name — never a variable
+/// that steers loading, and never a value pointing into the Supervisor's own directories, where
+/// the Server delivers files no one signed.
+fn check_delivered_env(
+    block: &SupervisorBlock,
+    current: Option<&toml::Table>,
+    allowed: &[String],
+) -> Result<(), String> {
+    let Some(env) = block.settings.get("env").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    let running = current
+        .and_then(|settings| settings.get("env"))
+        .and_then(toml::Value::as_table);
+    for (name, value) in env {
+        if running.and_then(|running| running.get(name)) == Some(value) {
+            continue;
+        }
+        if steers_loading(name) {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not set {name} — it would steer which \
+                 code the program loads",
+                block.name
+            ));
+        }
+        if value.as_str().is_some_and(|value| {
+            value.contains("${config_dir}") || value.contains("${supervisor_dir}")
+        }) {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not point {name} into its own \
+                 directories — the Server delivers files there that no one signed",
+                block.name
+            ));
+        }
+        let upper = name.to_ascii_uppercase();
+        let permitted = allowed
+            .iter()
+            .map(|pattern| pattern.to_ascii_uppercase())
+            .any(|pattern| match pattern.strip_suffix('*') {
+                Some(prefix) => upper.starts_with(prefix),
+                None => pattern == upper,
+            });
+        if !permitted {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not set {name} — allow it in \
+                 [supervisors] delivered_env in this Client's supervisor.toml",
+                block.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The program a block resolves to, for callers that must inspect ownership rather than just
 /// spawn it. The Supervisor-set apply uses it to keep a Server-delivered block to a Client-owned
 /// program (ADR-0032).
@@ -262,12 +386,17 @@ pub fn start_supervisor(
     // What the target itself needs — for a tree that is its root and nothing below it, since the
     // live tree arrives by renaming a directory over that name (ADR-0018).
     install.prepare()?;
-    state.accept_packages();
-    info!(
-        supervisor = %block.name,
-        program = %program.path.display(),
-        "packages accepted: the program is this supervisor's own"
-    );
+    // Only a Client holding the operator's verification key takes packages: there is no unsigned
+    // posture (ADR-0018). Without it the program stays as installed, and the startup notice says
+    // why.
+    if config.package_key().is_some() {
+        state.accept_packages();
+        info!(
+            supervisor = %block.name,
+            program = %program.path.display(),
+            "packages accepted: the program is this supervisor's own"
+        );
+    }
 
     // Each Supervisor stops on its own channel (ADR-0032): the Client-wide shutdown is forwarded
     // into it, and retiring the Supervisor fires it alone — its Endpoint releases the port and
@@ -277,15 +406,20 @@ pub fn start_supervisor(
 
     // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0034): bound
     // unconditionally, before the process starts — a taken port fails startup, not later.
+    // Only the Managed Process may report through it (ADR-0034): a token fresh for every start,
+    // handed to the process in its environment and asked of every connection.
+    let endpoint_token = endpoint::new_token()?;
     endpoint::start(
         block.name.clone(),
         block.endpoint_port,
         EventSender::new(index, event_tx.clone()),
         stop.clone(),
         config.max_message_size_bytes,
+        endpoint_token.clone(),
     )?;
 
     let commands = plugin.start(SupervisorContext {
+        endpoint_token,
         name: block.name.clone(),
         supervisor_dir,
         config_dir,
@@ -335,6 +469,13 @@ mod tests {
                 .map(|d| format!("supervisor_dir = {:?}\n", d.to_string_lossy()))
                 .unwrap_or_default(),
         )
+    }
+
+    /// A configuration as `ClientConfig::load` leaves it when `[packages] verification_key` is set:
+    /// the decoded key is what decides whether anything takes packages (ADR-0018).
+    fn keyed(mut config: ClientConfig) -> ClientConfig {
+        config.package_key = Some(vec![7u8; 32]);
+        config
     }
 
     /// A block of a wrapped kind, as ADR-0010 means one to be written.
@@ -569,14 +710,14 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    // Verifies: ADR-0032
+    /// Verifies: ADR-0032, ADR-0018
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
 
         let owned: ClientConfig =
-            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+            keyed(toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse"));
         let mut engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             accepts_packages(&mut engine),
@@ -601,6 +742,30 @@ mod tests {
         assert!(err.contains("only programs it installs"), "{err}");
     }
 
+    /// Without the operator's verification key, no Agent of this Client takes packages — neither a
+    /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
+    /// installed unsigned (ADR-0018, ADR-0020).
+    /// Verifies: ADR-0018, ADR-0020, Q-1
+    #[tokio::test]
+    async fn without_a_verification_key_no_agent_takes_packages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let unkeyed: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let mut engine = build_engine(&unkeyed, &shutdown).expect("build");
+        assert!(
+            !engine.installs_packages(),
+            "something takes packages without a key"
+        );
+        for report in engine.poll_reports() {
+            assert_eq!(
+                report.capabilities & AgentCapabilities::AcceptsPackages as u64,
+                0,
+                "an Agent declares AcceptsPackages without a key"
+            );
+        }
+    }
+
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
     /// (ADR-0018) agrees with the `AcceptsPackages` capability an Agent actually declares.
     #[tokio::test]
@@ -609,7 +774,7 @@ mod tests {
         let (_tx, shutdown) = shutdown_channel();
 
         let owned: ClientConfig =
-            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+            keyed(toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse"));
         let engine = build_engine(&owned, &shutdown).expect("build");
         assert!(
             engine.installs_packages(),
@@ -633,7 +798,7 @@ mod tests {
         // The Client's own Agent consents by default (ADR-0020), so a Client with no Supervisor at
         // all still installs packages — its own.
         let bare: ClientConfig =
-            toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse");
+            keyed(toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse"));
         let engine = build_engine(&bare, &shutdown).expect("build");
         assert!(
             engine.installs_packages(),
@@ -655,7 +820,7 @@ mod tests {
              program_path = \"bin/fluent-bit\"\n",
             state = dir.path().join("state").to_string_lossy(),
         );
-        let parsed: ClientConfig = toml::from_str(&config).expect("parse");
+        let parsed: ClientConfig = keyed(toml::from_str(&config).expect("parse"));
         let mut engine = build_engine(&parsed, &shutdown).expect("build");
 
         assert!(

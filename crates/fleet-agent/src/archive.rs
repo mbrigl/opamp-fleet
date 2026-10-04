@@ -902,6 +902,7 @@ mod tests {
         path.to_path_buf()
     }
 
+    /// Verifies: ADR-0018
     #[test]
     fn detects_gzip_by_its_leading_bytes_and_anything_else_as_raw() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -975,6 +976,7 @@ mod tests {
 
     /// A member whose stored path climbs out of any directory is written to *our* destination like
     /// any other: the archive never chooses where bytes land, so there is nothing to escape.
+    /// Verifies: ADR-0018
     #[test]
     fn an_escaping_member_path_still_lands_only_where_we_put_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1018,6 +1020,7 @@ mod tests {
         path
     }
 
+    /// Verifies: ADR-0018
     #[test]
     fn detects_a_7z_by_its_signature() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1042,6 +1045,7 @@ mod tests {
 
     /// The reason `.7z` is supported at all: the artifact is unreadable without the key, and the
     /// key lives only on the Agent (ADR-0018).
+    /// Verifies: ADR-0018
     #[test]
     fn an_encrypted_7z_opens_with_the_key_and_not_without_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1105,6 +1109,7 @@ mod tests {
     /// so a bomb hidden in front of the target cannot be decompressed just to walk past it. Proven
     /// with a small `limit`: the junk member alone exceeds it, and extraction stops before the
     /// target it precedes.
+    /// Verifies: ADR-0018
     #[test]
     fn a_bomb_ahead_of_the_target_is_refused_before_it_is_skipped() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1189,6 +1194,7 @@ mod tests {
 
     /// The next release renames the wrapper, and the configuration must not have to follow it —
     /// that drift is what ADR-0032 exists to make unspellable, and it applies here too.
+    /// Verifies: ADR-0018
     #[test]
     fn the_same_program_path_finds_the_program_under_any_wrapper() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1209,6 +1215,7 @@ mod tests {
 
     /// A member beside the wrapper is not part of the tree. Dropping it is right; dropping it
     /// silently is not, so it is counted and the caller logs the count.
+    /// Verifies: ADR-0018
     #[test]
     fn members_outside_the_programs_own_directory_are_left_out_and_counted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1231,6 +1238,7 @@ mod tests {
 
     /// The property the single-member path had for free and this one has to earn: an archive that
     /// names a path outside the destination is refused *whole*, before anything is written.
+    /// Verifies: ADR-0018
     #[test]
     fn a_member_that_climbs_out_refuses_the_archive_before_writing_anything() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1248,6 +1256,7 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0018
     #[test]
     fn an_absolute_member_refuses_the_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1263,6 +1272,7 @@ mod tests {
 
     /// A link is the one member the path check cannot judge, because what it names is not where it
     /// goes — so its mere presence refuses the archive.
+    /// Verifies: ADR-0018
     #[test]
     fn a_link_member_refuses_the_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1303,6 +1313,7 @@ mod tests {
     /// The other kind of link, which tar spells with its own entry type: it names an existing
     /// member rather than a path on the host, and is refused by the same rule for the same reason —
     /// where its bytes end up is not decided by where the member goes.
+    /// Verifies: ADR-0018
     #[test]
     fn a_hard_link_member_refuses_the_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1342,6 +1353,7 @@ mod tests {
 
     /// The member bound (ADR-0018). An archive of a hundred thousand empty files is not an agent,
     /// and the count refuses it in the listing pass — before any path is turned into a write.
+    /// Verifies: ADR-0018
     #[test]
     fn an_archive_of_too_many_members_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1381,6 +1393,7 @@ mod tests {
     /// The byte bound is across the *whole* tree, not per member: three members no one of which is
     /// large enough to refuse on its own still stop at the budget. What was written by then is the
     /// caller's staging directory, which it removes — the point here is that the copy stopped.
+    /// Verifies: ADR-0018
     #[test]
     fn a_tree_that_outgrows_the_total_budget_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1408,6 +1421,7 @@ mod tests {
     /// A `.7z` carries neither tar's entry types nor its modes, so the same two refusals are read
     /// out of Windows attributes instead: a reparse point is a link by another name, and an
     /// anti-item is a deletion wearing a member's clothes. Both refuse the whole archive.
+    /// Verifies: ADR-0018
     #[test]
     fn a_7z_member_that_is_a_link_or_an_anti_item_refuses_the_archive() {
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -1456,6 +1470,7 @@ mod tests {
     /// needs to fix it — quoted the way the archive spells a member, `/` and all, on every platform.
     /// The value being written from this message is one string for the whole fleet, so a Windows
     /// host answering with backslashes would be inviting a configuration that only works there.
+    /// Verifies: ADR-0018
     #[test]
     fn no_match_and_an_ambiguous_match_are_both_refused_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1488,6 +1503,7 @@ mod tests {
 
     /// A tar carries modes, and a tree needs them: a helper beside the program is executable only
     /// if the archive said so.
+    /// Verifies: ADR-0018
     #[cfg(unix)]
     #[test]
     fn a_tree_keeps_the_modes_the_archive_carried() {
@@ -1621,6 +1637,7 @@ mod tests {
         path.to_path_buf()
     }
 
+    /// Verifies: ADR-0018
     #[test]
     fn detects_a_zip_by_its_signature_and_an_empty_one_too() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1699,6 +1716,7 @@ mod tests {
     /// The same refusals the other containers earn, read from what zip has: the name for the
     /// traversal, the unix mode in the external attributes for the link, the flag bit for
     /// encryption — each refusing the whole archive before anything is written.
+    /// Verifies: ADR-0018
     #[test]
     fn a_hostile_zip_member_refuses_the_archive() {
         let dir = tempfile::tempdir().expect("tempdir");
