@@ -85,6 +85,9 @@ has:
   written `0600` in `0700` directories; on Windows a system-scope install cuts the data root off
   from the read right every local user inherits under `%ProgramData%` and leaves it to LocalSystem,
   the Administrators and the service account.
+- **A delivered Supervisor block reaches no further than the package signature** (ADR-0051): no
+  environment or arguments beyond what the running block has or the operator allowed, never a
+  loader variable or `PATH`, and no file outside its own `config/` directory.
 - `TLSConnectionSettings` and `ProxyConnectionSettings` refused on merit, so a Server cannot command
   a Client to weaken its own verification
   ([`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
@@ -124,8 +127,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
 which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
 
-**Status of each measure below:** 🔴 not taken · 🟡 partly in force · ⚪ cannot be judged until the
-check under [Unverified claims](#unverified-claims) is run · 🟢 in force. Nothing is 🟢 here by
+**Status of each measure below:** 🔴 not taken · 🟡 partly in force · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
 way the connection-setup bound did when ADR-0012 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
@@ -194,12 +196,45 @@ Server sees no downstream certificate at all.
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
 Agent's host. They deserve at least as much attention as the transport, and arguably more.
 
-⚪ **H14 — Establish how far remote configuration is already constrained.** *(verify first)*
-The Baseline asks that the Server restrict what configuration can be set remotely and what the Agent
-accepts. ADR-0022 (path-implied package consent) and ADR-0022 (a Server-pushed Supervisor block
-names only what the Client already owns) plainly cover part of this ground. **How much** they cover
-has not been established, and that has to come first — building a new restriction on top of an
-unexamined one would be the wrong order.
+**What a remote configuration can and cannot cause on a host.** The Server reaches a Client host
+through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
+restart its process; add, change, purge and restart Supervisors of the compiled-in kinds, each
+running a program from its own `program/` directory; install any package signed with the
+operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
+fleet to another TLS endpoint its trust accepts, rotate the credential, install a certificate for
+the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
+re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a Telegraf
+`inputs.exec`, an Icinga `CheckCommand` — it allows as the process's account; that is the product.
+
+It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
+outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
+at all; start a kind that is not compiled in; change any key of `supervisor.toml` but the
+`[[supervisor]]` array — not the endpoint, `state_dir`, `[auth]`, `[tls]`, the verification key,
+`allowed_sources` or `[self_update]`; apply a set with one bad block; purge outside the Supervisors'
+root; install anything unsigned, from a source not allowed, or with an archive member that climbs
+out; downgrade the Client or install a program that is not the Client as the Client; switch to
+plaintext beyond the loopback; weaken TLS verification or set a proxy; hand the Client a private
+key. Each of these is enforced in the code, and most by a test.
+
+Two things a reader would expect to be refused are not, and each is a measure below.
+
+🔴 **H23 — A Supervisor's package is bound to its bytes, not to its Agent type or version.**
+Any artifact signed with the operator's key installs as any Supervisor's program, at any version
+label, older ones included; only the Client's self-update refuses a downgrade. A compromised Server
+can roll a Managed Process back to a signed build with a known flaw. **To work out:** whether the
+signature should cover the Agent type and version, as the Deployment already pairs them
+(ADR-0045), and a Client-side refusal of a downgrade.
+
+🔴 **H24 — An offered endpoint is trusted by the public roots when no `ca_file` is set.**
+A connection offer may move the fleet to any host whose certificate a public CA issued, and the
+Client keeps the move in `connection-settings.pb`, which outranks the operator's file. A
+compromised Server can re-home the fleet for good. **To work out:** requiring `ca_file` for an
+offered endpoint, or pinning the offered endpoint to the trust the current one was reached with.
+
+Checks still missing for things that are enforced: an unknown Supervisor `type`; a delivered set
+naming top-level keys beyond `endpoint` and `state_dir`; a refused set leaving the running
+Supervisors untouched; the OpAMP half of an offer's `tls` and `proxy` not being honoured; two
+top-level packages in one offer; a delivered program name and Supervisor name that traverse.
 
 ## Stage 6 — Make it provable after the fact
 
@@ -208,23 +243,10 @@ Every measure above changes what the Server permits; none of them is demonstrabl
 a record of what was permitted and to whom. This is last in order but not in importance — it is what
 turns an incident into an investigation.
 
-## Unverified claims
-
-Two claims in this document rest on reading the code, not on running it, and are marked in place:
-
-- **H14** — how much of the Baseline's "restrict what the Agent can accept" ADR-0022
-  already cover.
-
-Both are cheap to settle and both change what the measure above them is worth, so they belong before
-the planning rather than inside it.
-
 ## Suggested order
 
-**H8 and H14 first — they are checks, not changes.** Each decides whether the measure is work at
-all, so they belong before the planning rather than inside it.
-
-**Then H7 and H15.** Hashed credentials and an audit record bind nothing else and make the rest
-provable after the fact.
+**H7 and H15 first, then H23 and H24.** Hashed credentials and an audit record bind nothing else
+and make the rest provable after the fact.
 
 **H4 last of the identity work, not first.** A sharper identity is only worth what the revocation
 path behind it is worth: binding certificates to Agents while still being unable to withdraw one
@@ -243,12 +265,9 @@ measure that has not been taken.
 | H4 | *Cannot be fixed before the ADR* — the shape decides the check. Two conditions hold whichever way it goes, and are the floor: a certificate issued for one Agent does not authenticate a connection claiming another, and a re-key through `AgentIdentification` does not invalidate a certificate still in force. |
 | H6 | Renewal is observed to complete **before** expiry in a fleet left running longer than one validity period. Not a unit test — this one needs a soak, and shortening validity without that evidence is the failure mode the measure is meant to avoid. |
 | H7 | No credential appears in `server.toml` in a form that authenticates on its own; a correct credential still authenticates; a wrong one is still rejected in constant time. The last clause matters: the point of the change is not to lose the property already held. |
-| H14 | First a written statement of what a remote configuration can and cannot cause on a host, derived from ADR-0022. Only then, one check per "cannot". Writing checks before that statement would test the implementation against itself. |
 | H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
-
-One further point holds across the table: **the two unverified claims**
-under [Unverified claims](#unverified-claims) are checks to run *before* planning, not after
-implementing — they decide whether H8 and H14 are work at all.
+| H23 | A signed artifact offered to a Supervisor of another Agent type, or at a version below the one installed, is refused before anything is swapped. |
+| H24 | An offered endpoint is not adopted unless the Client's own `ca_file` verifies it. |
 
 ## The local endpoint
 

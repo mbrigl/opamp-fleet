@@ -182,6 +182,9 @@ state_dir = "client-state"
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
+# delivered_env = []       # environment names a Server-delivered block may set ("OTEL_*" for a
+#                          # prefix); never PATH, LD_* or DYLD_* (ADR-0051)
+# delivered_args = false   # whether a Server-delivered block may state its own arguments
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory

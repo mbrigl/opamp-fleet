@@ -190,6 +190,128 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     resolved.plugin.check(&block.name, resolved.settings)
 }
 
+/// What a Server-delivered block may not bring (ADR-0051 clauses 18, 19), checked against
+/// `running` — the configuration in force, whose `[supervisors]` section the Server cannot change
+/// and whose block of the same name the delivered one may repeat.
+///
+/// # Errors
+/// Returns the reason the delivered block is refused, naming the block and what it brings.
+pub fn check_delivered_block(
+    running: &ClientConfig,
+    block: &SupervisorBlock,
+) -> Result<(), String> {
+    let current = running
+        .supervisors
+        .iter()
+        .find(|existing| existing.name == block.name && existing.kind == block.kind)
+        .map(|existing| &existing.settings);
+    let policy = &running.supervisor_defaults;
+    check_delivered_env(block, current, &policy.delivered_env)?;
+    if !policy.delivered_args {
+        for key in ["args", "version_args"] {
+            if block.settings.get(key) != current.and_then(|settings| settings.get(key)) {
+                return Err(format!(
+                    "supervisor {:?}: a delivered block may not set {key} — allow it with \
+                     [supervisors] delivered_args = true in this Client's supervisor.toml",
+                    block.name
+                ));
+            }
+        }
+    }
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
+    plugin
+        .check_delivered(&block.settings, current)
+        .map_err(|e| format!("supervisor {:?}: {e}", block.name))
+}
+
+/// Variables that steer which code a program loads — the dynamic loader's, `PATH`, the hooks of
+/// common runtimes — refused in a delivered block whatever `delivered_env` allows (ADR-0051 clause
+/// 18). Compared without regard to case, as Windows compares environment names.
+const LOADING_NAMES: &[&str] = &[
+    "PATH",
+    "GCONV_PATH",
+    "GLIBC_TUNABLES",
+    "OPENSSL_CONF",
+    "OPENSSL_ENGINES",
+    "DOTNET_STARTUP_HOOKS",
+    "NODE_OPTIONS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PERL5LIB",
+    "PERL5OPT",
+    "RUBYOPT",
+    "BASH_ENV",
+    "ENV",
+];
+
+/// Prefixes of the same kind: the loaders' own and the .NET profilers'.
+const LOADING_PREFIXES: &[&str] = &["LD_", "DYLD_", "COR_PROFILER", "CORECLR_PROFILER"];
+
+fn steers_loading(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    LOADING_NAMES.contains(&upper.as_str())
+        || LOADING_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+/// A delivered `env` entry is kept from the running block, or allowed by name — never a variable
+/// that steers loading, and never a value pointing into the Supervisor's own directories, where
+/// the Server delivers files no one signed.
+fn check_delivered_env(
+    block: &SupervisorBlock,
+    current: Option<&toml::Table>,
+    allowed: &[String],
+) -> Result<(), String> {
+    let Some(env) = block.settings.get("env").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    let running = current
+        .and_then(|settings| settings.get("env"))
+        .and_then(toml::Value::as_table);
+    for (name, value) in env {
+        if running.and_then(|running| running.get(name)) == Some(value) {
+            continue;
+        }
+        if steers_loading(name) {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not set {name} — it would steer which \
+                 code the program loads",
+                block.name
+            ));
+        }
+        if value.as_str().is_some_and(|value| {
+            value.contains("${config_dir}") || value.contains("${supervisor_dir}")
+        }) {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not point {name} into its own \
+                 directories — the Server delivers files there that no one signed",
+                block.name
+            ));
+        }
+        let upper = name.to_ascii_uppercase();
+        let permitted = allowed
+            .iter()
+            .map(|pattern| pattern.to_ascii_uppercase())
+            .any(|pattern| match pattern.strip_suffix('*') {
+                Some(prefix) => upper.starts_with(prefix),
+                None => pattern == upper,
+            });
+        if !permitted {
+            return Err(format!(
+                "supervisor {:?}: a delivered block may not set {name} — allow it in \
+                 [supervisors] delivered_env in this Client's supervisor.toml",
+                block.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The program a block resolves to, for callers that must inspect ownership rather than just
 /// spawn it. The Supervisor-set apply uses it to keep a Server-delivered block to a Client-owned
 /// program (ADR-0022).
@@ -583,7 +705,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0022, ADR-0042
+    /// Verifies: ADR-0051, ADR-0042
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");

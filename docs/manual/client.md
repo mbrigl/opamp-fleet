@@ -148,10 +148,28 @@ But the file is not entirely yours. The Server may send the `[[supervisor]]` blo
 does the Client rewrites that part of the file and leaves the rest alone. Your endpoint, your
 credentials, your logging stay yours.
 
-Two guards make that safe to have. The whole offer is **validated before anything is written** — if
-one block is bad, nothing changes and the Client reports the failure naming the block. And a
+Three guards make that safe to have. The whole offer is **validated before anything is written** —
+if one block is bad, nothing changes and the Client reports the failure naming the block. A
 delivered block may name only a program the Client owns, so a Server cannot use configuration
-delivery to run an arbitrary binary on your host.
+delivery to run an arbitrary binary on your host. And a delivered block **brings nothing that
+reaches past the package signature**: it may set environment variables and arguments only as the
+running block of the same name already has them, or as you allow below; never a variable that
+steers which code a program loads (`PATH`, `LD_*`, `DYLD_*`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH` and
+the like) and never a value pointing into the Supervisor's own directories; and a file it names,
+such as Icinga's `ticket_file`, only inside its own `config/` directory, with the Icinga parent
+pinned by `trusted_cert_file`.
+
+```toml
+[supervisors]
+delivered_env = ["OTEL_*", "GOMAXPROCS"]   # names a delivered block may set; `*` ends a prefix
+delivered_args = true                      # a delivered block may state its own arguments
+```
+
+Both default to nothing: without them the Server can change which programs run and with which
+configuration, but not the environment or the command line they run with. Allow as little as you
+need. A name you allow lets the Server set it to anything outside the refused list, and
+`delivered_args = true` lets it pass any argument to a signed program — one that loads a plugin
+named on its command line then loads what the Server says.
 
 The first configuration is written by the install, not by you finding a template: `service install`
 can ask for what a fresh host cannot guess, validates it, and only then registers the service. It

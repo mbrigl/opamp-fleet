@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0022, ADR-0040
+// Verifies: ADR-0051, ADR-0040
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -153,6 +153,10 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "heartbeat_interval_secs = 1\n\n",
             "[attributes]\n",
             "env = \"prod\"\n\n",
+            // The set the Server delivers below carries arguments; the operator consents to that
+            // here, where the Server cannot (ADR-0051 clause 18).
+            "[supervisors]\n",
+            "delivered_args = true\n\n",
             "{otelcol_block}\n",
             "{stub_block}",
         ),

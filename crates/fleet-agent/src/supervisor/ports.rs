@@ -387,6 +387,21 @@ pub trait Plugin {
     /// # Errors
     /// Returns an error when the settings do not parse.
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
+
+    /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
+    /// `args` (ADR-0051 clause 19): a kind whose settings name files the Supervisor reads confines
+    /// them here. `running` is the settings of the running block of the same name, if any. By
+    /// default a kind names no such file.
+    ///
+    /// # Errors
+    /// Returns the reason the delivered block is refused.
+    fn check_delivered(
+        &self,
+        _settings: &toml::Table,
+        _running: Option<&toml::Table>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The strict second-stage parse of a block's plugin settings, shared by every plugin's

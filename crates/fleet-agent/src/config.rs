@@ -697,6 +697,15 @@ pub struct SupervisorsConfig {
     /// configuration is acknowledged `APPLIED`; `0` acknowledges on start.
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
+    /// The environment variables a Server-delivered block may set, each name exact or ending in
+    /// `*` as a prefix (ADR-0051 clause 18). Empty — the default — lets a delivered block keep only
+    /// the environment its running block already has.
+    #[serde(default)]
+    pub delivered_env: Vec<String>,
+    /// Whether a Server-delivered block may state `args` and `version_args` its running block does
+    /// not already have (ADR-0051 clause 18).
+    #[serde(default)]
+    pub delivered_args: bool,
 }
 
 impl Default for SupervisorsConfig {
@@ -704,6 +713,8 @@ impl Default for SupervisorsConfig {
         SupervisorsConfig {
             stop_timeout_secs: default_stop_timeout_secs(),
             apply_grace_secs: default_apply_grace_secs(),
+            delivered_env: Vec::new(),
+            delivered_args: false,
         }
     }
 }
@@ -1495,7 +1506,7 @@ mod tests {
 
     /// One shape (ADR-0022): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
-    // Verifies: ADR-0022
+    // Verifies: ADR-0051
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");

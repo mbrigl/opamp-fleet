@@ -1,11 +1,28 @@
-# ADR-0022: Each Supervisor owns one directory and runs only a program installed there, and the Server manages the set of Supervisors
+# ADR-0051: Each Supervisor owns one directory and runs only a program installed there, the Server manages the set of Supervisors, and a delivered block brings nothing that reaches past the package signature
 
-- **Status:** ⚪ superseded by [ADR-0051](0051-a-delivered-block-brings-nothing-past-the-signature.md)
-- **Date:** 2026-08-19
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml
+- **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml, the `delivered_env` and `delivered_args` keys of its `[supervisors]` section, and the delivered-block check every kind in crates/fleet-agent/src/supervisor/ states
+- **Supersedes:** [ADR-0022](0022-a-supervisors-directory-program-and-set.md)
 
 ## Context
+
+Supersedes [ADR-0022](0022-a-supervisors-directory-program-and-set.md) because a delivered block
+can still run code no one signed. ADR-0022 keeps a delivered block to a program from its own
+directory — a program that arrived as a signed package — and names what it prevents: "fleet-wide
+code execution that bypasses signature verification entirely". But the block's `env` and `args`
+pass to that program unchecked, with placeholders expanded in both (clause 6). A Server that
+delivers a shared object as a configuration entry and then a block with `LD_PRELOAD` pointing at
+it has the loader run that object as the Client's account — root or LocalSystem by default — and
+any signed program that loads a plugin or a script named in its arguments reaches as far. The
+`icinga2` kind reads `ticket_file` from any path on the host and sends its content to the parent
+the block names; a delivered block naming `/etc/shadow` and a parent the attacker runs sends that
+file there. Both were found by measure H14 of [`HARDENING.md`](../HARDENING.md) and recorded as
+H21 and H22. The specification puts security before convenience; what a compromised Server can
+make a Supervisor block do on a host must stop at the signature. What an Agent's own configuration
+language allows its process to do stays the product's. The Decision sentence is extended and clauses 18 to 20 are
+new; the rest of the decision stands as it was.
 
 A package update swaps files: the running program is renamed aside, the artifact is written beside
 it and renamed into place ([ADR-0019](0019-package-delivery-on-the-agent.md)). All of that needs
@@ -39,7 +56,8 @@ that bypasses signature verification entirely.
 We will give every Supervisor one directory it owns under a root the operator can place, accept
 only programs this Client installs into that directory, point Foreign Agents at it by placeholder,
 and let the Server replace the set of `[[supervisor]]` blocks — and nothing else in the file —
-purging a removed Supervisor's directory with it.
+purging a removed Supervisor's directory with it, while a delivered block may bring no environment,
+arguments or host paths that reach past what its package's signature covers.
 
 1. **One directory per Supervisor, under a relocatable root.** The top-level key `supervisor_dir`
    defaults to `<state_dir>/supervisors` and is made absolute at load. Under it each Supervisor
@@ -175,6 +193,40 @@ purging a removed Supervisor's directory with it.
     leftover from a block temporarily commented out, and deleting would cost that Agent its
     identity and program; removing it is the operator's call.
 
+18. **A delivered block brings no environment and no arguments the operator did not allow.** In
+    the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those of
+    the running block of the same name, or be allowed by the operator in `supervisor.toml`'s
+    `[supervisors]` section — keys the Server cannot change (clause 7). `delivered_env` is a list of
+    variable names, each exact or ending in `*` as a prefix (`["OTEL_*", "GOMAXPROCS"]`), and
+    defaults to none; `delivered_args = true` lets delivered blocks state arguments, and defaults to
+    `false`. Names are compared without regard to case, as Windows compares them. Whatever the list
+    says, a delivered `env` that adds or changes a variable steering which code a program loads is
+    refused: `PATH`, every `LD_*` and `DYLD_*`, `GCONV_PATH`, `GLIBC_TUNABLES`, `OPENSSL_CONF`,
+    `OPENSSL_ENGINES`, `DOTNET_STARTUP_HOOKS`, `COR_PROFILER*`, `CORECLR_PROFILER*`,
+    `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`, `PYTHONPATH`,
+    `PYTHONSTARTUP`, `PERL5LIB`, `PERL5OPT`, `RUBYOPT`, `BASH_ENV` and `ENV`. So is a new or
+    changed value that contains `${config_dir}` or `${supervisor_dir}`: the Server delivers files
+    there that no one signed, and an allowed name such as `OTEL_JAVAAGENT_EXTENSIONS` would load
+    one. The list is a floor, not a guarantee: `delivered_env = ["*"]` leaves only it between a
+    delivered block and every other variable a program reads. A block that breaks this fails the whole offer before anything
+    stops (clause 8), naming the block and the variable or key. A block the operator writes is
+    unaffected: the rule is about what the Server may add.
+
+19. **A delivered block names no host path outside its own configuration directory.** A kind
+    states which of its settings name a file the Supervisor reads; in a delivered block each must
+    be `${config_dir}/` followed by a relative path with no `..`, `.` or root component, unless it
+    equals the running block's value and the block still names the same parent and node. The
+    `icinga2` kind states `ticket_file` and `trusted_cert_file` ([ADR-0029](0029-icinga-2.md)); its
+    `node_name`, which names the host's certificate and key files, is a plain name with no
+    separator in every block. A delivered `icinga2` block that names a `parent_host` must name
+    `trusted_cert_file`: trust on first use is for a parent an operator chose, not one the Server
+    names. [ADR-0029](0029-icinga-2.md) stands otherwise for an operator-written block.
+
+20. **What is checked is what is written.** The rewritten `supervisor.toml` is rendered before
+    anything stops, with every delivered table and its sub-tables placed in the order of the set,
+    and the offer is refused unless the rendered file reads back as exactly the set that passed
+    clauses 8, 18 and 19.
+
 **Out of scope:** reconciling a locally edited `[[supervisor]]` set against the last applied
 offer at startup; an opt-in reaping of orphaned directories; migrating a Supervisor tree when its
 root moves; a supervise-only mode for programs this Client does not install, which would need its
@@ -182,6 +234,17 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
 ([ADR-0019](0019-package-delivery-on-the-agent.md)).
 
 ## Alternatives considered
+
+- **A denylist of dangerous variables alone** — `LD_PRELOAD` is one of many; `PYTHONPATH`,
+  `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `BASH_ENV` and every program's own plugin variable reach as
+  far, and the list never ends. An allow-list the operator writes ends it; the loader variables are
+  refused on top because no Managed Process needs them from the Server.
+- **No delivered `env` or `args` at all** — safe, but a fleet that steers its Collectors with
+  `OTEL_*` variables or a Fluent Bit's `-c ${config_dir}/…` from the Server would lose that; the
+  operator's allow-list keeps it where it is wanted.
+- **Clearing the environment of every Managed Process** — the Client's own environment carries what
+  the host's agents expect (proxies, locale); clearing it breaks operator-written blocks to protect
+  against delivered ones.
 
 - **An `accepts_packages` flag beside a program path that may be absolute.** Two keys for one
   truth that can disagree, and the configuration could express what the filesystem forbids.
@@ -276,6 +339,18 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   pruning stale `.rollback` files on a schedule; a supervise-only mode as its own decision.
 
 ## Enforcement
+
+- [`crates/fleet-agent/src/reconfigure.rs`](../../crates/fleet-agent/src/reconfigure.rs) tests:
+  `a_delivered_block_may_not_add_environment_the_operator_did_not_allow`,
+  `a_loader_variable_is_refused_whatever_the_operator_allowed`,
+  `a_delivered_block_keeps_the_environment_it_already_runs_with`,
+  `delivered_arguments_need_the_operators_consent`,
+  `a_delivered_value_may_not_point_into_its_own_directories` (clause 18),
+  `a_delivered_icinga2_block_cannot_send_the_operators_ticket_elsewhere` (clause 19),
+  `delivered_tables_from_two_entries_keep_their_sub_tables` (clause 20),
+  `a_delivered_icinga2_block_reads_files_only_from_its_config_dir`,
+  `a_delivered_icinga2_block_must_pin_its_parent` (clause 19).
+- The tests below verify the clauses that stand unchanged.
 
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable`,

@@ -18,6 +18,15 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
+- **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
+  signature** ([ADR-0051](docs/adr/0051-a-delivered-block-brings-nothing-past-the-signature.md)).
+  It may set `env`, `args` and `version_args` only as the running block of the same name already
+  has them, or as the new `[supervisors] delivered_env` and `delivered_args` allow; never `PATH`,
+  `LD_*` or `DYLD_*`. A delivered `icinga2` block reads `ticket_file` and `trusted_cert_file` only
+  from `${config_dir}/` and must pin its parent. **What to do:** where the Server delivers blocks
+  with environment or arguments, allow them in each Client's `supervisor.toml`; otherwise the set
+  is refused, naming the block and the key, and the running set stays as it is.
+
 - **Revocation that takes effect at once**
   ([ADR-0049](docs/adr/0049-revocation-ends-sessions-and-follows-renewal.md)).
   `POST /api/v1/revocations` revokes a certificate, by issuing CA (`client` or `bootstrap`) and
