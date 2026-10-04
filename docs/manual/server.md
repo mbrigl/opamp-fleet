@@ -63,7 +63,7 @@ restart resumes with the same fleet state; Agents reconnect on their own.
 The Server refuses to start without `[tls]`, `[tls] client_ca_file` and `[auth]`, and the refusal
 names what is missing. For a first run on one machine,
 [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development set of certificates and
-prints the lines to paste; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
+a `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
 walks through it.
 
 There are **two listeners, split by audience**
@@ -382,7 +382,10 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 ```
 
 The Server lists each pending request with that fingerprint as its `id`, beside its arrival time,
-the peer address, the subject it asks for, and the bootstrap certificate's subject and fingerprint:
+the peer address, the subject it asks for, and the bootstrap certificate's subject and fingerprint.
+The request rides the Client's next message after it connects — its next heartbeat on WebSocket,
+its next poll on plain HTTP, 30 seconds by default for both — so it is listed that long after the
+host starts:
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
@@ -414,7 +417,7 @@ with close code `1008`. No other session is touched, and no restart is needed. T
 under `config_dir` and survives a restart.
 
 Every certificate the client CA signs is in a register, with the certificate the host presented
-when it renewed:
+when it renewed. Its `key_fingerprint` is the one the request was listed and approved by:
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates

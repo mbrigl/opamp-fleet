@@ -13,6 +13,8 @@
 #   bootstrap-ca.pem / bootstrap-ca-key.pem
 #                                       the bootstrap CA ([enrolment] bootstrap_ca_file)
 #   bootstrap.pem / bootstrap-key.pem   a bootstrap certificate, which can only enrol
+#   server.toml / supervisor.toml       a Server and a Client configuration that use the set, every
+#                                       other key at its default
 #
 # Requires the openssl command-line tool.
 #
@@ -33,6 +35,7 @@ command -v openssl >/dev/null || { echo "openssl is required" >&2; exit 1; }
 mkdir -p "$OUT"
 chmod 700 "$OUT"
 cd "$OUT"
+OUT="$(pwd)"  # the configurations name the set by absolute path
 
 # new_key <file> — a P-256 key, readable by its owner only.
 new_key() {
@@ -73,31 +76,40 @@ issue client "opamp-fleet development agent" ca clientAuth
 issue bootstrap "opamp-fleet development bootstrap" bootstrap-ca clientAuth
 rm -f ./*.srl
 
+cat >server.toml <<EOF
+[tls]
+cert_file = "$OUT/server.pem"
+key_file = "$OUT/server-key.pem"
+client_ca_file = "$OUT/ca.pem"
+
+[client_ca]
+cert_file = "$OUT/ca.pem"
+key_file = "$OUT/ca-key.pem"
+
+[enrolment]
+bootstrap_ca_file = "$OUT/bootstrap-ca.pem"
+
+[auth]
+bearer_tokens = ["$(printf '%s' dev-fleet-token | sha256sum | cut -d' ' -f1 | sed 's/^/sha256:/')"]
+EOF
+
+cat >supervisor.toml <<EOF
+endpoint = "wss://127.0.0.1:4320/v1/opamp"
+
+[auth]
+bearer_token = "dev-fleet-token"
+
+[tls]
+ca_file = "$OUT/ca.pem"
+cert_file = "$OUT/client.pem"
+key_file = "$OUT/client-key.pem"
+EOF
+
 cat <<EOF
-Created in $OUT. In server.toml:
+Created in $OUT, with a server.toml and a supervisor.toml that use the set:
 
-  [tls]
-  cert_file = "$OUT/server.pem"
-  key_file = "$OUT/server-key.pem"
-  client_ca_file = "$OUT/ca.pem"
+  cargo run -p fleet-server -- --config $OUT/server.toml
+  cargo run -p fleet-agent -- --config $OUT/supervisor.toml
 
-  [client_ca]
-  cert_file = "$OUT/ca.pem"
-  key_file = "$OUT/ca-key.pem"
-
-  [enrolment]
-  bootstrap_ca_file = "$OUT/bootstrap-ca.pem"
-
-  [auth]
-  bearer_tokens = ["$(printf '%s' dev-fleet-token | sha256sum | cut -d' ' -f1 | sed 's/^/sha256:/')"]
-
-In supervisor.toml (or bootstrap.pem and bootstrap-key.pem to try enrolment):
-
-  endpoint = "wss://127.0.0.1:4320/v1/opamp"
-  [auth]
-  bearer_token = "dev-fleet-token"
-  [tls]
-  ca_file = "$OUT/ca.pem"
-  cert_file = "$OUT/client.pem"
-  key_file = "$OUT/client-key.pem"
+To try enrolment, point [tls] in supervisor.toml at bootstrap.pem and bootstrap-key.pem.
 EOF

@@ -202,10 +202,11 @@ it (AGENTS.md links here).
   [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
   downloaded artifact has one (specification Q-2)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
-  TLS (ADR-0038); it writes a CA, a Server certificate for `127.0.0.1` and an Agent certificate to
-  `.dev-pki/` and prints the lines `server.toml` and `supervisor.toml` need
-- **Run the Server:** `cargo run -p fleet-server -- --config config/server.toml`
-- **Run the Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml`
+  TLS (ADR-0038); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
+  `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
+  configurations run it when `.dev-pki/` has no configuration yet
+- **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
+- **Run the Client:** `cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
   and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
   sign an artifact out of any program) — both documented in

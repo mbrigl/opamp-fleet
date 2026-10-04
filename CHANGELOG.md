@@ -160,6 +160,18 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **An enrolment and a renewal each issue one certificate, not two**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)). A
+  Client that received its certificate sent the request it had just been answered for once more
+  on its next connection, and the Server signed it again, so every host held a second valid
+  certificate it never used. **What to do:** nothing; a duplicate already issued expires with its
+  life, or can be revoked by its serial from `GET /api/v1/certificates`.
+- **The certificate register lists a key by the fingerprint its enrolment request carried.**
+  `key_fingerprint` in `GET /api/v1/certificates` and in the audit record's issuance lines is now
+  the SHA-256 of the public key, as the Client logs it and `GET /api/v1/enrolments` lists it, not
+  of the key's SubjectPublicKeyInfo. **What to do:** nothing; certificates registered before keep
+  the old value.
+
 - **A Gateway no longer carries a downstream peer's report on another peer's credential.** The
   upstream pool reused a connection opened with one peer's `Authorization` for the reports of
   another, so a peer with a wrong credential, or none, reached the Server on someone else's. A

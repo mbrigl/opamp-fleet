@@ -866,7 +866,9 @@ Enrolment then runs like this:
 1. An operator opens the Server's enrolment window (see
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).
 2. The Client connects with the bootstrap certificate and the fleet credential. It generates a key,
-   which never leaves the host, and sends a certificate signing request for it.
+   which never leaves the host, and sends a certificate signing request for it with its next
+   message: the next heartbeat on WebSocket, the next poll on plain HTTP, 30 seconds by default
+   for both.
 3. The Client logs the SHA-256 fingerprint of that key:
 
    ```text
@@ -878,7 +880,8 @@ Enrolment then runs like this:
    stores it, and uses it from then on.
 
 Until the request is answered, the Client keeps its pending key and re-sends the same request. A
-closed window is answered `401`, which the Client retries with its usual backoff. The issued
+closed window is answered `503`, which the Client retries with its usual backoff and which does not
+count toward the Server's admission throttle. The issued
 certificate is renewed the same way once it is two thirds through its validity, with no operator
 involved. The private key is written `0600`; on Windows the state directory's ACL is what protects
 it. A host behind a Gateway enrols by connecting to the Server directly once, or is given a

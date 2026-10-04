@@ -220,7 +220,9 @@ pub fn facts(der: &[u8]) -> Result<Facts, String> {
         id: CertId::new(cert.issuer().as_raw(), &hex::encode(cert.raw_serial())),
         issuer_name: cert.issuer().to_string(),
         subject: cert.subject().to_string(),
-        key_fingerprint: hex::encode(Sha256::digest(cert.public_key().raw)),
+        // The key itself, not its SubjectPublicKeyInfo: the fingerprint an enrolment request is
+        // listed by and the Client logs.
+        key_fingerprint: hex::encode(Sha256::digest(&cert.public_key().subject_public_key.data)),
         not_after_ms: u64::try_from(not_after).unwrap_or(0).saturating_mul(1000),
         host,
     })
@@ -594,6 +596,17 @@ mod tests {
             "{}",
             first.facts.issuer_name
         );
+    }
+
+    /// The register knows a certificate's key by the fingerprint its request was listed and
+    /// approved by, which is also the one the Client logs: one key, one fingerprint.
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_certificate_carries_the_key_fingerprint_of_its_request() {
+        let request = csr("edge-01");
+        let signed = client_ca(90).sign(&request, "host-1").expect("signed");
+        let enrolling = enrolment_request(&request, &[]).expect("request");
+        assert_eq!(signed.facts.key_fingerprint, enrolling.key_fingerprint);
     }
 
     const UID: &str = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";

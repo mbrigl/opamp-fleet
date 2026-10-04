@@ -61,8 +61,8 @@ development set of them.
    $ scripts/dev-pki.sh
    ```
 
-   It prints two blocks of TOML with absolute paths. Save the first as `.dev-pki/server.toml` and
-   the second as `.dev-pki/supervisor.toml`. Every other key keeps its default.
+   It also writes `.dev-pki/server.toml` and `.dev-pki/supervisor.toml`, which name the set by
+   absolute path. Every other key keeps its default.
 
 2. **Start the Server.** It serves two planes on two ports, both over TLS 1.3: the **Agent plane**
    on `127.0.0.1:4320` (the OpAMP endpoint at `/v1/opamp` and the package downloads), and the
