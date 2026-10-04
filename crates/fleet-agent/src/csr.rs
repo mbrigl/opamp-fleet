@@ -138,6 +138,13 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, config.name.clone());
+    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0039
+    // clause 27): the Server carries the host on from it even when a Gateway is in between.
+    if let Some(proof) = renewal_proof(config, &key) {
+        let uri = rcgen::string::Ia5String::try_from(proof)
+            .map_err(|e| format!("cannot build a renewal proof: {e}"))?;
+        params.subject_alt_names.push(rcgen::SanType::URI(uri));
+    }
     let csr = params
         .serialize_request(&key)
         .map_err(|e| format!("cannot build a certificate request: {e}"))?
@@ -167,6 +174,29 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         );
     }
     Ok(csr.into_bytes())
+}
+
+/// The renewal proof for `new_key`, while a certificate and its key are in force; `None` for a
+/// first enrolment, or when they cannot be read — the Server then renews what the connection
+/// presents.
+fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    let cert_pem = std::fs::read(config.state_dir.join(ISSUED_CERT_FILE)).ok()?;
+    let key_pem = std::fs::read_to_string(config.state_dir.join(ISSUED_KEY_FILE)).ok()?;
+    let (_, block) = x509_parser::pem::parse_x509_pem(&cert_pem).ok()?;
+    let old_key = KeyPair::from_pem(&key_pem).ok()?;
+    let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&new_key_sha256))
+        .ok()?;
+    Some(format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&block.contents, &signature))
+    ))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
+- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
 - **Supersedes:** [ADR-0017](0017-admission-and-authentication.md)
 
 ## Context
@@ -75,7 +75,7 @@ Forces that shape the answer:
 We will admit a peer to `/v1/opamp` only when both proofs succeed — a static Basic or Bearer
 credential and a client certificate required in the TLS handshake — issue a peer's first
 certificate only through an enrolment an operator opens and approves, treat what admission proves
-as fleet membership with no authorization between admitted Agents, and guard the Operator plane
+as fleet membership and the host a certificate was issued to, and guard the Operator plane
 with a separate set of Basic credentials that is required beyond the loopback — every one of them
 kept in `server.toml` only as a hash.
 
@@ -136,11 +136,23 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    other. Behind a terminating Gateway the credential is the only per-Agent proof that reaches the
    Server (clause 13).
 
-7. **A certificate proves membership, not identity.** The Server does not require the subject to
-   match `instance_uid`, `service.instance.name`, or anything else an Agent reports; the subject is
-   descriptive (the Client requests its `service.instance.name`) and authorizes nothing. The
-   request may not dictate the certificate's powers either: the Server signs a client-authentication
-   leaf only — `CA:FALSE`, `digitalSignature`, `clientAuth` — and drops any requested SANs.
+7. **A certificate proves membership and its host, not an Agent's identity.** The Server does not
+   require the subject to match `instance_uid`, `service.instance.name`, or anything else an Agent
+   reports; the subject is descriptive (the Client requests its `service.instance.name`) and
+   authorizes nothing. The request may not dictate the certificate's powers either: the Server
+   signs a client-authentication leaf only — `CA:FALSE`, `digitalSignature`, `clientAuth` — drops
+   every requested SAN, and puts in one of its own, the URI `urn:opamp-fleet:host:<id>`. The host
+   is minted when an operator approves an enrolment and carried on by every renewal (clause 27); a
+   certificate an operator provisioned without one is given a host derived from its issuer and
+   serial when it is first renewed. An `instance_uid` is spoken for by the host whose certificate
+   first reported it: a connection presenting another host's certificate that reports for it is
+   re-keyed through `AgentIdentification` to an identity of its own, and a CSR in that message may
+   not claim the old one. A re-key an Agent asks for keeps its host. A host holds at most three
+   valid certificates at a time and speaks for at most 256 `instance_uid`s. A Gateway carries other
+   hosts' Agents, so an operator marks it as one — `PUT /api/v1/hosts/{host}/gateway` — and its
+   certificate then speaks for any Agent; behind it, membership alone applies. `GET
+   /api/v1/hosts` lists each host, whether it is a Gateway, what it speaks for and how many valid
+   certificates it holds.
 
 8. **A Client has two sources for its identity, and the issued one wins.** An operator may provision
    one in `supervisor.toml`'s `[tls]` (`cert_file` and `key_file`, both or neither, beside
@@ -151,7 +163,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    ([ADR-0014](0014-the-client-as-an-installed-service.md)).
 
 9. **The Server signs CSRs as a local CA while `[client_ca]` is configured.** `[client_ca]` names
-   `cert_file`, `key_file` and `validity_days` (default 90, `0` refused); it is its own key, never
+   `cert_file`, `key_file` and `validity_days` (default 30, `0` refused; a month bounds what a
+   certificate stolen unnoticed is good for, and a host offline for a fortnight still renews on
+   its own); it is its own key, never
    the listener's, because the CA key is the fleet's trust anchor. `AcceptsConnectionSettingsRequest`
    is declared only while the section is present. A Client that holds no Server-issued certificate,
    or holds one in its renewal window, generates a keypair and a PEM CSR locally and sends it as
@@ -191,10 +205,10 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     the Gateway's downstream TLS keys). The Gateway makes no authentication decision of its own
     beyond its handshake; the credential is checked by the Server.
 
-14. **Admission is a fleet-wide trust boundary, and within it there is no authorization between
-    Agents.** A report's `instance_uid` is self-asserted; any admitted peer may report under any
-    `instance_uid`, and the Server takes it at face value. Per-Agent authorization is not added: the
-    only mechanism that could provide it — binding a certificate to `instance_uid` — breaks
+14. **Admission is a fleet-wide trust boundary, and within it the host is the only bound between
+    Agents.** A report's `instance_uid` is self-asserted; an admitted peer may report under any
+    `instance_uid` its host speaks for (clause 7), and through a Gateway under any at all.
+    Per-Agent authorization is not added: binding a certificate to one `instance_uid` breaks
     Server-initiated re-keying, certificate renewal and Gateway Mode. Operators who need isolation
     between mutually distrusting Agents put them behind separate Servers or network segments. This
     is stated in [`SECURITY.md`](../../SECURITY.md) and in the Server's admission and identity
@@ -311,9 +325,21 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     owner-only ([ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
     clause 18).
 
+27. **A renewal proves which certificate it renews.** A Client that holds a certificate and its key
+    adds to its CSR the SAN URI `urn:opamp-fleet:renewal:v1:` followed by the base64url, without
+    padding, of the certificate's DER and a signature made with its key over
+    `opamp-fleet-renewal-v1\n<SHA-256 of the new SubjectPublicKeyInfo, lowercase hex>\n`, each
+    prefixed by its length as four big-endian bytes. The Server accepts the proof only when the
+    certificate was issued by the client CA, is valid now, is not revoked, and its key verifies the
+    signature; the new certificate is then issued to that certificate's host, with it as the
+    predecessor ([ADR-0049](0049-revocation-ends-sessions-and-follows-renewal.md) clause 2). This
+    holds through a Gateway, which presents its own certificate. A proof that does not hold is
+    answered `BadRequest`. A CSR without a proof — a third-party client's — renews the certificate
+    its connection presented, and its host.
+
 **Out of scope:** credential references by environment variable, which leak through process
-listings and unit files; per-Agent credentials or identity; an opt-in strict mode binding certificate
-subject to `instance_uid` where Gateway Mode and re-keying are off; verifying an `instance_uid` a
+listings and unit files; per-Agent credentials or identity beyond the host; an opt-in strict mode
+binding certificate subject to `instance_uid` where Gateway Mode and re-keying are off; verifying an `instance_uid` a
 CSR carries against its sender; proxying a CSR to an external CA (it would sit behind
 `[client_ca]`); certificate revocation, for which short validity plus renewal stands in; how an
 installer obtains and writes the bootstrap certificate, which the ADR on the installed service
@@ -467,9 +493,13 @@ operator actions.
   Gateway's configuration and the manual.
 - Negative / trade-offs: behind a Gateway the Server proves which Gateway a message came through,
   never which Agent produced it; the credential stays load-bearing in gatewayed fleets.
-- Negative / trade-offs: a compromised admitted peer can poison another Agent's record, most easily
-  over plain HTTP, which cannot tell pollers apart. Accepted within one fleet; it is not a
-  cross-fleet or unauthenticated exposure.
+- Positive: a compromised host reports only for its own Agents and holds at most three valid
+  certificates; it cannot take over another host's Agent record or its renewals.
+- Negative / trade-offs: a compromised Gateway, or a compromised peer behind one, can still poison
+  the record of any Agent behind a Gateway. Accepted within one fleet; it is not a cross-fleet or
+  unauthenticated exposure.
+- Negative / trade-offs: an operator marks each Gateway by hand; until then the first Agents it
+  carries bind to the Gateway's host, and the mark is the remedy.
 - Positive: a copy of `server.toml` admits no host and signs in no operator.
 - Negative / trade-offs: a Server upgraded with plaintext credentials refuses to start until each is
   hashed; browsers cache Basic credentials and offer no clean logout.
@@ -527,7 +557,16 @@ operator actions.
   `the_table_is_bounded_and_drops_the_oldest` (clause 24).
 - [`crates/fleet-server/src/ca.rs`](../../crates/fleet-server/src/ca.rs) —
   `signs_a_request_into_a_certificate`, `the_request_cannot_dictate_the_certificates_powers`,
-  `refuses_a_request_that_does_not_parse` (clauses 7, 9).
+  `refuses_a_request_that_does_not_parse` (clauses 7, 9),
+  `a_renewal_proof_names_the_certificate_and_its_host` (clauses 7, 27).
+- [`crates/fleet-server/src/revocation.rs`](../../crates/fleet-server/src/revocation.rs) —
+  `a_host_is_bounded_and_speaks_only_for_its_own_agents` (clause 7).
+- [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) —
+  `a_host_cannot_report_for_another_hosts_agent` (clauses 7, 14).
+- [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs) —
+  `an_operator_sees_each_host_and_can_mark_a_gateway` (clause 7).
+- [`crates/fleet-agent/tests/certificate_renewal_e2e.rs`](../../crates/fleet-agent/tests/certificate_renewal_e2e.rs) —
+  `a_client_renews_each_certificate_before_it_expires` (clauses 9, 11, 27).
 - [`crates/fleet-agent/src/csr.rs`](../../crates/fleet-agent/src/csr.rs) —
   `a_client_without_a_certificate_asks_and_keeps_its_key` (clauses 9, 21),
   `the_private_key_is_written_owner_only`, `an_issued_certificate_becomes_the_identity`,
@@ -543,8 +582,8 @@ operator actions.
   [`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs) —
   `a_cross_site_state_changing_post_is_refused` (clause 16).
 
-**Not mechanically decidable:** clause 14 decides what is *not* built — no test can show the
-absence of a per-Agent authorization the design rejects; clause 12 is a dependency choice; and
+**Not mechanically decidable:** clause 14 decides what is *not* built beyond the host — no test
+can show the absence of a per-Agent authorization the design rejects; clause 12 is a dependency choice; and
 clause 25 rests on a Gateway's client CA, which the Server cannot see. Review holds them.
 Clause 23's Client half — the certificate presented only to the Server's own origin — is
 decidable, but no test decides it yet; review holds it until a download test in the Client's

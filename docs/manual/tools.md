@@ -283,14 +283,15 @@ For a program the other tool does not know: it builds the container, and it owns
 ```console
 $ opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex)
 $ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
 | Command | What it prints | Use it for |
 |---|---|---|
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
-| `sign --key <file> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}` |
+| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0042) |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
 

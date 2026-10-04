@@ -633,8 +633,10 @@ fn default_stale_after_secs() -> u64 {
     90
 }
 
+/// A month: short enough that a certificate stolen unnoticed is good for weeks, not a quarter;
+/// long enough that a host offline for a fortnight still renews on its own (ADR-0039 clause 9).
 fn default_validity_days() -> u32 {
-    90
+    30
 }
 
 /// Roomy enough for the real thing: an `otelcol-contrib` binary is a few hundred megabytes.

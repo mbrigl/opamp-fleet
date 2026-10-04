@@ -196,7 +196,14 @@ async fn a_package_rollout_reaches_a_polling_client() {
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
     let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
     let public_key_hex = hex::encode(keypair.public_key().as_ref());
-    let signature = keypair.sign(&artifact).as_ref().to_vec();
+    let signature = keypair
+        .sign(&fleet_core::package::statement(
+            "managed-agent",
+            "2.0.0",
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");

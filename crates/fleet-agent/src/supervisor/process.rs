@@ -267,8 +267,14 @@ pub struct VersionProbe {
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
+/// The environment variable a Managed Process finds the Supervisor Endpoint's token in
+/// (ADR-0053): an `opampextension` presents it as `Authorization: Bearer ${env:OPAMP_SUPERVISOR_TOKEN}`.
+pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
+
 pub struct Runner {
     pub name: String,
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0053).
+    pub endpoint_token: String,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0015's health-gated acknowledgement); zero acknowledges on start.
@@ -861,6 +867,10 @@ impl Runner {
         };
         let mut command = Command::new(&program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
+        // Last, so no block's `env` can replace it (ADR-0053).
+        if !self.endpoint_token.is_empty() {
+            command.env(ENDPOINT_TOKEN_ENV, &self.endpoint_token);
+        }
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }

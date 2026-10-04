@@ -108,6 +108,7 @@ fn runner_full(
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
     let runner = Runner {
+        endpoint_token: String::new(),
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
@@ -488,6 +489,52 @@ async fn wait_until_started(marker: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// The Managed Process finds the Supervisor Endpoint's token in its environment, and no block's
+/// `env` can put another one in its place.
+/// Verifies: ADR-0053
+#[tokio::test]
+async fn the_managed_process_is_handed_the_endpoint_token() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: "the-token".to_string(),
+        name: "test".to_string(),
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: vec![(
+                    "OPAMP_SUPERVISOR_TOKEN".to_string(),
+                    "a-block-tried".to_string(),
+                )],
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let task = tokio::spawn(runner.run(shutdown));
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(text.contains("token=the-token\n"), "{text}");
+    task.abort();
 }
 
 /// A kind that declared a reload applies a configuration in place (ADR-0015): the process is

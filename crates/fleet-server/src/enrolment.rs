@@ -227,6 +227,7 @@ impl Enrolment {
         &self,
         id: &str,
         signer: &dyn CertificateSigner,
+        host: &str,
         record: &Record<'_>,
     ) -> Result<(), DecisionError> {
         let mut state = self.state.lock().expect("enrolment lock");
@@ -236,7 +237,9 @@ impl Enrolment {
             .get_mut(id)
             .filter(|entry| entry.decision.is_none())
             .ok_or(DecisionError::NotFound)?;
-        let signed = signer.sign(&entry.csr_pem).map_err(DecisionError::Sign)?;
+        let signed = signer
+            .sign(&entry.csr_pem, host)
+            .map_err(DecisionError::Sign)?;
         record(&signed, &entry.instance_uid).map_err(DecisionError::Sign)?;
         entry.decision = Some(Decision::Approved(signed.pem));
         drop(state);
@@ -325,7 +328,7 @@ mod tests {
     struct Echo;
 
     impl CertificateSigner for Echo {
-        fn sign(&self, csr_pem: &str) -> Result<Signed, String> {
+        fn sign(&self, csr_pem: &str, _host: &str) -> Result<Signed, String> {
             Ok(Signed {
                 pem: format!("issued for {csr_pem}"),
                 facts: crate::revocation::Facts {
@@ -334,12 +337,20 @@ mod tests {
                     subject: String::new(),
                     key_fingerprint: String::new(),
                     not_after_ms: u64::MAX,
+                    host: None,
                 },
             })
         }
 
         fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
             Ok(())
+        }
+
+        fn renewal_proof(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::Facts>, String> {
+            Ok(None)
         }
     }
 
@@ -398,7 +409,7 @@ mod tests {
         );
         assert_eq!(enrolment.pending().len(), 1);
         enrolment
-            .approve("a", &Echo, &|_, _| Ok(()))
+            .approve("a", &Echo, "host", &|_, _| Ok(()))
             .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
@@ -409,7 +420,7 @@ mod tests {
             "a decided request is no longer pending"
         );
         assert_eq!(
-            enrolment.approve("a", &Echo, &|_, _| Ok(())),
+            enrolment.approve("a", &Echo, "host", &|_, _| Ok(())),
             Err(DecisionError::NotFound)
         );
 
@@ -434,7 +445,7 @@ mod tests {
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
         assert_eq!(
-            enrolment.approve("b", &Echo, &|_, _| Ok(())),
+            enrolment.approve("b", &Echo, "host", &|_, _| Ok(())),
             Err(DecisionError::NotFound)
         );
     }

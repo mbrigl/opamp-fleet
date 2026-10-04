@@ -464,10 +464,12 @@ async fn write_stream(
     })
 }
 
-/// Verifies the streamed artifact: the content hash from the stream, and — only when the policy
-/// demands a signature check — the file read back, since Ed25519 verifies over the whole message.
+/// Verifies the streamed artifact: the content hash from the stream, then the signature over what
+/// the offer says the artifact is — its Agent type (the package's name), its version and that
+/// hash (ADR-0042). A signed artifact offered as another type's program, or under another version,
+/// does not verify.
 fn verify_staged(
-    path: &Path,
+    _path: &Path,
     staged: &Staged,
     package: &PackageDownload,
     key: &[u8],
@@ -475,8 +477,9 @@ fn verify_staged(
     if staged.content_hash != package.content_hash {
         return Err("the downloaded artifact does not match its content hash".to_string());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    check_signature(&bytes, &package.signature, key)
+    let statement =
+        fleet_core::package::statement(&package.name, &package.version, &package.content_hash);
+    check_signature(&statement, &package.signature, key)
 }
 
 /// The signature policy (ADR-0042): there is no unsigned posture. An offer is refused before
@@ -499,7 +502,11 @@ fn signature_policy<'a>(signature: &[u8], key: Option<&'a [u8]>) -> Result<&'a [
 fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), String> {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
         .verify(bytes, signature)
-        .map_err(|_| "the artifact's signature is invalid".to_string())
+        .map_err(|_| {
+            "the artifact's signature is invalid — it must cover the Agent type, the version and \
+             the SHA-256 (opamp-package-sign sign --agent-type … --version …)"
+                .to_string()
+        })
 }
 
 #[cfg(test)]
@@ -696,7 +703,14 @@ mod tests {
         let (keypair, public) = keypair();
         let dir = tempfile::tempdir().expect("tempdir");
         let (path, staged) = stage(&dir, b"artifact");
-        let signature = keypair.sign(b"artifact").as_ref().to_vec();
+        let signature = keypair
+            .sign(&fleet_core::package::statement(
+                "otelcol",
+                "1.0.0",
+                &staged.content_hash,
+            ))
+            .as_ref()
+            .to_vec();
 
         let wrong = offer(Sha256::digest(b"other").to_vec(), signature.clone());
         assert!(verify_staged(&path, &staged, &wrong, &public).is_err());
@@ -716,7 +730,10 @@ mod tests {
         let bytes = b"the-binary";
         let (path, staged) = stage(&dir, bytes);
         let hash = staged.content_hash.clone();
-        let signature = keypair.sign(bytes).as_ref().to_vec();
+        let signature = keypair
+            .sign(&fleet_core::package::statement("otelcol", "1.0.0", &hash))
+            .as_ref()
+            .to_vec();
 
         // Before the download: a key and a signature, or nothing at all.
         assert!(signature_policy(&signature, None).is_err(), "no key");
@@ -738,6 +755,32 @@ mod tests {
         let mut bad = signature;
         bad[0] ^= 0xff;
         assert!(check(bad).is_err());
+    }
+
+    /// The signature covers which Agent type the artifact is for and at which version: the same
+    /// signed bytes offered as another type's program, or under another version, are refused.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_signature_does_not_carry_over_to_another_type_or_version() {
+        let (keypair, public) = keypair();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, staged) = stage(&dir, b"the-binary");
+        let hash = staged.content_hash.clone();
+        let signature = keypair
+            .sign(&fleet_core::package::statement("otelcol", "1.0.0", &hash))
+            .as_ref()
+            .to_vec();
+        let mut other_type = offer(hash.clone(), signature.clone());
+        other_type.name = "telegraf".to_string();
+        assert!(verify_staged(&path, &staged, &other_type, &public).is_err());
+        let mut other_version = offer(hash.clone(), signature.clone());
+        other_version.version = "0.9.0".to_string();
+        assert!(verify_staged(&path, &staged, &other_version, &public).is_err());
+        let bare = keypair.sign(b"the-binary").as_ref().to_vec();
+        assert!(
+            verify_staged(&path, &staged, &offer(hash, bare), &public).is_err(),
+            "a signature over the bytes alone no longer verifies"
+        );
     }
 
     /// A download goes to the Server's own origin, or below a configured prefix at a `/` boundary,

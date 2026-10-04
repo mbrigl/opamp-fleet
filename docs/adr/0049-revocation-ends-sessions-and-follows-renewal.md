@@ -58,11 +58,14 @@ each WebSocket session as soon as a proof that admitted it is revoked or its cer
 
 2. **The Server keeps a register of what it signed.** For each certificate: issuer, serial,
    subject, the SHA-256 fingerprint of its public key, `not_after`, the `instance_uid` of the
-   message that carried the CSR, and — on a renewal — the certificate it renewed, its
-   **predecessor**: always the certificate the connection presented, whatever `instance_uid` the
-   message names, because that value is self-asserted and a chain must not be left on its say-so.
-   Behind a Gateway the presented certificate is the Gateway's, so what its downstream Agents
-   renew through it descends from it. An enrolment has no predecessor and is the root of its
+   message that carried the CSR, its host
+   ([ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 7), and — on a
+   renewal — the certificate it renewed, its **predecessor**: the certificate the CSR's renewal
+   proof names (ADR-0039 clause 27), and without a proof the certificate the connection presented —
+   never what `instance_uid` the message names, because that value is self-asserted and a chain
+   must not be left on its say-so. A proof is checked against the client CA and its key, so it
+   holds through a Gateway too; a downstream Agent without one renews from the Gateway's
+   certificate, and what it renews descends from that. An enrolment has no predecessor and is the root of its
    chain. An issuer is identified by the SHA-256 of its DER-encoded name, so no text form of
    a name can fail to match. The register lives under `config_dir`, one file per certificate, and
    each entry is written before the certificate is offered. It holds at most 100 000 certificates,
@@ -124,10 +127,10 @@ each WebSocket session as soon as a proof that admitted it is revoked or its cer
     healthy fleet never meets this close; it ends what renewal did not replace.
 
 11. **Behind a Gateway the Server revokes what it sees.** A downstream Agent is revoked through
-    its credential, or by revoking the Gateway's certificate, which ends every Agent the Gateway
-    carries, and every certificate its downstream Agents renewed through it (clause 2), even once
-    they connect directly. Revoking a downstream certificate the Server never saw takes effect only
-    once that Agent connects directly.
+    its credential, by revoking the Gateway's certificate, which ends every Agent the Gateway
+    carries and every certificate renewed through it without a proof (clause 2), or by revoking its
+    own certificate: a revoked certificate's proof renews nothing. Revoking a downstream
+    certificate ends its sessions only once that Agent connects directly.
 
 **Out of scope:** CRL and OCSP for third parties; distributing the list to Gateways; per-Agent
 credentials; binding a certificate to an `instance_uid`
@@ -197,10 +200,10 @@ force; a revocation view in the bundled UI; an audit record of revocations.
   credential shuts out every Agent still presenting it, so it must follow a completed rotation.
   Behind a Gateway only the credential and the Gateway's own certificate are revocable. The
   register's bounds turn an admitted member that loops CSRs into a refusal of renewals within its
-  chain: behind a Gateway that chain is the Gateway's, so one downstream Agent can stop renewal
-  for the Gateway and every Agent it carries until the certificates it obtained expire. Admission
-  proves membership, not which Agent is speaking, so the Server cannot tell that Agent apart; the
-  bounds keep the damage to one chain and away from enrolment.
+  chain, and a host holds at most three valid certificates (ADR-0039 clause 7). A downstream Agent
+  that renews with a proof renews in its own chain and host; one without a proof renews in the
+  Gateway's, and can stop renewal for the Gateway and every Agent it carries until the certificates
+  it obtained expire. The bounds keep the damage to one chain and away from enrolment.
 - Follow-ups: distributing the list to Gateways; revocation by Agent as a convenience in the
   bundled UI; an audit record of each revocation and each session it closed; shortening
   certificate validity once renewal is proven; bounding issuance per Agent rather than per chain,

@@ -192,7 +192,7 @@ Optional. Present makes the Server a local CA that signs Agent certificate reque
 [client_ca]
 cert_file = "client-ca.pem"
 key_file = "client-ca-key.pem"
-validity_days = 90
+validity_days = 30
 ```
 
 ### `[enrolment]`
@@ -277,7 +277,7 @@ Add a `[client_ca]` section and the Server becomes a local CA:
 [client_ca]
 cert_file = "client-ca.pem"
 key_file = "client-ca-key.pem"
-validity_days = 90
+validity_days = 30
 ```
 
 Use a **separate** CA, not the listener's certificate and key: a CA private key stored where the
@@ -313,9 +313,28 @@ header is the only per-Agent proof that reaches the Server through it. A Gateway
 CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
 provisioned a certificate by an operator.
 
-**There is no revocation.** Short `validity_days` plus renewal is what bounds a certificate; ejecting
-a host faster than its certificate expires means rotating the CA. An expired certificate locks a
-host out even with a valid credential: a Client switched off longer than its validity enrols again
+**A certificate names its host.** The Server puts `urn:opamp-fleet:host:<id>` into every
+certificate it signs: a host is minted when an operator approves an enrolment, a certificate an
+operator provisioned is given one on its first renewal, and every renewal keeps it — the Client
+proves with its current key which certificate it renews, through a Gateway too. An Agent belongs
+to the host that first reported it: a connection with another host's certificate that reports
+for it is given an `instance_uid` of its own instead. A host holds at most three valid
+certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
+host:
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/hosts
+[{"host":"0192…","gateway":false,"instance_uids":["0192…","0193…"],"certificates":1}]
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway": true}' \
+       https://127.0.0.1:4321/api/v1/hosts/0192…/gateway
+```
+
+A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
+proves. A third-party client that sends no renewal proof renews the certificate it presents.
+
+**A certificate lives 30 days by default** and is renewed at two thirds of that; a host is ejected
+sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate-or-a-credential)).
+An expired certificate locks a host out even with a valid credential: a Client switched off longer than its validity enrols again
 with a bootstrap certificate, or is given a new certificate by an operator.
 
 ## Enrolment: a new host, approved by an operator
@@ -401,7 +420,8 @@ when it renewed:
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
 [{"authority":"client","issuer":"CN=fleet client CA","serial":"5c0f…","subject":"CN=host-01",
   "key_fingerprint":"…","not_after_ms":1797772400000,"instance_uid":"0192…",
-  "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"}}]
+  "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"},
+  "host":"0192…"}]
 ```
 
 Revoke a certificate by the CA that issued it — `client` for the client CA, `bootstrap` for the
@@ -409,9 +429,10 @@ bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every ren
 certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
 stays in force until the last of those renewals has expired. `openssl x509 -noout -serial` prints
 the serial of a certificate you hold; colons, case and leading zeros do not matter. A renewal
-descends from the certificate its connection presented, so a renewal made through a Gateway
-descends from the Gateway's: revoking a Gateway revokes the certificates its Agents renewed
-through it as well, and those Agents enrol again.
+descends from the certificate its renewal proof names, through a Gateway too; a client that sends
+no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
+revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
+certificate's proof renews nothing.
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
@@ -443,7 +464,8 @@ the reason `certificate expired`. A Client renews at two thirds of the life and 
 the new certificate, so a healthy fleet never sees this.
 
 Behind a Gateway the Server sees the Gateway's certificate, not the Agent's. Revoke a gatewayed
-Agent through its credential, or revoke the Gateway's certificate, which ends every Agent it
+Agent through its credential, its own certificate — which stops its renewals at once and its
+sessions once it connects directly — or the Gateway's certificate, which ends every Agent it
 carries.
 
 ## The audit record
@@ -817,7 +839,8 @@ artifact, hashes it, and signs it:
 ```console
 $ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail   # prints the sha256
 $ opamp-package-sign keygen --out fleet-signing.pk8                # prints the public key
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
 `pack` writes `.tar.gz` or an AES-256-encrypted `.7z`, and names the member the way the receiving

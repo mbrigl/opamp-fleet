@@ -1259,6 +1259,60 @@ async fn a_revocation_reaches_a_certificate_renewed_before_it() {
     );
 }
 
+/// A renewal of a certificate an operator provisioned names a host of its own; the operator
+/// sees the host, what it speaks for, and can mark it as a Gateway (ADR-0039 clause 7).
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn an_operator_sees_each_host_and_can_mark_a_gateway() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let uid = InstanceUid::default();
+    let (csr, _) = csr_for("edge-01");
+    let reply = decode(post_as(&http, &served.endpoint, with_csr(&uid, csr)).await).await;
+    assert!(reply
+        .connection_settings
+        .and_then(|s| s.opamp)
+        .and_then(|o| o.certificate)
+        .is_some());
+
+    let operator = client(&served.ca_pem, None);
+    let hosts: serde_json::Value = operator
+        .get(format!(
+            "https://localhost:{}/api/v1/hosts",
+            served.operator_port
+        ))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(hosts.as_array().expect("a list").len(), 1, "{hosts}");
+    assert_eq!(hosts[0]["certificates"], 1);
+    assert_eq!(hosts[0]["gateway"], false);
+    let host = hosts[0]["host"].as_str().expect("a host").to_string();
+
+    let gateway = |host: &str| {
+        operator
+            .put(format!(
+                "https://localhost:{}/api/v1/hosts/{host}/gateway",
+                served.operator_port
+            ))
+            .json(&serde_json::json!({"gateway": true}))
+            .send()
+    };
+    assert_eq!(
+        gateway(&host).await.expect("send").status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        gateway("nobody").await.expect("send").status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
 // ---- A CSR's claim to an instance_uid (ADR-0050) ----
 
 fn csr_claiming(subject: &str) -> Vec<u8> {

@@ -134,12 +134,13 @@ client_ca_file = "client-ca.pem"
 # offer. Point client_ca_file above at this CA's certificate.
 #
 # This is deliberately NOT the listener's own certificate and key: a CA private key sitting where
-# the server certificate lives means compromising the Server mints fleet members at will. There is
-# no revocation: validity_days plus renewal is what bounds a certificate, so keep it short.
+# the server certificate lives means compromising the Server mints fleet members at will. A
+# certificate can be revoked through the REST API (ADR-0049); validity_days bounds what one stolen
+# unnoticed is good for, and a Client renews at two thirds of it.
 # [client_ca]
 # cert_file = "client-ca.pem"
 # key_file = "client-ca-key.pem"
-# validity_days = 90
+# validity_days = 30
 
 # ENROLMENT (ADR-0039): how a fresh host gets its first certificate. It connects with a BOOTSTRAP
 # certificate from a CA of its own — never the client CA — and the fleet credential. That opens

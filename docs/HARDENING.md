@@ -20,12 +20,12 @@ link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
 protocol: the **Supervisor Endpoint**, the loopback WebSocket each Supervisor serves for a Managed
-Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs)). It is
-treated separately at the end.
+Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs)), which
+admits only the process its Supervisor started (ADR-0053).
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
-names as non-goals. The boundary is worth stating precisely because measures below (H4) run
-close to it — *which Agent is speaking* is authentication and belongs here; *what that Agent is
+names as non-goals. The boundary is worth stating precisely because the host binding (ADR-0039 clause 7)
+runs close to it — *which Agent is speaking* is authentication and belongs here; *what that Agent is
 allowed to do* is authorization and does not.
 
 ## What already holds
@@ -80,6 +80,12 @@ has:
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0050): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
+- **A certificate names its host, and a host speaks only for its own Agents** (ADR-0039 clauses
+  7, 14 and 27): the Server puts a host of its own in every certificate it signs; an
+  `instance_uid` first reported with one host's certificate is not spoken for by another's — such a
+  reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
+  certificate it renews with that certificate's key, so it keeps its host and chain through a
+  Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
 - **Key material and credentials readable by their owner alone** (ADR-0039 clause 8, ADR-0046
   clause 18): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories; on Windows a system-scope install cuts the data root off
@@ -94,6 +100,16 @@ has:
 - **An audit record of every security decision** (ADR-0052): admissions and refusals, enrolment,
   issuance, revocation, rotation, operator acts and package outcomes, one hash-chained line each;
   no admission without its record.
+- **Certificates live 30 days by default** (ADR-0039 clause 9) and are renewed at two thirds of
+  that; a test with lives of seconds watches three generations each replace the one before it
+  expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
+- **An offered move to another TLS endpoint needs the Client's own CA file** (ADR-0041 clause 5),
+  so a Server cannot move the fleet to a host only a public CA vouches for.
+- **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0053): a token
+  made at every start, handed to the process in its environment, asked of every connection.
+- **A package signature covers the Agent type, the version and the hash** (ADR-0042): a signed
+  artifact installs as its own type's program at its own version and nowhere else, and a
+  Supervisor refuses a version older than the one it runs.
 - `TLSConnectionSettings` and `ProxyConnectionSettings` refused on merit, so a Server cannot command
   a Client to weaken its own verification
   ([`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
@@ -138,53 +154,14 @@ construction: a measure that reaches it moves up into [What already holds](#what
 way the connection-setup bound did when ADR-0012 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
 
-## Stage 1 — Separate rotation from revocation
+## Revocation behind a Gateway
 
 Revocation and the CSR check are in force and listed under
 [What already holds](#what-already-holds). What remains of revocation is the Gateway: the Server sees the Gateway's certificate, so a downstream
 certificate is revoked only once that Agent connects directly. Handing the list to Gateways would
 make the Gateway take an admission decision, and is a measure of its own when a fleet needs it.
 
-## Stage 2 — Sharpen identity
-
-🔴 **H4 — Decide what a client certificate proves: fleet membership, or a specific Agent.**
-Today it proves membership only, and that is a recorded decision with a real reason: binding the
-issued certificate to an `instance_uid` would mean a re-key through `AgentIdentification` kills a
-certificate the Server itself issued (ADR-0017). Hardening this means *resolving* that
-conflict rather than working around it. Three approaches are worth weighing, and none is obviously
-right:
-
-- a **stable enrolment identity** carried in the certificate, distinct from the re-keyable
-  `instance_uid`, with the Server holding the mapping;
-- **stop re-keying** while certificates are in force, making `instance_uid` stable by construction
-  and accepting what that costs in duplicate-identity handling;
-- **bind only on direct connections**, leaving a gatewayed fleet on membership proof, since the
-  certificate the Server sees there is the Gateway's anyway.
-
-This is the most expensive measure in the document and the one with the widest blast radius. It
-would need an ADR superseding ADR-0017 on this specific point, and that ADR is where the
-authorization boundary named under [Scope](#scope) has to be drawn explicitly — otherwise it moves
-unnoticed.
-
-🔴 **H6 — Shorten certificate validity once renewal is proven.**
-`validity_days` defaults to 90. Revocation ends a session at once (ADR-0049), so a short
-validity no longer has to stand in for it; what remains is the reach of a certificate stolen
-without anyone noticing. Shortening it is cheap, but only once renewal is shown to complete in a
-fleet left running for longer than one validity period: otherwise it moves the failure to
-"eject the whole fleet by accident".
-
-## Stage 4 — Shrink the surface and bound the abuse
-
-🔴 **H20 — Bound certificate issuance per Agent, not per chain.**
-The Server signs every CSR an admitted member sends, and bounds the register per renewal chain
-(ADR-0049). Behind a Gateway every downstream renewal descends from the Gateway's certificate, so
-one downstream Agent looping CSRs fills that chain and every renewal behind the Gateway is refused
-until what it obtained expires. A rate bound alone only slows this; telling the abusing Agent apart
-needs the per-Agent identity H4 decides. **To work out:** whether a renewal may be refused while
-the requesting key's certificate is still young, and how that holds behind a Gateway, where the
-Server sees no downstream certificate at all.
-
-## Stage 5 — The channels that put code on the host
+## The channels that put code on the host
 
 Remote configuration and package delivery are the paths by which the Server causes code to run on an
 Agent's host. They deserve at least as much attention as the transport, and arguably more.
@@ -209,34 +186,10 @@ out; downgrade the Client or install a program that is not the Client as the Cli
 plaintext beyond the loopback; weaken TLS verification or set a proxy; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 
-Two things a reader would expect to be refused are not, and each is a measure below.
-
-🔴 **H23 — A Supervisor's package is bound to its bytes, not to its Agent type or version.**
-Any artifact signed with the operator's key installs as any Supervisor's program, at any version
-label, older ones included; only the Client's self-update refuses a downgrade. A compromised Server
-can roll a Managed Process back to a signed build with a known flaw. **To work out:** whether the
-signature should cover the Agent type and version, as the Deployment already pairs them
-(ADR-0045), and a Client-side refusal of a downgrade.
-
-🔴 **H24 — An offered endpoint is trusted by the public roots when no `ca_file` is set.**
-A connection offer may move the fleet to any host whose certificate a public CA issued, and the
-Client keeps the move in `connection-settings.pb`, which outranks the operator's file. A
-compromised Server can re-home the fleet for good. **To work out:** requiring `ca_file` for an
-offered endpoint, or pinning the offered endpoint to the trust the current one was reached with.
-
 Checks still missing for things that are enforced: an unknown Supervisor `type`; a delivered set
 naming top-level keys beyond `endpoint` and `state_dir`; a refused set leaving the running
 Supervisors untouched; the OpAMP half of an offer's `tls` and `proxy` not being honoured; two
 top-level packages in one offer; a delivered program name and Supervisor name that traverse.
-
-## Suggested order
-
-**H23 and H24 next.** Each narrows what a compromised Server can do on a host beyond what the
-signature already stops.
-
-**H4 last of the identity work, not first.** A sharper identity is only worth what the revocation
-path behind it is worth: binding certificates to Agents while still being unable to withdraw one
-buys precision without control. Revocation is the prerequisite, not the warm-up, and it is in force.
 
 ## Verifying a measure is in force
 
@@ -246,22 +199,5 @@ proves it — and the rule for all of them is the project's own ([`AGENTS.md` §
 must fail before the change and pass after**. A test that passes today verifies nothing about a
 measure that has not been taken.
 
-| # | Verified when |
-|---|---|
-| H4 | *Cannot be fixed before the ADR* — the shape decides the check. Two conditions hold whichever way it goes, and are the floor: a certificate issued for one Agent does not authenticate a connection claiming another, and a re-key through `AgentIdentification` does not invalidate a certificate still in force. |
-| H6 | Renewal is observed to complete **before** expiry in a fleet left running longer than one validity period. Not a unit test — this one needs a soak, and shortening validity without that evidence is the failure mode the measure is meant to avoid. |
-| H23 | A signed artifact offered to a Supervisor of another Agent type, or at a version below the one installed, is refused before anything is swapped. |
-| H24 | An offered endpoint is not adopted unless the Client's own `ca_file` verifies it. |
-
-## The local endpoint
-
-The Supervisor Endpoint binds `127.0.0.1` and authenticates nothing: any local process can take the
-place of the Managed Process and report health, description, and effective configuration in its
-name. On a single-purpose host that is proportionate — anything able to open that socket can usually
-also write the files the Supervisor reads. On a shared or multi-user host it is not, and the fleet's
-view of that Agent becomes forgeable from the inside.
-
-This needs a decision either way: a local authentication mechanism, or a written statement that
-single-purpose hosts are the assumed deployment and that shared hosts are an accepted risk. The one
-outcome to avoid is leaving it unstated, since the assumption is currently implicit in the code and
-nowhere else.
+Each open measure adds a row here — its number, and the observable that proves it — and leaves
+with the measure when it moves up into [What already holds](#what-already-holds).

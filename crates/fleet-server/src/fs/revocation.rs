@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use crate::revocation::{CertId, Issued, Ledger, LedgerStore, Revocation};
+use std::collections::BTreeMap;
+
+use crate::revocation::{CertId, Host, Issued, Ledger, LedgerStore, Revocation};
 
 /// A directory of its own under `config_dir`, owner-only: one JSON file per certificate in the
 /// register under `issued/`, so a renewal writes one small file, and the list in
@@ -11,6 +13,7 @@ use crate::revocation::{CertId, Issued, Ledger, LedgerStore, Revocation};
 pub struct FsLedgerStore {
     issued: PathBuf,
     revocations: PathBuf,
+    hosts: PathBuf,
 }
 
 impl FsLedgerStore {
@@ -25,6 +28,7 @@ impl FsLedgerStore {
         Ok(FsLedgerStore {
             issued,
             revocations: dir.join("revocations.json"),
+            hosts: dir.join("hosts.json"),
         })
     }
 
@@ -62,9 +66,16 @@ impl LedgerStore for FsLedgerStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("cannot read {}: {e}", self.revocations.display())),
         };
+        let hosts = match std::fs::read(&self.hosts) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| format!("cannot parse {}: {e}", self.hosts.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(format!("cannot read {}: {e}", self.hosts.display())),
+        };
         Ok(Ledger {
             issued,
             revocations,
+            hosts,
         })
     }
 
@@ -80,6 +91,11 @@ impl LedgerStore for FsLedgerStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("cannot delete {}: {e}", path.display())),
         }
+    }
+
+    fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+        let json = serde_json::to_vec_pretty(hosts).expect("the hosts serialize");
+        super::replace_owner_only(&self.hosts, &json)
     }
 
     fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
@@ -105,6 +121,7 @@ mod tests {
                 subject: "CN=edge-01".into(),
                 key_fingerprint: "k".into(),
                 not_after_ms: 9,
+                host: None,
             },
             instance_uid: "00".into(),
             predecessor: None,

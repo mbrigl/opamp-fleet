@@ -406,15 +406,20 @@ pub fn start_supervisor(
 
     // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0009): bound
     // unconditionally, before the process starts — a taken port fails startup, not later.
+    // Only the Managed Process may report through it (ADR-0053): a token fresh for every start,
+    // handed to the process in its environment and asked of every connection.
+    let endpoint_token = endpoint::new_token()?;
     endpoint::start(
         block.name.clone(),
         block.endpoint_port,
         EventSender::new(index, event_tx.clone()),
         stop.clone(),
         config.max_message_size_bytes,
+        endpoint_token.clone(),
     )?;
 
     let commands = plugin.start(SupervisorContext {
+        endpoint_token,
         name: block.name.clone(),
         supervisor_dir,
         config_dir,

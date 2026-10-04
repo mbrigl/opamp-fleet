@@ -565,7 +565,14 @@ mod tests {
             let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
             ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair")
         };
-        let signature = keypair.sign(&artifact).as_ref().to_vec();
+        let signature = keypair
+            .sign(&fleet_core::package::statement(
+                "otelcol",
+                "2.0.0",
+                &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+            ))
+            .as_ref()
+            .to_vec();
         let public = {
             use ring::signature::KeyPair as _;
             keypair.public_key().as_ref().to_vec()

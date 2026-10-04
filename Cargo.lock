@@ -866,6 +866,7 @@ dependencies = [
  "dialoguer",
  "flate2",
  "fleet-agent",
+ "fleet-core",
  "hex",
  "opamp",
  "reqwest",

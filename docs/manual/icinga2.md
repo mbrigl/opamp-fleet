@@ -278,7 +278,8 @@ $ curl --cacert ca.pem -u fleet-admin:secret -X POST \
        https://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
 ```
 
-`$sig` is the artifact's signature from `opamp-package-sign sign`. A Client takes the package only
+`$sig` is the artifact's signature from `opamp-package-sign sign --agent-type icinga2 --version …`,
+which holds for that type and version alone. A Client takes the package only
 with `[packages] verification_key` set.
 
 ## What to expect in the fleet view

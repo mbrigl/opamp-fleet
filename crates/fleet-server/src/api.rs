@@ -236,6 +236,8 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .routes(routes!(list_certificates))
         .routes(routes!(list_revocations, revoke))
         .routes(routes!(lift_revocation))
+        .routes(routes!(list_hosts))
+        .routes(routes!(set_gateway))
         .split_for_parts();
     // The document is immutable once assembled — serialize it once, serve it forever.
     let document =
@@ -2460,6 +2462,28 @@ struct CertificateView {
     /// On a renewal, the certificate it renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     predecessor: Option<CertificateRef>,
+    /// The host it was issued to (ADR-0039 clause 7); absent on one an operator provisioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+}
+
+/// A host the client CA issued to (ADR-0039 clause 7).
+#[derive(Serialize, ToSchema)]
+struct HostView {
+    host: String,
+    /// A Gateway speaks for any Agent; any other host only for those it reported first.
+    gateway: bool,
+    /// The `instance_uid`s it speaks for, hex.
+    instance_uids: Vec<String>,
+    /// How many valid certificates it holds — at most three.
+    certificates: usize,
+}
+
+/// Whether a host is a Gateway.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct GatewayRequest {
+    gateway: bool,
 }
 
 /// A certificate by the CA that issued it and its serial.
@@ -2591,9 +2615,77 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
                 authority: authority(&id),
                 serial: id.serial,
             }),
+            host: issued.facts.host,
         })
         .collect();
     Json(issued).into_response()
+}
+
+/// Every host the client CA issued to, by name.
+#[utoipa::path(
+    get,
+    path = "/api/v1/hosts",
+    tag = "revocation",
+    responses(
+        (status = 200, body = Vec<HostView>),
+        (status = 404, description = "Revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    let hosts: Vec<HostView> = revocations
+        .hosts()
+        .into_iter()
+        .map(|(host, entry, certificates)| HostView {
+            host,
+            gateway: entry.gateway,
+            instance_uids: entry.instance_uids.into_iter().collect(),
+            certificates,
+        })
+        .collect();
+    Json(hosts).into_response()
+}
+
+/// Marks a host as a Gateway, which speaks for the Agents behind it, or takes the mark away.
+#[utoipa::path(
+    put,
+    path = "/api/v1/hosts/{host}/gateway",
+    tag = "revocation",
+    params(("host" = String, Path, description = "the host, as its certificates name it")),
+    request_body = GatewayRequest,
+    responses(
+        (status = 204, description = "Set"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such host, or revocation is not configured", body = ErrorBody)
+    )
+)]
+async fn set_gateway(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(host): Path<String>,
+    Json(request): Json<GatewayRequest>,
+) -> Response {
+    let Some(revocations) = state.revocations() else {
+        return revocation_off();
+    };
+    match revocations.set_gateway(&host, request.gateway) {
+        Ok(true) => {
+            info!(%host, gateway = request.gateway, "gateway mark set");
+            note(
+                &state,
+                crate::audit::Entry::new(
+                    "host.gateway",
+                    if request.gateway { "set" } else { "cleared" },
+                )
+                .with("host", host),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, format!("no host {host:?}")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 /// The revocation list, oldest first.

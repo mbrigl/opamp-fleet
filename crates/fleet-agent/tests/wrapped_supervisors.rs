@@ -75,6 +75,7 @@ fn start(plugin: &dyn Plugin, name: &str, program_path: Option<&str>) -> Harness
     let (event_tx, events) = mpsc::channel(64);
     let (shutdown_tx, shutdown) = shutdown_channel();
     let ctx = SupervisorContext {
+        endpoint_token: String::new(),
         name: name.to_string(),
         supervisor_dir: dir.path().to_path_buf(),
         config_dir: dir.path().join("config"),

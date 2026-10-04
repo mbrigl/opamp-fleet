@@ -17,8 +17,9 @@ The credential `[connection_offer]` hands the fleet sits verbatim in `server.tom
 hashed credentials of
 [ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 26. Unlike those,
 the Server must send it, so it cannot be a hash: it moves out of `server.toml` into a file of its
-own that only the Server's account can read. Clause 1 changes; the rest of the decision stands as
-it was.
+own that only the Server's account can read. And a Server could move the fleet to any host a public
+CA certified, since a Client without its own CA file trusts the public roots (measure H24 of
+[`HARDENING.md`](../HARDENING.md)).
 
 Static credentials ([ADR-0017](0017-admission-and-authentication.md)) would have to be rotated by
 editing every host's configuration file — the fleet-wide chore this project exists to remove. The
@@ -104,7 +105,10 @@ actually sends, and pessimistic only where a message would be an error.
    receipt the Client reports `APPLYING`, then checks the candidate's endpoint by clause 1's rule:
    a `ws://` or `http://` endpoint whose host is not a loopback IP literal is refused without
    connecting, and the offer is reported `FAILED` with an `error_message` naming the endpoint and
-   the reason. Otherwise it connects with the candidate — offered fields, falling back to those in
+   the reason. A candidate that moves to another `wss://` or `https://` endpoint is refused the
+   same way unless `[tls] ca_file` is set, and is then verified against that CA alone: under the
+   public roots, a Server could move the fleet to any host a public CA ever certified, and the
+   move would outlive the operator's file (clause 9). Otherwise it connects with the candidate — offered fields, falling back to those in
    force, an offered certificate included — over TLS 1.3, presenting the client certificate in
    force unless the offer carries one; only a candidate on the loopback connects in plaintext. A
    WebSocket candidate must complete its handshake, a plain-HTTP candidate a real exchange. Only
@@ -284,6 +288,8 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
   `an_offered_credential_is_read_from_its_file`, `an_inline_offered_credential_is_refused`,
   `an_offered_credential_file_readable_by_others_is_refused` (clause 1).
+- [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) —
+  `an_offered_move_needs_the_clients_own_ca` (clause 5).
 - The tests below verify the clauses that stand unchanged.
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —

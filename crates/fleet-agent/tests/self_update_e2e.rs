@@ -68,7 +68,15 @@ fn ring_holding(
         .artifact_path(id, &this_host())
         .expect("the artifact is stored");
     let artifact = std::fs::read(path).expect("read the artifact");
-    let signature = signing_key().0.sign(&artifact).as_ref().to_vec();
+    let signature = signing_key()
+        .0
+        .sign(&fleet_core::package::statement(
+            &id.agent_type,
+            &id.version,
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
     ring_holding_signed(state, id, Some((&this_host(), signature)))
 }
 
@@ -929,7 +937,15 @@ async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client
     let mut service = Supervised::start(&program, &config);
 
     // Signed with the operator's key, over bytes that are not the artifact.
-    let signature = signing_key().0.sign(b"another artifact").as_ref().to_vec();
+    let signature = signing_key()
+        .0
+        .sign(&fleet_core::package::statement(
+            &set.agent_type,
+            &set.version,
+            &<sha2::Sha256 as sha2::Digest>::digest(b"another artifact"),
+        ))
+        .as_ref()
+        .to_vec();
     let ring = ring_holding_signed(&state, &set, Some((&this_host(), signature)));
     wait_until("the rollout act to reach the agent", || {
         service.tend();

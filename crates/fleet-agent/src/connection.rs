@@ -190,6 +190,17 @@ pub async fn verify(
     } else {
         settings.destination_endpoint.clone()
     };
+    // A move to another TLS endpoint is taken only where this Client's own CA file can vouch for
+    // it: under the public roots alone, a Server could move the fleet to any host a public CA
+    // ever certified, and keep it there (ADR-0041 clause 5).
+    let moves = endpoint != config.endpoint;
+    let over_tls = endpoint.starts_with("wss://") || endpoint.starts_with("https://");
+    if moves && over_tls && config.ca_file().is_none() {
+        return Err(format!(
+            "refusing the offered endpoint {endpoint}: a move to another endpoint needs [tls] \
+             ca_file, so that only a server certificate from the fleet's own CA is trusted"
+        ));
+    }
     let authorization = match offered_authorization(settings) {
         Some(offered) => Some(offered.to_string()),
         None => config.authorization_value()?,
@@ -470,6 +481,23 @@ mod tests {
 
     fn never_reported() -> Option<AgentToServer> {
         panic!("a refused endpoint must not get as far as a probe report")
+    }
+
+    /// A move to another TLS endpoint is refused without the Client's own CA file: the public
+    /// roots would let any publicly certified host take the fleet.
+    /// Verifies: ADR-0041
+    #[tokio::test]
+    async fn an_offered_move_needs_the_clients_own_ca() {
+        let config: ClientConfig =
+            toml::from_str("endpoint = \"wss://fleet.example/v1/opamp\"").expect("config");
+        let error = verify(
+            &endpoint_only("wss://elsewhere.example/v1/opamp"),
+            &config,
+            never_reported,
+        )
+        .await
+        .expect_err("no ca_file");
+        assert!(error.contains("ca_file"), "{error}");
     }
 
     /// An offered plaintext endpoint off the loopback is refused before anything is dialled, on

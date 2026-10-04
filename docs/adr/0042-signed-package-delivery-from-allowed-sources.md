@@ -1,9 +1,9 @@
-# ADR-0042: A Supervisor downloads from an allowed source, verifies a mandatory signature, unpacks, swaps and health-gates a package, and rolls back only to a predecessor
+# ADR-0042: A Supervisor downloads from an allowed source, verifies a mandatory signature over the package's type, version and hash, refuses another type and a downgrade, unpacks, swaps and health-gates a package, and rolls back only to a predecessor
 
 - **Status:** 🟡 proposed
-- **Date:** 2026-10-03
+- **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/packages.rs, crates/fleet-agent/src/archive.rs, crates/fleet-agent/src/install.rs, crates/fleet-agent/src/supervisor/process.rs, the package handling in crates/fleet-agent/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`
+- **Applies to:** crates/fleet-agent/src/packages.rs, crates/fleet-agent/src/archive.rs, crates/fleet-agent/src/install.rs, crates/fleet-agent/src/supervisor/process.rs, the package handling in crates/fleet-agent/src/supervisor/agent.rs, the `[packages]` and `[updates]` sections and the `program_path` and `retain_previous_secs` keys of `supervisor.toml`, `crates/fleet-core/src/package.rs`, and the `sign` command of `opamp-package-sign`
 - **Supersedes:** [ADR-0019](0019-package-delivery-on-the-agent.md)
 
 ## Context
@@ -15,6 +15,15 @@ signed with a key the operator holds and fetched from a source the operator allo
 (who declares `AcceptsPackages`), clause 4 (where a download may go, over what, and with which
 identity and headers) and clause 5 (the signature is mandatory) change; every other clause stands
 as it was.
+
+A signature
+over the artifact's bytes alone says nothing about what the artifact is for. Any artifact signed
+with the operator's key installed as any Supervisor's program, at any version label, older ones
+included; a compromised Server could roll a Managed Process back to a signed build with a known
+flaw, or hand a Collector a Telegraf binary. Measure H23 of [`HARDENING.md`](../HARDENING.md)
+asked for the signature to cover the Agent type and the version, as a Deployment already pairs
+them ([ADR-0045](0045-packages-and-deployments-that-sign-every-package.md)), and for a Client-side
+refusal of a downgrade.
 
 The Server updates the program a Managed Process runs: it verifies each Package before it is
 applied, reports the outcome, and rolls back on failure; a failed update is reported, not silent.
@@ -151,7 +160,13 @@ configurable window.
    downloaded; an invalid signature refuses the artifact. Both checks complete on the staged
    bytes before the artifact is opened, so an unverified archive is never parsed beyond its hash
    and signature. There is no unsigned posture: a Client without a key takes no packages (clause
-   1). The signature covers the artifact exactly as published, archive and all. Where a Deployment
+   1). The signature covers a statement of what the artifact is, not its bytes:
+   `opamp-fleet-package-v1`, the Agent type (the offered package's name), the version and the
+   artifact's SHA-256 in lowercase hex, one per line, each ended by a newline
+   (`fleet_core::package::statement`). `opamp-package-sign sign --agent-type … --version …` makes
+   it. Since the hash is in the statement and checked against the streamed bytes first, the
+   signature still covers the artifact exactly as published, archive and all — and holds for that
+   type and version alone. Where a Deployment
    keeps the signature is [ADR-0030](0030-packages-and-deployments.md). The same download and
    verification serve the Client's own update ([ADR-0021](0021-the-client-updates-itself.md)).
 
@@ -252,6 +267,12 @@ configurable window.
     most one predecessor: the next update replaces it and its marker. The marker lives in the
     Supervisor's directory, so the deadline survives a Client restart.
 
+22. **A Supervisor takes its own type, and never goes back.** An offered package whose name is not
+    the Supervisor's Agent type is refused before anything is downloaded, and so is one whose
+    version precedes the installed one by Semantic Versioning's precedence. Versions that do not
+    compare are not refused on that ground; the signature still binds them. The Client's own
+    update keeps its own rules ([ADR-0044](0044-the-client-updates-itself-from-a-signed-package.md)).
+
 **Out of scope:** where artifacts are stored and served, upload and source entries, and the
 Package's identity ([ADR-0020](0020-the-package-store.md)); signature placement and aiming, and
 whether the Server offers a Package it holds no signature for
@@ -262,6 +283,13 @@ the archive key, the verification key or the allow-list; keeping more than one p
 scoping an offered header to a path below an allowed origin.
 
 ## Alternatives considered
+
+- **A Client-side downgrade refusal alone, the signature left over the bytes** — keeps every
+  existing signature valid, but a signed artifact of one type stays installable as another's
+  program.
+- **The type and version in a detached manifest, signed beside the artifact** — a second file to
+  carry and keep in step; the statement is a few dozen bytes the Client builds from what the offer
+  already says.
 
 - **A separate Updater process for Managed-Process packages**, symmetric with the Client's own
   update. The Supervisor already is a distinct process that owns stop, swap, spawn and health
@@ -399,6 +427,14 @@ scoping an offered header to a path below an allowed origin.
   path; a directory mode for the packing tool; range-request resumption for large artifacts.
 
 ## Enforcement
+
+- [`crates/fleet-core/src/package.rs`](../../crates/fleet-core/src/package.rs) test:
+  `the_statement_names_type_version_and_hash` (clause 5).
+- [`crates/fleet-agent/src/packages.rs`](../../crates/fleet-agent/src/packages.rs) test:
+  `a_signature_does_not_carry_over_to_another_type_or_version` (clause 5).
+- [`crates/fleet-agent/src/supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)
+  test: `a_package_for_another_type_or_an_older_version_is_refused` (clause 22).
+- The tests below verify the clauses that stand unchanged.
 
 - Download and verification: `content_hash_mismatch_is_refused`,
   `signature_policy_is_enforced`, `a_traversing_package_name_is_refused`,

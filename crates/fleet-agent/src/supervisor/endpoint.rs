@@ -35,6 +35,8 @@ pub struct Endpoint {
     max_message_size: usize,
     /// How long a connection may take to send its request headers.
     header_read_timeout: Duration,
+    /// What a connection must present as `Authorization: Bearer …` (ADR-0053); empty asks nothing.
+    token: String,
 }
 
 impl Endpoint {
@@ -59,7 +61,15 @@ impl Endpoint {
             events,
             max_message_size,
             header_read_timeout: HEADER_READ_TIMEOUT,
+            token: String::new(),
         })
+    }
+
+    /// Asks every connection for `token` (ADR-0053).
+    #[must_use]
+    pub fn with_token(mut self, token: String) -> Self {
+        self.token = token;
+        self
     }
 
     /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
@@ -86,6 +96,7 @@ impl Endpoint {
             name: self.name.clone(),
             events: self.events,
             shutdown: shutdown.clone(),
+            expected: (!self.token.is_empty()).then(|| format!("Bearer {}", self.token)),
         });
         // WebSocket-only, and on any path: this listener serves exactly one local process, so
         // there is nothing to route by.
@@ -121,6 +132,28 @@ struct Folding {
     name: String,
     events: EventSender,
     shutdown: Shutdown,
+    /// The `Authorization` value a connection must carry; `None` asks nothing.
+    expected: Option<String>,
+}
+
+/// A fresh token for one Supervisor start (ADR-0053): 32 bytes from the system's secure random
+/// source, hex.
+///
+/// # Errors
+/// Returns an error when no secure random source is available.
+pub fn new_token() -> Result<String, String> {
+    use ring::rand::SecureRandom as _;
+    let mut bytes = [0u8; 32];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| "no secure random source for the supervisor endpoint's token".to_string())?;
+    Ok(hex::encode(bytes))
+}
+
+/// Compares in time that depends on the lengths alone, so an answer never tells how far a guess
+/// matched.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 /// A session ends when the Client does: a socket the extension holds open is closed on shutdown
@@ -142,8 +175,26 @@ impl Handler for Folding {
 
     fn on_connecting(
         &self,
-        _request: &RequestInfo<'_>,
+        request: &RequestInfo<'_>,
     ) -> Result<((), Option<UntilShutdown>), Rejection> {
+        if let Some(expected) = &self.expected {
+            let presented = request
+                .headers
+                .get("authorization")
+                .map(|value| value.as_bytes())
+                .unwrap_or_default();
+            if !same(presented, expected.as_bytes()) {
+                warn!(
+                    supervisor = %self.name,
+                    "refused a local connection without the endpoint's token"
+                );
+                return Err(Rejection {
+                    status: axum::http::StatusCode::UNAUTHORIZED,
+                    headers: Vec::new(),
+                    message: "the supervisor endpoint requires its token".to_string(),
+                });
+            }
+        }
         debug!(supervisor = %self.name, "endpoint connection");
         Ok(((), Some(UntilShutdown(self.shutdown.clone()))))
     }
@@ -198,8 +249,9 @@ pub fn start(
     events: EventSender,
     shutdown: Shutdown,
     max_message_size: usize,
+    token: String,
 ) -> Result<SocketAddr, String> {
-    let endpoint = Endpoint::bind(name.clone(), port, events, max_message_size)?;
+    let endpoint = Endpoint::bind(name.clone(), port, events, max_message_size)?.with_token(token);
     let addr = endpoint.local_addr()?;
     info!(supervisor = %name, endpoint = %format!("ws://{addr}/v1/opamp"), "supervisor endpoint ready");
     tokio::spawn(endpoint.run(shutdown));
@@ -229,6 +281,7 @@ mod tests {
             EventSender::new(0, event_tx),
             shutdown,
             opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            String::new(),
         )
         .expect("endpoint starts");
 
@@ -308,6 +361,7 @@ mod tests {
             EventSender::new(0, event_tx),
             shutdown,
             opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            String::new(),
         )
         .expect("endpoint starts");
         shutdown_tx.send(true).expect("signal shutdown");
@@ -376,5 +430,44 @@ mod tests {
             "the endpoint left a half-finished upgrade open"
         );
         served(addr).await;
+    }
+
+    /// Only the Managed Process reports through the endpoint: a connection without the token
+    /// handed to the process is refused before the upgrade, one with it is served.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn the_endpoint_admits_only_the_token_it_handed_out() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let (event_tx, _events) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown) = shutdown_channel();
+        let token = new_token().expect("token");
+        assert_eq!(token.len(), 64);
+        let addr = start(
+            "test".to_string(),
+            0,
+            EventSender::new(0, event_tx),
+            shutdown,
+            opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
+            token.clone(),
+        )
+        .expect("endpoint starts");
+        let url = format!("ws://{addr}/v1/opamp");
+        assert!(
+            tokio_tungstenite::connect_async(&url).await.is_err(),
+            "a local process without the token was admitted"
+        );
+        let mut wrong = url.as_str().into_client_request().expect("request");
+        wrong
+            .headers_mut()
+            .insert("authorization", "Bearer guess".parse().expect("header"));
+        assert!(tokio_tungstenite::connect_async(wrong).await.is_err());
+        let mut right = url.as_str().into_client_request().expect("request");
+        right.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}").parse().expect("header"),
+        );
+        tokio_tungstenite::connect_async(right)
+            .await
+            .expect("the Managed Process is admitted");
     }
 }

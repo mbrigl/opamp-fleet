@@ -47,7 +47,13 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     ),
     (
         "fleet-core",
-        &[("", Root), ("platform", Core), ("version", Core)],
+        &[
+            ("", Root),
+            ("package", Core),
+            ("platform", Core),
+            ("renewal", Core),
+            ("version", Core),
+        ],
     ),
     (
         "fleet-server",

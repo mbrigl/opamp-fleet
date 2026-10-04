@@ -171,7 +171,8 @@ you want a different name on disk.
 
 ```console
 $ opamp-package-sign keygen --out fleet-signing.pk8     # prints the public key (hex)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
 Put the public key in every Client's `[packages] verification_key`. Signing is not optional: a

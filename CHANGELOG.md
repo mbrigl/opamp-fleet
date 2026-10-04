@@ -18,6 +18,23 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
+- **A certificate names its host, and a host speaks only for its own Agents**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clauses 7,
+  14 and 27). Every certificate the Server signs carries `urn:opamp-fleet:host:<id>`; a connection
+  reporting for an Agent another host reported first is re-keyed, and a host holds at most three
+  valid certificates. A Client's renewal proves, with its current key, which certificate it renews.
+  `GET /api/v1/hosts` lists the hosts, and `PUT /api/v1/hosts/{host}/gateway` with
+  `{"gateway": true}` marks a Gateway, whose certificate then speaks for any Agent. **What to do:**
+  mark each Gateway once its certificate has been renewed; until then the first Agents it carries
+  are bound to it.
+
+- **The Supervisor Endpoint admits only the process its Supervisor started**
+  ([ADR-0053](docs/adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)). Every
+  Managed Process finds a token in `OPAMP_SUPERVISOR_TOKEN`, and the endpoint answers any
+  connection without `Authorization: Bearer <token>` with `401`. **What to do:** add
+  `headers: { Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}" }` to the `opampextension`'s
+  `server.ws` in every Collector configuration that reports through the endpoint.
+
 - **An audit record of every security decision**
   ([ADR-0052](docs/adr/0052-an-append-only-audit-record-chained-by-hash.md)): admissions and
   refusals, enrolment, issuance, revocation and the sessions it ends, credential rotation, operator
@@ -60,6 +77,21 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   this project names none and is not affected.
 
 ### Changed
+
+- **A package signature now covers the Agent type, the version and the SHA-256**
+  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md)), and a
+  Supervisor refuses a package for another Agent type or older than the one it runs. **What to
+  do:** sign every Deployment's entries again with `opamp-package-sign sign --agent-type <type>
+  --version <version> <artifact>` and `PUT` the new signatures; signatures over the bytes alone no
+  longer verify.
+
+- **Client certificates live 30 days by default, not 90**
+  ([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 9);
+  a Client renews at two thirds of the life. **What to do:** nothing, unless a host is offline
+  longer than about 20 days; then set `[client_ca] validity_days` higher.
+- **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
+  ([ADR-0041](docs/adr/0041-connection-settings-offered-securely-and-server-capabilities.md) clause 5). **What to
+  do:** set `ca_file` on every Client before offering a new endpoint.
 
 - **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
   ([ADR-0038](docs/adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).

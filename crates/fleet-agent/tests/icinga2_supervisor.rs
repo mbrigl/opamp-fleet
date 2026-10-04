@@ -54,6 +54,7 @@ fn start(settings: &str) -> Harness {
     let (shutdown_tx, shutdown) = shutdown_channel();
     let settings: toml::Table = settings.parse().expect("settings");
     let ctx = SupervisorContext {
+        endpoint_token: String::new(),
         name: "icinga2".to_string(),
         supervisor_dir: dir.path().to_path_buf(),
         config_dir: dir.path().join("config"),

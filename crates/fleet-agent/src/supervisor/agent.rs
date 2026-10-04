@@ -903,6 +903,40 @@ impl Local {
             self.refuse_offer(offer, error, handled);
             return;
         }
+        // A Supervisor takes a package for its own Agent type and nothing else, and never an older
+        // one than it runs: the signature covers type and version (ADR-0042), so neither can be
+        // changed in transit — this refuses a Server that offers the wrong one.
+        if self.expected_package.is_none() {
+            if name != self.service_name {
+                error!(
+                    offered = %name, agent_type = %self.service_name,
+                    "refusing a package for another Agent type"
+                );
+                let error = format!(
+                    "this Agent is a {:?}; the Server offered a package for {name:?}",
+                    self.service_name
+                );
+                self.refuse_offer(offer, error, handled);
+                return;
+            }
+            if let Some(installed) = &self.installed_package {
+                if fleet_core::version::precedence(&available.version, &installed.version)
+                    == Some(std::cmp::Ordering::Less)
+                {
+                    error!(
+                        offered = %available.version, installed = %installed.version,
+                        "refusing a package older than the one installed"
+                    );
+                    let error = format!(
+                        "the Server offered {} {}, older than the {} installed — a downgrade is \
+                         not taken",
+                        name, available.version, installed.version
+                    );
+                    self.refuse_offer(offer, error, handled);
+                    return;
+                }
+            }
+        }
         // A usable offer clears whatever the last unusable one complained about.
         self.offer_error.clear();
         self.offered_name = Some(name.clone());
@@ -2314,6 +2348,60 @@ mod tests {
         assert!(statuses.packages.is_empty(), "nothing was installed");
         // A refusal is a report, not a loop: the aggregate is echoed so the offer ends.
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-addon");
+    }
+
+    /// A Supervisor takes a package only for its own Agent type, and never one older than it
+    /// runs: both are refused before anything is downloaded, and the reason is reported.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_package_for_another_type_or_an_older_version_is_refused() {
+        use crate::supervisor::ports::AgentStorage as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_package(&crate::supervisor::ports::InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "0.110.0".to_string(),
+                hash_hex: hex::encode(b"installed"),
+            })
+            .expect("store");
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.accept_packages();
+        let _ = agent.next_report();
+
+        for (offer, reason) in [
+            (package_offer("telegraf", "1.30.0", b"other"), "telegraf"),
+            (package_offer("otelcol", "0.109.0", b"older"), "older"),
+        ] {
+            let handled = agent.handle(&ServerToAgent {
+                packages_available: Some(offer),
+                ..Default::default()
+            });
+            assert!(
+                handled.package_download.is_none(),
+                "{reason}: nothing is fetched"
+            );
+            let statuses = agent.next_report().package_statuses.expect("statuses");
+            assert!(
+                statuses.error_message.contains(reason),
+                "{reason}: {}",
+                statuses.error_message
+            );
+        }
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "0.111.0", b"newer")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_some(),
+            "a newer one of its own type is taken"
+        );
     }
 
     /// A reply declaring a Capability Set, so a test can say what the Server accepts.

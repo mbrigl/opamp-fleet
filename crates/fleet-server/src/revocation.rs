@@ -95,7 +95,36 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
+    /// The host the certificate was issued to (ADR-0039 clause 7) — the stable identity a host
+    /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
+
+/// The certificate a connection presented: what it renews, and the host it speaks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Presented {
+    pub id: CertId,
+    pub host: Option<String>,
+}
+
+/// A host this Server issued certificates to (ADR-0039 clause 7).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Host {
+    /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
+    #[serde(default)]
+    pub gateway: bool,
+    /// The `instance_uid`s that have reported with this host's certificate, hex.
+    #[serde(default)]
+    pub instance_uids: BTreeSet<String>,
+}
+
+/// The certificates one host may hold at once (ADR-0039 clause 7): the one in force, its renewal,
+/// and one more for a renewal whose answer was lost.
+pub const MAX_PER_HOST: usize = 3;
+
+/// The `instance_uid`s one host may speak for: a Client carries an Agent per Supervisor.
+pub const MAX_UIDS_PER_HOST: usize = 256;
 
 /// A certificate the client CA signed, PEM, and what it says about itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +174,7 @@ pub struct Revocation {
 pub struct Ledger {
     pub issued: Vec<Issued>,
     pub revocations: Vec<Revocation>,
+    pub hosts: BTreeMap<String, Host>,
 }
 
 /// The ledger's port (ADR-0006): where it is kept. A certificate is written on its own, so a
@@ -173,6 +203,12 @@ pub trait LedgerStore: Send + Sync {
     /// # Errors
     /// Returns an error when it cannot be written.
     fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String>;
+
+    /// Replaces the hosts and what each speaks for.
+    ///
+    /// # Errors
+    /// Returns an error when they cannot be written.
+    fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String>;
 }
 
 /// Why a revocation was refused.
@@ -216,6 +252,9 @@ struct State {
     descendants: BTreeMap<CertId, usize>,
     /// The earliest `not_after` in the register: nothing can be pruned before it.
     earliest_expiry_ms: u64,
+    hosts: BTreeMap<String, Host>,
+    /// Which host each bound `instance_uid` belongs to, hex.
+    owners: BTreeMap<String, String>,
 }
 
 impl State {
@@ -295,6 +334,17 @@ impl Revocations {
                     roots: BTreeMap::new(),
                     descendants: BTreeMap::new(),
                     earliest_expiry_ms: u64::MAX,
+                    owners: ledger
+                        .hosts
+                        .iter()
+                        .flat_map(|(host, entry)| {
+                            entry
+                                .instance_uids
+                                .iter()
+                                .map(move |uid| (uid.clone(), host.clone()))
+                        })
+                        .collect(),
+                    hosts: ledger.hosts,
                 };
                 for issued in ledger.issued {
                     state.earliest_expiry_ms =
@@ -367,6 +417,22 @@ impl Revocations {
         if state.descendants.get(&root).copied().unwrap_or(0) >= MAX_DESCENDANTS_PER_ROOT {
             return Err("this certificate's chain has been renewed too often".to_string());
         }
+        if let Some(host) = &facts.host {
+            let now = self.clock.now_ms();
+            let live = state
+                .issued
+                .values()
+                .filter(|issued| {
+                    issued.facts.host.as_ref() == Some(host) && issued.facts.not_after_ms > now
+                })
+                .count();
+            if live >= MAX_PER_HOST {
+                return Err(format!(
+                    "the host already holds {MAX_PER_HOST} valid certificates — one is renewed \
+                     when it has run two thirds of its life"
+                ));
+            }
+        }
         let issued = Issued {
             facts,
             instance_uid: hex::encode(instance_uid),
@@ -376,6 +442,106 @@ impl Revocations {
         self.store.put_issued(&issued)?;
         state.insert(issued);
         Ok(())
+    }
+
+    /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
+    /// (ADR-0039 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
+    /// Agents.
+    ///
+    /// # Errors
+    /// Returns the refusal, or an error when a new binding cannot be written.
+    pub fn check_report(&self, host: &str, instance_uid: &[u8]) -> Result<(), String> {
+        let uid = hex::encode(instance_uid);
+        let mut state = self.state.lock().expect("revocation lock");
+        if state.hosts.get(host).is_some_and(|entry| entry.gateway) {
+            return Ok(());
+        }
+        match state.owners.get(&uid) {
+            Some(owner) if owner == host => return Ok(()),
+            Some(owner) => {
+                let owner_is_gateway = state.hosts.get(owner).is_some_and(|entry| entry.gateway);
+                if !owner_is_gateway {
+                    return Err("this certificate belongs to another host than that Agent's".into());
+                }
+            }
+            None => {}
+        }
+        let entry = state.hosts.entry(host.to_string()).or_default();
+        if entry.instance_uids.len() >= MAX_UIDS_PER_HOST {
+            return Err(format!(
+                "this host already speaks for {MAX_UIDS_PER_HOST} Agents"
+            ));
+        }
+        entry.instance_uids.insert(uid.clone());
+        state.owners.insert(uid, host.to_string());
+        self.store.save_hosts(&state.hosts)
+    }
+
+    /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
+    /// orphans a host's certificate (ADR-0039 clause 7).
+    ///
+    /// # Errors
+    /// Returns an error when the binding cannot be written.
+    pub fn rebind(&self, old: &[u8], new: &[u8]) -> Result<(), String> {
+        let (old, new) = (hex::encode(old), hex::encode(new));
+        let mut state = self.state.lock().expect("revocation lock");
+        let Some(host) = state.owners.remove(&old) else {
+            return Ok(());
+        };
+        if let Some(entry) = state.hosts.get_mut(&host) {
+            entry.instance_uids.remove(&old);
+            entry.instance_uids.insert(new.clone());
+        }
+        state.owners.insert(new, host);
+        self.store.save_hosts(&state.hosts)
+    }
+
+    /// Marks `host` as a Gateway, or not; answers whether this Server knows the host.
+    ///
+    /// # Errors
+    /// Returns an error when the change cannot be written.
+    pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let mut state = self.state.lock().expect("revocation lock");
+        let known = state.hosts.contains_key(host)
+            || state
+                .issued
+                .values()
+                .any(|issued| issued.facts.host.as_deref() == Some(host));
+        if !known {
+            return Ok(false);
+        }
+        state.hosts.entry(host.to_string()).or_default().gateway = gateway;
+        self.store.save_hosts(&state.hosts)?;
+        Ok(true)
+    }
+
+    /// Every host this Server knows, and how many valid certificates each holds.
+    #[must_use]
+    pub fn hosts(&self) -> Vec<(String, Host, usize)> {
+        let state = self.state.lock().expect("revocation lock");
+        let now = self.clock.now_ms();
+        let mut names: BTreeSet<String> = state.hosts.keys().cloned().collect();
+        names.extend(
+            state
+                .issued
+                .values()
+                .filter_map(|issued| issued.facts.host.clone()),
+        );
+        names
+            .into_iter()
+            .map(|name| {
+                let live = state
+                    .issued
+                    .values()
+                    .filter(|issued| {
+                        issued.facts.host.as_ref() == Some(&name) && issued.facts.not_after_ms > now
+                    })
+                    .count();
+                let host = state.hosts.get(&name).cloned().unwrap_or_default();
+                (name, host, live)
+            })
+            .collect()
     }
 
     /// Every certificate in the register, oldest first.
@@ -656,6 +822,10 @@ mod tests {
             self.0.lock().expect("lock").revocations = revocations.to_vec();
             Ok(())
         }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.0.lock().expect("lock").hosts = hosts.clone();
+            Ok(())
+        }
     }
 
     const NOW: u64 = 1_000_000_000;
@@ -689,7 +859,70 @@ mod tests {
             subject: "CN=edge-01".into(),
             key_fingerprint: format!("key-{serial}"),
             not_after_ms,
+            host: None,
         }
+    }
+
+    fn on_host(serial: &str, host: &str) -> Facts {
+        Facts {
+            host: Some(host.to_string()),
+            ..facts(serial, NOW + 1_000_000)
+        }
+    }
+
+    /// A host holds a bounded number of valid certificates, an Agent is spoken for by the host
+    /// that first reported it alone, a re-key keeps its host, and a Gateway speaks for any Agent.
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_host_is_bounded_and_speaks_only_for_its_own_agents() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        for serial in ["a1", "a2", "a3"] {
+            revocations
+                .record(on_host(serial, "h1"), &[1; 16], None)
+                .expect("within the bound");
+        }
+        assert!(
+            revocations
+                .record(on_host("a4", "h1"), &[1; 16], None)
+                .is_err(),
+            "a fourth valid certificate for one host"
+        );
+        revocations
+            .record(on_host("b1", "h2"), &[2; 16], None)
+            .expect("another host");
+
+        revocations
+            .check_report("h1", &[1; 16])
+            .expect("first report binds");
+        revocations
+            .check_report("h1", &[1; 16])
+            .expect("its own Agent");
+        assert!(
+            revocations.check_report("h2", &[1; 16]).is_err(),
+            "another host spoke for h1's Agent"
+        );
+        revocations.rebind(&[1; 16], &[3; 16]).expect("rebind");
+        revocations
+            .check_report("h1", &[3; 16])
+            .expect("the re-keyed Agent");
+        assert!(revocations.check_report("h2", &[3; 16]).is_err());
+        revocations
+            .check_report("h2", &[1; 16])
+            .expect("the old identity is free");
+
+        assert!(!revocations.set_gateway("unknown", true).expect("set"));
+        assert!(revocations.set_gateway("h2", true).expect("set"));
+        revocations
+            .check_report("h2", &[3; 16])
+            .expect("a Gateway speaks for any Agent");
+
+        // The bindings survive a restart.
+        let (reopened, _) = open(&store);
+        assert!(reopened.check_report("h3", &[3; 16]).is_err());
+        reopened
+            .check_report("h2", &[9; 16])
+            .expect("still a Gateway");
     }
 
     /// Verifies: ADR-0049

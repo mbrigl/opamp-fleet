@@ -30,7 +30,7 @@ use crate::config::AuthConfig;
 use crate::credentials::Credentials;
 use crate::enrolment::{Enrolment, Requester, Submitted};
 use crate::fleet::{bad_request, unavailable, AppState, ConnId, Transport};
-use crate::revocation::{credential_hash, CertId, Revocations};
+use crate::revocation::{credential_hash, CertId, Presented, Revocations};
 use crate::throttle::Throttle;
 use crate::tls::{Issuers, Peer};
 
@@ -96,6 +96,8 @@ const ADMITTED_MAX: usize = 100_000;
 pub struct Proofs {
     pub certificate: Option<(CertId, u64)>,
     pub credential: Option<String>,
+    /// The host the certificate was issued to, when it names one (ADR-0039 clause 7).
+    pub host: Option<String>,
 }
 
 impl Proofs {
@@ -426,6 +428,7 @@ async fn admit(
                 .as_ref()
                 .map(|facts| (facts.id.clone(), facts.not_after_ms)),
             credential: credential.clone(),
+            host: None,
         };
         // Which proof was revoked is not said (ADR-0049 clause 8).
         if proofs.revoked(revocations) {
@@ -524,6 +527,7 @@ async fn admit(
     }
     request.extensions_mut().insert(classified);
     request.extensions_mut().insert(Proofs {
+        host: presented.as_ref().and_then(|facts| facts.host.clone()),
         certificate: presented.map(|facts| (facts.id, facts.not_after_ms)),
         credential,
     });
@@ -809,7 +813,6 @@ impl Handler for Fleet {
             .as_ref()
             .and_then(|request| request.opamp.as_ref())
             .is_some_and(|opamp| opamp.certificate_request.is_some());
-        let mut predecessor = None;
         if csr {
             if let Some(revocations) = self.0.revocations() {
                 // A session whose proof was revoked a moment ago is not handed a certificate
@@ -817,22 +820,22 @@ impl Handler for Fleet {
                 if carrier.proofs.revoked(revocations) {
                     return Reply::Send(bad_request("this connection is no longer admitted"));
                 }
-                // The connection's own certificate, whatever the message claims to be: behind a
-                // Gateway that is the Gateway's, so revoking it reaches what was renewed through it
-                // (ADR-0049 clauses 2, 11).
-                predecessor = carrier
-                    .proofs
-                    .certificate
-                    .as_ref()
-                    .map(|(id, _)| id.clone());
             }
         }
-        let outcome = self.0.process_presented(
-            report,
-            carrier.transport,
-            carrier.conn,
-            predecessor.as_ref(),
-        );
+        // The connection's own certificate, whatever the message claims to be: behind a Gateway
+        // that is the Gateway's, so revoking it reaches what was renewed through it without a
+        // renewal proof (ADR-0049 clauses 2, 11).
+        let presented = carrier
+            .proofs
+            .certificate
+            .as_ref()
+            .map(|(id, _)| Presented {
+                id: id.clone(),
+                host: carrier.proofs.host.clone(),
+            });
+        let outcome =
+            self.0
+                .process_presented(report, carrier.transport, carrier.conn, presented.as_ref());
         if let (Some(uid), Some(_)) = (outcome.uid, carrier.conn) {
             if outcome.disconnected {
                 carrier.seen.retain(|s| s != &uid);

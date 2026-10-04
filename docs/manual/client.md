@@ -1186,11 +1186,19 @@ extensions:
     server:
       ws:
         endpoint: ws://127.0.0.1:4321/v1/opamp
+        headers:
+          Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}"
         tls:
           insecure: true
 service:
   extensions: [opamp]
 ```
+
+The endpoint admits only the process its Supervisor started: at every start the Supervisor makes a
+new token, hands it to the process as `OPAMP_SUPERVISOR_TOKEN`, and answers any connection without
+`Authorization: Bearer <token>` with `401`. Another program on the host therefore cannot report in
+the Collector's name. A Collector configuration without the header loses its own reports, not its
+supervision.
 
 A Collector **without** the extension needs no `endpoint_port`: the endpoint still comes up on an
 ephemeral port, and nothing ever connects to it. Nothing reports an Agent type either, so state one
