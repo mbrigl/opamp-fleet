@@ -228,8 +228,12 @@ Two variations:
   Configuration and name it in `trusted_cert_file`. It is the parent's **own** certificate —
   `DataDir/certs/<master-cn>.crt` on the master — **not** the CA that signed it: Icinga compares
   what the parent presents against this file, so a CA certificate here fails every enrolment with
-  *"Peer certificate does not match trusted certificate"*. Without a pinned certificate the
-  Supervisor trusts what the parent presents on first contact, and logs that it did.
+  *"Peer certificate does not match trusted certificate"*. Once `trusted_cert_file` names a file,
+  enrolment waits until that file is there — the Agent stays unhealthy and says which path it
+  waits for — and never falls back to trusting the parent on sight. Only a block that names no
+  `trusted_cert_file` at all trusts what the parent presents on first contact, and logs that it did.
+  Unlike the ticket, the parent certificate stays needed after enrolment: a renewal pins the parent
+  again, so keep its Configuration released for as long as the block names it.
 - **No ticket at all.** The request lands in the master's signing queue; the Agent stays unhealthy
   until someone runs `icinga2 ca sign <hash>` there. That is correct behaviour, not a fault.
 
@@ -333,7 +337,7 @@ rather than inside it.
 
 | Symptom | Cause |
 |---|---|
-| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, or a signature nobody granted yet. It retries with backoff; the daemon deliberately does not start meanwhile. |
+| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, a signature nobody granted yet, or a parent certificate named in `trusted_cert_file` that has not arrived (the error names the path). It retries with backoff; the daemon deliberately does not start meanwhile. |
 | `awaiting the configuration …` | No root Configuration has arrived yet: nothing delivered carries `role = "main"`, and no entry is named `icinga2-conf` either. |
 | `two configurations claim to be the root` | Two delivered entries carry `role = "main"`. The message names both; take the role off the one that is not Icinga's root file. |
 | `remote_config_status = FAILED` with a syntax error | Icinga refused the configuration. The running daemon kept the previous one — fix the Configuration and roll out again. |

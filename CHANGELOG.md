@@ -242,6 +242,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Fixed
 
+- **A named parent certificate that is missing is waited for, never trusted on sight**
+  ([ADR-0029](docs/adr/0029-icinga-2.md) clause 12). An `icinga2` Supervisor whose
+  `trusted_cert_file` names a file that is not there — not yet delivered, or a mistyped path —
+  fell back to trusting whatever the parent presented on first contact. It now keeps the Agent
+  unhealthy, naming the path, and enrols once the file arrives. A block that names no
+  `trusted_cert_file` still trusts on first use, logged as such.
+
 - **A request body or a WebSocket message that stalls is cut off**
   ([ADR-0054](docs/adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
   Once its headers had arrived, a peer could hold any connection of the Server, a Gateway or a

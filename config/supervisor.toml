@@ -376,5 +376,6 @@ state_dir = "client-state"
 #                                       # be resolved, this Supervisor's own name.
 # ticket_file = "${config_dir}/icinga2-ticket"        # delivered per host as a supplementary entry
 # trusted_cert_file = "${config_dir}/icinga2-parent-cert"  # the parent's own certificate, pinned;
-#                                       # without it the request trusts what the parent presents
-#                                       # on first sight, which is logged as such
+#                                       # named but missing, enrolment waits for the file; not
+#                                       # named, the request trusts what the parent presents on
+#                                       # first sight, which is logged as such
