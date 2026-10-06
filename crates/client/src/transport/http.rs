@@ -49,7 +49,7 @@ pub async fn run(
         }
     }
     // Trust, plus this Client's own certificate when it has one — a Server on mutual TLS asks for
-    // it on every request of this transport (ADR-0035).
+    // it on every request of this transport (ADR-0013).
     builder = crate::tls::trust_and_identity(builder, config)?;
     let client = builder
         .build()
@@ -60,7 +60,7 @@ pub async fn run(
     info!(endpoint = %config.endpoint, interval = ?poll, "polling");
     engine.force_full_all();
 
-    // Set when a self-update wants the process to exit for its restart (ADR-0020): the loop leaves
+    // Set when a self-update wants the process to exit for its restart (ADR-0017): the loop leaves
     // through the same graceful shutdown a normal stop uses, then reports it as a restart.
     let mut restarting = false;
     'poll: loop {
@@ -100,11 +100,11 @@ pub async fn run(
                     }
                 }
             }
-            // Enrolment (ADR-0035): with the Server's capabilities now known, ask it to sign a
+            // Enrolment (ADR-0013): with the Server's capabilities now known, ask it to sign a
             // certificate if it signs them and this Client needs one. The answer arrives as an
             // ordinary connection-settings offer, handled just below.
             engine.request_certificate(config);
-            // A connection-settings offer (ADR-0014, ADR-0086). An OpAMP half is verified by
+            // A connection-settings offer (ADR-0014, ADR-0023). An OpAMP half is verified by
             // connecting and ends this run so the runtime reconnects with it; a telemetry-only
             // offer is applied in place and the acknowledgement rides the reports owed below.
             match crate::transport::process_connection_offer(engine, config, telemetry).await {
@@ -119,7 +119,7 @@ pub async fn run(
                 limit,
             };
             crate::transport::process_package_downloads(engine, config, &mut sink).await;
-            // The self-Agent's configuration is its Supervisor set (ADR-0056): apply it — stop
+            // The self-Agent's configuration is its Supervisor set (ADR-0029): apply it — stop
             // what left, rewrite `supervisor.toml`, start what arrived — and send the retired
             // Agents' goodbyes; the outcome rides the owed reports below.
             crate::transport::process_self_configuration(engine, config, shutdown, &mut sink).await;
@@ -127,7 +127,7 @@ pub async fn run(
             if engine.restart_for_update() {
                 // Send the owed `Installing`, then leave through the graceful shutdown below so the
                 // Managed Processes are stopped and the goodbyes sent before this process exits for
-                // the restart (ADR-0020): the pointer already points at the new version, and this
+                // the restart (ADR-0017): the pointer already points at the new version, and this
                 // one exists only to get out of its way — cleanly, not by abandoning its children.
                 if !reports.is_empty() {
                     let _ = sink.send(reports).await;

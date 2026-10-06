@@ -1,18 +1,18 @@
-//! Server-set labels on an Agent (ADR-0042).
+//! Server-set labels on an Agent (ADR-0027).
 //!
 //! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and
 //! until now it could only be invented in `supervisor.toml` on the machine. Moving a host between channels
-//! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0017 set out to
+//! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0016 set out to
 //! remove, surviving in the one place it mattered most.
 //!
 //! A label joins the attribute set a Selector matches against — for Configurations (ADR-0012) and
-//! for packages (ADR-0017) alike, since both resolve against the same `AgentDescription`. It never
+//! for packages (ADR-0016) alike, since both resolve against the same `AgentDescription`. It never
 //! travels to the Agent: it is an input to matching here, and the Agent experiences it only as the
 //! Configuration and the packages it is offered.
 //!
 //! **A label can never restate a reported attribute.** `os.type` and `host.arch` decide which
-//! artifact an Agent is offered (ADR-0031) and `service.name` decides which packages fit it at all
-//! (ADR-0034), so a label that outranked them would let a typo hand a Windows binary to a Linux
+//! artifact an Agent is offered (ADR-0021) and `service.name` decides which packages fit it at all
+//! (ADR-0016), so a label that outranked them would let a typo hand a Windows binary to a Linux
 //! host. Labels annotate; they do not correct.
 
 use std::collections::{BTreeMap, HashMap};
@@ -107,7 +107,7 @@ pub enum LabelError {
     UnknownAgent,
     /// A label key the Agent already reports. Refused rather than applied: a label that could
     /// override `os.type`, `host.arch`, or `service.name` would let a slip in the UI offer an
-    /// Agent an artifact built for another machine (ADR-0031, ADR-0034).
+    /// Agent an artifact built for another machine (ADR-0021, ADR-0016).
     RestatesReported(String),
     /// The store could not be written.
     Storage(String),
@@ -240,7 +240,7 @@ mod tests {
         ));
     }
 
-    /// The crux (ADR-0042 point 3): reported wins. A label that could rewrite `os.type` would let a
+    /// The crux (ADR-0027 point 3): reported wins. A label that could rewrite `os.type` would let a
     /// slip in the UI offer this Agent an artifact built for another machine.
     #[test]
     fn a_label_never_overrides_what_the_agent_reports() {

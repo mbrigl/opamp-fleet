@@ -2,7 +2,7 @@
 #
 # Seeds one minimal test Configuration (ADR-0012) per example supervisor from config/supervisor.toml,
 # each aimed at the Agent that should receive it — the two Collectors by Selector, the two
-# Foreign Agents by Agent type (ADR-0054), whose bodies are formats no other kind of Agent
+# Foreign Agents by Agent type (ADR-0012), whose bodies are formats no other kind of Agent
 # could read:
 #
 #   otelcol-contrib-conf  →  selector service.name = otelcol-contrib  (opampextension, self-reporting)
@@ -18,14 +18,14 @@
 # Two modes:
 #   scripts/seed_test_configs.sh [server-url]
 #       PUTs each Configuration to a running Server's REST API and rolls it out — the act that
-#       assigns it to the matching Agents (ADR-0061); a PUT alone reaches nobody.
+#       assigns it to the matching Agents (ADR-0030); a PUT alone reaches nobody.
 #       (default server-url: http://127.0.0.1:4321).
 #   scripts/seed_test_configs.sh --offline [config-dir]
 #       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
 #       format, loaded at its next start; no running Server needed. Default config-dir is
 #       fleet-configs/ in the repository root (the server.toml default). This is what
 #       scripts/install_tools.sh runs after installing the processes. A staged Configuration is
-#       stored, not assigned: under ADR-0061 only an Agent record that predates the ADR is
+#       stored, not assigned: under ADR-0030 only an Agent record that predates the ADR is
 #       seeded from it, so on a fresh fleet roll each one out once the Agents have enrolled
 #       (POST /api/v1/configurations/<name>/rollout, or the fleet view).
 # Both modes replace an existing Configuration of the same name.
@@ -60,7 +60,7 @@ fi
 
 # seed <name> <file> <selector-json> [service_name]
 #   selector-json  equality pairs as a JSON object; {} matches every Agent of the type below
-#   service_name   the Agent type this Configuration is for (ADR-0054); omitted means every type
+#   service_name   the Agent type this Configuration is for (ADR-0012); omitted means every type
 seed() {
     local name="$1" file="$2" selector="$3" type="${4:-}"
     local spec aimed_at
@@ -87,7 +87,7 @@ seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" '{"service.name"
 seed otelcol-conf "$examples/otelcol-conf.yaml" '{"service.name": "otelcol"}'
 seed telegraf-conf "$examples/telegraf-conf.toml" '{}' telegraf
 seed glpi-agent-conf "$examples/glpi-agent-conf.cfg" '{}' glpi-agent
-# Icinga 2 reads one root file and includes the rest by name (ADR-0068), so both entries are seeded.
+# Icinga 2 reads one root file and includes the rest by name (ADR-0033), so both entries are seeded.
 # Its ticket is per host and a secret, so it is deliberately not seeded here — see docs/manual/icinga2.md.
 seed icinga2-conf "$examples/icinga2-conf.conf" '{}' icinga2
 seed icinga2-zones "$examples/icinga2-zones.conf" '{}' icinga2

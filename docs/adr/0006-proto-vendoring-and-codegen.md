@@ -6,7 +6,7 @@
 
 ## Context
 
-[ADR-0004](0004-protocol-baseline-and-conformance-tracking.md) pinned the Protocol Baseline
+[ADR-0004](0004-protocol-baseline-and-conformance.md) pinned the Protocol Baseline
 (`v0.18.0`) and left one follow-up explicitly open: *how the protobuf definitions are obtained and
 compiled — vendored copy versus fetch-at-build, and which Rust protobuf toolchain generates them —
 needs its own ADR before the first protocol code lands.* This is that ADR.
@@ -16,7 +16,7 @@ Forces:
 - **The wire contract must be reproducible and reviewable.** The generated Rust types are the wire
   contract of both ends; if the schema can change without a diff in this repository, conformance
   claims in [`CONFORMANCE.md`](../CONFORMANCE.md) are unverifiable.
-- **Builds must work offline.** [ADR-0004](0004-protocol-baseline-and-conformance-tracking.md)
+- **Builds must work offline.** [ADR-0004](0004-protocol-baseline-and-conformance.md)
   already accepts that network-dependent checks degrade quietly; the *build* must not depend on the
   network at all.
 - **The proto path must live in exactly one place.** Upstream has already relocated the proto files

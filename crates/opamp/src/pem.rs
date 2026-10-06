@@ -1,8 +1,8 @@
-//! Reading certificates and a private key out of PEM bytes (ADR-0044).
+//! Reading certificates and a private key out of PEM bytes (ADR-0005).
 //!
 //! Both ends parse PEM: the Client for its trust file and its own identity, the Server for the
 //! listener's certificate and the client CA that turns mutual TLS on
-//! ([ADR-0035](../../../docs/adr/0035-mutual-tls-and-the-server-issued-client-certificate.md)).
+//! ([ADR-0013](../../../docs/adr/0013-opamp-endpoint-admission.md)).
 //! The parsing is one thing written twice; what the file *means* is not, so this module takes bytes
 //! and each end keeps its own path-based wrapper — the error naming a trust anchor, a listener's
 //! key or a client CA is written where that is known.

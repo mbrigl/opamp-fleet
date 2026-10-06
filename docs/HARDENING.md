@@ -38,20 +38,20 @@ has:
 
 - TLS on both transports, on both ends, with a private CA supported on the Client (ADR-0007).
 - **Cumulative** admission on `/v1/opamp`: every configured proof must succeed — a credential when
-  `[auth]` is set, a client certificate when a client CA is, both when both are (ADR-0035,
+  `[auth]` is set, a client certificate when a client CA is, both when both are (ADR-0013,
   `transport::Admission`). Not "either one", which is what keeps switching mutual TLS on from ever
   admitting more than before.
 - Constant-time comparison of the presented `Authorization` value, so a comparison leaks nothing
   about how far it matched — on both planes, from one primitive (`credentials.rs`).
 - Optional Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
-  ADR-0067), on a listener that is loopback until an operator publishes it (ADR-0066).
+  ADR-0032), on a listener that is loopback until an operator publishes it (ADR-0032).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
   powers of a CA ([`ca.rs`](../crates/server/src/ca.rs)).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
-- **Connection setup bounded on both of the Server's planes** (ADR-0073): a peer has 30 seconds to
+- **Connection setup bounded on both of the Server's planes** (ADR-0032): a peer has 30 seconds to
   send its request line and headers, and 10 seconds to complete the TLS handshake, before it is hung
   up on — enforced below every other limit in this list, because it applies before a request exists
   and therefore before Admission ever runs.
@@ -67,23 +67,23 @@ The list above is per mechanism; this is the same state per **surface**, since a
 one listener and not on its neighbour is the failure mode worth seeing at a glance. ✅ in force,
 ⚠️ partial, ❌ absent.
 
-- **Agent plane** — `0.0.0.0:4320`, public by default (ADR-0066).
+- **Agent plane** — `0.0.0.0:4320`, public by default (ADR-0032).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
     ✅ gzip bounded *after* decompression · ✅ Admission, cumulative
   - ❌ concurrent connections: uncapped (**H16**) · ❌ HTTP/2 has no header bound (**H17**) ·
     ❌ attempt rate: unthrottled (**H10**)
-- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0066).
-  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ optional Basic over the whole plane (ADR-0067) ·
+- **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0032).
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ optional Basic over the whole plane (ADR-0032) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
   - ⚠️ the package upload is unbounded in **time** and, by decision, in size (ADR-0008) — the one
     route where that is intended · ❌ H16, H17, H10 as above
 - **Client → Server**, outbound (`transport/http.rs`, `transport/ws.rs`).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
-- **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0037).
+- **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0024).
   - ✅ message size, gzip after decompression, per-hop exchange timeout, `max_carried_agents`
   - ❌ **no header-read bound**: it runs on `axum::serve` and `axum_server` without a timer, which is
-    exactly the state the Server was in before ADR-0073 (**H18**)
+    exactly the state the Server was in before ADR-0032 (**H18**)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ message size in both directions
   - ❌ **no handshake bound**, and connections are served one at a time by design: a local process
@@ -96,7 +96,7 @@ which a withdrawn credential still works**, and **shrink the surface that sits b
 **Status of each measure below:** 🔴 not taken · 🟡 partly in force · ⚪ cannot be judged until the
 check under [Unverified claims](#unverified-claims) is run · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
-way the connection-setup bound did when ADR-0073 took it. The ✅/⚠️/❌ marks in that section are the
+way the connection-setup bound did when ADR-0032 took it. The ✅/⚠️/❌ marks in that section are the
 same three states seen per *surface* rather than per measure.
 
 ## Stage 1 — Separate rotation from revocation
@@ -116,7 +116,7 @@ certificate revocation — the Server cannot eject a peer sooner than that peer 
 and it is the reason rotation must not be mistaken for revocation.
 **To work out:** whether a maximum session age is the answer or a re-authentication the Server
 pushes; what either costs in reconnect churn across a fleet, given every drop is a reconnect storm's
-worth of handshakes; and how it behaves in Gateway Mode (ADR-0037), where one upstream connection
+worth of handshakes; and how it behaves in Gateway Mode (ADR-0024), where one upstream connection
 carries many Agents and closing it disconnects all of them at once. Needs an ADR for that last
 reason, and H10 belongs in the same decision — the churn this creates is the churn that one bounds.
 
@@ -132,11 +132,11 @@ MUST verify that the instance_uid field in AgentToServer message matches the ins
 fields"*, justified as what *"prevents Agents impersonating other Agents"*. This Server performs no
 such check — `ClientCa::sign` treats the subject as descriptive and drops the request's SANs. Note
 what this is *not*: it is not the question H4 opens. Refusing to bind the **issued** certificate to
-an `instance_uid` is right, for the reason ADR-0035 gives; the MUST is about rejecting a mismatched
+an `instance_uid` is right, for the reason ADR-0013 gives; the MUST is about rejecting a mismatched
 **request**, and nothing about re-keying argues against that. The MUST is conditional and nothing
 triggers it today — this project's Client puts its configured name in the CSR's common name and no
 `instance_uid` anywhere — but the Baseline invites a peer implementation to include one, and
-interoperability with such Clients is a stated target (ADR-0040).
+interoperability with such Clients is a stated target (ADR-0004).
 **To work out:** where an `instance_uid` may legitimately appear in a CSR, given the Baseline
 prescribes no field for it (*"one of the CSR fields (or part of the field)"*); how to recognise one
 without reading an ordinary descriptive subject as a claim; and whether a mismatch is answered
@@ -149,7 +149,7 @@ ADR — it changes no interface, adds no state, and refuses something already re
 🔴 **H4 — Decide what a client certificate proves: fleet membership, or a specific Agent.**
 Today it proves membership only, and that is a recorded decision with a real reason: binding the
 issued certificate to an `instance_uid` would mean a re-key through `AgentIdentification` kills a
-certificate the Server itself issued (ADR-0035, ADR-0047). Hardening this means *resolving* that
+certificate the Server itself issued (ADR-0013). Hardening this means *resolving* that
 conflict rather than working around it. Three approaches are worth weighing, and none is obviously
 right:
 
@@ -161,7 +161,7 @@ right:
   certificate the Server sees there is the Gateway's anyway.
 
 This is the most expensive measure in the document and the one with the widest blast radius. It
-would need an ADR superseding ADR-0035 on this specific point, and that ADR is where the
+would need an ADR superseding ADR-0013 on this specific point, and that ADR is where the
 authorization boundary named under [Scope](#scope) has to be drawn explicitly — otherwise it moves
 unnoticed.
 
@@ -183,7 +183,7 @@ host" to "eject the whole fleet by accident".
 
 🔴 **H7 — Store admission credentials hashed, and referenced rather than inline.**
 `server.toml` holds Bearer tokens and Basic passwords verbatim, so they reach backups, diffs, and
-config management. Since ADR-0067 this is **two** sections — `[auth]` for the fleet and
+config management. Since ADR-0032 this is **two** sections — `[auth]` for the fleet and
 `[rest.auth]` for the operators — and they have to change together, or the file ends up carrying two
 credential formats. Two different answers are needed for the two schemes, and conflating them would
 be a mistake: Basic passwords want a password hash (Argon2/bcrypt), while running a KDF per Bearer
@@ -203,9 +203,9 @@ the document.
 ## Stage 4 — Shrink the surface and bound the abuse
 
 🟡 **H9 — Require the client certificate in the TLS handshake on the Agent plane.** *(half taken —
-ADR-0066)*
+ADR-0032)*
 The listener split this measure asked for is **done**: the REST API and the UI have their own
-listener (ADR-0066, superseding ADR-0005 on that point), and the OpAMP endpoint no longer shares a
+listener (ADR-0032, superseding ADR-0005 on that point), and the OpAMP endpoint no longer shares a
 port with a browser. What has *not* changed is the verifier: client authentication is still
 *optional* at the TLS layer and required on the route
 ([`tls.rs`](../crates/server/src/tls.rs)) — and the reason is now a different one. The Agent plane
@@ -236,7 +236,7 @@ every peer in a deployment can do it; the reason to write it down rather than ju
 is a compatibility decision, not a code decision.
 
 🔴 **H16 — Cap concurrent connections per plane.**
-ADR-0073 made each connection cheap and short-lived while it is still unproven, but not *few*:
+ADR-0032 made each connection cheap and short-lived while it is still unproven, but not *few*:
 nothing bounds how many a peer may hold open at once, and `max_agents` bounds the fleet, not the
 sockets. The cap belongs at the accept loop, where refusing costs one `accept` and a close — and it
 has to be a number an operator can raise, since a legitimate fleet reconnecting after a Server
@@ -252,16 +252,16 @@ The TLS listeners offer `h2` by ALPN, and hyper's header-read timeout is HTTP/1 
 equivalent, because there is no header phase to time. Its analogues are `max_concurrent_streams`, the
 header-list size, and keep-alive pings that evict a peer which stops answering. None is set today, so
 an h2 peer is bounded by message size and by nothing else. Cheap to take, but it is a set of numbers
-that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0073 says
+that wants measuring against a real fleet rather than guessing — and it is the reason ADR-0032 says
 "HTTP/1" and not "the transport".
 
 🔴 **H18 — Give the Client's own listeners the bound the Server's have.**
-Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0073:
-the **Gateway** endpoint (ADR-0037), which runs on `axum::serve` and `axum_server` with no timer
+Two surfaces on the Client speak the server side of this protocol and were untouched by ADR-0032:
+the **Gateway** endpoint (ADR-0024), which runs on `axum::serve` and `axum_server` with no timer
 installed and is therefore in exactly the state the Server was in; and the **Supervisor Endpoint**,
 which wraps `accept_async_with_config` in no timeout at all and serves connections one at a time, so
 a half-finished handshake does not merely cost memory — it holds the endpoint against the Managed
-Process it exists for. The Gateway half is the same three lines as ADR-0073 applied to a different
+Process it exists for. The Gateway half is the same three lines as ADR-0032 applied to a different
 binary. The Supervisor Endpoint half is a `tokio::time::timeout` around the upgrade, and is the
 cheapest item in this document.
 
@@ -277,7 +277,7 @@ signing key, no package applied. The cost is operational, not technical: every f
 manage a key before it can distribute anything.
 
 🔴 **H13 — Allow-list the sources of referenced packages.**
-A referenced package (ADR-0018) is fetched from an operator-supplied URL. The hash and TLS
+A referenced package (ADR-0015) is fetched from an operator-supplied URL. The hash and TLS
 verification already apply, so this is not an open hole — but the set of hosts a Client will fetch
 from is currently unbounded, and bounding it is cheap. **H19 raises the stakes**: since the download
 now carries the credential the offer names, an unbounded source set is an unbounded set of hosts an
@@ -302,7 +302,7 @@ the token on every artifact fetched from it.
 
 ⚪ **H14 — Establish how far remote configuration is already constrained.** *(verify first)*
 The Baseline asks that the Server restrict what configuration can be set remotely and what the Agent
-accepts. ADR-0021 (path-implied package consent) and ADR-0057 (a Server-pushed Supervisor block
+accepts. ADR-0018 (path-implied package consent) and ADR-0029 (a Server-pushed Supervisor block
 names only what the Client already owns) plainly cover part of this ground. **How much** they cover
 has not been established, and that has to come first — building a new restriction on top of an
 unexamined one would be the wrong order.
@@ -320,7 +320,7 @@ Two claims in this document rest on reading the code, not on running it, and are
 
 - **H8** — whether the CSR-obtained private key and the rotated-credential cache are written with a
   restrictive file mode.
-- **H14** — how much of the Baseline's "restrict what the Agent can accept" ADR-0021 and ADR-0057
+- **H14** — how much of the Baseline's "restrict what the Agent can accept" ADR-0018 and ADR-0029
   already cover.
 
 Both are cheap to settle and both change what the measure above them is worth, so they belong before
@@ -328,7 +328,7 @@ the planning rather than inside it.
 
 ## Suggested order
 
-**H18 first — it is the smallest item here and it closes a gap the Server no longer has.** ADR-0073
+**H18 first — it is the smallest item here and it closes a gap the Server no longer has.** ADR-0032
 bounded the Server's two planes; leaving the Client's two listeners unbounded means the fleet's
 weakest surface is now the one running on the hosts, and the fix is already written next door.
 
@@ -358,20 +358,20 @@ measure that has not been taken.
 | H6 | Renewal is observed to complete **before** expiry in a fleet left running longer than one validity period. Not a unit test — this one needs a soak, and shortening validity without that evidence is the failure mode the measure is meant to avoid. |
 | H7 | No credential appears in `server.toml` in a form that authenticates on its own; a correct credential still authenticates; a wrong one is still rejected in constant time. The last clause matters: the point of the change is not to lose the property already held. |
 | H8 | The CSR-obtained private key and the rotated-credential cache carry mode `0600` on Unix and the equivalent ACL on Windows. The Windows half is `cfg(windows)` code and therefore invisible to a local `cargo test` — it needs cross-compilation to typecheck, and CI to run. |
-| H9 | The listener split is in force and covered: the REST API answers on the Operator plane and `404`s on the Agent plane, and the artifact download does the reverse (ADR-0066, `auth.rs` and `packages.rs` integration tests). What remains unverified is the handshake half: a peer presenting no client certificate must fail in the **TLS handshake** on the Agent plane — an error at the transport, not a `401` from a handler — while a browser reaching the Operator plane with none is served. The distinction between those two failures is the rest of the measure. |
+| H9 | The listener split is in force and covered: the REST API answers on the Operator plane and `404`s on the Agent plane, and the artifact download does the reverse (ADR-0032, `auth.rs` and `packages.rs` integration tests). What remains unverified is the handshake half: a peer presenting no client certificate must fail in the **TLS handshake** on the Agent plane — an error at the transport, not a `401` from a handler — while a browser reaching the Operator plane with none is served. The distinction between those two failures is the rest of the measure. |
 | H10 | Connection or enrolment attempts past the configured rate are answered `ServerErrorResponse` of type `Unavailable` carrying `retry_info`, and the Client backs off accordingly (the Client half is already implemented, so this verifies the pair). |
 | H11 | A peer offering only TLS 1.2 fails the handshake against both ends. |
 | H12 | A package offered to a Client with no signing key configured is **not applied**, and is reported `InstallFailed` with a reason. Today it is applied, hash-verified only. |
 | H13 | A referenced package whose host is not allow-listed is refused **before** any byte is fetched — the assertion is on the absence of the request, not on the outcome of the download. |
-| H14 | First a written statement of what a remote configuration can and cannot cause on a host, derived from ADR-0021 and ADR-0057. Only then, one check per "cannot". Writing checks before that statement would test the implementation against itself. |
+| H14 | First a written statement of what a remote configuration can and cannot cause on a host, derived from ADR-0018 and ADR-0029. Only then, one check per "cannot". Writing checks before that statement would test the implementation against itself. |
 | H15 | Each of admission, issuance, rotation, revocation, and package application emits exactly one audit record naming the Agent and the outcome — including the **refusals**, which is the half that is easy to omit and the half an investigation needs. |
-| H16 | Connections past the configured cap are refused while the ones already established keep working, and the cap is reached by opening sockets that send nothing — the same peer ADR-0073 hangs up on, in quantity. |
+| H16 | Connections past the configured cap are refused while the ones already established keep working, and the cap is reached by opening sockets that send nothing — the same peer ADR-0032 hangs up on, in quantity. |
 | H17 | An HTTP/2 peer that opens streams past `max_concurrent_streams` is refused, and one that stops answering keep-alive pings is dropped. Neither happens today, which is what the check must first show. |
 | H18 | On the Gateway: a downstream connection that never finishes its headers is closed, exactly as [`connection_setup.rs`](../crates/server/tests/connection_setup.rs) shows for the Server. On the Supervisor Endpoint: a local connection that never completes the WebSocket upgrade is dropped, **and a second connection is served afterwards** — the second clause is the measure, since the first would pass on a listener that simply died. |
 
 Two further points hold across the table. **H3 and H9 belong in the interoperability suite**, not only
 in this project's own tests: both concern what the Server does with a peer it did not write, and
-opamp-go is the peer that already stands in for that (ADR-0040). And **the two unverified claims**
+opamp-go is the peer that already stands in for that (ADR-0004). And **the two unverified claims**
 under [Unverified claims](#unverified-claims) are checks to run *before* planning, not after
 implementing — they decide whether H8 and H14 are work at all.
 

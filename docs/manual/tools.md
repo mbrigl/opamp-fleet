@@ -20,7 +20,7 @@ signing lives, which `opamp-package-fetch` deliberately does not do.
 ## Running them
 
 Both live in their own crate, `package-tools`, so neither is part of what runs on a managed host
-([ADR-0065](../adr/0065-the-operator-package-tools-live-in-their-own-crate.md)). From a source
+([ADR-0005](../adr/0005-workspace-and-crates.md)). From a source
 checkout:
 
 ```console
@@ -60,8 +60,8 @@ checksum file goes with them:
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `telegraf` | `dl.influxdata.com` (versions from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
-| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0020](../adr/0020-client-self-update.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
-| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0072) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
+| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0017](../adr/0017-client-self-update-and-its-consent.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
+| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0034) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 
 Four things it does on every run:
 
@@ -69,7 +69,7 @@ Four things it does on every run:
   used for anything. A mismatch stops that platform and leaves the file for inspection.
 - **It leaves the artifact alone** wherever upstream's container is one a Client can open — so
   the hash the fleet verifies is the hash on the release page, and the line from the release to
-  the host is unbroken ([ADR-0018](../adr/0018-packages-imported-from-a-url.md)).
+  the host is unbroken ([ADR-0015](../adr/0015-package-delivery-for-managed-processes.md)).
 - **It uploads the agent's default configuration with the package** — but only the ones the
   Server does not already have, see [below](#the-default-configuration).
 - **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching a
@@ -110,7 +110,7 @@ question below shows what *that release* actually has. Two need a word:
   the distribution it is built for — the tree bundles the libraries found there — so the only
   artifact a run can produce is that host's, and its reach is that build's glibc floor. glibc is
   backward compatible, so the floor is the whole criterion and the family is none of it
-  ([ADR-0071](../adr/0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md)). The
+  ([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)). The
   transcript above was taken in a `bookworm` container, whose vendor packages declare
   `libc6 >= 2.34`; run it in `bullseye` and the same line reads `Debian 11+/Ubuntu 20.04+/RHEL 9+`,
   in `trixie` `Debian 13+/Ubuntu 24.04+/RHEL 10+`. **Which container you start this in is therefore
@@ -174,7 +174,7 @@ Done. What a Supervisor needs to install these:
 
 For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
 the consent that lets it take the package over itself, which is also its default
-([ADR-0075](../adr/0075-the-self-update-consent-stands-unless-it-is-withdrawn.md)):
+([ADR-0017](../adr/0017-client-self-update-and-its-consent.md)):
 
 ```
 Done. What a Client needs to take these:
@@ -201,7 +201,7 @@ released binary:
 | `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
 | `telegraf` | `telegraf-conf` | Agent type `telegraf` |
 | `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
-| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0056](../adr/0056-the-client-accepts-its-supervisor-set-from-the-server.md)) |
+| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0029](../adr/0029-supervisor-set-from-the-server.md)) |
 
 Two rules keep this from surprising anyone:
 
@@ -209,7 +209,7 @@ Two rules keep this from surprising anyone:
   Server already holds is left exactly as you left it, edits and all. That is what makes a second
   upload of a newer version safe.
 - **Nothing is distributed.** Saving only saves
-  ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)), so the default reaches
+  ([ADR-0030](../adr/0030-a-rollout-is-an-explicit-act.md)), so the default reaches
   no host until you roll it out. Read it first: these bodies carry example values — Icinga's
   parent is `master.example.com`.
 
@@ -235,7 +235,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 
 | What it answers | What to do |
 |---|---|
-| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0061](../adr/0061-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Package first. |
+| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0030](../adr/0030-a-rollout-is-an-explicit-act.md)). Fetch under a new version, or delete the Package first. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
 | `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |

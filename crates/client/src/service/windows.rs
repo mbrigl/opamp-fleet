@@ -25,7 +25,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
-/// (ADR-0084 clause 5) — so it only needs to be stable.
+/// (ADR-0010 clause 11) — so it only needs to be stable.
 const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -122,7 +122,7 @@ fn run_service() -> Result<(), String> {
     let exit_code = match &result {
         Ok(runtime::Exit::Normal) => ServiceExitCode::Win32(0),
         // A self-update is not a failure, but the SCM's recovery actions are the only way to be
-        // restarted, and they run on a failure (ADR-0020).
+        // restarted, and they run on a failure (ADR-0017).
         Ok(runtime::Exit::RestartForUpdate) => {
             error!("exiting so the SCM starts the newly installed version");
             ServiceExitCode::ServiceSpecific(

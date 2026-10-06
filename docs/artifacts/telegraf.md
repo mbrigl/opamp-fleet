@@ -5,8 +5,8 @@
 
 **Who reads this.** Whoever changes how Telegraf is packed, and whoever changes what the `telegraf`
 kind knows. It is the one place both sides state the same facts, so a release that moves something
-can be answered on both at once ([ADR-0091](../adr/0091-a-kind-knows-its-own-agent.md) clause 9,
-[ADR-0094](../adr/0094-telegraf-gets-a-kind-of-its-own.md)).
+can be answered on both at once ([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md) clause 9,
+[ADR-0038](../adr/0038-telegraf-gets-a-kind-of-its-own.md)).
 
 It is the thinnest of the three artifact documents, because the artifact is installed exactly as
 InfluxData published it: there is no repack to keep in step, and no tree whose internal layout
@@ -31,7 +31,7 @@ list cannot be read from anywhere and is this tool's own (`TELEGRAF_PLATFORMS`).
 ## 2. Assets per platform
 
 `telegraf-<version>_<os>_<arch>.tar.gz`, and `.zip` for Windows. Upstream spells 32-bit `i386`
-where this fleet says `386` ([ADR-0031](../adr/0031-per-platform-package-variants.md)); the mapping is the
+where this fleet says `386` ([ADR-0021](../adr/0021-one-platform-vocabulary.md)); the mapping is the
 third and fourth column of `TELEGRAF_PLATFORMS`:
 
 | This fleet | Upstream |
@@ -61,8 +61,8 @@ the archive root on Windows — and **neither matters**, because the Client find
 *file name*. That is the whole reason this kind has no `program_path`.
 
 The installed program therefore lands in this Supervisor's own `program/` directory
-([ADR-0021](../adr/0021-supervisor-directory-and-path-implied-package-consent.md)), which is also where the process
-starts ([ADR-0091](../adr/0091-a-kind-knows-its-own-agent.md)).
+([ADR-0018](../adr/0018-supervisor-directory-and-client-installed-programs.md)), which is also where the process
+starts ([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md)).
 
 ## 6. What the Client derives
 
@@ -85,7 +85,7 @@ block.
 
 The **version arguments serve twice**: as the probe that gives the Agent its `service.version`, and
 as the preflight run against a *staged* program before the running one is stopped
-([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)). What makes them a version
+([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)). What makes them a version
 probe is what makes them a safe check — cheap, and touching no state.
 
 ## 7. Configurations

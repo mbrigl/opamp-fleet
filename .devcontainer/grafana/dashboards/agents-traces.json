@@ -79,7 +79,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Every trace here is one fleet operation.** A Client opens a span for installing a package, applying a configuration \u2014 a Managed Process's, and its own Supervisor set \u2014 applying offered connection settings, and updating itself (ADR-0090). Its phases are the child spans, and the outcome it reported to the Server is the span status, so *which phase failed* is a question these panels answer.\n\nMessage handling is deliberately not traced, so the rate below is operations and not traffic. A self-update spans a restart and still arrives as one trace."
+        "content": "**Every trace here is one fleet operation.** A Client opens a span for installing a package, applying a configuration \u2014 a Managed Process's, and its own Supervisor set \u2014 applying offered connection settings, and updating itself (ADR-0023). Its phases are the child spans, and the outcome it reported to the Server is the span status, so *which phase failed* is a question these panels answer.\n\nMessage handling is deliberately not traced, so the rate below is operations and not traffic. A self-update spans a restart and still arrives as one trace."
       },
       "id": 1
     },

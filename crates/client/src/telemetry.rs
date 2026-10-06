@@ -1,4 +1,4 @@
-//! The Agent's own telemetry (ADR-0036): OTLP/HTTP to the destinations the Server names.
+//! The Agent's own telemetry (ADR-0023): OTLP/HTTP to the destinations the Server names.
 //!
 //! Three capabilities, one mechanism. `ReportsOwnMetrics`, `ReportsOwnTraces`, and `ReportsOwnLogs`
 //! each mean "the Agent can report own <signal> to the destination specified by the Server via
@@ -77,16 +77,16 @@ const SCOPE: &str = "opamp-fleet-client";
 /// one by one rather than taken as a bag.
 ///
 /// **Why a list and not "everything non-identifying".** That bag also holds `host.ip`, `host.mac`
-/// and whatever the operator wrote under `[attributes]` in `supervisor.toml`. ADR-0036 says out loud
+/// and whatever the operator wrote under `[attributes]` in `supervisor.toml`. ADR-0023 says out loud
 /// that the Resource is what leaves the host for a destination the *Server* named, so widening this
 /// to the whole bag is a decision about what gets sent somewhere else — naming what describes the
 /// platform is not.
 ///
 /// - `service.instance.name` is non-identifying only because the Baseline has no key for a human
-///   instance name and identity stays `service.instance.id` (ADR-0033) — that is a statement about
+///   instance name and identity stays `service.instance.id` (ADR-0022) — that is a statement about
 ///   *identity*, not about what the telemetry is worth carrying. Without it every series at the
 ///   receiving end is a uuid the operator cannot place against the fleet view they searched by.
-/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0031), and
+/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0021), and
 ///   `os.description` is the readable form of the first. They sit on the Resource rather than on
 ///   each sample because they are a property of the *host*: this Client samples its own process and
 ///   the Managed Processes it holds the pids of, so every Agent in one export runs on the machine
@@ -98,7 +98,7 @@ const DESCRIPTIVE_ATTRIBUTES: [&str; 4] =
     [SERVICE_INSTANCE_NAME, OS_TYPE, HOST_ARCH, OS_DESCRIPTION];
 
 /// The layer the `tracing` subscriber reserves for the OTLP bridge, so a destination that arrives
-/// at runtime has somewhere to go (ADR-0036).
+/// at runtime has somewhere to go (ADR-0023).
 ///
 /// A global, because the subscriber it belongs to is one: `tracing` has exactly one, installed
 /// before anything is configured, and the bridge cannot be added to it afterwards without a slot
@@ -112,12 +112,12 @@ type BridgeLayer = Option<
 static BRIDGE: std::sync::OnceLock<tracing_subscriber::reload::Handle<BridgeLayer, WithSpans>> =
     std::sync::OnceLock::new();
 
-/// The second slot, for the span exporter (ADR-0090). The appender above converts `tracing`
+/// The second slot, for the span exporter (ADR-0023). The appender above converts `tracing`
 /// *events* and says so in its own documentation; this is what converts `tracing` *spans*, and
 /// without it the `own_traces` exporter has nothing to export.
 ///
 /// Two slots rather than one, because the two destinations are independent: an offer may name
-/// traces and not logs, or withdraw one and keep the other (ADR-0089).
+/// traces and not logs, or withdraw one and keep the other (ADR-0023).
 ///
 /// Public because `main` builds the slot and has to name what it holds — the subscriber is
 /// installed there, long before this module has anything to put in it.
@@ -147,7 +147,7 @@ pub fn hold_log_bridge(handle: tracing_subscriber::reload::Handle<BridgeLayer, W
     let _ = BRIDGE.set(handle);
 }
 
-/// The same, for the span slot (ADR-0090).
+/// The same, for the span slot (ADR-0023).
 pub fn hold_span_layer(
     handle: tracing_subscriber::reload::Handle<SpanLayer, tracing_subscriber::Registry>,
 ) {
@@ -168,7 +168,7 @@ fn set_spans(provider: Option<&SdkTracerProvider>) {
 /// The two fields every operation span declares empty and fills in when it ends.
 ///
 /// They are `tracing-opentelemetry`'s reserved names, not this project's: recording them turns into
-/// the OpenTelemetry span status, which is what ADR-0036 meant by *"the existing outcome becomes the
+/// the OpenTelemetry span status, which is what ADR-0023 meant by *"the existing outcome becomes the
 /// span status"*. Declared empty at creation because a field can only be recorded on a span that
 /// declared it — and the outcome is, by definition, not known then.
 ///
@@ -201,7 +201,7 @@ pub fn succeeded(span: &tracing::Span) {
 /// when nothing is being traced, which is every run with no destination offered.
 ///
 /// Exists so a caller can persist a trace across something a span cannot survive: the self-update's
-/// restart (ADR-0090 clause 6), where the process that stages a version is not the process that
+/// restart (ADR-0023 clause 33), where the process that stages a version is not the process that
 /// commits or rolls back one. The OpenTelemetry types stay here; what leaves this module is two
 /// strings.
 #[must_use]
@@ -260,7 +260,7 @@ fn set_bridge(provider: Option<&SdkLoggerProvider>) {
 ///
 /// All three names travel together because none answers on its own. The uid is the identity the
 /// protocol keys everything by, the instance name is the only part of it an operator recognises,
-/// and the type says what the thing *is* (ADR-0033) — a series labelled with one and not the others
+/// and the type says what the thing *is* (ADR-0022) — a series labelled with one and not the others
 /// is either unreadable or ambiguous.
 #[derive(Clone)]
 pub struct SamplingTarget {
@@ -268,7 +268,7 @@ pub struct SamplingTarget {
     pub uid: String,
     /// The operator's name for it.
     pub instance_name: String,
-    /// The Agent *type* it is reported under — `service.name` (ADR-0033). Per Agent rather than on
+    /// The Agent *type* it is reported under — `service.name` (ADR-0022). Per Agent rather than on
     /// the Resource: one Client reports its own `supervisor` beside an `otelcol` and an `icinga2`,
     /// so unlike the platform this differs *within* a single export.
     pub service_name: String,
@@ -283,9 +283,9 @@ pub struct SamplingTarget {
 /// arrives from the Server and can change. Applying a new offer means building fresh providers and
 /// shutting these down, which needs a handle on exactly what is running.
 ///
-/// **Interior mutability, deliberately.** The exporters outlive a connection (ADR-0036), so this is
+/// **Interior mutability, deliberately.** The exporters outlive a connection (ADR-0023), so this is
 /// owned by the runtime loop — but a destination is put in force from *inside* a transport, where
-/// the offer's acknowledgement is composed (ADR-0086). Both the sampler arm of the runtime's
+/// the offer's acknowledgement is composed (ADR-0023). Both the sampler arm of the runtime's
 /// `select!` and the transport future it drives therefore hold this at once, which `&mut self`
 /// cannot express. One `Mutex` gives both a shared borrow and costs nothing else: every method
 /// under the lock is synchronous, so the guard is never held across an `.await` and no deadlock
@@ -327,7 +327,7 @@ impl Telemetry {
     /// Puts the offered destinations in force, replacing whatever was running.
     ///
     /// Returns the destinations it refused, if any, so the caller can report them rather than drop
-    /// them silently — the same honesty the OpAMP settings get (ADR-0035).
+    /// them silently — the same honesty the OpAMP settings get (ADR-0013).
     pub fn apply(
         &self,
         settings: &ConnectionSettingsOffers,
@@ -362,7 +362,7 @@ impl Telemetry {
             {
                 Ok(provider) => {
                     opentelemetry::global::set_tracer_provider(provider.clone());
-                    // The spans themselves come from this Client's `tracing` spans (ADR-0090); the
+                    // The spans themselves come from this Client's `tracing` spans (ADR-0023); the
                     // global provider above is for anything reaching the OpenTelemetry API
                     // directly, which nothing here does.
                     set_spans(Some(&provider));
@@ -387,7 +387,7 @@ impl Telemetry {
         if this.meters.is_some() || this.tracers.is_some() || this.loggers.is_some() {
             info!("reporting own telemetry to the destinations the Server offered");
         } else if refused.is_empty() {
-            // Only a withdrawal reaches here (ADR-0089): an offer that changes nothing returned
+            // Only a withdrawal reaches here (ADR-0023): an offer that changes nothing returned
             // above, and one whose destinations were refused has something in `refused` to report.
             // An operator switching telemetry off from the fleet should see it land on the host.
             info!("the Server withdrew every own-telemetry destination; no longer reporting");
@@ -489,7 +489,7 @@ impl Providers {
 
 /// The destination a field offers, if it offers one.
 ///
-/// An endpoint offered **empty** is a withdrawal (ADR-0089), not a malformed URL: the exporter for
+/// An endpoint offered **empty** is a withdrawal (ADR-0023), not a malformed URL: the exporter for
 /// that signal is shut down, nothing is built in its place, and nothing is reported about it. The
 /// Server is saying stop, and stopping is not a failure to be handed back as one.
 fn offered(settings: Option<&TelemetryConnectionSettings>) -> Option<&TelemetryConnectionSettings> {
@@ -505,10 +505,10 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// The Resource carries the Agent's identifying attributes and the log records carry whatever this
 /// Client logs, so plaintext across a network the operator does not control is refused rather than
 /// warned about — one step firmer than the credential warning of ADR-0013, because this is a
-/// continuous stream. What that leaves is the private address space (ADR-0088): loopback, and the
+/// continuous stream. What that leaves is the private address space (ADR-0023): loopback, and the
 /// RFC 1918 and unique-local ranges, where the stream stays inside the boundary the operator
 /// already owns. `tls` and `proxy` are refused for the same reasons they are on the OpAMP settings
-/// (ADR-0035).
+/// (ADR-0013).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
     if endpoint.starts_with("http://") && !is_private(endpoint) {
@@ -531,9 +531,9 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
     if settings.proxy.is_some() {
         unhonoured.push("proxy");
     }
-    // An offered certificate *is* honoured (ADR-0036 point 10) — but only its `cert`, paired with
+    // An offered certificate *is* honoured (ADR-0023 point 10) — but only its `cert`, paired with
     // the key this Client already holds. A `private_key` in the offer is a key the Server generated
-    // for us, and ADR-0035's rule is that this Client's private key never leaves its host and is
+    // for us, and ADR-0013's rule is that this Client's private key never leaves its host and is
     // never handed to it: that is the whole point of asking for a certificate through a CSR. Refused
     // by name rather than quietly ignored, so a Server issuing pairs learns why nothing happened.
     if settings
@@ -555,7 +555,7 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
 /// The HTTP client the OTLP exporters send through: this Client's TLS trust, plus the client
 /// certificate the offer named, if it named one.
 ///
-/// The certificate machinery is ADR-0035's, reused as-is (ADR-0036 point 10): the offered `cert` is
+/// The certificate machinery is ADR-0013's, reused as-is (ADR-0023 point 10): the offered `cert` is
 /// paired with the key already on disk — the one the CSR was made for — because that key is what
 /// proves the certificate belongs to this host, and it never travels.
 ///
@@ -578,8 +578,8 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
 ///
 /// This is not a consequence of supplying our own client: with the `reqwest-client` feature
 /// `opentelemetry-otlp` builds exactly the same asynchronous client when given none, so the fault
-/// was latent from the day ADR-0036 chose that feature and surfaced only once a destination was
-/// actually offered. ADR-0036's reasoning — *"this Client is a tokio process"* — is true of the
+/// was latent from the day ADR-0023 chose that feature and surfaced only once a destination was
+/// actually offered. ADR-0023's reasoning — *"this Client is a tokio process"* — is true of the
 /// process and false of the thread the export happens on.
 ///
 /// The fix keeps the asynchronous client the ADR chose and puts the work where it belongs: every
@@ -652,7 +652,7 @@ fn exporter_client(
     Ok(RuntimeBoundClient { client, handle })
 }
 
-/// Whether a cleartext destination stays inside the private address space (ADR-0088).
+/// Whether a cleartext destination stays inside the private address space (ADR-0023).
 ///
 /// Literal addresses only, plus `localhost` by name. A host name is **not** resolved to decide
 /// this: the answer would depend on what DNS says at the moment the offer is admitted, and an
@@ -848,7 +848,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// The private address space is where cleartext is admitted and where it stops (ADR-0088).
+    /// The private address space is where cleartext is admitted and where it stops (ADR-0023).
     /// The last two cases are the ones a prefix test would wave through: a public address that
     /// merely reads like a private one, and a host *name* whose first labels are a private
     /// address.
@@ -883,7 +883,7 @@ mod tests {
     }
 
     /// A Collector on the LAN rather than on the host: the same shape as loopback, one hop out,
-    /// and still inside the boundary the operator owns (ADR-0088).
+    /// and still inside the boundary the operator owns (ADR-0023).
     #[tokio::test]
     async fn a_private_network_destination_is_allowed_in_cleartext() {
         crate::tls::install_ring_provider();
@@ -914,7 +914,7 @@ mod tests {
         telemetry.shutdown();
     }
 
-    /// A destination offered with an empty endpoint is a withdrawal (ADR-0089 rule 3): the
+    /// A destination offered with an empty endpoint is a withdrawal (ADR-0023 rule 25): the
     /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
     /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
     #[tokio::test]
@@ -943,7 +943,7 @@ mod tests {
     }
 
     /// The same two fields refused on the OpAMP settings are refused here, and for the same
-    /// reasons — named, not dropped in silence (ADR-0035, ADR-0036).
+    /// reasons — named, not dropped in silence (ADR-0013, ADR-0023).
     #[test]
     fn offered_tls_settings_are_refused_by_name() {
         let telemetry = Telemetry::new();
@@ -964,7 +964,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// ADR-0036 point 10: the offered `certificate` is *honoured*, not refused — the ADR-0035
+    /// ADR-0023 point 10: the offered `certificate` is *honoured*, not refused — the ADR-0013
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
@@ -1039,7 +1039,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// But a private key *in the offer* is refused by name. ADR-0035's rule is that this Client's
+    /// But a private key *in the offer* is refused by name. ADR-0013's rule is that this Client's
     /// private key never leaves its host and is never handed to it — which is the whole reason the
     /// certificate is obtained through a CSR.
     #[test]
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     /// The platform travels with the telemetry, because a series that cannot be placed on an
-    /// operating system and an architecture (ADR-0031) cannot be read against a fleet whose Agents
+    /// operating system and an architecture (ADR-0021) cannot be read against a fleet whose Agents
     /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
     /// host this Resource describes, so per-sample it would be a constant repeated on every point.
     #[test]
@@ -1194,7 +1194,7 @@ mod tests {
         );
     }
 
-    /// The whole chain the traces half rests on (ADR-0090): a `tracing` span this Client writes,
+    /// The whole chain the traces half rests on (ADR-0023): a `tracing` span this Client writes,
     /// through the layer, the provider and the exporter, to the destination the Server offered.
     ///
     /// Worth an end-to-end test rather than a unit one because every link was already in place
@@ -1274,7 +1274,7 @@ mod tests {
         );
     }
 
-    /// ADR-0090 clause 6: an operation that outlives the process it started in stays **one** trace.
+    /// ADR-0023 clause 33: an operation that outlives the process it started in stays **one** trace.
     ///
     /// Asserted through the two functions the self-update uses — the ids it writes into its marker,
     /// and the parent it builds from them afterwards — because what the restart breaks is exactly

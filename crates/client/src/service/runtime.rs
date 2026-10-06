@@ -23,7 +23,7 @@ pub struct RunSpec {
     pub config_path: PathBuf,
     /// Overrides the configuration file's `state_dir` when present.
     pub state_dir: Option<PathBuf>,
-    /// Started by the machine's service manager rather than by a person (ADR-0041). Set from the
+    /// Started by the machine's service manager rather than by a person (ADR-0026). Set from the
     /// hidden `--service` marker `service install` writes into the command line on every platform,
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
@@ -34,7 +34,7 @@ pub struct RunSpec {
 pub enum Exit {
     /// The operator stopped it. A clean exit, and the service manager leaves it stopped.
     Normal,
-    /// A self-update switched to a new version (ADR-0020). The process must exit *non-zero* so
+    /// A self-update switched to a new version (ADR-0017). The process must exit *non-zero* so
     /// the manager's restart-on-failure brings the new version up: none of the three managers
     /// offers "restart on success", and issuing the restart from inside the unit deadlocks.
     RestartForUpdate,
@@ -57,7 +57,7 @@ impl Shutdown {
     }
 }
 
-/// Starts Gateway Mode when `[gateway]` arms it (ADR-0037), or nothing when it does not.
+/// Starts Gateway Mode when `[gateway]` arms it (ADR-0024), or nothing when it does not.
 ///
 /// It runs as its own task rather than inside the transport loop: the downstream endpoint's
 /// lifetime is the process's, not one upstream connection's, and an Agent behind the Gateway must
@@ -107,14 +107,14 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
     if exit == Exit::RestartForUpdate {
         // Not an error, but it has to look like one: systemd's `Restart=on-failure` and launchd's
         // `KeepAlive{SuccessfulExit:false}` are the only "bring it back" either offers, and a
-        // clean exit is precisely what tells them not to (ADR-0010, ADR-0020).
+        // clean exit is precisely what tells them not to (ADR-0010, ADR-0017).
         tracing::info!("exiting so the service manager starts the newly installed version");
         std::process::exit(crate::selfupdate::EXIT_RESTART_FOR_UPDATE);
     }
     Ok(())
 }
 
-/// Opens the Client's own log file for a service run (ADR-0041).
+/// Opens the Client's own log file for a service run (ADR-0026).
 ///
 /// **A log that cannot be written never stops the Client.** A directory the installer did not make
 /// writable, or a full disk, is reported on stderr — which the SCM discards, which is the whole
@@ -142,12 +142,12 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 ///
 /// **The version is the point of the first line.** It rides in every report to the Server and names
 /// the directory this binary runs from (ADR-0010), and until now it appeared in no log line at all
-/// — so the file a self-update left behind (ADR-0020, ADR-0041) could not be attributed to the
+/// — so the file a self-update left behind (ADR-0017, ADR-0026) could not be attributed to the
 /// version that wrote it, which is the situation that file exists for. The rest of the line is what
 /// an operator otherwise has to reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
-/// accessors the transports build their TLS from (ADR-0007, ADR-0035) rather than read off the
+/// accessors the transports build their TLS from (ADR-0007, ADR-0013) rather than read off the
 /// configuration — so it states what *will* be presented, including a Server-issued certificate
 /// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
 /// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
@@ -181,7 +181,7 @@ fn announce(config: &ClientConfig, config_path: &std::path::Path) {
 ///
 /// Its own function because it makes a claim worth a test: the certificate named here is whichever
 /// [`ClientConfig::client_identity`] resolves to, which prefers the **Server-issued** one in the
-/// state directory over anything `[tls]` names (ADR-0035). A line that reported the configured
+/// state directory over anything `[tls]` names (ADR-0013). A line that reported the configured
 /// certificate while the connection presented the issued one would be worse than no line at all.
 fn tls_posture(config: &ClientConfig) -> (String, String) {
     let trust = config.ca_file().map_or_else(
@@ -196,7 +196,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 }
 
 /// What a run does when its configuration cannot be read: resolve the update in flight anyway, so
-/// the failure counts (ADR-0020).
+/// the failure counts (ADR-0017).
 ///
 /// Returns `RestartForUpdate` when that resolution rolled the Client back — the pointer now names
 /// the version that *could* read this file, and the manager must start it — and otherwise hands the
@@ -204,7 +204,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([ADR-0091](../../../../docs/adr/0091-a-kind-knows-its-own-agent.md)), and for some kinds there
+/// ([ADR-0037](../../../../docs/adr/0037-a-kind-knows-its-own-agent.md)), and for some kinds there
 /// is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
@@ -251,7 +251,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let mut config = match load_effective_config(&spec) {
         Ok(config) => config,
         // A version that cannot read this host's file is a failed update like any other, and until
-        // now it was the one failure the probation of ADR-0020 could not see: the load happens
+        // now it was the one failure the probation of ADR-0017 could not see: the load happens
         // before `on_start`, so the process left before the attempt was counted, the manager
         // restarted it, and the host stayed on a version that never reached the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
@@ -263,7 +263,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
 
-    // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
+    // Resolve any self-update in flight before anything else runs (ADR-0017): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
     let startup = crate::selfupdate::on_start(&config.state_dir)?;
     let (probation, owed_outcome) = match startup {
@@ -300,14 +300,14 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         engine.report_self_update_outcome(outcome);
         crate::selfupdate::clear_outcome(&config.state_dir);
     }
-    // Own telemetry (ADR-0036) is owned here rather than by a transport loop, because the
+    // Own telemetry (ADR-0023) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
     let telemetry = crate::telemetry::Telemetry::new();
     let mut system = sysinfo::System::new();
     let sampling = engine.sampling_handle();
 
-    // Gateway Mode (ADR-0037), if armed: a downstream endpoint and an upstream pool, running
+    // Gateway Mode (ADR-0024), if armed: a downstream endpoint and an upstream pool, running
     // beside everything else. It is restarted when a verified offer moves this Client's endpoint,
     // since the pool dials that endpoint and would otherwise keep reaching for the old one.
     let mut gateway = spawn_gateway(&config, &shutdown);
@@ -322,7 +322,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // And the Server hears about it. The line above just reported these settings APPLIED;
             // saying nothing here would have this Client claim, on every reconnect for the life of
             // the state directory, that a destination is in force which it refused to use
-            // (ADR-0036: refused *and reported*).
+            // (ADR-0023: refused *and reported*).
             let error = refused.join("; ");
             tracing::warn!(reason = %error, "not reporting own telemetry");
             engine.connection_settings_outcome(&stored.hash, Err(&error));
@@ -381,7 +381,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
                 // The telemetry destinations of the same offer are already in force: since
-                // ADR-0086 `process_connection_offer` applies them before it asks for the
+                // ADR-0023 `process_connection_offer` applies them before it asks for the
                 // reconnect, and it composes the one acknowledgement that names anything refused.
                 // Re-applying here would be a no-op through `in_force` whose only visible effect
                 // was a `warn!` with no acknowledgement attached — which was the bug.
@@ -527,7 +527,7 @@ mod tests {
 
     /// A configuration this version cannot read is a failed update attempt, and the marker has to
     /// be resolved rather than stepped over — otherwise the service manager restarts the version
-    /// that refuses the file, for ever, and ADR-0020's rollback never fires.
+    /// that refuses the file, for ever, and ADR-0017's rollback never fires.
     ///
     /// The test binary does not run from an install layout, so the resolution takes the "the new
     /// version did not take over" path: the marker is cleared and an outcome recorded. What is
@@ -584,7 +584,7 @@ mod tests {
     }
 
     /// And it reports what will actually be presented: a Server-issued pair in the state directory
-    /// outranks the configured one (ADR-0035), so the line has to name the issued one — that is the
+    /// outranks the configured one (ADR-0013), so the line has to name the issued one — that is the
     /// whole reason it resolves the identity instead of printing `[tls] cert_file`.
     #[test]
     fn the_tls_line_names_the_issued_certificate_over_the_configured_one() {

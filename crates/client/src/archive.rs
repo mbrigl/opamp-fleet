@@ -1,9 +1,9 @@
-//! Unpacking a package artifact (ADR-0018).
+//! Unpacking a package artifact (ADR-0015).
 //!
 //! An upstream release is an archive — `opentelemetry-collector-releases` publishes `.tar.gz` and
 //! never a bare binary — so the artifact a Supervisor is handed is often a container holding the
 //! program rather than the program itself. Nothing between the artifact's author and this host
-//! repacks it (ADR-0018), which is what lets an Agent verify the very hash the release published;
+//! repacks it (ADR-0015), which is what lets an Agent verify the very hash the release published;
 //! the price is that the Agent is the end that has to open it.
 //!
 //! Two rules keep opening someone else's archive from becoming a way in:
@@ -11,7 +11,7 @@
 //! - **The archive chooses as little as it can.** For a single-file package it chooses nothing:
 //!   exactly one member is extracted, to a destination this Client picked, so a member named
 //!   `../../etc/cron.d/x` writes to that destination like any other and there is no traversal to
-//!   defend against. A tree (ADR-0023) cannot work that way — its members keep their own relative
+//!   defend against. A tree (ADR-0015) cannot work that way — its members keep their own relative
 //!   paths — so every path is validated by [`safe_member_path`] *before a byte is written*, and one
 //!   member this Client will not write refuses the whole archive.
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
@@ -28,7 +28,7 @@ use tracing::debug;
 /// megabytes; anything past this is not a program but a way to fill a disk.
 const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 
-/// The most members a tree may hold (ADR-0023). An agent with its libraries and plugins is a few
+/// The most members a tree may hold (ADR-0015). An agent with its libraries and plugins is a few
 /// hundred files; a hundred thousand empty ones is a way to spend an afternoon creating inodes.
 const MAX_TREE_MEMBERS: usize = 10_000;
 
@@ -83,7 +83,7 @@ pub const fn unix_mode_attributes(mode: u32) -> u32 {
     ((unix_attributes::S_IFREG | mode) << 16) | unix_attributes::EXTENSION
 }
 
-/// Whether a member's path may be written at all (ADR-0023).
+/// Whether a member's path may be written at all (ADR-0015).
 ///
 /// Unpacking a whole tree is the point where an archive starts having a say in *where* bytes land —
 /// the single-member path has no traversal to defend against because it never uses an archive's
@@ -115,7 +115,7 @@ fn safe_member_path(raw: &Path) -> Result<std::path::PathBuf, String> {
 }
 
 /// Whether `path` ends with all of `suffix`'s components — how `program_path` finds its member
-/// (ADR-0023).
+/// (ADR-0015).
 ///
 /// A release archive wraps its tree in a version-named directory, so matching from the root would
 /// mean writing that version into the configuration and having it be wrong at the next release.
@@ -210,9 +210,9 @@ pub enum Kind {
     Raw,
     /// A gzip stream — in practice a `.tar.gz` holding the program.
     TarGz,
-    /// A 7z container, which may be encrypted (ADR-0018).
+    /// A 7z container, which may be encrypted (ADR-0015).
     SevenZ,
-    /// A zip container (ADR-0064) — the form the GLPI Agent's portable Windows build is
+    /// A zip container (ADR-0031) — the form the GLPI Agent's portable Windows build is
     /// published in, taken as published so the hash an Agent verifies stays upstream's own.
     /// Read-only here, and never encrypted: a confidential artifact is a `.7z`.
     Zip,
@@ -405,7 +405,7 @@ pub struct TreeSummary {
 /// turned on costs nothing while an operator chasing a missing file can turn it on for one install.
 ///
 /// The reason is not carried because there is exactly one: the member does not sit under the
-/// directory the program was found in (ADR-0023). Every other refusal — a traversing path, a
+/// directory the program was found in (ADR-0015). Every other refusal — a traversing path, a
 /// member past the size or count ceiling, an encrypted entry — fails the whole archive with an
 /// error that reaches the Server, and none of them reaches here.
 fn skipped(member: &Path, summary: &mut TreeSummary) {
@@ -413,7 +413,7 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
     debug!(member = %as_member(member), "member outside the program's directory; not unpacked");
 }
 
-/// Extracts a `.tar.gz` **whole** into `dest` (ADR-0023), keeping each member's relative path and
+/// Extracts a `.tar.gz` **whole** into `dest` (ADR-0015), keeping each member's relative path and
 /// dropping the directory prefix that `program_path`'s match sits under — so
 /// `fluent-bit-3.1.0/bin/fluent-bit` with `program_path = bin/fluent-bit` lands at
 /// `dest/bin/fluent-bit`, and the tree beside it comes along unchanged.
@@ -538,7 +538,7 @@ fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, St
     Ok(members)
 }
 
-/// Extracts a `.7z` **whole** into `dest` (ADR-0023), exactly as [`extract_tree_tar_gz`] does for a
+/// Extracts a `.7z` **whole** into `dest` (ADR-0015), exactly as [`extract_tree_tar_gz`] does for a
 /// `.tar.gz`. `key` opens an encrypted archive.
 ///
 /// Modes are not taken from the archive here: 7z carries Windows attributes, and a Unix mode
@@ -667,7 +667,7 @@ fn list_7z(
 }
 
 /// Extracts the member called `member` from the `.zip` at `archive`, writing it to `out` —
-/// [`extract_tar_gz`] for the third container (ADR-0064). Matching is by **file name**, exactly as
+/// [`extract_tar_gz`] for the third container (ADR-0031). Matching is by **file name**, exactly as
 /// there; the bound is [`MAX_UNPACKED_BYTES`] on what is written. Unlike a tar, a zip is read
 /// through its central directory, so members before the match are never decompressed and there is
 /// no skip budget to spend.
@@ -726,7 +726,7 @@ fn extract_zip_within(
         .map_err(|e| format!("cannot unpack {member:?} from the archive: {e}"))
 }
 
-/// Extracts a `.zip` **whole** into `dest` (ADR-0023, ADR-0064), exactly as [`extract_tree_tar_gz`]
+/// Extracts a `.zip` **whole** into `dest` (ADR-0015, ADR-0031), exactly as [`extract_tree_tar_gz`]
 /// does for a `.tar.gz`.
 ///
 /// Modes are not taken from the archive, as for a `.7z`: zip carries host attributes a Windows
@@ -735,7 +735,7 @@ fn extract_zip_within(
 ///
 /// # Errors
 /// As [`extract_tree_tar_gz`], plus an encrypted member — encryption is the `.7z` format's job
-/// (ADR-0018), and a zip travels as its author published it or not at all.
+/// (ADR-0015), and a zip travels as its author published it or not at all.
 pub fn extract_tree_zip(
     archive: &Path,
     program_path: &Path,
@@ -827,7 +827,7 @@ fn list_zip(
 }
 
 /// An encrypted zip member is refused by policy, not by inability: encryption is what `.7z` is for
-/// (ADR-0018), where the key handling already exists — a second scheme with the same key would be
+/// (ADR-0015), where the key handling already exists — a second scheme with the same key would be
 /// one more way to hold it wrong.
 fn refuse_encrypted(entry: &zip::read::ZipFile<'_, File>) -> Result<(), String> {
     if entry.encrypted() {
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     /// The reason `.7z` is supported at all: the artifact is unreadable without the key, and the
-    /// key lives only on the Agent (ADR-0018).
+    /// key lives only on the Agent (ADR-0015).
     #[test]
     fn an_encrypted_7z_opens_with_the_key_and_not_without_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1166,7 +1166,7 @@ mod tests {
         assert!(err.contains("decompression bomb"), "{err}");
     }
 
-    // ── Trees (ADR-0023) ────────────────────────────────────────────────────────
+    // ── Trees (ADR-0015) ────────────────────────────────────────────────────────
 
     /// A release as agents actually ship: the program, the shared objects it loads, and a data
     /// file, all under one version-named directory.
@@ -1215,7 +1215,7 @@ mod tests {
     }
 
     /// The next release renames the wrapper, and the configuration must not have to follow it —
-    /// that drift is what ADR-0022 exists to make unspellable, and it applies here too.
+    /// that drift is what ADR-0018 exists to make unspellable, and it applies here too.
     #[test]
     fn the_same_program_path_finds_the_program_under_any_wrapper() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1367,7 +1367,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dest).expect("read").count(), 0);
     }
 
-    /// The member bound (ADR-0023). An archive of a hundred thousand empty files is not an agent,
+    /// The member bound (ADR-0015). An archive of a hundred thousand empty files is not an agent,
     /// and the count refuses it in the listing pass — before any path is turned into a write.
     #[test]
     fn an_archive_of_too_many_members_is_refused() {
@@ -1558,7 +1558,7 @@ mod tests {
         assert_eq!(mode("etc/parsers.conf"), 0o644);
     }
 
-    // ── Zip (ADR-0064) ──────────────────────────────────────────────────────────
+    // ── Zip (ADR-0031) ──────────────────────────────────────────────────────────
 
     /// Builds a `.zip` holding `members` — (path inside the archive, contents). A name ending in
     /// `/` becomes a directory entry, the way zip spells one.
@@ -1687,7 +1687,7 @@ mod tests {
         assert!(err.contains("LICENSE"), "names what it holds: {err}");
     }
 
-    /// The case ADR-0064 adds the format for: the GLPI portable zip, taken as published — the
+    /// The case ADR-0031 adds the format for: the GLPI portable zip, taken as published — the
     /// tree lands whole, directory entries and all, with the member outside counted as skipped.
     #[test]
     fn a_zip_tree_lands_whole_with_the_wrapper_directory_dropped() {

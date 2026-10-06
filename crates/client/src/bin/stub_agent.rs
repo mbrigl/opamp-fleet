@@ -11,7 +11,7 @@
 //!   crash-path tests. Without them the stub sleeps until it is killed.
 //! - `--ignore-hup` (Unix only) — ignore `SIGHUP`, the way a daemon that reloads on it survives
 //!   the signal; without the flag the default disposition terminates the stub. What the reload
-//!   tests (ADR-0060) use for both sides of `reload-or-restart`.
+//!   tests (ADR-0011) use for both sides of `reload-or-restart`.
 
 use std::time::Duration;
 

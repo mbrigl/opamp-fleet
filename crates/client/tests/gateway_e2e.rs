@@ -1,4 +1,4 @@
-//! Gateway Mode end to end (ADR-0037): the real Server, a real Gateway, and Agents reaching one
+//! Gateway Mode end to end (ADR-0024): the real Server, a real Gateway, and Agents reaching one
 //! through the other.
 //!
 //! What these prove is the part the design rests on — that the Server sees Agents rather than
@@ -149,7 +149,7 @@ async fn two_agents_reach_the_server_over_one_folded_connection() {
 }
 
 /// The pool grows lazily to its cap and no further: one Agent means one upstream connection, even
-/// with a cap of ten (ADR-0037 rule 5).
+/// with a cap of ten (ADR-0024 rule 5).
 #[tokio::test]
 async fn one_agent_opens_one_upstream_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -283,11 +283,11 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
 /// A gzipped report reaches the Server through the Gateway.
 ///
 /// The regression: accepting `Content-Encoding: gzip` is a Baseline MUST for anything serving this
-/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0037). It implemented the rule
+/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0024). It implemented the rule
 /// nowhere — the Server's endpoint had it, this one handed the compressed bytes straight to the
 /// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
 /// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
-/// (ADR-0044).
+/// (ADR-0005).
 #[tokio::test]
 async fn a_downstream_peer_may_gzip_its_report() {
     let (server, state, _dir) = spawn_server().await;
@@ -349,7 +349,7 @@ async fn a_gzip_bomb_is_refused_by_the_gateway() {
 
 /// An oversized message closes the downstream socket with 1009, the status the Baseline names.
 ///
-/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0037), and
+/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0024), and
 /// `docs/CONFORMANCE.md` claims the `1009 Message Too Big` close as implemented. The Server's
 /// endpoint did it; this one hung up with no status at all, so a downstream Client saw its
 /// connection drop and could not tell an oversized report from a Gateway that had died.

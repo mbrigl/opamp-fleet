@@ -56,7 +56,7 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
 
-There are **two listeners, split by audience** (ADR-0066): the one the fleet talks to, and the one
+There are **two listeners, split by audience** (ADR-0032): the one the fleet talks to, and the one
 you talk to.
 
 **The Agent plane** — `listen`, `0.0.0.0:4320` by default:
@@ -532,7 +532,7 @@ in each:
 | `package_conflict` | two channels claim it | narrow one Selector |
 
 **A rollout act never moves an Agent backwards.** Since
-[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) the version an Agent reports
+[ADR-0035](../adr/0035-what-reaches-an-agent.md) the version an Agent reports
 installed is part of matching: a Package reaches it only if the Package's version is **greater**,
 compared as SemVer (major, minor, patch, then the pre-release rules). Equal is not greater — a
 Package an Agent already runs reaches it with nothing — and a reported version nothing can order
@@ -541,14 +541,14 @@ and says which version the Agent reports.
 
 **An Agent that reports no version for the package is held against the version it reports
 *running*** — its `service.version`
-([ADR-0079](../adr/0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md)).
+([ADR-0035](../adr/0035-what-reaches-an-agent.md)).
 That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
 installed no package and has none to report: no Client is offered the version it already runs, and
 none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
 nothing, so an Agent whose program numbers itself its own way stays reachable.
 
 **Where an Agent reports both, what it *runs* decides**
-([ADR-0083](../adr/0083-what-reaches-an-agent.md) points 2 and 3). The Package must be greater
+([ADR-0035](../adr/0035-what-reaches-an-agent.md) points 2 and 3). The Package must be greater
 than the `service.version` the Agent reports, and the package status is not read beside it —
 neither to admit a Package the running version refuses, nor to refuse one it admits. A statement
 about the present outranks a record of an install, which outlives the binary it describes. So a

@@ -285,7 +285,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 ### Running it under its own account
 
 By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
-`--run-as` drops that (ADR-0062): the service — and every Managed Process its Supervisors spawn —
+`--run-as` drops that (ADR-0010 clause 18): the service — and every Managed Process its Supervisors spawn —
 runs as the account you name, and the install hands its files over to it: the
 configuration file, the state directory, **and the executable layout**. The layout too because
 the self-update runs *inside* the service — a layout the account cannot write would silently end
@@ -345,7 +345,7 @@ installed supervisor
 
 What it asks about is only what has no useful default here: the endpoint, the Agent's name, the
 credential ([`[auth]`](#auth)), a private CA when the endpoint is `wss://` or `https://`
-([`[tls]`](#tls)), and last — defaulting to **yes** since ADR-0075 — consent for the Server to
+([`[tls]`](#tls)), and last — defaulting to **yes** since ADR-0017 — consent for the Server to
 replace this Client's own binary ([`[self_update]`](#self_update)). Everything else is written into the file as commented
 defaults. The credential is typed into a hidden prompt rather than passed as a flag, so it stays out
 of the shell history and out of the process list; on Unix the file is created mode `0600`.
@@ -845,10 +845,10 @@ package = "supervisor"             # the default: this Client's own Agent type
 ```
 
 See [Updating the Client itself](#updating-the-client-itself). **An absent section is the consent**
-(ADR-0075): a Client the fleet cannot update is the one program on the host left to patch by hand.
+(ADR-0017): a Client the fleet cannot update is the one program on the host left to patch by hand.
 What bounds it is the name — an offer under any other is refused and reported, never applied — and
 the default name is the product's own, which is what the release artifact and therefore the Package
-carrying this Client is named. Not the Agent type: since ADR-0077 the two are different strings, and
+carrying this Client is named. Not the Agent type: since ADR-0022 the two are different strings, and
 a default taken from the type would narrow the consent to a package nobody publishes.
 
 To withdraw the consent, say so; there is no third state:
@@ -925,10 +925,10 @@ OpAMP.
 
 **Three are wrappers**, each knowing one agent's program, its layout on each platform and its
 invocation, so its block says which host runs it and little else
-([ADR-0091](../adr/0091-a-kind-knows-its-own-agent.md)): `icinga2` for a daemon that takes its
+([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md)): `icinga2` for a daemon that takes its
 directories as `-D` constants rather than flags, validates a configuration before applying it, and
 needs a certificate from a master before it can do anything
-([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)); `glpi` for the GLPI
+([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)); `glpi` for the GLPI
 inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
 reload signal could not be written in a block a mixed fleet could use.
 
@@ -1130,7 +1130,7 @@ is called.
 For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
 its state, its template library and its account are on **every** invocation, it creates none of
 those directories itself, and it obtains a certificate from an Icinga master before it can do
-anything ([ADR-0068](../adr/0068-icinga-2-is-supervised-by-a-kind-of-its-own.md)).
+anything ([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)).
 
 It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
 **installation this host is joining**. Nothing here can compute them: the ticket was minted on the
@@ -1140,7 +1140,7 @@ parent for one common name, and a node that differs from it does not enrol.
 |---|---|
 | `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
 | `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
-| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0069). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
+| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0033). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
 | `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Absent falls back to trust on first sight, which is logged as such. |
 
 Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
@@ -1353,7 +1353,7 @@ package = "supervisor"
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
 another Agent type either, and this Client's type is the constant `supervisor` — the same string,
-which is why the Package that carries the Client is typed with it — since ADR-0095 the Agent type *is* the name it carries on the wire, so the two cannot drift apart.
+which is why the Package that carries the Client is typed with it — since ADR-0039 the Agent type *is* the name it carries on the wire, so the two cannot drift apart.
 Neither guard replaces the other — an operator who types a Collector artifact as `supervisor` gets
 past the Server, and this name is what is left.
 
@@ -1373,7 +1373,7 @@ restart.
 **What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
 an `.rpm`, an MSI or a hand did. It reports that under the name `[self_update]` consents to from its
 very first report, which is what lets the Server hold a Package against it: since
-[ADR-0076](../adr/0076-a-set-reaches-an-agent-only-as-an-upgrade.md) a Package reaches an Agent only as
+[ADR-0035](../adr/0035-what-reaches-an-agent.md) a Package reaches an Agent only as
 an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
 The practical consequence: a Client installed by hand is not taken over by the fleet's package the
 moment one is published at the version it already is — it comes under package management with the
@@ -1391,7 +1391,7 @@ uninstalls nothing.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
 `supervisor_<version>_<os>_<arch>.tar.gz`
-([ADR-0078](../adr/0078-a-release-is-named-after-the-set-it-becomes.md)) — and that file *is* a
+([ADR-0022 clause 8](../adr/0022-agent-type-instance-name-and-the-supervisor-name.md)) — and that file *is* a
 package artifact: it holds the Client under the name the install layout gives it, so it is uploaded
 exactly as downloaded, and the SHA-256 the release published is the one the Agent verifies. Nothing
 repacks it. The files are named after the **Package** they become, not after the product inside them:
@@ -1414,7 +1414,7 @@ $ curl -X PUT -H 'Content-Type: application/json' \
 The second call is what arms the package: until a type is set it is offered to nobody, so
 an artifact uploaded and left untyped reaches no Client at all. For this one the type is the
 Client's own, `supervisor` — and that type **is** the name `[self_update] package` above consents
-to, because since ADR-0095 a Package carries its Agent type on the wire and has no separate name.
+to, because since ADR-0039 a Package carries its Agent type on the wire and has no separate name.
 Setting that key to anything else therefore refuses every offer this Client will ever get, visibly,
 on its fleet row. The *file* keeps its published name.
 

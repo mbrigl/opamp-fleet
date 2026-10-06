@@ -1,4 +1,4 @@
-//! Mutual TLS and the CSR flow, end to end over the real listener (ADR-0035).
+//! Mutual TLS and the CSR flow, end to end over the real listener (ADR-0013).
 //!
 //! What these cover is the part that cannot be unit-tested: the handshake actually carrying a
 //! client certificate into the OpAMP route, and the admission rule that every configured proof
@@ -71,7 +71,7 @@ fn csr_for(name: &str) -> (Vec<u8>, KeyPair) {
     (csr.into_bytes(), key)
 }
 
-/// Serves both planes over TLS on ephemeral ports (ADR-0066), the Agent plane through the acceptor
+/// Serves both planes over TLS on ephemeral ports (ADR-0032), the Agent plane through the acceptor
 /// that carries the peer certificate into the request — the thing under test. Answers with the
 /// OpAMP endpoint, the Operator plane's port, and the CA a client must trust.
 async fn serve(
@@ -115,7 +115,7 @@ async fn serve(
             .await
             .expect("serve the Agent plane");
     });
-    // The Operator plane, over the same certificate on its own listener (ADR-0066) — the half a
+    // The Operator plane, over the same certificate on its own listener (ADR-0032) — the half a
     // browser reaches, and the reason the verifier stays optional is no longer that it is here.
     let operator_listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
@@ -168,9 +168,9 @@ async fn post(
 
 /// The channel half: with a client CA configured, a peer that presents a certificate reaches the
 /// OpAMP endpoint and one that presents none is refused — while the Operator plane on its own
-/// listener (ADR-0066) keeps serving the REST API to a peer with no certificate at all, and the
+/// listener (ADR-0032) keeps serving the REST API to a peer with no certificate at all, and the
 /// package download on the *same* listener as OpAMP stays reachable without one too. Those two are
-/// why client authentication is optional at the TLS layer and required on the route (ADR-0035).
+/// why client authentication is optional at the TLS layer and required on the route (ADR-0013).
 #[tokio::test]
 async fn a_client_certificate_is_required_on_the_opamp_route_and_nowhere_else() {
     let pki = Pki::new();
@@ -196,7 +196,7 @@ async fn a_client_certificate_is_required_on_the_opamp_route_and_nowhere_else() 
     let response = without.get(&agents).send().await.expect("send");
     assert!(response.status().is_success(), "{:?}", response.status());
 
-    // And on the Agent plane the artifact download is deliberately outside the guard (ADR-0066):
+    // And on the Agent plane the artifact download is deliberately outside the guard (ADR-0032):
     // a Client fetching a package presents no certificate, so this must reach the handler — `404`
     // for a package nobody uploaded, never the `401` the OpAMP route answers above.
     let download = endpoint.replace(
