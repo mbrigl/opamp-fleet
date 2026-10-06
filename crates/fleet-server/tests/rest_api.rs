@@ -723,8 +723,8 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes
-    // itself to nobody — and since ADR-0014 even a match only proposes.
+    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes itself to
+    // nobody — and even a match only proposes (ADR-0014).
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))

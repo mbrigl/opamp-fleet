@@ -7,7 +7,7 @@
 //!
 //! The default state directory is [`STATE_DIR_NAME`] under the *data* root — the same directory
 //! as this layout's root everywhere except Linux system installs, where the layout executes from
-//! `/opt` while data stays in `/var/lib` (ADR-0028 clause 8, carrying ADR-0028).
+//! `/opt` while data stays in `/var/lib` (ADR-0028 clause 8).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
@@ -362,8 +362,8 @@ mod tests {
     }
 
     /// A root an operator wrote with forward slashes — `--root C:/fleet`, which every Windows API
-    /// in this Client accepts. `mklink` is a `cmd` builtin and `cmd` reads `/` as a switch, so this
-    /// used to fail with `Invalid switch` in the middle of a self-update.
+    /// in this Client accepts. `mklink` is a `cmd` builtin and `cmd` reads `/` as a switch, so
+    /// passed through as written it fails with `Invalid switch` in the middle of a self-update.
     #[cfg(windows)]
     #[test]
     fn a_root_written_with_forward_slashes_still_gets_its_pointer() {

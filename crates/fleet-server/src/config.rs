@@ -25,7 +25,7 @@ pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Address and port the **Agent plane** binds: the OpAMP endpoint and the package download
-    /// route the offers point at (ADR-0023, superseding ADR-0025 on this point).
+    /// route the offers point at (ADR-0023).
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// The **Operator plane** — REST API, API docs, and the bundled UI — on its own listener

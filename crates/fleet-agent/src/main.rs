@@ -246,7 +246,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         windows_rights::restrict_data_root(level, &state_dir)?;
     }
 
-    // The handover (ADR-0028 clause 13, carrying ADR-0028): both roots belong to the account —
+    // The handover (ADR-0028 clause 13): both roots belong to the account —
     // config and state because the service reads and rewrites them (ADR-0032), the executable
     // layout because the self-update that stages into it *is* the service (ADR-0020). The state
     // directory is created first: the daemon must not need rights on its parent to begin.

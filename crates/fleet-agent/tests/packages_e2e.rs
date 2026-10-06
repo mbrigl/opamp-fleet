@@ -201,7 +201,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0021 — the program's file name here, since
+        // The wire name is the Agent type (ADR-0021 clause 2) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
@@ -317,7 +317,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let error = wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0021 — the program's file name here, since
+        // The wire name is the Agent type (ADR-0021 clause 2) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "InstallFailed").then(|| package.error.clone())

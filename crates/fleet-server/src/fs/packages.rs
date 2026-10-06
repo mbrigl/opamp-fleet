@@ -46,11 +46,11 @@ impl PackageBackend for FsPackageBackend {
                 .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
                 .path();
             if !path.is_dir() {
-                // A Package is a directory. A loose file at the top level is what the pre-ADR-0019
-                // store wrote (`<name>.json`, `<name>@<os>-<arch>.json`/`.bin`), and there is no
-                // reader for it any more — so it is named rather than skipped. Skipping would turn
-                // an old store into one that merely looks empty, which is the failure an operator
-                // cannot see (ADR-0025: loud, never silently ignored).
+                // A Package is a directory. A loose file at the top level (`<name>.json`,
+                // `<name>@<os>-<arch>.json`/`.bin`) is an older layout this Server has no reader
+                // for — so it is named rather than skipped. Skipping would turn such a store into
+                // one that merely looks empty, which is the failure an operator cannot see
+                // (ADR-0025: loud, never silently ignored).
                 return Err(format!(
                     "{} is not a Package directory — this Server reads no other package store \
                      layout. \

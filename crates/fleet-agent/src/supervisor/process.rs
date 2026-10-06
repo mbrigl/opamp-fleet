@@ -257,10 +257,10 @@ pub struct Preflight {
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
-    /// How to read a version out of what the program printed. `None` is [`find_semver`], the
-    /// strict Semantic Versioning read every Managed Process was held to until ADR-0016: a program
-    /// whose version banner is not SemVer — Icinga 2 prints `r2.14.6-1` — reported none at all,
-    /// and a kind that knows its program's convention can now say so instead.
+    /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
+    /// Semantic Versioning read. A program whose version banner is not SemVer — Icinga 2 prints
+    /// `r2.14.6-1` — would report none at all, so a kind that knows its program's convention says
+    /// so here (ADR-0016).
     pub parse: Option<fn(&str) -> Option<String>>,
 }
 
@@ -283,14 +283,14 @@ pub struct Runner {
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
     pub install: Option<InstallTarget>,
     /// How long the version a successful update supersedes is kept before deletion (ADR-0018), so
-    /// an operator has a fallback window. Zero deletes it on success, the pre-ADR-0018 behaviour.
+    /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
     /// Opens an encrypted `.7z` artifact (ADR-0018); `None` when no key is configured.
     pub archive_key: Option<String>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
-    /// How to prove a staged package runs before it replaces what does (ADR-0016). `None` keeps
-    /// the pre-ADR-0016 behaviour: the swap is the first thing that finds out.
+    /// How to prove a staged package runs before it replaces what does (ADR-0016). `None` proves
+    /// nothing in advance: the swap is the first thing that finds out.
     pub preflight: Option<Preflight>,
     /// The signal that makes the running process re-read its configuration in place (ADR-0010);
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
@@ -616,7 +616,7 @@ impl Runner {
             // No predecessor: a first install with nothing behind it. It is *not* rolled back
             // (ADR-0018) — the verified program stays in place, reported InstallFailed, so a first
             // package that will not start does not empty `program/` and set the Server re-offering
-            // it in a loop. Discarding it here is what used to make that loop turn.
+            // it in a loop. Discarding it here would make that loop turn.
             (GraceOutcome::Failed(_), false) => {
                 warn!(supervisor = %self.name, "the first install would not start; kept in place, not rolled back (nothing to roll back to)");
             }
@@ -629,8 +629,8 @@ impl Runner {
     }
 
     /// Keeps the version a successful update superseded, or drops it now (ADR-0018). With retention
-    /// off it is the old immediate delete; otherwise the backup stays and a marker records the
-    /// deadline `now + retain_previous`, swept once it passes.
+    /// off it is deleted at once; otherwise the backup stays and a marker records the deadline
+    /// `now + retain_previous`, swept once it passes.
     fn retain_backup(&self, target: &InstallTarget) {
         if self.retain_previous.is_zero() {
             target.drop_backup();
@@ -1093,7 +1093,7 @@ async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), Str
 /// Leading a group is what a plugin asks for with [`ProcessSpec::own_process_group`], so the test
 /// is the fact rather than a flag threaded through the Runner: a child whose process group id is
 /// its own pid is a group the Supervisor created for it, and everything in it descends from the
-/// process it started. Anything else is signalled alone, exactly as before (ADR-0016).
+/// process it started. Anything else is signalled alone (ADR-0016).
 #[cfg(unix)]
 fn signal_child(pid: u32, signal: i32) {
     let pid = pid as libc::pid_t;
@@ -1167,8 +1167,8 @@ enum GraceOutcome {
 /// over `path` — the final rename being what makes the swap atomic, so a crash mid-install never
 /// leaves a half-written program where one is about to be started.
 ///
-/// A raw artifact is **moved** rather than copied when it can be: since ADR-0032 the download is
-/// staged in the same Supervisor directory the program lives in, so the two are normally on one
+/// A raw artifact is **moved** rather than copied when it can be: the download is staged in the
+/// same Supervisor directory the program lives in (ADR-0032), so the two are normally on one
 /// filesystem and the install costs a metadata update instead of a second full write of several
 /// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
 /// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
@@ -1339,9 +1339,9 @@ mod tests {
     }
 
     // What remains here are the cases that reach *into* this module — a private helper and the
-    // install function — and need no program to spawn. Everything that supervises a running
-    // process moved to `tests/supervisor_process.rs` when ADR-0025 made a real stub reachable;
-    // those cases were gated to Unix for want of one, and now run on all three platforms.
+    // install function — and need no program to spawn. Everything that supervises a running process
+    // lives in `tests/supervisor_process.rs`, where a real stub is reachable (ADR-0025) and the
+    // cases run on all three platforms.
 
     #[test]
     fn find_semver_extracts_the_first_strict_version_from_free_text() {
@@ -1479,8 +1479,8 @@ mod tests {
         assert!(!target.backup_marker().exists(), "and so is its marker");
     }
 
-    /// A backup with no marker is not something this Runner retained (the pre-ADR-0018 immediate
-    /// drop, or a half-finished install), so a sweep leaves it alone.
+    /// A backup with no marker is not something this Runner retained (a half-finished install
+    /// leaves one), so a sweep leaves it alone.
     /// Verifies: ADR-0018
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {

@@ -36,9 +36,9 @@ const CONFIG_ENTRY: &str = "telegraf-conf";
 /// makes them a version probe is what makes them a safe check: cheap, and touching no state.
 const VERSION_ARGS: &[&str] = &["--version"];
 
-/// The keys this kind used to take as a `command` recipe and now supplies itself (ADR-0015), each
-/// with what answers it now — refused by name rather than met with serde's "unknown field", so an
-/// operator rewriting the old block is told where each value went.
+/// The keys a `command` recipe for Telegraf carries and this kind supplies itself (ADR-0015), each
+/// with what answers it — refused by name rather than met with serde's "unknown field", so an
+/// operator rewriting a `command` block is told where each value went.
 const RETIRED: &[(&str, &str)] = &[
     ("args", "the kind points Telegraf at its delivered configuration"),
     (
@@ -187,9 +187,9 @@ mod tests {
         assert!(err.contains("interval"), "{err}");
     }
 
-    /// Each key the old `command` recipe carried is refused by name with what supplies it now —
-    /// including through `check`, so a Supervisor set the Server offers is refused before any
-    /// running process is touched (ADR-0032).
+    /// Each key a `command` recipe carries is refused by name with what supplies it — including
+    /// through `check`, so a Supervisor set the Server offers is refused before any running process
+    /// is touched (ADR-0032).
     #[test]
     fn the_recipes_keys_are_refused_by_name() {
         for (key, line) in [

@@ -338,11 +338,11 @@ struct Plan {
     /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
-    /// For a **wrapped** agent it is now the `type` alone (ADR-0010): the Client's kind knows the
-    /// program's name, where it sits in the tree, and how it is invoked, so this tool no longer
-    /// dictates a line for a host to transcribe. What it used to name lives in that agent's
-    /// artifact document under `docs/artifacts/`, which the kind's own tests pin — the two ends of
-    /// one artifact, kept in step by a red test rather than by a hint printed on a terminal.
+    /// For a **wrapped** agent it is the `type` alone (ADR-0010): the Client's kind knows the
+    /// program's name, where it sits in the tree, and how it is invoked, so this tool dictates no
+    /// line for a host to transcribe. Those facts live in that agent's artifact document under
+    /// `docs/artifacts/`, which the kind's own tests pin — the two ends of one artifact, kept in
+    /// step by a red test rather than by a hint printed on a terminal.
     block_hint: String,
 }
 
@@ -432,9 +432,9 @@ async fn run(cli: Cli) -> Result<(), String> {
     let available = plans(agent, &version, &assets, cli.distro.as_deref()).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
-        // the operator a trip to the release page: everything published before ADR-0029 carries
-        // the old name and container, and a Set built from those fits no Client reporting the type
-        // `supervisor` anyway (ADR-0029).
+        // the operator a trip to the release page: older releases carry another name and container,
+        // and a Set built from those fits no Client reporting the type `supervisor` anyway
+        // (ADR-0029).
         let why = match agent {
             AgentKind::Supervisor => {
                 " — a release from before the rename publishes \
@@ -972,9 +972,9 @@ fn windows_plan(version: &str) -> Plan {
         },
         out_name: format!("icinga2_{version}_windows_amd64.tar.gz"),
         // The check plugins stay beside the daemon rather than moving to `plugins/`: on Windows a
-        // program finds its DLLs in its *own* directory first, and separating the check
-        // executables from the runtime they share with the daemon would break them. The kind knows
-        // that, which is why it is a comment here and no longer a line an operator writes.
+        // program finds its DLLs in its *own* directory first, and separating the check executables
+        // from the runtime they share with the daemon would break them. The kind knows that, which
+        // is why it is a comment here and not a line an operator writes.
         block_hint: "type = \"icinga2\"  (docs/artifacts/icinga2.md)".to_string(),
     }
 }
@@ -2758,8 +2758,9 @@ SHA256: cccc
 
     /// The list offers release *series*, not tags. Icinga 2 is the agent that makes the difference
     /// visible: five 2.16 patches would have been the entire list, so the one question an operator
-    /// asks it — which versions can I still go back to — had no answer in it. Only the newest patch
-    /// of a series is offered, because an older one of the same line is not a choice anybody makes.
+    /// asks it — which versions can I still go back to — would have no answer in it. Only the
+    /// newest patch of a series is offered, because an older one of the same line is not a choice
+    /// anybody makes.
     #[test]
     fn the_version_list_offers_the_newest_patch_of_each_recent_series() {
         let icinga: Vec<String> = [

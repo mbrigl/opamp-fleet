@@ -2,10 +2,10 @@
 //! ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` makes the system service run as that account, and the
-//! installation's files — the configuration, the state directory, and the executable layout,
-//! across both roots since ADR-0028 clause 8 — belong
-//! to it afterwards. The two halves live here; *what* the service manager is told is
-//! [`manager`](super::manager)'s and [`windows_config`](super::windows_config)'s business.
+//! installation's files — the configuration, the state directory, and the executable layout, across
+//! both roots (ADR-0028 clause 8) — belong to it afterwards. The two halves live here; *what* the
+//! service manager is told is [`manager`](super::manager)'s and
+//! [`windows_config`](super::windows_config)'s business.
 //!
 //! **Resolution comes first** because ADR-0028 wants an install that cannot succeed to fail
 //! before it writes: an account that does not exist (Unix), or a Windows account form that would
@@ -36,9 +36,8 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the service's name, which since ADR-0028 is the product's — on Windows the
-    /// one virtual account that may be
-    /// named is the service's own.
+    /// `service` is the service's name, which is the product's (ADR-0028 clause 3) — on Windows the
+    /// one virtual account that may be named is the service's own.
     ///
     /// # Errors
     /// Returns an error if the account does not exist (Unix) or is not one of the passwordless

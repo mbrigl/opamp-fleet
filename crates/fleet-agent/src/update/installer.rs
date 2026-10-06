@@ -468,14 +468,13 @@ fn on_start_as(state_dir: &Path, exe: &Path, running_version: &str) -> Result<St
 /// Whether the process that came up is the update the marker describes — asked of the directory it
 /// runs from **and** of the version it reports for itself.
 ///
-/// The directory alone answered this until ADR-0014, and it answers a slightly different question:
-/// which version was *pointed at*. On a platform where the running path is the `current` pointer
-/// rather than the version behind it, canonicalising it says where the pointer now leads, not which
-/// binary the service manager actually started. A commit that trusted that would tell the Server a
-/// version this host does not run — and the fleet then holds the package back over a claim the
-/// program itself denies, which is the state ADR-0014 is about. What a binary says about itself is
-/// the one thing no stale pointer can fake, so both must agree; the build metadata does not take
-/// part (ADR-0017).
+/// The directory alone answers a slightly different question: which version was *pointed at*. On a
+/// platform where the running path is the `current` pointer rather than the version behind it,
+/// canonicalising it says where the pointer now leads, not which binary the service manager
+/// actually started. A commit that trusted that would tell the Server a version this host does not
+/// run — and the fleet then holds the package back over a claim the program itself denies, which is
+/// the state ADR-0014 is about. What a binary says about itself is the one thing no stale pointer
+/// can fake, so both must agree; the build metadata does not take part (ADR-0017).
 fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateMarker) -> bool {
     fleet_core::version::same_release(running_version, &marker.version)
         && running_dir.is_some_and(|dir| {
@@ -585,7 +584,7 @@ mod tests {
         store_marker(dir.path(), &written).expect("store");
         assert_eq!(load_marker(dir.path()), Some(written));
 
-        // What a Client from before ADR-0022 left behind: every field but this one.
+        // A marker an older Client wrote: every field but this one.
         let older = serde_json::json!({
             "previous_dir": dir.path().join("previous"),
             "new_dir": dir.path().join("new"),

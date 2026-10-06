@@ -51,9 +51,9 @@ fn registry() -> Vec<Box<dyn Plugin>> {
 
 /// The kinds this Client was compiled with, as attributes of its own Agent (ADR-0010 clause 18).
 ///
-/// Wrapping created a fact the fleet did not have to know before: a `type` is something a Client
-/// either carries or does not, and a Server rolling a `glpi` set at a Client too old to have that
-/// plugin used to learn it from a `FAILED` afterwards rather than by not aiming there.
+/// A `type` is something a Client either carries or does not, and a Server rolling a `glpi` set at
+/// a Client without that plugin should learn it by not aiming there rather than from a `FAILED`
+/// afterwards.
 ///
 /// **One key per kind**, not one list, because of how matching works here: a Selector is equality
 /// over string values (`configs.rs::matches`), so a list could only be matched by spelling the
@@ -86,10 +86,10 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     let (event_tx, events) = mpsc::channel(64);
     let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
 
-    // The Client is always its own Agent (ADR-0020), whether or not it supervises anything. It
-    // used to exist only when nothing else did, which left the Client invisible on exactly the
-    // hosts that manage something — and left the Server with nobody to offer the Client's own
-    // package to. It is index 0 so the Supervisors that follow keep a stable, obvious offset.
+    // The Client is always its own Agent (ADR-0020), whether or not it supervises anything:
+    // otherwise it would be invisible on exactly the hosts that manage something, and the Server
+    // would have nobody to offer the Client's own package to. It is index 0 so the Supervisors that
+    // follow keep a stable, obvious offset.
     let storage = Storage::new(config.state_dir.clone())
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     // A host that keeps its Supervisor set takes none from the Server, and the set stored from
@@ -108,7 +108,7 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             .with_namespace(config.service_namespace.clone()),
     );
     // Consenting to be updated names the package it will take — anything else is refused rather
-    // than written over this binary (ADR-0020). Since ADR-0020 the consent stands unless the file
+    // than written over this binary (ADR-0020). The consent stands unless the file
     // withdraws it, so this is the ordinary path rather than the opted-into one.
     // And only from a signed package: without a verification key the consent is kept, but nothing
     // is declared (ADR-0020) — the startup notice names the key.
@@ -497,10 +497,9 @@ pub fn start_supervisor(
     );
     // Every Managed Process is the fleet's (ADR-0032), so every Supervisor takes whichever
     // top-level package the Server selects for it (ADR-0018, ADR-0019). There is no second branch:
-    // a block naming a program on the machine no longer parses, so the consent ADR-0032 derived
-    // from the path is discharged by the type system rather than by a rule. The log line stays and
-    // loses its "declined" half — it now says *where* the program is, which is the thing an
-    // operator reading a startup log actually wants.
+    // a block naming a program on the machine does not parse, so the consent is discharged by the
+    // type system rather than by a rule. The log line says *where* the program is, which is the
+    // thing an operator reading a startup log actually wants.
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
     // live tree arrives by renaming a directory over that name (ADR-0018).
@@ -948,7 +947,7 @@ mod tests {
             "the directory the swap renames inside exists before any package arrives"
         );
 
-        // The shape that used to declare nothing now does not start at all (ADR-0032).
+        // A program on the machine does not start at all (ADR-0032).
         let foreign = dir.path().join("elsewhere/managed-agent");
         let machines: ClientConfig = toml::from_str(&config(
             dir.path(),
@@ -1001,10 +1000,10 @@ mod tests {
             "the program is package-updatable, so the Client installs packages"
         );
 
-        // Since ADR-0032 every Supervisor is package-updatable, so the only way for an Engine to
-        // answer *no* is to have no Supervisor and a withdrawn self-update consent. That is worth
-        // keeping green: the startup check this feeds warns about an unconfigured verification
-        // key, and a Client that installs nothing has nothing for that key to protect.
+        // Every Supervisor is package-updatable (ADR-0032), so the only way for an Engine to answer
+        // *no* is to have no Supervisor and a withdrawn self-update consent. That is worth keeping
+        // green: the startup check this feeds warns about an unconfigured verification key, and a
+        // Client that installs nothing has nothing for that key to protect.
         let alone: ClientConfig = toml::from_str(
             "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n[self_update]\nenabled = false\n",
         )
@@ -1205,7 +1204,7 @@ mod tests {
     /// Switching off takes the Server's last configuration out of force before the kind starts:
     /// the entry files it wrote and `.supplementary` go while their bytes are still the stored
     /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (ADR-0032
-    /// clause 5).
+    /// clause 32).
     /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_listed_supervisor_drops_the_stored_remote_config_and_keeps_the_operators_files() {
@@ -1307,7 +1306,7 @@ mod tests {
             0
         );
 
-        // Unlisted, the same stored configuration is restored as applied, as before.
+        // Unlisted, the same stored configuration is restored as applied.
         let (_tx, shutdown) = shutdown_channel();
         let other = tempfile::tempdir().expect("tempdir");
         let unlisted = listed_config(other.path(), "[]", None);

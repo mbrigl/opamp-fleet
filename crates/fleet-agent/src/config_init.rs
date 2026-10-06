@@ -222,7 +222,7 @@ pub fn ask() -> Result<Answers, String> {
         println!("no verification key: this Client installs no package until one is set");
     }
 
-    // Last, and defaulting to yes (ADR-0020, superseding ADR-0028 point 17). It is still the
+    // Last, and defaulting to yes (ADR-0020). It is still the
     // largest grant in this file — the Server may replace the binary that manages every other
     // binary on the host — but the alternative is a fleet whose own agent is the one thing left to
     // patch by hand, and the package name below is what the grant is narrowed to.
@@ -580,7 +580,7 @@ mod tests {
 
     /// The withdrawal has a non-interactive twin too (`--no-self-update`, the MSI's cleared
     /// checkbox): it writes the section out as `enabled = false` rather than omitting it, because
-    /// an omitted section is now the consent.
+    /// an omitted section is the consent.
     #[test]
     fn an_installer_can_withhold_the_self_update_consent() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -160,7 +160,7 @@ fn free_port() -> u16 {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
-/// Places the stub where a Managed Process must live since ADR-0032: inside the Supervisor's own
+/// Places the stub where a Managed Process must live (ADR-0032): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. Copied rather than
 /// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
 /// installed package would leave behind.

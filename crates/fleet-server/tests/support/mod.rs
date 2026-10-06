@@ -142,7 +142,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
             }],
             non_identifying_attributes: vec![
                 // The operator's name for this Agent (ADR-0012) — what distinguishes it from its
-                // neighbours, now that `service.name` says only what kind of thing it is.
+                // neighbours, since `service.name` says only what kind of thing it is.
                 KeyValue {
                     key: "service.instance.name".to_string(),
                     value: Some(AnyValue {
@@ -188,8 +188,8 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 }
 
 /// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
-/// portal) does — two calls since ADR-0014, because saving alone distributes nothing and the
-/// rollout act is what assigns it to every currently matching Agent.
+/// portal) does — two calls (ADR-0014), because saving alone distributes nothing and the rollout
+/// act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
 pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
     distribute_with_role(rest_addr, name, selector, body, "").await;

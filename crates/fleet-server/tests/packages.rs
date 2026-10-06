@@ -249,7 +249,7 @@ async fn upload_entry(
 
 /// `POST /api/v1/deployments/<channel>/rollout` — the one act that distributes (ADR-0014): the channel's
 /// Package is assigned to every Agent it claims. Returns the outcome body.
-/// One channel as the API answers with it — where the reach counts live since ADR-0021.
+/// One channel as the API answers with it — where the reach counts live (ADR-0021).
 async fn ring_view(server: &TestServer, channel: &str) -> serde_json::Value {
     reqwest::Client::new()
         .get(deployment_url(server, channel))
@@ -575,8 +575,8 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
     member.exchange(&report).await;
 
-    // Past axum's 2 MiB default body limit — the limit that used to make a real binary
-    // undeliverable — and not a round number, so a truncation would show.
+    // Past axum's 2 MiB default body limit — the limit that would make a real binary undeliverable
+    // — and not a round number, so a truncation would show.
     let artifact: Vec<u8> = (0..(5 * 1024 * 1024 + 17))
         .map(|i| (i % 251) as u8)
         .collect();
@@ -741,8 +741,8 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     exchange(&server, &report).await;
 
     // Two Packages of one Agent type differ by version (ADR-0021) — there is no name to tell them
-    // apart any more, which is the point: what distinguishes two artifacts is what they are and
-    // which release they belong to.
+    // apart, which is the point: what distinguishes two artifacts is what they are and which
+    // release they belong to.
     upload(&server, support::AGENT_TYPE, "2.0.0", b"for-linux").await;
     upload(&server, support::AGENT_TYPE, "2.1.0", b"for-windows").await;
     // Two channels, disjoint by platform — which is what a partition looks like when the attribute
@@ -886,8 +886,8 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     );
 }
 
-/// The one case with no defensible answer, restated for ADR-0021. It is no longer about versions
-/// or specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
+/// The one case with no defensible answer (ADR-0021 clause 12). It is not about versions or
+/// specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
 /// either is. The Server offers nothing and the fleet view names both.
 /// Verifies: ADR-0021
 #[tokio::test]
@@ -1065,7 +1065,7 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
     assert_eq!(unreachable.status(), 200);
 }
 
-/// ADR-0019 in place of ADR-0019's late typing: the Agent type is identity, stated at creation —
+/// ADR-0019, with no late typing: the Agent type is identity, stated at creation —
 /// there is no untyped state — and a Set built for another type fits nobody here: its rollout
 /// act assigns no one, whatever its Selector says.
 /// Verifies: ADR-0019

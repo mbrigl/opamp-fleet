@@ -67,16 +67,13 @@ pub struct Handled {
 /// it plays on the host, the Agent that supervises the others. A constant, not the configured
 /// instance name — every Client in a fleet is the same kind of thing, and that is what a type says.
 ///
-/// Since ADR-0029 it is also the shipped program's name and its configuration file's — see
+/// It is also the shipped program's name and its configuration file's (ADR-0029) — see
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
 /// **separate** constant. It is *not* the service's name: ADR-0028 clause 3 gives the service the
 /// product's name, and clause 9 keeps this one off
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
-///
-/// It was called `CLIENT_SERVICE_NAME` until ADR-0028. It never named a service, and with the
-/// service now carrying the product's name the old name would read as the one thing it is not.
 ///
 /// The package that carries this Client is named after the type, so `[self_update] package`
 /// defaults to this constant.
@@ -98,7 +95,7 @@ pub struct AgentState {
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The SHA-256 of each remote configuration hash ignored since start, when the operator
-    /// switched remote configuration off for this Agent (ADR-0032, ADR-0032); `None` when it takes
+    /// switched remote configuration off for this Agent (ADR-0032); `None` when it takes
     /// them. A digest and not the hash itself, and at most [`IGNORED_CONFIGS_CAP`] of them,
     /// because the hash is whatever the Server sends.
     ignored_configs: Option<std::collections::HashSet<[u8; 32]>>,
@@ -604,8 +601,8 @@ impl AgentState {
 
         if let Some(remote_config) = received.remote_config {
             if let Some(ignored) = &mut self.ignored_configs {
-                // Not declared, so not acted on and not reported (ADR-0032 clause 31, ADR-0032
-                // clause 3); said once per hash, so a Server resending its offer on every exchange
+                // Not declared, so not acted on and not reported (ADR-0032 clauses 31
+                // and 3); said once per hash, so a Server resending its offer on every exchange
                 // does not flood the log.
                 use sha2::Digest as _;
                 let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
@@ -873,12 +870,12 @@ impl Local {
         };
         // `agent_has_*` is what the Agent actually runs — the last successful install, if any.
         //
-        // For the Client's own Agent there is one without an install record too: *this process*.
-        // A Client that arrived by `.deb`, `.rpm`, MSI or by hand has installed no package, and
-        // reporting nothing there says "nothing installed under this name" — which since ADR-0014
-        // is precisely the answer that lets a Set of the version it already runs reach it, and a
-        // Set *older* than it downgrade it. The binary knows what it is; the record only says how
-        // it got here.
+        // For the Client's own Agent there is one without an install record too: *this process*. A
+        // Client that arrived by `.deb`, `.rpm`, MSI or by hand has installed no package, and
+        // reporting nothing there says "nothing installed under this name" — which is precisely the
+        // answer (ADR-0014) that lets a Set of the version it already runs reach it, and a Set
+        // *older* than it downgrade it. The binary knows what it is; the record only says how it
+        // got here.
         let (has_version, has_hash) = self
             .installed_package
             .as_ref()
@@ -1115,11 +1112,11 @@ impl Local {
     /// than a download.
     ///
     /// For the package that carries the Client itself (ADR-0020, ADR-0029) that question is
-    /// answered by the version *this process runs* — since ADR-0014, what a program reports about
-    /// itself outranks what a record says was once installed here. The record's hash would
-    /// otherwise end an offer of the very bytes this host is not running: a state directory that
-    /// outlived its binary claims a version, the Server offers it again, and the claim is what
-    /// swallows the offer.
+    /// answered by the version *this process runs*: what a program reports about itself outranks
+    /// what a record says was once installed here (ADR-0014). The record's hash would otherwise end
+    /// an offer of the very bytes this host is not running: a state directory that outlived its
+    /// binary claims a version, the Server offers it again, and the claim is what swallows the
+    /// offer.
     ///
     /// A Supervisor has no such answer — the Managed Process's version is the process's own, and a
     /// package numbers it in whatever space the operator chose — so there the installed hash stays
@@ -1140,9 +1137,8 @@ impl Local {
 
     fn describe(&self, uid: &InstanceUid) -> AgentDescription {
         // `service.name` is the Agent *type* — the Baseline's "reverse FQDN that uniquely
-        // identifies the Agent type" (ADR-0012). It used to carry the instance name, which a
-        // Managed Process reporting its own type then destroyed; the instance name now has its own
-        // key below, out of the way of the fold.
+        // identifies the Agent type" (ADR-0012). The instance name has its own key below, out of
+        // the way of the fold, so a Managed Process reporting its own type cannot destroy it.
         let mut identifying_attributes =
             vec![string_attr(attributes::SERVICE_NAME, &self.service_name)];
         // The Baseline lists `service.namespace` second, among what identifies the Agent — it says
@@ -1540,9 +1536,9 @@ mod tests {
         }
     }
 
-    /// The defect ADR-0012 exists for: a Collector's `opampextension` reports the type it was
-    /// built with, and folding that in used to overwrite the operator's name for the Supervisor —
-    /// so every Collector of one distribution collapsed onto one name in the fleet view. Both
+    /// The defect ADR-0012 exists for: a Collector's `opampextension` reports the type it was built
+    /// with, and folding that into the operator's name for the Supervisor would overwrite it — so
+    /// every Collector of one distribution would collapse onto one name in the fleet view. Both
     /// values must survive, each in its own key, each won by the side that actually knows it.
     // Verifies: ADR-0012
     #[test]
@@ -1658,9 +1654,9 @@ mod tests {
         );
     }
 
-    /// ADR-0029 pins the value, not just the separation: the type is `supervisor`. ADR-0029 then
-    /// gave the program, its service and its configuration file the same word, so what began as
-    /// the Agent's *role* is now the one name this thing has anywhere — which is the point, and
+    /// ADR-0029 pins the value, not just the separation: the type is `supervisor`. ADR-0029 also
+    /// gives the program, its service and its configuration file the same word, so the Agent's
+    /// *role* is the one name this thing has anywhere — which is the point, and
     /// which is why the two constants are asserted to agree rather than to differ.
     /// Verifies: ADR-0029
     #[test]
@@ -1669,7 +1665,7 @@ mod tests {
         assert_eq!(
             CLIENT_AGENT_TYPE,
             crate::service::layout::COMPONENT,
-            "the type, the program and the service are one word since ADR-0029"
+            "the type, the program and the service are one word (ADR-0029)"
         );
     }
 
@@ -2198,11 +2194,12 @@ mod tests {
         );
     }
 
-    /// ADR-0014 point 15: for the package that carries this Client, *already installed* is what this
-    /// process runs — never a hash in a record. The same bytes can be published under a new version,
-    /// and a record about a binary that is gone must not swallow the offer that would replace it:
-    /// the Server offers because the Agent reports running something older, and a Client that
-    /// answered "in sync" from its record would strand the host exactly where ADR-0014 found it.
+    /// ADR-0014 point 15: for the package that carries this Client, *already installed* is what
+    /// this process runs — never a hash in a record. The same bytes can be published under a new
+    /// version, and a record about a binary that is gone must not swallow the offer that would
+    /// replace it: the Server offers because the Agent reports running something older, and a
+    /// Client that answered "in sync" from its record would strand the host on what it runs, for
+    /// good.
     // Verifies: ADR-0014
     #[test]
     fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
@@ -2557,9 +2554,8 @@ mod tests {
         }
     }
 
-    /// ADR-0027 clause 14: once the Server has declared its capabilities, package status stops going
-    /// to one that cannot take it. The Baseline makes this a MUST in both directions, and until now
-    /// only two of seven Server bits changed any behaviour here.
+    /// ADR-0027 clause 14: once the Server has declared its capabilities, package status stops
+    /// going to one that cannot take it. The Baseline makes this a MUST in both directions.
     /// Verifies: ADR-0027
     #[test]
     fn package_statuses_stop_once_the_server_says_it_accepts_none() {
@@ -3145,7 +3141,7 @@ mod tests {
     }
 
     /// The warning about an ignored offer is said once per hash seen since start (ADR-0032 clause
-    /// 4), so a Server resending the same offer does not flood the log.
+    /// 31), so a Server resending the same offer does not flood the log.
     /// Verifies: ADR-0032
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {

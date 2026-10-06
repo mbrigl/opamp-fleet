@@ -28,12 +28,12 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. Since ADR-0010 a Managed Process starts in its own directory, so a
-        // path the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}`
-        // it substitutes — is resolved by that process against a directory the Client has left.
-        // `state_dir` defaults to the relative `client-state`, so leaving these relative made the
-        // ordinary configuration the broken one: the program was looked for under itself, and a
-        // Collector that did start could not find the configuration written for it.
+        // it can be done once. A Managed Process starts in its own directory (ADR-0010), so a path
+        // the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}` it
+        // substitutes — is resolved by that process against a directory the Client has left.
+        // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
+        // the ordinary configuration the broken one: the program would be looked for under itself,
+        // and a Collector that did start could not find the configuration written for it.
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
         // Each allowed download source is held to ADR-0018's rules now, not at the first offer.
@@ -82,15 +82,14 @@ impl ClientConfig {
     }
 }
 
-/// Refuses to carry on when the configuration is only *missing* because it was renamed
-/// (ADR-0029): the file this Client looks for is absent and a `supervisor.toml` — what it was called
-/// until ADR-0029 — sits where it would be.
+/// Refuses to carry on when the file this Client looks for is absent and a `client.toml` sits
+/// beside where it would be (ADR-0029 clause 5).
 ///
 /// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
 /// and manages nothing until one exists (ADR-0028). That is exactly the wrong answer here, and the
 /// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
-/// none of the Agents it used to, and nothing about it would look like a failure. So this one case
-/// fails closed, naming both paths and the single command that fixes it.
+/// none of its Agents, and nothing about it would look like a failure. So this one case fails
+/// closed, naming both paths and the single command that fixes it.
 fn legacy_name_beside(path: &Path) -> Result<(), String> {
     let legacy = path.with_file_name(LEGACY_CONFIG_FILE_NAME);
     if path

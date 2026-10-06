@@ -17,10 +17,10 @@
 # crates/fleet-agent/src/service/manager.rs), the only roots a packaged install ever uses: this script
 # calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
 # because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
-# state under `/var/lib`, where data belongs (ADR-0028 clause 8, carrying ADR-0028).
+# state under `/var/lib`, where data belongs (ADR-0028 clause 8).
 #
-# There is no migration branch here, and that is ADR-0028 clause 10: no host was ever installed
-# under the paths or names this release replaces, so there is nothing to carry across.
+# There is no migration branch here, and that is ADR-0028 clause 10: an upgrade is a
+# re-registration, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort

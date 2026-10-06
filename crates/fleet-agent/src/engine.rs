@@ -122,9 +122,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// An Engine over Agents without Managed Processes. Since ADR-0020 the Client always builds
-    /// its self-Agent *and* its Supervisors through [`with_processes`](Self::with_processes), so
-    /// this is the tests' constructor — the shape it stands for no longer occurs in production.
+    /// An Engine over Agents without Managed Processes. The Client always builds its self-Agent
+    /// *and* its Supervisors through [`with_processes`](Self::with_processes) (ADR-0020), so this
+    /// is the tests' constructor — the shape it stands for does not occur in production.
     #[cfg(test)]
     #[must_use]
     pub fn new(agents: Vec<AgentState>) -> Self {
@@ -770,9 +770,9 @@ impl Engine {
         }
         // Each adapter drops its command receiver once its process is down; awaiting that — while
         // draining events, which a stopping adapter may still be flushing — is what puts the
-        // goodbyes after the processes, not beside them. (The Engine itself holds an event
-        // sender for runtime-started Supervisors, so "the channel closed" can no longer stand in
-        // for "every adapter exited".)
+        // goodbyes after the processes, not beside them. (The Engine itself holds an event sender
+        // for runtime-started Supervisors, so "the channel closed" cannot stand in for "every
+        // adapter exited".)
         for commands in stopping {
             self.drain_events_until_closed(&commands).await;
         }

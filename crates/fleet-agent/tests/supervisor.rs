@@ -29,7 +29,7 @@ fn spawn_client(config_path: &Path) -> Child {
         .expect("spawn the client")
 }
 
-/// Places the stub where a Managed Process must live since ADR-0032: inside the Supervisor's own
+/// Places the stub where a Managed Process must live (ADR-0032): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. `root` is whatever
 /// `supervisor_dir` resolves to for the Client under test — `<state_dir>/supervisors` by default.
 ///

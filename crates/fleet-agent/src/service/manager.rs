@@ -225,11 +225,9 @@ impl ServiceControl for NativeService {
 /// The default **data** root for a scope: `<base>/<PRODUCT_NAME>`, where `supervisor.toml` and the
 /// state directory live (ADR-0028 clause 7).
 ///
-/// One level named after the product, and no level below it. What used to be
-/// `<base>/opamp-fleet/client/<instance>` asserted `client` where the file says `supervisor` and
-/// held the constant `default` in its last level; a second installation is a second build now, so
-/// there is nothing left for either level to distinguish. `--data-root` overrides it, `--root`
-/// collapses both halves into one directory, and no path is ever fixed.
+/// One level named after the product, and no level below it: a second installation is a second
+/// build (ADR-0028 clause 5), so there is nothing for a deeper level to distinguish. `--data-root`
+/// overrides it, `--root` collapses both halves into one directory, and no path is ever fixed.
 ///
 /// # Errors
 /// Returns an error if the platform's base directory cannot be determined from the environment.
@@ -443,7 +441,7 @@ mod tests {
         );
     }
 
-    /// ADR-0028 clause 8, carrying ADR-0028: a system service's binary must not live under
+    /// ADR-0028 clause 8: a system service's binary must not live under
     /// `/var/lib` — SELinux's `var_lib_t` is no entrypoint type, and the service would fail its
     /// first start with `status=203/EXEC` on every enforcing host. The executable layout defaults
     /// to `/opt`; the data root stays under `/var/lib`, so an upgrade re-registers and moves no

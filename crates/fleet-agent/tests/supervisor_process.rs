@@ -11,8 +11,7 @@
 //!
 //! The two stubs are the vocabulary: [`stub_agent`] stays up until it is killed, [`stub_crasher`]
 //! exits at once. Which one's *bytes* an artifact carries is what decides whether an install
-//! survives its grace — the same thing the shell scripts used to say, in a form all three platforms
-//! can execute.
+//! survives its grace, said in a form all three platforms can execute.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -267,22 +266,22 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.task.await.expect("join");
 }
 
-/// A program named by a **relative** path still starts — which it did not, once ADR-0010 had the
-/// process begin in its own directory.
+/// A program named by a **relative** path starts, though the process begins in its own directory
+/// (ADR-0010).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
 /// default makes this the ordinary case rather than a corner — `state_dir = "client-state"` is
-/// relative, so every Managed Process under a default configuration failed to spawn, with a bare
-/// `No such file or directory` naming a file that was plainly there.
+/// relative, so every Managed Process under a default configuration would fail to spawn, with a
+/// bare `No such file or directory` naming a file that is plainly there.
 #[tokio::test]
 async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() {
     // **Under** this test's working directory, so the relative path is a plain descent with no
     // `..` in it — which is what a Client's own `state_dir = "client-state"` looks like, and what
     // makes the fixture mean the same thing on every platform. Counting `..` to the root does not:
-    // it is drive-relative on Windows, and the first version of this test accidentally used
-    // exactly as many as the new working directory was deep, so the path climbed back out to the
-    // same file and passed against the unfixed code.
+    // it is drive-relative on Windows, and exactly as many as the new working directory is deep
+    // climb back out to the same file, so the test would pass whether or not the path is made
+    // absolute.
     let here = std::env::current_dir().expect("cwd");
     let dir = tempfile::tempdir_in(&here).expect("tempdir under the working directory");
     let program_dir = dir.path().join("a/b/c/d/program");
@@ -1037,8 +1036,8 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
 }
 
 /// ADR-0018: a *first* install that will not start has nothing to roll back to, so it is **kept**
-/// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
-/// empty the directory and set the Server re-offering the same artifact in a loop.
+/// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
+/// directory and set the Server re-offering the same artifact in a loop.
 /// Verifies: ADR-0018
 #[tokio::test]
 async fn a_first_install_that_will_not_start_is_kept_not_discarded() {

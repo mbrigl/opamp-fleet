@@ -6,8 +6,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
 `[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
-`version/*` tag from ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md),
-superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A section carries a date once its tag exists.
+`version/*` tag from ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A section carries a date once its tag exists.
 
 > **Where this file starts.** Entries begin with ADR-0032. The work before that point — package
 > delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
@@ -638,9 +637,7 @@ superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)
   name of yours first.
 
 - **Release artifacts are `.tar.gz` and are named `supervisor_…`**
-  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md), superseding
-  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) clauses 3 and 4 and
-  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) on the artifact name alone).
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)).
   A release published `opamp-fleet-client_<version>_<os>_<arch>.7z`; it now publishes
   `supervisor_<version>_<os>_<arch>.tar.gz`, and the `.deb`, `.rpm` and `.msi` beside it take the
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
@@ -685,10 +682,8 @@ superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)
   (`supervisor-prod` for a named instance) on systemd, launchd and the SCM, the version directories
   are `supervisor-<version>-<hash>`, the `PATH` symlink is `/usr/bin/supervisor`, the log file is
   `supervisor.<date>.log`, and `client.toml` is **`supervisor.toml`**
-  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md), superseding
-  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) and
-  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md) on the two names, and amending
-  ADR-0028 and ADR-0029). It completes what ADR-0029 began: one word from the
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) and
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md) on the two names). It completes what ADR-0029 began: one word from the
   Agent type in the fleet view down to the unit you restart. The top-level `name` default follows
   it; a host that set one of its own keeps it.
 
@@ -1829,7 +1824,7 @@ superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 
-  This closes a silent failure the follow-ups of ADR-0019, ADR-0012 and ADR-0019 all named: a
+  This closes a silent failure the follow-ups of ADR-0019 and ADR-0012 both named: a
   package can target nobody — through an Agent type that is unset or misspelled, artifacts for
   platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
   The package stored fine and reached no one, and nothing said so until somebody noticed the version
@@ -2332,7 +2327,7 @@ superseding [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)
   ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)), and the separator between the four
   fields, which used to be `-`
   ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — both
-  superseding the naming in [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md).
+  as [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) names them now.
 
   **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
   releases already published keep the names they have, and nothing is renamed.

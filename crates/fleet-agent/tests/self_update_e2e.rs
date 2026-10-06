@@ -34,8 +34,7 @@ fn this_host() -> Platform {
 }
 
 // What the Client exits with to ask its service manager for a restart, and its file name inside a
-// version directory. Imported rather than restated since ADR-0025: both were copied here with a
-// comment saying `client` is a binary crate and a test cannot link it, and a copied constant is a
+// version directory. Imported rather than restated (ADR-0025 clause 11): a copied constant is a
 // correctness risk that no comment can remove.
 use fleet_agent::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 use fleet_agent::update::EXIT_RESTART_FOR_UPDATE;
@@ -202,12 +201,11 @@ const NEWER_VERSION: &str = "9.9.9";
 /// binary with the override the build script documents (`OPAMP_FLEET_VERSION`, ADR-0017), and its
 /// version as an operator would type it.
 ///
-/// A second build, rather than offering the running binary back to itself, because that offer is
-/// one the fleet no longer makes: a Set reaches an Agent only as an **upgrade** (ADR-0014), and a
-/// Client reports the version it runs whether or not a package put it there — so a Set at the
-/// running version reaches nobody, which is what `a_set_at_the_running_version_reaches_nobody`
-/// asserts. What is left to test here is the update itself, and an update needs something newer to
-/// install.
+/// A second build, rather than offering the running binary back to itself, because the fleet
+/// does not make that offer: a Set reaches an Agent only as an **upgrade** (ADR-0014), and a Client
+/// reports the version it runs whether or not a package put it there — so a Set at the running
+/// version reaches nobody, which is what `a_set_at_the_running_version_reaches_nobody` asserts.
+/// What is left to test here is the update itself, and an update needs something newer to install.
 ///
 /// It is built from a **tagless clone** of this repository rather than from the checkout itself,
 /// and that is the whole reason a clone appears in a test: `build.rs` refuses a build whose
@@ -606,8 +604,8 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
     // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
-    // by a bare file name, which since ADR-0032 is the only shape a block may carry: a Managed
-    // Process is always one this Client installed.
+    // by a bare file name, the only shape a block may carry (ADR-0032): a Managed Process is always
+    // one this Client installed.
     let stub = {
         let program_dir = state_dir.join("supervisors/managed/program");
         std::fs::create_dir_all(&program_dir).expect("create the supervisor's program directory");
@@ -696,12 +694,12 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     }
 }
 
-/// The bug this exists for: a Server holding the 0.4.0 package offered it to Clients already
-/// running 0.4.0, and to one running 0.4.1-dev — a downgrade of the host that manages the host.
+/// The hazard this guards against: a Server holding the 0.4.0 package offering it to Clients
+/// already running 0.4.0, and to one running 0.4.1-dev — a downgrade of the host that manages the
+/// host.
 ///
-/// Both come from one gap. ADR-0014 holds a Set against what the Agent reports installed, and a
-/// Client that arrived by `.deb`, `.rpm`, MSI or by hand had installed no *package*, so it reported
-/// nothing and the fourth test had nothing to measure against. It now reports the version it runs —
+/// ADR-0014 holds a Set against what the Agent reports installed, and a Client that arrived by
+/// `.deb`, `.rpm`, MSI or by hand has installed no *package*, so it reports the version it runs —
 /// which is what this asserts across the process boundary, together with what the Server then does
 /// with it: an equal Set and an older one reach nobody, a greater one reaches this Client.
 /// Verifies: ADR-0020
@@ -800,13 +798,13 @@ async fn a_set_at_the_running_version_reaches_nobody() {
 /// anything not called what that section says is refused and reported — never applied, and never a
 /// reason to restart.
 ///
-/// Since ADR-0021 the *offered* name is the Agent type itself, so the mistyped-artifact case this
-/// test used to stage — a Collector binary typed `supervisor` but named `otelcol` — is no longer
-/// representable: a Package of type `supervisor` is always offered under the name `supervisor`.
-/// What is still reachable, and what this test now drives, is the operator error ADR-0021 names in
-/// its Consequences: `[self_update] package` set to something that is *not* this Client's Agent
-/// type. The Client then refuses every offer it will ever get, visibly, on its fleet row — which
-/// is the behaviour that has to be observable, since nothing else would say so.
+/// The *offered* name is the Agent type itself (ADR-0021), so a mistyped artifact — a Collector
+/// binary typed `supervisor` but named `otelcol` — is not representable: a Package of type
+/// `supervisor` is always offered under the name `supervisor`. What is reachable, and what this
+/// test drives, is the operator error ADR-0021 names in its Consequences: `[self_update] package`
+/// set to something that is *not* this Client's Agent type. The Client then refuses every offer it
+/// will ever get, visibly, on its fleet row — which is the behaviour that has to be observable,
+/// since nothing else would say so.
 /// Verifies: ADR-0020
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {

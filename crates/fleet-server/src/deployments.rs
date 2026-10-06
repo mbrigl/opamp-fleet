@@ -15,7 +15,7 @@
 //!
 //! **A Selector is never empty.** An empty one is the channel that collides with every other, and a
 //! forgotten field would quietly become the base for the whole fleet — the class of accident
-//! ADR-0014 was built to prevent. Channels are therefore a *partition*: a Selector cannot express
+//! ADR-0014 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
 //! "not", so disjoint channels come from membership, which is what ADR-0013's labels already are.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +33,7 @@ pub struct Deployment {
     /// it keeps the ADR-0028 grammar a Package gave up (ADR-0021).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
-    /// (ADR-0011 semantics, unchanged). **Never empty** — see the module note.
+    /// (ADR-0011 semantics). **Never empty** — see the module note.
     pub selector: BTreeMap<String, String>,
     /// At most one Package per Agent type, keyed by that type. Two of one type would collide on
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
@@ -459,8 +459,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Specificity does not break the tie, and that is the decision — not an oversight. The wider
-    /// Selector used to win by being narrower; now neither does.
+    /// Specificity does not break the tie, and that is the decision — not an oversight: neither
+    /// Selector wins by being narrower (ADR-0021 clause 12).
     /// Verifies: ADR-0021
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {

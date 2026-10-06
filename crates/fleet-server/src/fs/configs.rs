@@ -26,7 +26,7 @@ impl FsConfigBackend {
 
 impl ConfigBackend for FsConfigBackend {
     /// A file that does not parse is a startup error that names it, and that includes a file in a
-    /// shape this Server no longer writes: there is no legacy reader, so it is named rather than
+    /// shape this Server does not write: there is no legacy reader, so it is named rather than
     /// guessed at.
     fn load(&self) -> Result<Vec<Configuration>, String> {
         let mut configs = Vec::new();
@@ -91,9 +91,9 @@ mod tests {
         assert_eq!(open(dir.path()).expect("open").list().len(), 1);
     }
 
-    /// No legacy reader: a file in a shape this Server no longer writes is a startup error that
-    /// names the path, not a file quietly read as something else. Both retired shapes are covered
-    /// — the flat pre-ADR-0014 record and the two-revision ADR-0014 one.
+    /// No legacy reader: a file in a shape this Server does not write is a startup error that names
+    /// the path, not a file quietly read as something else. Both retired shapes are covered — a
+    /// flat record and a two-revision one.
     #[test]
     fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
         for (file, body) in [

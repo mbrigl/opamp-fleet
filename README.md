@@ -228,9 +228,8 @@ nobody types a tag. Running it publishes one archive per platform,
 `supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
 ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
-([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — and since
-[ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) the program inside them and
-its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
+([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — and the program inside them and its configuration
+file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
 the **product's** name, `opamp-fleet`
 ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both

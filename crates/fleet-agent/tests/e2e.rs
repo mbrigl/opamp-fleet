@@ -176,9 +176,9 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     let _client = spawn_client(&config_path);
 
-    // Both Supervisors appear as their own connected Agents — over the one WebSocket
-    // connection this Client maintains (ADR-0034: routed by instance_uid alone) — and so does the
-    // Client itself, which since ADR-0020 is an Agent whether or not it supervises anything.
+    // Both Supervisors appear as their own connected Agents — over the one WebSocket connection
+    // this Client maintains (ADR-0034: routed by instance_uid alone) — and so does the Client
+    // itself, which is an Agent (ADR-0020) whether or not it supervises anything.
     let agents = wait_until("every agent connected", || {
         let snapshot = state.snapshot();
         (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
@@ -337,8 +337,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .labels
         .is_empty());
 
-    // …and a Selector aimed at it reaches that Agent and no other — which is the whole claim the
-    // retired block table used to carry.
+    // …and a Selector aimed at it reaches that Agent and no other.
 
     state
         .save_configuration(
@@ -407,11 +406,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // ——— The Server manages the Client's own Supervisor set (ADR-0032) ———
 
-    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is
-    // YAML). Since ADR-0014 a narrower aim no longer withdraws what was already rolled out —
-    // the Client keeps its pinned assignment however the type changes — so the recovery is to
-    // delete the Configuration, which removes it from every assigned Agent, and roll it out
-    // again stated for the type both Supervisors report (ADR-0011).
+    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is YAML).
+    // A narrower aim does not withdraw what was already rolled out (ADR-0014) — the Client keeps
+    // its pinned assignment however the type changes — so the recovery is to delete the
+    // Configuration, which removes it from every assigned Agent, and roll it out again stated for
+    // the type both Supervisors report (ADR-0011).
     let snapshot = state.snapshot();
     let supervised_type = view(&snapshot, "otelcol")
         .expect("otelcol view")
