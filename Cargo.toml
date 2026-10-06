@@ -70,7 +70,7 @@ tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0026).
 base64 = "0.22"
 # Constant-time credential comparison on the Server (ADR-0026).
-constant_time_eq = "0.4"
+constant_time_eq = "0.6"
 # kill(2) for the graceful SIGTERM stop of Managed Processes (ADR-0010). Unix-only.
 libc = "0.2"
 # The Client's WebSocket transport; rustls enables `wss://` (ADR-0023).
