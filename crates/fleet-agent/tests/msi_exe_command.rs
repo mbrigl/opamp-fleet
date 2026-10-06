@@ -1,20 +1,20 @@
 //! The MSI's custom-action command lines, parsed the way Windows will parse them
 //! (`packaging/windows/supervisor.wxs`, ADR-0029).
 //!
-//! Regression test, and since ADR-0028 clause 8 also a guard on how the hazard was retired.
+//! A guard on the hazard ADR-0028 clause 8 rules out.
 //!
 //! `[INSTALLFOLDER]` always resolves with a trailing backslash, and the C runtime that builds a
 //! process's argv treats a backslash before a quote as an escaped, literal quote — so
-//! `--root &quot;[INSTALLFOLDER]&quot;` did not end the argument at the closing quote. The root
-//! swallowed the rest of the command line, `service install` staged into an impossible path, and
-//! every MSI install died with error 1722 ("A program run as part of the setup did not finish as
-//! expected").
+//! `--root &quot;[INSTALLFOLDER]&quot;` would not end the argument at the closing quote. The root
+//! would swallow the rest of the command line, `service install` would stage into an impossible
+//! path, and every MSI install would die with error 1722 ("A program run as part of the setup did
+//! not finish as expected").
 //!
-//! The MSI no longer passes a root at all: `Program Files` holds the payload and the layout goes
-//! under `%ProgramData%`, so no directory property reaches a command line. That is the stronger
-//! fix — a doubled backslash is one edit away from being undoubled, while an argument that is not
-//! there cannot be mis-split. Both facts are asserted below, because the day someone reintroduces
-//! `--root` here, they reintroduce error 1722 with it.
+//! The MSI passes no root at all: `Program Files` holds the payload and the layout goes under
+//! `%ProgramData%`, so no directory property reaches a command line. That is the stronger fix — a
+//! doubled backslash is one edit away from being undoubled, while an argument that is not there
+//! cannot be mis-split. Both facts are asserted below, because the day someone adds `--root` here,
+//! they bring error 1722 with it.
 //!
 //! This test formats each ExeCommand the way msiexec does, splits it under the CRT's documented
 //! rules, and feeds the result to the real CLI parser — pure string handling, so the Windows
@@ -196,8 +196,8 @@ fn register_service_survives_the_crt() {
 /// ADR-0028 clause 8: the MSI names neither root, so the install takes the platform defaults —
 /// `%ProgramData%\opamp-fleet` for both halves — and `Program Files` holds only the payload.
 ///
-/// This is also what keeps error 1722 retired. A directory property resolves with a trailing
-/// backslash, and there is now no command line for one to reach.
+/// This is also what keeps error 1722 out. A directory property resolves with a trailing backslash,
+/// and there is no command line for one to reach.
 /// Verifies: ADR-0028, ADR-0029
 #[test]
 fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {

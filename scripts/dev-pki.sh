@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Creates the certificates a development Server and Client need, now that both refuse to run
-# without them (ADR-0023, ADR-0026). Everything lands in one directory, gitignored, and is for a
-# development machine only: the keys are unencrypted and the CAs are throwaway.
+# Creates the certificates a development Server and Client need, since both refuse to run without
+# them (ADR-0023, ADR-0026). Everything lands in one directory, gitignored, and is for a development
+# machine only: the keys are unencrypted and the CAs are throwaway.
 #
 #   ca.pem / ca-key.pem                 the development CA: it signs the Server's certificate, and it
 #                                       is the client CA that issues and verifies Agent certificates

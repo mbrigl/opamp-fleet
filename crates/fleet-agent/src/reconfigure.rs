@@ -386,8 +386,8 @@ fn offered_blocks(
 /// (ADR-0032). Letting the Server spawn a program on the machine would be arbitrary code execution
 /// that never passes through package signing.
 ///
-/// Since ADR-0032 that rule **cannot fire**: no block naming a program on the machine parses at
-/// all, from any principal, so every block reaching here already satisfies it. The check stays as
+/// That rule **cannot fire** (ADR-0032): no block naming a program on the machine parses at all,
+/// from any principal, so every block reaching here already satisfies it. The check stays as
 /// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
 /// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
 /// enforces it in fact.
@@ -1048,10 +1048,10 @@ mod tests {
         }
     }
 
-    /// The attack this guard was written against: a Server that delivers a block spawning a
-    /// program on the machine with arguments of its choosing. Since ADR-0032 it is refused a step
-    /// earlier and for a broader reason — no block naming a program on the machine parses, from
-    /// any principal — but the delivery path must still refuse it, which is what this asserts.
+    /// The attack this guard stands against: a Server that delivers a block spawning a program on
+    /// the machine with arguments of its choosing. It is refused a step earlier and for a broader
+    /// reason (ADR-0032) — no block naming a program on the machine parses, from any principal —
+    /// but the delivery path must still refuse it, which is what this asserts.
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
         let program = machine_program();
@@ -1072,8 +1072,8 @@ mod tests {
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (ADR-0032), so a
-    /// delivered block that names one is accepted — since ADR-0032 the only shape there is.
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0032), so a delivered
+    /// block that names one is accepted — the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
         let offer = offer_of(&[(

@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn todays_invocation_still_parses() {
-        // The pre-ADR-0028 command line: `client --config <path>`.
+        // The command line without a subcommand: `client --config <path>`.
         let cli = parse(&["client", "--config", "config/supervisor.toml"]);
         assert!(cli.command.is_none());
         assert_eq!(cli.config, PathBuf::from("config/supervisor.toml"));

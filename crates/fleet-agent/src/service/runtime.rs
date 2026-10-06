@@ -117,10 +117,10 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// What this process is and what it will use, in one line each, before it uses any of it.
 ///
 /// **The version is the point of the first line.** It rides in every report to the Server and names
-/// the directory this binary runs from (ADR-0028), and until now it appeared in no log line at all
-/// — so the file a self-update left behind (ADR-0020, ADR-0028) could not be attributed to the
-/// version that wrote it, which is the situation that file exists for. The rest of the line is what
-/// an operator otherwise has to reconstruct from the command line of a service they did not start.
+/// the directory this binary runs from (ADR-0028), and logged here it lets the file a self-update
+/// leaves behind (ADR-0020, ADR-0028) be attributed to the version that wrote it, which is the
+/// situation that file exists for. The rest of the line is what an operator otherwise has to
+/// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
 /// accessors the transports build their TLS from (ADR-0023, ADR-0026) rather than read off the
@@ -226,10 +226,10 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     heal_torn_pointer();
     let mut config = match load_effective_config(&spec) {
         Ok(config) => config,
-        // A version that cannot read this host's file is a failed update like any other, and until
-        // now it was the one failure the probation of ADR-0020 could not see: the load happens
-        // before `on_start`, so the process left before the attempt was counted, the manager
-        // restarted it, and the host stayed on a version that never reached the Server to say so.
+        // A version that cannot read this host's file is a failed update like any other, and one
+        // the probation of ADR-0020 would not see on its own: the load happens before `on_start`,
+        // so the process would leave before the attempt was counted, the manager would restart it,
+        // and the host would stay on a version that never reaches the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
     // Without a client certificate the Server refuses this Client; it says so and stops rather
@@ -510,7 +510,7 @@ mod tests {
     ///
     /// The test binary does not run from an install layout, so the resolution takes the "the new
     /// version did not take over" path: the marker is cleared and an outcome recorded. What is
-    /// asserted is that the marker was *seen at all*, which before this change it was not.
+    /// asserted is that the marker was *seen at all*.
     /// Verifies: ADR-0020
     #[test]
     fn an_unreadable_configuration_resolves_the_update_in_flight() {

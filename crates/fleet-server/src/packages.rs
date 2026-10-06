@@ -128,9 +128,9 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
 /// of "what is this artifact" as the version — an attribute would be editable, and retyping stored
 /// bytes to another kind of Agent is exactly the mistake an immutable identity forecloses.
 ///
-/// There is no name beside these two. What a name would have added is a second identity for a
-/// thing that already has one, and the only thing it could express — two Packages of one Agent
-/// type at one version — is the ambiguity resolution used to have to rank its way out of.
+/// There is no name beside these two. What a name would have added is a second identity for a thing
+/// that already has one, and the only thing it could express — two Packages of one Agent type at
+/// one version — is an ambiguity resolution would have to rank its way out of.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PackageId {
     /// The Agent type this Package is built for, matched **raw** against the `service.name` an
@@ -614,9 +614,8 @@ impl PackageStore {
         // Neither the artifact nor the headers an Agent sends for it cross a network in plaintext
         // (ADR-0019).
         opamp::endpoint::check_url(&source.url).map_err(|e| format!("the source url {e}"))?;
-        // Bytes this Server was holding are no longer what the fleet gets; the reference replaces
-        // them wholesale. Another version is another Package — nothing is remembered here
-        // (ADR-0021).
+        // The reference replaces any bytes this Server was holding, wholesale. Another version is
+        // another Package — nothing is remembered here (ADR-0021).
         self.backend.remove_artifact(id, platform)?;
         self.put_entry_record(
             id,
@@ -936,11 +935,12 @@ pub type InstalledVersions = BTreeMap<String, String>;
 /// does not get a veto over it either. The Baseline defines the field as *"the version of the package
 /// that the Agent has"*, which a record naming a version the program denies running is not.
 ///
-/// Where no `service.version` can be ordered — a program numbering itself `1.19` or `24.04.1`, or an
-/// Agent reporting none at all — the claim is the whole test, exactly as ADR-0014 wrote it: strictly
-/// greater to match, and a claim that cannot itself be ordered **refuses** outright. That is the safe
+/// Where no `service.version` can be ordered — a program numbering itself `1.19` or `24.04.1`, or
+/// an Agent reporting none at all — the claim is the whole test (ADR-0014): strictly greater to
+/// match, and a claim that cannot itself be ordered **refuses** outright. That is the safe
 /// direction for a claim about that very package, and the Client's own
-/// (`update::installer::install`): what cannot be ordered must not be installed over what is running.
+/// (`update::installer::install`): what cannot be ordered must not be installed over what is
+/// running.
 ///
 /// An Agent that reports neither has nothing to be greater than: the first rollout, which matches.
 fn upgrades(
@@ -959,8 +959,8 @@ fn upgrades(
     match runs {
         // The program's own word about the program, in both directions.
         Some(running) => greater(running),
-        // No statement about the present: fall back to the record, ADR-0014 unchanged. An
-        // unorderable claim refuses, which `greater` already does by yielding `None`.
+        // No statement about the present: fall back to the record (ADR-0014). An unorderable claim
+        // refuses, which `greater` already does by yielding `None`.
         None => match claimed_version(set, installed) {
             Some(claimed) => greater(claimed),
             None => true,
@@ -977,9 +977,9 @@ fn claimed_version<'a>(set: &Package, installed: &'a InstalledVersions) -> Optio
         .filter(|has| !has.is_empty())
 }
 
-/// The version an Agent reports as `service.version` — its program's own number, and since ADR-0014
-/// what a Package is held against when the Agent reports no version for the package itself. Since
-/// ADR-0014 it is also read beside a reported one, as what the Agent actually runs.
+/// The version an Agent reports as `service.version` — its program's own number, and what a Package
+/// is held against when the Agent reports no version for the package itself (ADR-0014). It is also
+/// read beside a reported one, as what the Agent actually runs.
 fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
         &description?.identifying_attributes,
@@ -996,9 +996,9 @@ fn reported_service_version(description: Option<&AgentDescription>) -> Option<&s
 /// report has an "unknown, so anything goes" case — an Agent reporting neither fits nothing. The
 /// type needs no second comparison: a Deployment holds each Package under its own Agent type.
 ///
-/// There is no ranking left. The Deployment holds at most one Package per Agent type, so the
-/// specificity comparison and the version tie-break ADR-0019 needed have nothing to
-/// choose between — a state that used to be ambiguous is now one a write refuses to create.
+/// There is no ranking. The Deployment holds at most one Package per Agent type (ADR-0021 clause
+/// 9), so a specificity comparison or a version tie-break would have nothing to choose between — an
+/// ambiguous state is one a write refuses to create.
 fn resolve<'a>(
     sets: &'a BTreeMap<PackageId, Package>,
     deployment: &Deployment,
@@ -1074,8 +1074,8 @@ mod tests {
         description
     }
 
-    /// A Set with one uploaded linux entry — stored, which since ADR-0014 reaches nobody until
-    /// an assignment names it.
+    /// A Set with one uploaded linux entry — stored, which reaches nobody until an assignment names
+    /// it (ADR-0014).
     fn stored_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> PackageId {
         let id = id(name, version);
         store.create(&id).expect("create");
@@ -1256,9 +1256,9 @@ mod tests {
             .is_some());
     }
 
-    /// The gate an explicit rollout act runs (ADR-0014): the Package must hold entries and fit
-    /// the Agent's type and platform. **Aim is no longer among them** — whom a Package reaches is
-    /// its Deployment's, and the act names the channel. The version *ranking* stays out too: an Agent
+    /// The gate an explicit rollout act runs (ADR-0014): the Package must hold entries and fit the
+    /// Agent's type and platform. **Aim is not among them** — whom a Package reaches is its
+    /// Deployment's, and the act names the channel. The version *ranking* stays out too: an Agent
     /// that has installed nothing takes the older Package as readily as the newer one.
     #[test]
     fn fits_agent_checks_fit_but_neither_aim_nor_the_ranking() {
@@ -1433,14 +1433,13 @@ mod tests {
         );
     }
 
-    /// ADR-0014 points 10 and 11, as re-decided: **what an Agent runs decides, in both directions**,
-    /// and the claim is not consulted beside it. The record a package status comes from outlives
-    /// the binary it describes; the program's own number is the statement about the present.
+    /// ADR-0014 points 10 and 11: **what an Agent runs decides, in both directions**, and the claim
+    /// is not consulted beside it. The record a package status comes from outlives the binary it
+    /// describes; the program's own number is the statement about the present.
     ///
-    /// This is the direction the accepted text had the other way round, and both halves of the
-    /// trade are asserted here rather than only the convenient one — including that a Managed
-    /// Process numbered below its Set can now be moved backwards, which is the cost the ADR
-    /// records under Consequences.
+    /// Both halves of the trade are asserted here rather than only the convenient one — including
+    /// that a Managed Process numbered below its Set can be moved backwards, which is the cost the
+    /// ADR records under Consequences.
     // Verifies: ADR-0014
     #[test]
     fn the_version_an_agent_runs_wins_over_the_version_it_claims() {
@@ -1448,7 +1447,7 @@ mod tests {
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         stored_set(&store, "otelcol", "2.0.0", b"v2");
 
-        // A program above the Set holds it back now, where the claim used to admit it.
+        // A program above the Set holds it back, whatever the claim admits.
         assert!(
             candidates_for(
                 &store,
@@ -1461,7 +1460,7 @@ mod tests {
 
         // A Collector numbering itself far below the Package that carries it: every version above
         // that number clears the test, the claim notwithstanding. Which of them an Agent gets is
-        // no longer decided here — a channel holds one, and there is nothing left to rank.
+        // not decided here — a channel holds one, and there is nothing to rank.
         let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
         stored_set(&store, "otelcol", "1.5.0", b"v15");
         assert_eq!(
@@ -1486,13 +1485,13 @@ mod tests {
                 )
                 .is_ok(),
             "and the act admits the lower Set too: 1.5.0 is ahead of what the program reports, so \
-             the claim of 2.0.0 no longer refuses it — the downgrade ADR-0014 admits as its cost"
+             the claim of 2.0.0 does not refuse it — the downgrade ADR-0014 admits as its cost"
         );
     }
 
-    /// ADR-0014: a claim the Agent's own program denies no longer holds the Set back. A Client that
+    /// ADR-0014: a claim the Agent's own program denies does not hold the Set back. A Client that
     /// reports `supervisor 0.4.1` installed while reporting that it runs 0.4.0 has a record about a
-    /// binary that is gone — and until this rule it was offered nothing, for good.
+    /// binary that is gone — and held to that record it would be offered nothing, for good.
     #[test]
     fn a_claim_the_running_program_denies_no_longer_holds_the_set_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1541,10 +1540,10 @@ mod tests {
         );
     }
 
-    /// The case that re-opened ADR-0014, and the other face of the one above: a claim *above* the
-    /// Set, over a program that denies running it. A self-update that staged 0.4.2 and did not take
-    /// leaves `supervisor 0.4.2` recorded on a host whose program still reports 0.4.0 — and rolling
-    /// 0.4.1 out to it was refused as a downgrade, so the host stayed where it was for good.
+    /// The other face of the one above (ADR-0014): a claim *above* the Set, over a program that
+    /// denies running it. A self-update that staged 0.4.2 and did not take leaves
+    /// `supervisor 0.4.2` recorded on a host whose program still reports 0.4.0 — and refusing
+    /// 0.4.1 to it as a downgrade would keep the host where it is for good.
     #[test]
     fn a_claim_above_the_set_no_longer_holds_it_back_either() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1595,17 +1594,16 @@ mod tests {
             );
         }
 
-        // And an Agent reporting no version at all is the first rollout, unchanged (ADR-0014).
+        // And an Agent reporting no version at all is the first rollout (ADR-0014).
         assert_eq!(
             candidates_for(&store, &agent("linux", "amd64", &[]), &nothing),
             [("otelcol".to_string(), "2.0.0".to_string())],
         );
     }
 
-    /// Only the Package its channel holds is a candidate. Two versions of one Agent type used to be
-    /// ranked against each other — and, when nothing could order them, refused as a tie. A
-    /// Deployment holds one Package per type (ADR-0021), so there is no second contender to rank
-    /// or refuse: the store answers what the channel points at, or nothing.
+    /// Only the Package its channel holds is a candidate. A Deployment holds one Package per type
+    /// (ADR-0021), so there is no second contender to rank or refuse: the store answers what the
+    /// channel points at, or nothing.
     /// Verifies: ADR-0021
     #[test]
     fn only_the_package_its_ring_holds_is_a_candidate() {
@@ -1615,8 +1613,8 @@ mod tests {
         let b = stored_set(&store, "otelcol", "nightly-b", b"b");
         let host = agent("linux", "amd64", &[]);
 
-        // Neither version can be ordered against the other, which used to be the one case with no
-        // defensible answer. It is now a question nobody asks.
+        // Neither version can be ordered against the other, a case with no defensible answer — and
+        // a question nobody asks here.
         for held in [&a, &b] {
             assert_eq!(
                 store.candidate(&channel(held), Some(&host), &InstalledVersions::new()),
@@ -1820,18 +1818,18 @@ mod tests {
     /// store that merely looks empty offers nothing and says nothing about why, which an operator
     /// reads as "nothing uploaded yet".
     ///
-    /// Both shapes an older Server left behind are covered: the loose files of a pre-ADR-0019
-    /// store, and the `<name>@<version>@<type>/set.json` directories of an ADR-0019 one.
+    /// Both shapes an older Server left behind are covered: loose files in the store root, and
+    /// `<name>@<version>@<type>/set.json` directories.
     /// Verifies: ADR-0021
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
-        // Pre-ADR-0019: loose files in the store root.
+        // Loose files in the store root.
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("otelcol.json"),
             serde_json::json!({"name": "otelcol", "service_name": "otelcol"}).to_string(),
         )
-        .expect("write a pre-ADR-0019 rollout file");
+        .expect("write a loose rollout file");
         let error = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
             .expect_err("an older layout is refused, never read as an empty store");

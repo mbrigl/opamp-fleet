@@ -280,8 +280,8 @@ async fn a_package_rollout_reaches_a_polling_client() {
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0021, and this block states none — so it is
-        // the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
+        // The wire name is the Agent type (ADR-0021 clause 2), and this block states none — so it
+        // is the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
     })

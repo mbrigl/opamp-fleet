@@ -147,8 +147,8 @@ tempfile = "3"
 # would let it do.
 rustls.workspace = true
 # Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
-# encoder rides here alone again now that `pack` has moved to its own crate (ADR-0025) — a
-# dev-dependency reaches the tests and no shipped binary.
+# encoder rides here alone, since `pack` lives in its own crate (ADR-0025) — a dev-dependency
+# reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0010: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }

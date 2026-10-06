@@ -40,8 +40,9 @@ async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
 }
 
 /// The measure itself: a connection that sends a request line and then falls silent is closed by
-/// the Server. Before ADR-0023 it was held open indefinitely — hyper's own default timeout resolves
-/// to nothing while no timer is installed, and neither `axum::serve` nor `axum_server` installs one.
+/// the Server. Without that measure it would be held open indefinitely — hyper's own default
+/// timeout resolves to nothing while no timer is installed, and neither `axum::serve` nor
+/// `axum_server` installs one.
 /// Verifies: ADR-0023
 #[tokio::test]
 async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {

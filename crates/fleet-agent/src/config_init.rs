@@ -580,7 +580,7 @@ mod tests {
 
     /// The withdrawal has a non-interactive twin too (`--no-self-update`, the MSI's cleared
     /// checkbox): it writes the section out as `enabled = false` rather than omitting it, because
-    /// an omitted section is now the consent.
+    /// an omitted section is the consent.
     #[test]
     fn an_installer_can_withhold_the_self_update_consent() {
         let dir = tempfile::tempdir().expect("tempdir");

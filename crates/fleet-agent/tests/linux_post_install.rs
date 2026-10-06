@@ -55,10 +55,10 @@ fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
     }
 }
 
-/// The first step the post-install prints is the questionnaire, which asks for the client
-/// identity; an endpoint alone is never offered as a complete step, since a Client with nothing
-/// more refuses to start. The manual alternative names the identity, `[tls] cert_file` and
-/// `key_file`, and nothing the Client no longer reads (ADR-0029 clause 13).
+/// The first step the post-install prints is the questionnaire, which asks for the client identity;
+/// an endpoint alone is never offered as a complete step, since a Client with nothing more refuses
+/// to start. The manual alternative names the identity, `[tls] cert_file` and `key_file`, and
+/// nothing the Client does not read (ADR-0029 clause 13).
 /// Verifies: ADR-0029
 #[test]
 fn the_post_install_steps_ask_for_the_client_identity() {

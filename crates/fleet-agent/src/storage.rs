@@ -34,9 +34,8 @@ const PACKAGE_FILE: &str = "installed-package.json";
 /// **The value is here because the Baseline says it matters.** `AgentConfigFile.role` is defined as
 /// *"Optional role of the content in the body field. The values and their semantics are Agent
 /// type-specific"* — so a kind may define its own vocabulary, and to read it the value has to
-/// survive the write. This file used to hold names alone, which answered only *whether* an entry
-/// carried a role; a line without a second field still reads that way, which is exactly what an
-/// older Client left behind.
+/// survive the write. A line without a second field — what an older Client wrote — answers only
+/// *whether* an entry carries a role.
 pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
@@ -696,8 +695,8 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// A Client that stored entries before ADR-0011 has no bookkeeping file; everything it wrote
-    /// is configuration, which is exactly what it was.
+    /// A state directory with no bookkeeping file holds configuration alone, so everything in it
+    /// reads as configuration (ADR-0011).
     #[test]
     fn entries_without_bookkeeping_are_all_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");

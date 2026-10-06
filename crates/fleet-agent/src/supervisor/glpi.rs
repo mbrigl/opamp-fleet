@@ -58,9 +58,9 @@ const LOG_MAX_SIZE: &str = "16";
 /// tree raises: does this host satisfy the interpreter we shipped it?
 const VERSION_ARGS: &[&str] = &["--version"];
 
-/// The keys the `command` recipe carried and this kind now supplies (ADR-0015), each with what
-/// answers it now — refused by name, so an operator rewriting the old block is told where each
-/// value went rather than meeting serde's "unknown field".
+/// The keys a `command` recipe carries and this kind supplies (ADR-0015), each with what answers it
+/// — refused by name, so an operator rewriting a `command` block is told where each value went
+/// rather than meeting serde's "unknown field".
 const RETIRED: &[(&str, &str)] = &[
     (
         "args",
@@ -277,7 +277,7 @@ mod tests {
         assert!(err.contains("tag"), "{err}");
     }
 
-    /// Every key of the old recipe is refused by name with what supplies it now — through `check`
+    /// Every key of a `command` recipe is refused by name with what supplies it — through `check`
     /// too, so an offered Supervisor set is refused before a running process is touched.
     #[test]
     fn the_recipes_keys_are_refused_by_name() {

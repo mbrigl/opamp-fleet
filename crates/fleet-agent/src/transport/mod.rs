@@ -271,8 +271,7 @@ pub enum OfferOutcome {
 /// Handles a pending connection-settings offer, whichever transport is carrying it.
 ///
 /// The two transports differ in how they end a connection, not in what an offer means — so the
-/// meaning lives here, once. Before ADR-0027 both carried a byte-identical copy of this, and both
-/// assumed every offer had to be proved by reconnecting.
+/// meaning lives here, once.
 ///
 /// The order of the steps is load-bearing:
 ///
@@ -330,7 +329,7 @@ pub async fn process_connection_offer(
             return OfferOutcome::Applied;
         }
         // The issued certificate is stored only now, after connecting with it proved it works — the
-        // old one stayed in force until here (ADR-0026).
+        // old one stays in force until here (ADR-0026).
         if let Some(certificate) = &settings.certificate {
             if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
                 tracing::warn!(error = %e, "cannot store the issued certificate");

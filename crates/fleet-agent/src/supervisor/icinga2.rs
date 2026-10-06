@@ -62,10 +62,10 @@ struct Icinga2Settings {
     trusted_cert_file: Option<String>,
 }
 
-/// The keys this kind used to take and now supplies itself (ADR-0016), each with what answers it
-/// now. Refused by name rather than met with serde's "unknown field": a block that carries one was
-/// written against a Client that needed it, and the operator deleting the line deserves to be told
-/// where the value went — the pattern `package` and `accepts_packages` already run.
+/// The keys this kind supplies itself (ADR-0016), each with what answers it. Refused by name rather
+/// than met with serde's "unknown field": a block that carries one expects a Client that needs it,
+/// and the operator deleting the line deserves to be told where the value went — the pattern
+/// `package` and `accepts_packages` already run.
 const RETIRED: &[(&str, &str)] = &[
     ("binary", "the kind installs and names its own program"),
     (
@@ -652,7 +652,7 @@ impl Icinga2Plugin {
             run_dir: path("${supervisor_dir}/run"),
             // The operator's, else this host's fully qualified name, else the Supervisor's own —
             // which the instance-name grammar cannot spell as an FQDN, so it is the last resort
-            // rather than the default it used to be (ADR-0016).
+            // rather than the default (ADR-0016).
             node_name: settings
                 .node_name
                 .clone()
@@ -758,9 +758,9 @@ fn read_fqdn() -> Option<String> {
 const ROOT_ROLE: &str = "main";
 const CONVENTIONAL_ROOT: &str = "icinga2-conf";
 
-/// The console severity the daemon is started with (`-x`). Icinga's own default, and no longer a
-/// block key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration
-/// is the place, which the fleet rolls out (ADR-0016).
+/// The console severity the daemon is started with (`-x`). Icinga's own default, and not a block
+/// key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration is the
+/// place, which the fleet rolls out (ADR-0016).
 const DEFAULT_LOG_LEVEL: &str = "information";
 
 /// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-0016).
@@ -1021,9 +1021,8 @@ impl Plugin for Icinga2Plugin {
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        // Retired keys are refused before the strict parse, so a block written against an older
-        // Client is told where its value went instead of meeting serde's "unknown field"
-        // (ADR-0016).
+        // Retired keys are refused before the strict parse, so a block carrying one is told where
+        // its value went instead of meeting serde's "unknown field" (ADR-0016).
         let settings = parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings)?;
         check_node_name(name, settings.node_name.as_deref())
     }
@@ -1092,9 +1091,9 @@ mod tests {
             .expect("settings")
     }
 
-    /// The paths this kind used to be told are now the tree's own (ADR-0016), and the state
-    /// directories sit beside it. Asserted against a context rather than against the settings,
-    /// because after this change the settings have nothing to say about any of them.
+    /// The paths are the tree's own (ADR-0016), and the state directories sit beside it. Asserted
+    /// against a context rather than against the settings, because the settings have nothing to say
+    /// about any of them.
     #[test]
     fn the_layout_follows_the_delivered_tree_and_needs_no_settings() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1165,8 +1164,8 @@ mod tests {
         assert_eq!(parent_address("[::1]:5665"), ("::1".to_string(), 5665));
     }
 
-    /// A block written against an older Client is told where its value went, rather than meeting
-    /// serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
+    /// A block carrying a key this kind supplies itself is told where its value went, rather than
+    /// meeting serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
     #[test]
     fn a_retired_key_is_refused_by_name_and_says_what_supplies_it_now() {
         for (key, expected) in [

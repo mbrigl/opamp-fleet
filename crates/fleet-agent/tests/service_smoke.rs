@@ -37,9 +37,9 @@ use fleet_server::fleet::{AgentView, AppState};
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
 /// `supervisor` (ADR-0029).
 ///
-/// Since ADR-0028 there is no `--instance` to isolate this run under, and the service it registers
-/// carries the product's name like any other install. This test therefore takes over the host's
-/// one service for its duration, which is what `Registered` exists to undo.
+/// There is no `--instance` to isolate this run under (ADR-0028 clause 6), and the service it
+/// registers carries the product's name like any other install. This test therefore takes over the
+/// host's one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
 
 fn service() -> NativeService {
@@ -101,7 +101,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform since ADR-0028, so this is what systemd, launchd, and the SCM
+    // One name on every platform (ADR-0028 clause 3), so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]

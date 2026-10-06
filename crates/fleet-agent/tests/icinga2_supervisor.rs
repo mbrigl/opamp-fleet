@@ -120,7 +120,7 @@ async fn wait_for_file(path: &Path) {
 }
 
 /// Delivers Icinga's root configuration the way the fleet does (ADR-0016): the entry, and the role
-/// that says it is the root. The block no longer names it — the marking is the fleet's.
+/// that says it is the root. The block does not name it — the marking is the fleet's.
 fn write_config(harness: &Harness, body: &str) {
     std::fs::write(harness.config_dir().join("icinga2-conf"), body).expect("configuration");
     std::fs::write(

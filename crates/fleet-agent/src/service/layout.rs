@@ -362,8 +362,8 @@ mod tests {
     }
 
     /// A root an operator wrote with forward slashes — `--root C:/fleet`, which every Windows API
-    /// in this Client accepts. `mklink` is a `cmd` builtin and `cmd` reads `/` as a switch, so this
-    /// used to fail with `Invalid switch` in the middle of a self-update.
+    /// in this Client accepts. `mklink` is a `cmd` builtin and `cmd` reads `/` as a switch, so
+    /// passed through as written it fails with `Invalid switch` in the middle of a self-update.
     #[cfg(windows)]
     #[test]
     fn a_root_written_with_forward_slashes_still_gets_its_pointer() {

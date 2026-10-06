@@ -225,11 +225,9 @@ impl ServiceControl for NativeService {
 /// The default **data** root for a scope: `<base>/<PRODUCT_NAME>`, where `supervisor.toml` and the
 /// state directory live (ADR-0028 clause 7).
 ///
-/// One level named after the product, and no level below it. What used to be
-/// `<base>/opamp-fleet/client/<instance>` asserted `client` where the file says `supervisor` and
-/// held the constant `default` in its last level; a second installation is a second build now, so
-/// there is nothing left for either level to distinguish. `--data-root` overrides it, `--root`
-/// collapses both halves into one directory, and no path is ever fixed.
+/// One level named after the product, and no level below it: a second installation is a second
+/// build (ADR-0028 clause 5), so there is nothing for a deeper level to distinguish. `--data-root`
+/// overrides it, `--root` collapses both halves into one directory, and no path is ever fixed.
 ///
 /// # Errors
 /// Returns an error if the platform's base directory cannot be determined from the environment.

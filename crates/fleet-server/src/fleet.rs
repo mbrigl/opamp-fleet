@@ -1166,7 +1166,7 @@ impl AppState {
     /// it at all (ADR-0019), so a label that outranked them would let a slip here offer this Agent
     /// an artifact built for another machine. Labels annotate; they do not correct.
     ///
-    /// Since ADR-0014 a label move changes only what the fleet view **proposes**: the Agent's
+    /// A label move changes only what the fleet view **proposes** (ADR-0014): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
     pub fn set_labels(
         &self,
@@ -1195,7 +1195,7 @@ impl AppState {
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
-    /// answers "whom would this reach", now that it does not aim by itself (ADR-0021).
+    /// answers "whom would this reach", since it does not aim by itself (ADR-0021).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let Some(store) = self.deployment_store() else {

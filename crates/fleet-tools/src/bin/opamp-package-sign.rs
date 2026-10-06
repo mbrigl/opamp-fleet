@@ -130,9 +130,6 @@ enum Format {
 /// a failed install on every matched Agent. Test-only: the tool itself never unpacks. (It does
 /// reach one item of `archive` outside tests — `unix_mode_attributes`, the 7z convention that
 /// module also decodes.)
-///
-/// Until ADR-0025 this was `#[path = "../archive.rs"] mod archive`, a second compilation of the
-/// same file, because a binary in a crate without a library has no other way to reach it.
 #[cfg(test)]
 use fleet_agent::archive;
 
@@ -452,8 +449,8 @@ mod tests {
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
-    /// ships `.tar.gz` since ADR-0029, and `.7z` stays the container an artifact may be encrypted
-    /// in (ADR-0018). Both therefore carry an executable mode of their own — the tar in its header,
+    /// ships `.tar.gz` (ADR-0029), and `.7z` stays the container an artifact may be encrypted in
+    /// (ADR-0018). Both therefore carry an executable mode of their own — the tar in its header,
     /// the 7z in 7-Zip's Unix-attribute convention — rather than relying on the Client, which sets
     /// the mode itself but only on the path where *it* installs the package.
     #[test]

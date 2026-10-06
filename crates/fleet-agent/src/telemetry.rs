@@ -519,9 +519,9 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
 ///
 /// This is not a consequence of supplying our own client: with the `reqwest-client` feature
 /// `opentelemetry-otlp` builds exactly the same asynchronous client when given none, so the fault
-/// was latent from the day ADR-0022 chose that feature and surfaced only once a destination was
-/// actually offered. ADR-0022's reasoning — *"this Client is a tokio process"* — is true of the
-/// process and false of the thread the export happens on.
+/// comes with the feature ADR-0022 chose and shows only once a destination is actually offered.
+/// ADR-0022's reasoning — *"this Client is a tokio process"* — is true of the process and false of
+/// the thread the export happens on.
 ///
 /// The fix keeps the asynchronous client the ADR chose and puts the work where it belongs: every
 /// request is `spawn`ed onto the runtime handle captured when the exporter was built, and the

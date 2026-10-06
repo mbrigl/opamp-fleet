@@ -353,7 +353,7 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0017 prescribes — and, now that both live here, it is
+    /// The baked string has the shape ADR-0017 prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
     // Verifies: ADR-0017
     #[test]
