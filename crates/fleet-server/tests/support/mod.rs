@@ -24,47 +24,30 @@ pub struct TestServer {
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn() -> TestServer {
-    spawn_with(None, None).await
-}
-
-/// The same real router, with the OpAMP endpoint's credential check active (ADR-0017).
-#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
-pub async fn spawn_with_auth(auth: Option<fleet_server::transport::OpampAuth>) -> TestServer {
-    spawn_with(auth, None).await
+    spawn_with(None).await
 }
 
 /// The same real router with a tightened message size limit, for the tests that drive the
 /// Baseline's size rules without moving megabytes around.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_limit(limit: usize) -> TestServer {
-    spawn_full(None, None, limit, DEFAULT_STALE_AFTER).await
+    spawn_full(None, limit, DEFAULT_STALE_AFTER).await
 }
 
 /// The same real router with a tightened staleness budget (ADR-0026), for the tests that need an
 /// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
-    spawn_full(
-        None,
-        None,
-        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
-        stale_after,
-    )
-    .await
+    spawn_full(None, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE, stale_after).await
 }
 
 /// The Server's own default, restated here so a scaffolded Server behaves like a real one.
 const DEFAULT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The full shape: optional credential check (ADR-0017) and optional connection-settings offer
-/// (ADR-0018).
+/// The full shape: an optional connection-settings offer (ADR-0060).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
-pub async fn spawn_with(
-    auth: Option<fleet_server::transport::OpampAuth>,
-    offer: Option<fleet_server::fleet::ConnectionOffer>,
-) -> TestServer {
+pub async fn spawn_with(offer: Option<fleet_server::fleet::ConnectionOffer>) -> TestServer {
     spawn_full(
-        auth,
         offer,
         opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
         DEFAULT_STALE_AFTER,
@@ -73,7 +56,6 @@ pub async fn spawn_with(
 }
 
 async fn spawn_full(
-    auth: Option<fleet_server::transport::OpampAuth>,
     offer: Option<fleet_server::fleet::ConnectionOffer>,
     limit: usize,
     stale_after: std::time::Duration,
@@ -88,11 +70,7 @@ async fn spawn_full(
             .with_max_message_size(limit)
             .with_stale_after(stale_after),
     );
-    let (addr, rest_addr) = serve(
-        state.clone(),
-        fleet_server::transport::Admission::new(auth, false),
-    )
-    .await;
+    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
     TestServer {
         addr,
         rest_addr,
@@ -247,6 +225,60 @@ pub async fn distribute_with_role(
         .await
         .expect("roll out the configuration");
     assert_eq!(response.status(), 200, "the configuration is rolled out");
+}
+
+/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0066).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub struct ManualClock(pub std::sync::atomic::AtomicU64);
+
+impl fleet_server::fleet::Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+impl ManualClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000_000)))
+    }
+
+    pub fn advance(&self, by: std::time::Duration) {
+        self.0.fetch_add(
+            u64::try_from(by.as_millis()).expect("millis"),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+/// The same real router with the Agent plane's rate limit armed (ADR-0066), its buckets on a clock
+/// the test moves.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_agent_rate(
+    limits: fleet_server::agent_rate::Limits,
+) -> (TestServer, Arc<ManualClock>) {
+    opamp::tls::install_ring_provider();
+    let clock = ManualClock::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("open the configuration store")
+            .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
+                limits,
+                100,
+                clock.clone(),
+            )))),
+    );
+    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    (
+        TestServer {
+            addr,
+            rest_addr,
+            state,
+            _dir: dir,
+        },
+        clock,
+    )
 }
 
 /// The same real router with own-telemetry destinations to offer (ADR-0025).

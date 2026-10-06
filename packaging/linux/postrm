@@ -7,8 +7,8 @@
 # it cleanly takes back —
 #
 #   remove:  the PATH symlink and the executable layout — every staged version and the `current`
-#            pointer, which live under `/opt`. The data root stays: this host's identity and a
-#            credential the operator typed are not binaries, and a reinstall picks them back up.
+#            pointer, which live under `/opt`. The data root stays: this host's identity and the
+#            configuration the operator wrote are not binaries, and a reinstall picks them back up.
 #   purge:   (dpkg only) all of the above and the data root itself — state, logs and
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.

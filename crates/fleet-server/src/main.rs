@@ -13,18 +13,18 @@ use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
-use tracing::info;
+use tracing::{info, warn};
 
 fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
-         server hash-credential --bearer|--basic   (reads the secret from standard input)\n       \
+         server hash-credential --basic   (reads the password from standard input)\n       \
          server audit-verify <config_dir>/audit"
     );
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0052 clause 3): walks the audit record's files in order and
+/// `server audit-verify <dir>` (ADR-0063 clause 3): walks the audit record's files in order and
 /// names the first entry whose `prev` does not match the entry before it.
 fn audit_verify(dir: Option<String>) -> ! {
     let Some(dir) = dir else { usage() };
@@ -63,13 +63,23 @@ fn audit_verify(dir: Option<String>) -> ! {
     }
 }
 
-/// `server hash-credential --bearer|--basic` (ADR-0039 clause 26): reads the secret from standard
-/// input — without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
+/// What makes the entry `server.toml` keeps from a secret.
+type Hasher = fn(&str) -> Result<String, String>;
+
+/// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0059 clause 26).
+fn hasher(scheme: Option<&str>) -> Option<Hasher> {
+    match scheme {
+        Some("--basic") => Some(fleet_server::credentials::hash_basic),
+        _ => None,
+    }
+}
+
+/// `server hash-credential --basic` (ADR-0059 clause 26): reads the password from standard input —
+/// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
-    let hash: fn(&str) -> Result<String, String> = match scheme.as_deref() {
-        Some("--bearer") => fleet_server::credentials::hash_bearer,
-        Some("--basic") => fleet_server::credentials::hash_basic,
-        _ => usage(),
+    let Some(hash) = hasher(scheme.as_deref()) else {
+        usage()
     };
     let secret = match read_secret() {
         Ok(secret) => secret,
@@ -208,7 +218,7 @@ async fn main() {
     };
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0038, ADR-0039).
+    // to know which CA issued what (ADR-0038, ADR-0059).
     let planes = match config
         .tls
         .as_ref()
@@ -227,30 +237,20 @@ async fn main() {
     };
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     let enrolment = config.enrolment.as_ref().map(|_| {
-        // ADR-0039: closed until an operator opens it.
+        // ADR-0059: closed until an operator opens it.
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()))
     });
     let limits = config.admission_throttle.limits();
 
-    let connection_offer = match config
+    let connection_offer = config
         .connection_offer
         .as_ref()
-        .map(fleet_server::fleet::ConnectionOffer::from_config)
-        .transpose()
-    {
-        Ok(offer) => {
-            if offer.is_some() {
-                // ADR-0018.
-                info!("offering connection settings to the fleet");
-            }
-            offer
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+        .map(fleet_server::fleet::ConnectionOffer::from_config);
+    if connection_offer.is_some() {
+        // ADR-0060.
+        info!("offering connection settings to the fleet");
+    }
     let client_ca = match config
         .client_ca
         .as_ref()
@@ -272,6 +272,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
+        // ADR-0070 clause 3.
+        info!("{notice}");
+    }
     let telemetry_offer = config
         .telemetry_offer
         .as_ref()
@@ -299,28 +303,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The fleet credential's check (ADR-0039), built once: admission runs it, and the revocation
-    // list revokes only what it accepts. The configuration was refused at load without `[auth]`.
-    let auth = match config
-        .auth
-        .as_ref()
-        .map(fleet_server::transport::OpampAuth::from_config)
-        .transpose()
-    {
-        Ok(auth) => auth,
-        Err(e) => {
-            eprintln!("{}: {e}", config_path.display());
-            std::process::exit(1);
-        }
-    };
-    let accepts: fleet_server::revocation::Accepts = match &auth {
-        Some(auth) => {
-            let credentials = auth.credentials();
-            Arc::new(move |authorization: &str| credentials.verify(authorization))
-        }
-        None => Arc::new(|_: &str| false),
-    };
-    // What the client CA signed and what is revoked (ADR-0049), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0065), kept beside the fleet's records.
     let revocations = match fleet_server::fs::FsLedgerStore::open(
         config.config_dir.join("revocation"),
     )
@@ -328,7 +311,6 @@ async fn main() {
         fleet_server::revocation::Revocations::open(
             Box::new(store),
             clock.clone(),
-            accepts,
             planes.3.clone(),
         )
     }) {
@@ -338,7 +320,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The audit record (ADR-0052), opened before anything is decided.
+    // The audit record (ADR-0063), opened before anything is decided.
     let audit = match fleet_server::fs::FsAuditStore::open(config.config_dir.join("audit"))
         .and_then(|store| {
             fleet_server::audit_log::AuditLog::start(
@@ -356,9 +338,19 @@ async fn main() {
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
+    if let Some(warning) = config.rate_limit_warning() {
+        // ADR-0066 clause 2.
+        warn!("{warning}");
+    }
+    let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
+        config.agent_rate_limit.limits(),
+        config.max_agents,
+        clock.clone(),
+    ));
     let state = match AppState::new(config.config_dir.clone()) {
         Ok(state) => Arc::new(
             state
+                .with_agent_rate(Some(agent_rate))
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
                 .with_enrolment(enrolment.clone())
@@ -377,14 +369,15 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // Both proofs, always (ADR-0039): the configuration was refused at load without either.
-    info!("the OpAMP endpoint requires the fleet credential and a client certificate");
+    // The certificate is the whole of admission (ADR-0059): the configuration was refused at load
+    // without the client CA.
+    info!("the OpAMP endpoint admits by client certificate");
     // Two planes, two listeners (ADR-0038): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
-        fleet_server::transport::Admission::new(auth, true)
+        fleet_server::transport::Admission::new(true)
             .with_enrolment(issuers, enrolment)
             .with_revocations(Some(revocations))
             .with_audit(Some(audit.clone()))
@@ -411,7 +404,7 @@ async fn main() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0039. Both planes serve TLS, so the password never crosses a network in clear
+        // ADR-0059. Both planes serve TLS, so the password never crosses a network in clear
         // (ADR-0038).
         info!("the REST API and the UI require authentication");
     }
@@ -454,4 +447,46 @@ async fn main() {
     // The graceful-shutdown flush (ADR-0026): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+}
+
+/// What a Server that signs no CSRs says once at startup (ADR-0070 clause 3): its hosts hold the
+/// certificates an operator provisioned, and only one that names its host is served an uploaded
+/// artifact.
+fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
+    (!signs_csrs).then(|| {
+        format!(
+            "without [client_ca], uploaded artifacts reach only hosts whose certificate names a \
+             host ({}<id>)",
+            fleet_server::ca::HOST_URI_PREFIX
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
+    /// credential to hash.
+    /// Verifies: ADR-0059
+    #[test]
+    fn hash_credential_hashes_a_basic_password_alone() {
+        let basic = hasher(Some("--basic")).expect("--basic is a scheme");
+        let entry = basic("s3cret").expect("hash");
+        fleet_server::credentials::check_basic(&entry).expect("an entry server.toml keeps");
+        assert!(!entry.contains("s3cret"));
+        assert!(hasher(Some("--bearer")).is_none(), "--bearer is gone");
+        assert!(hasher(None).is_none());
+    }
+
+    /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
+    /// certificate naming a host, and how one is named; with it, it says nothing.
+    /// Verifies: ADR-0070
+    #[test]
+    fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
+        let notice = uploaded_artifacts_notice(false).expect("a notice");
+        assert!(notice.contains("uploaded artifacts"), "{notice}");
+        assert!(notice.contains("urn:opamp-fleet:host:<id>"), "{notice}");
+        assert!(uploaded_artifacts_notice(true).is_none());
+    }
 }

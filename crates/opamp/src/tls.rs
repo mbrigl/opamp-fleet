@@ -181,7 +181,7 @@ mod tests {
         assert!(!format!("{identity:?}").contains("PRIVATE KEY"));
     }
 
-    /// Verifies: ADR-0057, ADR-0054, ADR-0041, Q-3
+    /// Verifies: ADR-0057, ADR-0054, ADR-0060, Q-3
     #[test]
     fn the_provider_offers_tls_1_3_suites_alone() {
         let provider = provider();

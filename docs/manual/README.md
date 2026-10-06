@@ -15,9 +15,9 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Artifact documents](../artifacts/)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent: [Icinga 2](../artifacts/icinga2.md), [GLPI Agent](../artifacts/glpi-agent.md), [Telegraf](../artifacts/telegraf.md) |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
-(the Client presents a credential and a client certificate the Server accepts, and a new host is
+(the Client presents a client certificate the Server accepts, and a new host is
 enrolled on an operator's approval), **connection settings** (the Server can move
-the fleet to a new endpoint or credential), and **packages** (the Server decides *which* artifact an
+the fleet to a new endpoint and renews each certificate), and **packages** (the Server decides *which* artifact an
 Agent gets, the Client decides *whether* it takes one at all).
 
 ## What this manual is not
@@ -47,7 +47,7 @@ An installed deployment runs the same two programs under the names `server` and 
 ## Quick start: a closed loop on one machine
 
 This is the smallest complete deployment — one Server, one Client, one Configuration. Neither end
-starts without TLS material, a fleet credential and a client certificate, so the first step makes a
+starts without TLS material and a client certificate, so the first step makes a
 development set of them.
 
 1. **Create the development certificates.** [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) needs
@@ -74,8 +74,7 @@ development set of them.
    ```
 
 3. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself. It
-   presents the development client certificate and the token `dev-fleet-token`, and it trusts the
-   development CA.
+   presents the development client certificate, and it trusts the development CA.
 
    ```console
    $ cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml
@@ -159,13 +158,13 @@ only to the IP literals `127.0.0.1` and `::1`.
 **Security before convenience.** Both ends refuse an insecure configuration at startup, and the
 refusal names the setting to fix; neither warns and carries on. Every connection that leaves a host
 is TLS 1.3, and plaintext is accepted on the loopback alone — the IP literals `127.0.0.1` and
-`::1`, never the name `localhost`. An Agent proves fleet membership twice: with a client
-certificate in the TLS handshake and with the fleet credential. A new host gets its certificate
+`::1`, never the name `localhost`. An Agent proves fleet membership with one thing: a client
+certificate in the TLS handshake. It holds no credential. A new host gets its certificate
 only through an enrolment an operator opens and approves. Software is installed only when it is
 signed with the operator's key and fetched from a source the operator allowed.
 
 **Configuration files.** Both ends read one hand-edited TOML file, named with `--config`.
-Most keys are optional; the TLS material and the fleet credential are not. An unknown key is
+Most keys are optional; the TLS material is not. An unknown key is
 refused at startup rather than ignored, and there are no environment-variable fallbacks. The
 annotated examples in [`config/`](../../config/) are the reference copies: [`config/server.toml`](../../config/server.toml) and
 [`config/supervisor.toml`](../../config/supervisor.toml).

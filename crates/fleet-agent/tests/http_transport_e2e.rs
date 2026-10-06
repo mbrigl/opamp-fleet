@@ -150,7 +150,7 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
     stage_owned_program(&state_dir, "otelcol", &program);
 
     let _client = spawn_client(&config_path);
@@ -260,7 +260,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);

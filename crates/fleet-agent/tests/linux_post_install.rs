@@ -32,7 +32,7 @@ fn printed(script: &str) -> Vec<&str> {
 /// startup rule (`ClientConfig::transport`, which `ClientConfig::load` applies) refuses plaintext
 /// off the loopback literals, so a `ws://` or `http://localhost` example would teach a value the
 /// service then refuses. A placeholder host stands in for the operator's Server.
-/// Verifies: ADR-0047
+/// Verifies: ADR-0062
 #[test]
 fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
     let script = post_install();
@@ -55,12 +55,13 @@ fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
     }
 }
 
-/// The first step the post-install prints is the questionnaire, which asks for the credential and
-/// the certificate; an endpoint alone is never offered as a complete step, since a Client with
-/// nothing more refuses to start (ADR-0047 clause 13).
-/// Verifies: ADR-0047
+/// The first step the post-install prints is the questionnaire, which asks for the client
+/// identity; an endpoint alone is never offered as a complete step, since a Client with nothing
+/// more refuses to start. The manual alternative names the identity, `[tls] cert_file` and
+/// `key_file`, and nothing the Client no longer reads (ADR-0062 clause 13).
+/// Verifies: ADR-0062
 #[test]
-fn the_post_install_steps_ask_for_the_credential() {
+fn the_post_install_steps_ask_for_the_client_identity() {
     let script = post_install();
     let printed = printed(&script);
     let first_step = printed
@@ -74,7 +75,14 @@ fn the_post_install_steps_ask_for_the_credential() {
     );
     let text = printed.join("\n");
     assert!(
-        text.contains("[auth]") && text.contains("cert_file"),
+        text.contains("[tls]") && text.contains("cert_file") && text.contains("key_file"),
         "{text}"
     );
+    let lower = text.to_lowercase();
+    for absent in ["[auth]", "credential", "bearer_token", "password"] {
+        assert!(
+            !lower.contains(absent),
+            "the post-install names {absent}: {text}"
+        );
+    }
 }

@@ -1,8 +1,8 @@
-//! Repeated admission failures from one peer address are throttled (ADR-0039 clause 24).
+//! Repeated admission failures from one peer address are throttled (ADR-0059 clause 24).
 //!
 //! Every `401` counts as a failure of the peer's IP address. A peer with `max_failures` failures
-//! within `window_secs` is in back-off for `backoff_secs`, and is answered before its credential
-//! is compared. A success clears nothing: behind a shared address a member's success would wipe a
+//! within `window_secs` is in back-off for `backoff_secs`, and is answered before anything else is
+//! checked. A success clears nothing: behind a shared address a member's success would wipe a
 //! guesser's count, so failures only age out of the window. The table is bounded; when it is full
 //! the address heard from least recently that is not in back-off is dropped first, so a flood of
 //! fresh addresses costs memory once and cannot push a blocked address out.
@@ -111,7 +111,7 @@ impl Throttle {
         (until > now).then(|| (until - now).div_ceil(1000).max(1))
     }
 
-    /// Starts an attempt of `peer` before its credential is verified; `None` when its failures and
+    /// Starts an attempt of `peer` before an operator's credential is verified; `None` when its failures and
     /// the attempts already under way reach `max_failures`. Without this, every attempt sent at
     /// once would pass the back-off check before the first of them had failed.
     #[must_use]
@@ -208,7 +208,7 @@ mod tests {
 
     const PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
 
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_peer_that_fails_too_often_waits_out_the_back_off() {
         let (throttle, clock) = throttle(16);
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(throttle.retry_after(PEER), None);
     }
 
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_full_table_keeps_an_address_in_back_off() {
         let (throttle, clock) = throttle(2);
@@ -255,7 +255,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn the_table_is_bounded_and_drops_the_oldest() {
         let (throttle, clock) = throttle(2);
@@ -276,7 +276,7 @@ mod tests {
 
     /// Attempts already under way count against the limit, so sending many at once gains
     /// nothing, and a whole IPv6 /64 is one peer.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn attempts_under_way_count_and_a_slash_64_is_one_peer() {
         let (throttle, _) = throttle(16);

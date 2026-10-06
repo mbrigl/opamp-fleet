@@ -25,7 +25,7 @@ use tracing::{info, warn};
 use crate::config::{ClientConfig, SupervisorBlock};
 use crate::engine::{Engine, EngineAgent};
 use crate::shutdown::{shutdown_channel, Shutdown};
-use crate::storage::Storage;
+use crate::storage::{DroppedRemoteConfig, DroppedStoredSet, Storage};
 
 use agent::AgentState;
 use block::{find_plugin, resolve, take_program, Resolved};
@@ -80,6 +80,9 @@ fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String,
 /// unknown plugin, or a plugin rejects its settings — startup fails loudly, nothing runs half.
 pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine, String> {
     report_orphaned_supervisor_dirs(config);
+    for notice in remote_config_disabled_notices(config) {
+        warn!("{notice}");
+    }
     let (event_tx, events) = mpsc::channel(64);
     let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
 
@@ -89,9 +92,17 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
     // package to. It is index 0 so the Supervisors that follow keep a stable, obvious offset.
     let storage = Storage::new(config.state_dir.clone())
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
+    // A host that keeps its Supervisor set takes none from the Server, and the set stored from
+    // before leaves rather than be reported as applied (ADR-0069 clauses 22 and 24).
+    let self_state = if config.server_manages_set() {
+        AgentState::new(config.name.clone(), storage, crate::host::SystemHost)
+    } else {
+        drop_stored_supervisor_set(&storage);
+        AgentState::new_without_remote_config(config.name.clone(), storage, crate::host::SystemHost)
+    };
     let mut self_state = declare_heartbeat(
         config,
-        AgentState::new(config.name.clone(), storage, crate::host::SystemHost)
+        self_state
             .map_err(|e| format!("cannot restore the agent state: {e}"))?
             .with_attributes(kind_attributes(config.agent_attributes(None)))
             .with_namespace(config.service_namespace.clone()),
@@ -190,9 +201,10 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     resolved.plugin.check(&block.name, resolved.settings)
 }
 
-/// What a Server-delivered block may not bring (ADR-0051 clauses 18, 19), checked against
-/// `running` — the configuration in force, whose `[supervisors]` section the Server cannot change
-/// and whose block of the same name the delivered one may repeat.
+/// What a Server-delivered block may not bring (ADR-0069 clauses 18, 19; for a Supervisor whose
+/// remote configuration is switched off, ADR-0067 clause 7), checked against `running` — the
+/// configuration in force, whose `[supervisors]` section the Server cannot change and whose block
+/// of the same name the delivered one may repeat.
 ///
 /// # Errors
 /// Returns the reason the delivered block is refused, naming the block and what it brings.
@@ -200,33 +212,124 @@ pub fn check_delivered_block(
     running: &ClientConfig,
     block: &SupervisorBlock,
 ) -> Result<(), String> {
+    let plugins = registry();
+    let plugin = find_plugin(&plugins, block)?;
     let current = running
         .supervisors
         .iter()
         .find(|existing| existing.name == block.name && existing.kind == block.kind)
         .map(|existing| &existing.settings);
-    let policy = &running.supervisor_defaults;
-    check_delivered_env(block, current, &policy.delivered_env)?;
-    if !policy.delivered_args {
-        for key in ["args", "version_args"] {
-            if block.settings.get(key) != current.and_then(|settings| settings.get(key)) {
-                return Err(format!(
-                    "supervisor {:?}: a delivered block may not set {key} — allow it with \
-                     [supervisors] delivered_args = true in this Client's supervisor.toml",
-                    block.name
-                ));
+    if running.remote_config_disabled(&block.name) {
+        // A listed Supervisor's block is the operator's whole: repeated as it runs, or added
+        // naming its program and nothing else (ADR-0067 clause 7).
+        let named = running
+            .supervisors
+            .iter()
+            .find(|existing| existing.name == block.name);
+        check_listed_block(block, named, plugin)?;
+    } else {
+        let policy = &running.supervisor_defaults;
+        check_delivered_env(block, current, &policy.delivered_env)?;
+        if !policy.delivered_args {
+            for key in ["args", "version_args"] {
+                if block.settings.get(key) != current.and_then(|settings| settings.get(key)) {
+                    return Err(format!(
+                        "supervisor {:?}: a delivered block may not set {key} — allow it with \
+                         [supervisors] delivered_args = true in this Client's supervisor.toml",
+                        block.name
+                    ));
+                }
             }
         }
     }
-    let plugins = registry();
-    let plugin = find_plugin(&plugins, block)?;
     plugin
         .check_delivered(&block.settings, current)
         .map_err(|e| format!("supervisor {:?}: {e}", block.name))
 }
 
+/// A delivered block for a Supervisor whose remote configuration is switched off configures
+/// nothing, whatever `delivered_args` and `delivered_env` allow: any key it may change would be a
+/// configuration by another route (ADR-0067 clause 7). With a block of that name running, the
+/// delivered one equals it whole; added, it carries `type`, `name` and — where the kind does not
+/// name its own program — the kind's program key, and nothing else.
+fn check_listed_block(
+    block: &SupervisorBlock,
+    current: Option<&SupervisorBlock>,
+    plugin: &dyn Plugin,
+) -> Result<(), String> {
+    let refuse = |key: &str| {
+        Err(format!(
+            "supervisor {:?}: a delivered block may not set {key} — remote configuration is \
+             switched off for it in [supervisors] remote_config_disabled in this Client's \
+             supervisor.toml, so the block must stay as the operator wrote it",
+            block.name
+        ))
+    };
+    // The keys the core takes out of a block, spelled for comparison; an unset one is `None`.
+    let core = |b: &SupervisorBlock| {
+        let secs = |value: Option<u64>| value.map(|secs| secs.to_string());
+        [
+            ("type", Some(b.kind.clone())),
+            ("service_name", b.service_name.clone()),
+            (
+                "endpoint_port",
+                (b.endpoint_port != 0).then(|| b.endpoint_port.to_string()),
+            ),
+            ("stop_timeout_secs", secs(b.stop_timeout_secs)),
+            ("apply_grace_secs", secs(b.apply_grace_secs)),
+            ("retain_previous_secs", secs(b.retain_previous_secs)),
+            (
+                "program_path",
+                b.program_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            ),
+        ]
+    };
+    match current {
+        Some(current) => {
+            if block == current {
+                return Ok(());
+            }
+            for ((key, given), (_, running)) in core(block).into_iter().zip(core(current)) {
+                if given != running {
+                    return refuse(key);
+                }
+            }
+            let keys = block.settings.keys().chain(current.settings.keys());
+            for key in keys {
+                if block.settings.get(key) != current.settings.get(key) {
+                    return refuse(key);
+                }
+            }
+            // Equal key by key yet unequal as a whole cannot happen; refuse rather than assume.
+            refuse("a key")
+        }
+        None => {
+            for (key, given) in core(block) {
+                if key != "type" && given.is_some() {
+                    return refuse(key);
+                }
+            }
+            let program_key = plugin
+                .defaults()
+                .program
+                .is_none()
+                .then(|| plugin.program_key());
+            match block
+                .settings
+                .keys()
+                .find(|key| Some(key.as_str()) != program_key)
+            {
+                Some(key) => refuse(key),
+                None => Ok(()),
+            }
+        }
+    }
+}
+
 /// Variables that steer which code a program loads — the dynamic loader's, `PATH`, the hooks of
-/// common runtimes — refused in a delivered block whatever `delivered_env` allows (ADR-0051 clause
+/// common runtimes — refused in a delivered block whatever `delivered_env` allows (ADR-0069 clause
 /// 18). Compared without regard to case, as Windows compares environment names.
 const LOADING_NAMES: &[&str] = &[
     "PATH",
@@ -364,17 +467,33 @@ pub fn start_supervisor(
         None => crate::supervisor::ports::InstallTarget::Binary(program.path.clone()),
     };
 
-    let mut state = declare_heartbeat(
-        config,
+    // Switched off, the Server's last configuration leaves before the kind starts, and what the
+    // operator placed in `config/` stays (ADR-0067 clause 5).
+    let remote_config = !config.remote_config_disabled(&block.name);
+    if !remote_config {
+        drop_stored_remote_config(&block.name, &storage)?;
+    }
+    let state = if remote_config {
         AgentState::supervised(
             block.name.clone(),
             service_name,
             storage,
             crate::host::SystemHost,
         )
-        .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
-        .with_attributes(config.agent_attributes(Some(block)))
-        .with_namespace(config.service_namespace.clone()),
+    } else {
+        AgentState::supervised_without_remote_config(
+            block.name.clone(),
+            service_name,
+            storage,
+            crate::host::SystemHost,
+        )
+    };
+    let mut state = declare_heartbeat(
+        config,
+        state
+            .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
+            .with_attributes(config.agent_attributes(Some(block)))
+            .with_namespace(config.service_namespace.clone()),
     );
     // Every Managed Process is the fleet's (ADR-0022), so every Supervisor takes whichever
     // top-level package the Server selects for it (ADR-0019, ADR-0020). There is no second branch:
@@ -439,6 +558,107 @@ pub fn start_supervisor(
         stop: Some(stop_tx),
         block_name: Some(block.name.clone()),
     })
+}
+
+/// Removes what a remote configuration stored for the Supervisor `name` before its remote
+/// configuration was switched off, and says what it did (ADR-0067 clause 5).
+///
+/// # Errors
+/// Returns an error when a file that has to go cannot be deleted — the Supervisor must not start
+/// on the Server's configuration under a switch that says it does not.
+fn drop_stored_remote_config(name: &str, storage: &Storage) -> Result<(), String> {
+    match storage.drop_remote_config().map_err(|e| {
+        format!("supervisor {name:?}: cannot remove the stored remote configuration: {e}")
+    })? {
+        None => {}
+        Some(DroppedRemoteConfig::Removed { hash, kept }) => warn!(
+            supervisor = %name,
+            hash = %hex::encode(hash),
+            kept = ?kept,
+            "remote configuration is switched off: removed the stored remote configuration and \
+             the files it wrote; kept the files whose content had changed"
+        ),
+        Some(DroppedRemoteConfig::Undecodable) => warn!(
+            supervisor = %name,
+            "remote configuration is switched off: removed a stored remote configuration that \
+             does not decode; config/ is left as it is and may still hold files the Server wrote"
+        ),
+    }
+    Ok(())
+}
+
+/// Removes the Supervisor set the Client's own Agent stored before the host kept its set, and says
+/// what it did (ADR-0069 clause 24). Nothing runs on those files — the set is already in
+/// `supervisor.toml` — so a file that cannot go is a warning, not a reason to stay offline.
+fn drop_stored_supervisor_set(storage: &Storage) {
+    match storage.drop_stored_set() {
+        Ok(None) => {}
+        Ok(Some(DroppedStoredSet::Removed {
+            hash,
+            kept,
+            unremoved,
+        })) => {
+            warn!(
+                hash = %hex::encode(hash),
+                kept = ?kept,
+                "the Server does not manage this Client's supervisor set: removed the stored \
+                 supervisor set; the [[supervisor]] blocks in supervisor.toml stay as they are"
+            );
+            for (file, error) in unremoved {
+                warn!(
+                    file = %file,
+                    error = %error,
+                    "cannot remove a copy of the stored supervisor set; nothing reads it"
+                );
+            }
+        }
+        Ok(Some(DroppedStoredSet::Undecodable)) => warn!(
+            "the Server does not manage this Client's supervisor set: removed a stored supervisor \
+             set that does not decode"
+        ),
+        Err(e) => warn!(
+            error = %e,
+            "the Server does not manage this Client's supervisor set, and remote-config.pb cannot \
+             be removed; it is not reported now, but its hash would be reported as applied again \
+             once server_manages_set is true"
+        ),
+    }
+}
+
+/// The startup notices `[supervisors] remote_config_disabled` earns (ADR-0067 clause 2): a listed
+/// name no `[[supervisor]]` block carries, since the set may arrive later, and one that is the
+/// Client's own name, whose Agent the switch does not cover.
+#[must_use]
+pub fn remote_config_disabled_notices(config: &ClientConfig) -> Vec<String> {
+    config
+        .supervisor_defaults
+        .remote_config_disabled
+        .iter()
+        .filter(|name| config.supervisors.iter().all(|block| &block.name != *name))
+        .map(|name| {
+            if *name == config.name {
+                if config.server_manages_set() {
+                    format!(
+                        "[supervisors] remote_config_disabled names {name:?}, which is this \
+                         Client's own name: the Client's own Agent is not covered and keeps \
+                         taking its supervisor set; [supervisors] server_manages_set = false \
+                         stops that"
+                    )
+                } else {
+                    format!(
+                        "[supervisors] remote_config_disabled names {name:?}, which is this \
+                         Client's own name: the Client's own Agent is not covered by this key; \
+                         server_manages_set = false already keeps its supervisor set on the host"
+                    )
+                }
+            } else {
+                format!(
+                    "[supervisors] remote_config_disabled names {name:?}, which no \
+                     [[supervisor]] block carries yet; it takes effect when one does"
+                )
+            }
+        })
+        .collect()
 }
 
 /// Forwards the Client-wide shutdown into one Supervisor's own channel, so its adapter and
@@ -710,7 +930,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0051, ADR-0042
+    /// Verifies: ADR-0069, ADR-0042
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -923,6 +1143,421 @@ mod tests {
         assert!(
             !body.contains("s3cret"),
             "a credential must never leave the host: {body}"
+        );
+    }
+
+    /// A stored configuration as a remote configuration left it: `fleet` and the roled `ruleset`
+    /// as entry files, `.supplementary` naming the role, and the `.pb` beside them.
+    fn store_offer(supervisor_dir: &std::path::Path) -> std::path::PathBuf {
+        use crate::supervisor::ports::AgentStorage as _;
+        let storage = Storage::new(supervisor_dir.to_path_buf()).expect("storage");
+        let entry = |body: &str, role: &str| opamp::proto::AgentConfigObject {
+            body: body.as_bytes().to_vec(),
+            role: role.to_string(),
+            content_type: String::new(),
+        };
+        storage
+            .store_remote_config(&opamp::proto::AgentRemoteConfig {
+                config: Some(opamp::proto::AgentConfigMap {
+                    config_map: std::collections::HashMap::from([
+                        ("fleet".to_string(), entry("receivers: {}\n", "")),
+                        ("ruleset".to_string(), entry("rules: []\n", "rules")),
+                        ("edited".to_string(), entry("server: 1\n", "")),
+                    ]),
+                }),
+                config_hash: b"stored".to_vec(),
+            })
+            .expect("store");
+        storage.config_dir()
+    }
+
+    /// One `command` Supervisor named `agent`, with `names` in `[supervisors]
+    /// remote_config_disabled` and, when given, the Client's own `name`.
+    fn listed_config(root: &std::path::Path, names: &str, name: Option<&str>) -> ClientConfig {
+        toml::from_str(&format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n{own}\
+             [supervisors]\nremote_config_disabled = {names}\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"managed-agent\"\n",
+            state = root.join("state").to_string_lossy(),
+            own = name.map(|n| format!("name = {n:?}\n")).unwrap_or_default(),
+        ))
+        .expect("parse")
+    }
+
+    /// A listed name no block carries starts the Client and earns one notice naming it; one equal
+    /// to the Client's own name says that Agent is not covered (ADR-0067 clause 2).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn a_listed_name_without_a_block_is_a_notice_not_a_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"agent\", \"later\"]", None);
+        build_engine(&config, &shutdown).expect("a name without a block starts");
+        let notices = remote_config_disabled_notices(&config);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("\"later\""), "{notices:?}");
+        assert!(
+            notices[0].contains("no [[supervisor]] block"),
+            "{notices:?}"
+        );
+    }
+
+    /// Switching off takes the Server's last configuration out of force before the kind starts:
+    /// the entry files it wrote and `.supplementary` go while their bytes are still the stored
+    /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (ADR-0067
+    /// clause 5).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn a_listed_supervisor_drops_the_stored_remote_config_and_keeps_the_operators_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"agent\"]", None);
+        let supervisor_dir = config.supervisor_dir("agent");
+        let config_dir = store_offer(&supervisor_dir);
+        assert!(config_dir
+            .join(crate::storage::SUPPLEMENTARY_FILE)
+            .is_file());
+        std::fs::write(config_dir.join("edited"), "operator: 1\n").expect("overwrite");
+        std::fs::write(config_dir.join("local.yaml"), "mine: 1\n").expect("operator's file");
+
+        build_engine(&config, &shutdown).expect("build");
+
+        assert!(!supervisor_dir.join("remote-config.pb").exists());
+        assert!(!config_dir.join("fleet").exists());
+        assert!(!config_dir.join("ruleset").exists());
+        assert!(!config_dir.join(crate::storage::SUPPLEMENTARY_FILE).exists());
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("edited")).expect("kept"),
+            "operator: 1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("local.yaml")).expect("kept"),
+            "mine: 1\n"
+        );
+    }
+
+    /// A stored configuration whose files cannot be removed stops the Supervisor before its kind
+    /// starts on them, and at startup that fails the whole Client: it fails closed rather than run
+    /// the Server's configuration under a switch that says it does not (ADR-0067 clause 5).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn a_stored_remote_config_that_cannot_be_removed_fails_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"agent\"]", None);
+        let supervisor_dir = config.supervisor_dir("agent");
+        let config_dir = store_offer(&supervisor_dir);
+        // An entry the stored map names that cannot be read, and so cannot be compared or removed.
+        std::fs::remove_file(config_dir.join("fleet")).expect("remove");
+        std::fs::create_dir(config_dir.join("fleet")).expect("in the way");
+
+        let Err(err) = build_engine(&config, &shutdown) else {
+            panic!("started over a stored configuration it could not remove");
+        };
+        assert!(
+            err.contains("\"agent\"")
+                && err.contains("cannot remove the stored remote configuration"),
+            "{err}"
+        );
+        assert!(supervisor_dir.join("remote-config.pb").is_file());
+    }
+
+    /// A stored `.pb` that does not decode is deleted, and `config/` is left exactly as it is,
+    /// since nothing says which of its files the Server wrote (ADR-0067 clause 5).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn an_undecodable_stored_remote_config_is_deleted_and_config_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"agent\"]", None);
+        let supervisor_dir = config.supervisor_dir("agent");
+        let config_dir = store_offer(&supervisor_dir);
+        std::fs::write(supervisor_dir.join("remote-config.pb"), [0xff; 7]).expect("garble");
+
+        build_engine(&config, &shutdown).expect("build");
+
+        assert!(!supervisor_dir.join("remote-config.pb").exists());
+        for kept in [
+            "fleet",
+            "ruleset",
+            "edited",
+            crate::storage::SUPPLEMENTARY_FILE,
+        ] {
+            assert!(config_dir.join(kept).is_file(), "{kept} was touched");
+        }
+    }
+
+    /// A listed Supervisor restarted over a stored configuration reports no status and no hash,
+    /// and declares neither remote-configuration capability (ADR-0067 clauses 3 and 5).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn a_listed_supervisor_reports_no_remote_config_status_after_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"agent\"]", None);
+        store_offer(&config.supervisor_dir("agent"));
+
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        let report = &engine.poll_reports()[SELF_AGENT_OFFSET];
+        assert!(report.remote_config_status.is_none(), "{report:?}");
+        assert_eq!(
+            report.capabilities
+                & (AgentCapabilities::AcceptsRemoteConfig as u64
+                    | AgentCapabilities::ReportsRemoteConfig as u64),
+            0
+        );
+
+        // Unlisted, the same stored configuration is restored as applied, as before.
+        let (_tx, shutdown) = shutdown_channel();
+        let other = tempfile::tempdir().expect("tempdir");
+        let unlisted = listed_config(other.path(), "[]", None);
+        store_offer(&unlisted.supervisor_dir("agent"));
+        let mut engine = build_engine(&unlisted, &shutdown).expect("build");
+        let status = engine.poll_reports()[SELF_AGENT_OFFSET]
+            .remote_config_status
+            .clone()
+            .expect("restored");
+        assert_eq!(status.last_remote_config_hash, b"stored");
+    }
+
+    /// The switch covers Supervisors only: the Client's own name in the list earns a notice, and
+    /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (ADR-0067 clause 2
+    /// and out of scope).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn the_clients_own_agent_keeps_accepting_its_supervisor_set_when_its_name_is_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = listed_config(dir.path(), "[\"edge-1\"]", Some("edge-1"));
+        let notices = remote_config_disabled_notices(&config);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("\"edge-1\"") && notices[0].contains("own Agent is not covered"),
+            "{notices:?}"
+        );
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        let reports = engine.poll_reports();
+        let own = reports[SELF_AGENT_INDEX].capabilities;
+        assert_ne!(own & AgentCapabilities::AcceptsRemoteConfig as u64, 0);
+        assert_ne!(own & AgentCapabilities::ReportsRemoteConfig as u64, 0);
+        assert_ne!(
+            reports[SELF_AGENT_OFFSET].capabilities & AgentCapabilities::AcceptsRemoteConfig as u64,
+            0,
+            "an unlisted Supervisor keeps it too"
+        );
+    }
+
+    /// One `command` Supervisor named `agent`, with `[supervisors] server_manages_set` as given.
+    fn kept_set_config(root: &std::path::Path, server_manages_set: bool) -> ClientConfig {
+        toml::from_str(&format!(
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+             [supervisors]\nserver_manages_set = {server_manages_set}\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"managed-agent\"\n",
+            state = root.join("state").to_string_lossy(),
+        ))
+        .expect("parse")
+    }
+
+    /// On a host that keeps its set, the set the Client's own Agent stored before is removed at
+    /// start — the `.pb` and the unchanged entry copies, not a copy changed since — and is not
+    /// reported; the Agent declares neither remote-configuration bit. With the key `true` the same
+    /// stored set is restored as applied (ADR-0069 clauses 22 and 24).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn a_host_that_keeps_its_set_drops_the_stored_set_and_reports_no_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = kept_set_config(dir.path(), false);
+        let config_dir = store_offer(&config.state_dir);
+        std::fs::write(config_dir.join("edited"), "changed: 1\n").expect("change a copy");
+
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+
+        assert!(!config.state_dir.join("remote-config.pb").exists());
+        assert!(!config_dir.join("fleet").exists());
+        assert!(!config_dir.join("ruleset").exists());
+        assert!(config_dir.join("edited").is_file(), "a changed copy stays");
+        let reports = engine.poll_reports();
+        let own = &reports[SELF_AGENT_INDEX];
+        assert!(own.remote_config_status.is_none(), "{own:?}");
+        assert_eq!(
+            own.capabilities
+                & (AgentCapabilities::AcceptsRemoteConfig as u64
+                    | AgentCapabilities::ReportsRemoteConfig as u64),
+            0
+        );
+        assert_ne!(
+            reports[SELF_AGENT_OFFSET].capabilities & AgentCapabilities::AcceptsRemoteConfig as u64,
+            0,
+            "a Supervisor keeps taking its own configuration"
+        );
+
+        let (_tx, shutdown) = shutdown_channel();
+        let other = tempfile::tempdir().expect("tempdir");
+        let managed = kept_set_config(other.path(), true);
+        store_offer(&managed.state_dir);
+        let mut engine = build_engine(&managed, &shutdown).expect("build");
+        let status = engine.poll_reports()[SELF_AGENT_INDEX]
+            .remote_config_status
+            .clone()
+            .expect("restored");
+        assert_eq!(status.last_remote_config_hash, b"stored");
+        assert!(managed.state_dir.join("remote-config.pb").is_file());
+    }
+
+    /// A `remote-config.pb` that cannot be read or deleted is a warning, not a refusal: nothing
+    /// runs on it, and it is still not reported (ADR-0069 clause 24).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn a_stored_set_that_cannot_be_removed_does_not_stop_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = kept_set_config(dir.path(), false);
+        std::fs::create_dir_all(config.state_dir.join("remote-config.pb")).expect("in the way");
+
+        let mut engine = build_engine(&config, &shutdown).expect("starts all the same");
+        let own = &engine.poll_reports()[SELF_AGENT_INDEX];
+        assert!(own.remote_config_status.is_none(), "{own:?}");
+    }
+
+    /// `remote-config.pb` goes before the copies, so a copy that cannot be removed leaves no hash
+    /// behind: switched back on, the next start reports none (ADR-0069 clauses 24 and 27).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn a_copy_that_cannot_be_removed_still_leaves_no_hash_to_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = kept_set_config(dir.path(), false);
+        let config_dir = store_offer(&config.state_dir);
+        // An entry the stored map names that cannot be read, and so cannot be compared or removed.
+        std::fs::remove_file(config_dir.join("fleet")).expect("remove");
+        std::fs::create_dir(config_dir.join("fleet")).expect("in the way");
+
+        build_engine(&config, &shutdown).expect("starts all the same");
+        assert!(!config.state_dir.join("remote-config.pb").exists());
+        assert!(
+            !config_dir.join("ruleset").exists(),
+            "the other copies still go"
+        );
+
+        let (_tx, shutdown) = shutdown_channel();
+        let managed = kept_set_config(dir.path(), true);
+        let mut engine = build_engine(&managed, &shutdown).expect("build");
+        let own = &engine.poll_reports()[SELF_AGENT_INDEX];
+        assert!(own.remote_config_status.is_none(), "{own:?}");
+        assert_ne!(
+            own.capabilities & AgentCapabilities::AcceptsRemoteConfig as u64,
+            0
+        );
+    }
+
+    /// A stored set that does not decode is deleted, and `config/` is left as it is (ADR-0069
+    /// clause 24).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn an_undecodable_stored_set_is_deleted_and_config_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = kept_set_config(dir.path(), false);
+        let config_dir = store_offer(&config.state_dir);
+        std::fs::write(config.state_dir.join("remote-config.pb"), [0xff; 7]).expect("garble");
+
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+
+        assert!(!config.state_dir.join("remote-config.pb").exists());
+        for kept in [
+            "fleet",
+            "ruleset",
+            "edited",
+            crate::storage::SUPPLEMENTARY_FILE,
+        ] {
+            assert!(config_dir.join(kept).is_file(), "{kept} was touched");
+        }
+        assert!(engine.poll_reports()[SELF_AGENT_INDEX]
+            .remote_config_status
+            .is_none());
+    }
+
+    /// The removal is logged once naming the stored hash, and a set offered to the built Client
+    /// anyway is logged once per hash (ADR-0069 clauses 23 and 24).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn the_removed_stored_set_is_logged_naming_its_hash() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = kept_set_config(dir.path(), false);
+        store_offer(&config.state_dir);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut engine = build_engine(&config, &shutdown).expect("build");
+            let uid = engine.poll_reports()[SELF_AGENT_INDEX].instance_uid.clone();
+            for hash in [b"set-a", b"set-a", b"set-b", b"set-a"] {
+                engine.handle(&opamp::proto::ServerToAgent {
+                    instance_uid: uid.clone(),
+                    remote_config: Some(opamp::proto::AgentRemoteConfig {
+                        config: None,
+                        config_hash: hash.to_vec(),
+                    }),
+                    ..Default::default()
+                });
+            }
+            assert!(
+                engine.take_self_config().is_none(),
+                "a set reached the apply"
+            );
+        });
+        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
+        let removed: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("removed the stored supervisor set"))
+            .collect();
+        assert_eq!(removed.len(), 1, "{log}");
+        assert!(removed[0].contains(&hex::encode(b"stored")), "{log}");
+        let ignored: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("ignoring a supervisor set"))
+            .collect();
+        assert_eq!(ignored.len(), 2, "{log}");
+        assert!(ignored[0].contains(&hex::encode(b"set-a")), "{log}");
+        assert!(ignored[1].contains(&hex::encode(b"set-b")), "{log}");
+    }
+
+    /// The notice for the Client's own name in `remote_config_disabled` (ADR-0067 clause 2) points
+    /// at `server_manages_set`, and on a host that keeps its set says the set is the host's
+    /// already (ADR-0069).
+    /// Verifies: ADR-0067
+    #[test]
+    fn the_own_name_notice_points_at_server_manages_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = listed_config(dir.path(), "[\"edge-1\"]", Some("edge-1"));
+        let notices = remote_config_disabled_notices(&config);
+        assert!(
+            notices[0].contains("server_manages_set = false stops that"),
+            "{notices:?}"
+        );
+        config.supervisor_defaults.server_manages_set = false;
+        let notices = remote_config_disabled_notices(&config);
+        assert!(
+            notices[0].contains("own Agent is not covered")
+                && notices[0].contains("already keeps its supervisor set"),
+            "{notices:?}"
         );
     }
 }

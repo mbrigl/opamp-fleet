@@ -846,8 +846,8 @@ mod tests {
 
     /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
     /// re-sent while it waits for an operator rides the next report, so it never answers every
-    /// answer (ADR-0039 clause 21).
-    /// Verifies: ADR-0039
+    /// answer (ADR-0059 clause 21).
+    /// Verifies: ADR-0059
     #[test]
     fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");

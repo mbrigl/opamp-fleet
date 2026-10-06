@@ -18,7 +18,7 @@
 //! ADR-0027 was built to prevent. Channels are therefore a *partition*: a Selector cannot express
 //! "not", so disjoint channels come from membership, which is what ADR-0026's labels already are.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
 use opamp::proto::AgentDescription;
@@ -197,6 +197,18 @@ impl DeploymentStore {
             .expect("deployments lock")
             .get(name)
             .cloned()
+    }
+
+    /// The names of the Deployments that sign the artifact `(id, platform)` — what the download
+    /// route asks once per request rather than once per Agent (ADR-0070 clause 1).
+    pub fn signing(&self, id: &PackageId, platform: &Platform) -> BTreeSet<String> {
+        self.deployments
+            .read()
+            .expect("deployments lock")
+            .values()
+            .filter(|deployment| deployment.signature(id, platform).is_some())
+            .map(|deployment| deployment.name.clone())
+            .collect()
     }
 
     /// A snapshot of the whole store, for one resolution pass.

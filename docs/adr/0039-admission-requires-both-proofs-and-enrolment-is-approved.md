@@ -1,6 +1,6 @@
 # ADR-0039: Admission requires a fleet credential and a client certificate in the handshake, every enrolment is approved by an operator, the Operator plane is guarded beyond the loopback, and server.toml holds no credential that authenticates on its own
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0059](0059-admission-by-a-client-certificate-alone.md)
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`

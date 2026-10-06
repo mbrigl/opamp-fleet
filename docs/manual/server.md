@@ -16,6 +16,7 @@ a service.
 - [Packages and Deployments: distributing software](#packages-and-deployments-distributing-software)
 - [The REST API](#the-rest-api)
 - [Authentication](#authentication)
+- [Upgrading to admission by certificate alone](#upgrading-to-admission-by-certificate-alone)
 - [TLS](#tls)
 - [The fleet's own telemetry](#the-fleets-own-telemetry)
 - [Moving the fleet: connection settings](#moving-the-fleet-connection-settings)
@@ -34,11 +35,10 @@ a service.
   Agent reports installed, never when it would move it back or leave it where it is.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
   command.
-- **Offers new connection settings**: a credential, a heartbeat interval, or an entirely
-  different endpoint, which each Agent verifies by connecting before it switches.
-- **Admits an Agent on two proofs**: a client certificate in the TLS handshake and the fleet
-  credential. It signs Agent certificates as a local CA, and enrols a new host only on an
-  operator's approval.
+- **Offers new connection settings**: a heartbeat interval or an entirely different endpoint,
+  which each Agent verifies by connecting before it switches.
+- **Admits an Agent on one proof**: a client certificate in the TLS handshake. It signs Agent
+  certificates as a local CA, and enrols a new host only on an operator's approval.
 - **Serves two listeners over TLS 1.3**: OpAMP over both transports and the package download on
   one, the REST API, the OpenAPI document and its docs page, and a rudimentary UI on the other.
 
@@ -51,7 +51,7 @@ $ server --version
 
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory. A missing file means the defaults, and the defaults hold no `[tls]` and no `[auth]`, so the Server refuses to start and names `[tls]`. |
+| `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory. A missing file means the defaults, and the defaults hold no `[tls]`, so the Server refuses to start and names `[tls]`. |
 | `--version` | Print the version and exit — the full string, `1.2.3+<commit>` for a release and `1.2.3-dev+<commit>` for a build on the way to one. |
 
 Any other argument prints usage and exits with status 2. Logging goes to stderr and is controlled by
@@ -60,10 +60,12 @@ the `RUST_LOG` environment variable (default `info`); everything else is in the 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
 
-The Server refuses to start without `[tls]`, `[tls] client_ca_file` and `[auth]`, and the refusal
-names what is missing. For a first run on one machine,
-[`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development set of certificates and
-a `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
+The Server refuses to start without `[tls]` and `[tls] client_ca_file`, and the refusal names what
+is missing. It also refuses an `[auth]` section, and a credential key in `[connection_offer]`: the
+Agent plane admits by client certificate alone (see
+[Upgrading to admission by certificate alone](#upgrading-to-admission-by-certificate-alone)). For
+a first run on one machine, [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development
+set of certificates and a `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
 walks through it.
 
 There are **two listeners, split by audience**
@@ -77,7 +79,7 @@ line, `listen = "0.0.0.0:4320"`.
 | Path | What it is |
 |---|---|
 | `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both. |
-| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. It sits outside the credential check and behind the same TLS handshake as `/v1/opamp`, so a downloading Client presents its client certificate. A certificate from the client CA is required; a bootstrap certificate is answered `401`. |
+| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. It sits outside the Operator plane's `[rest.auth]` and behind the same TLS handshake as `/v1/opamp`, so a downloading Client presents its client certificate. A certificate from the client CA is required; a bootstrap certificate is answered `401`. A host is served only the artifact offered to one of its own Agents, and every other request is answered `404` ([A host fetches only what its Agents are offered](#a-host-fetches-only-what-its-agents-are-offered)). |
 
 The Agent plane asks every peer for a client certificate in the TLS handshake. A peer without one
 fails the handshake and reaches no route (see
@@ -92,7 +94,7 @@ fails the handshake and reaches no route (see
 | `/api/v1/docs` | Interactive API documentation (Redoc, vendored and served from this origin, so it works offline). |
 | `/` | The bundled UI: one embedded page, no frontend toolchain. It is deliberately rudimentary — the API is the product. |
 
-`[auth]` guards the OpAMP endpoint and nothing else; the Operator plane has its own credential,
+The Agent plane has no credential; the Operator plane has one of its own,
 [`[rest.auth]`](#the-operator-plane-restauth). This port carries the authority to reconfigure and
 re-package the whole fleet, so its default address is the **loopback**. There `[rest.auth]` is
 optional, and the address is what protects the plane. Reach it from another host through an SSH
@@ -108,8 +110,8 @@ before the TLS handshake, and the connections already held keep working. See
 ## Configuration reference
 
 The full annotated example is [`config/server.toml`](../../config/server.toml). Every key is shown
-below with its default. `[tls]` with its `client_ca_file`, and `[auth]`, are required; every other
-key is optional. An unknown key fails startup rather than being ignored.
+below with its default. `[tls]` with its `client_ca_file` is required; every other key is
+optional. An unknown key fails startup rather than being ignored.
 
 ### Top level
 
@@ -122,7 +124,7 @@ key is optional. An unknown key fails startup rather than being ignored.
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
-| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) on both proofs; this is the backstop behind it. `0` is refused at startup. |
+| `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 | `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset in the ordinary case: the Client then resolves the offered path against its own OpAMP endpoint, which is exactly where the download is served. Set it only when downloads must go through a different host, such as a mirror. |
 
@@ -195,6 +197,12 @@ key_file = "client-ca-key.pem"
 validity_days = 30
 ```
 
+Without it, every host holds a certificate an operator provisioned, and such a certificate is
+served an uploaded artifact only when it names its host as a URI SAN,
+`urn:opamp-fleet:host:<id>`. A certificate that names no host fetches nothing from the download
+route; referenced artifacts are unaffected. A Server started without `[client_ca]` says so once at
+startup.
+
 ### `[enrolment]`
 
 Optional. Present lets a new host enrol with a bootstrap certificate from this CA — see
@@ -218,26 +226,28 @@ window_secs = 60
 backoff_secs = 300
 ```
 
-### `[auth]`
+### `[agent_rate_limit]`
 
-Required. See [Authentication](#authentication).
+Optional; absent means the defaults shown. See
+[How often a member may be heard](#how-often-a-member-may-be-heard).
 
 ```toml
-[auth]
-bearer_tokens = ["sha256:<hex of the new token>", "sha256:<hex of the previous one>"]
-[auth.basic_users]
-fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
+[agent_rate_limit]
+messages_per_sec = 10
+burst = 300
+gateway_messages_per_sec = 500
+gateway_burst = 10000
 ```
 
 ### `[connection_offer]`
 
-See [Moving the fleet](#moving-the-fleet-connection-settings). Any subset of the keys is valid, but
+See [Moving the fleet](#moving-the-fleet-connection-settings). Either key or both is valid, but
 not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http://` only to
-`127.0.0.1` or `::1`.
+`127.0.0.1` or `::1`. The section carries no credential: `bearer_token_file`, `username`,
+`password_file`, `bearer_token` and `password` are each refused at startup by name.
 
 ```toml
 [connection_offer]
-bearer_token_file = "/etc/opamp-fleet/offered-token"   # or username = "…" / password_file = "…"
 heartbeat_interval_secs = 30
 endpoint = "wss://fleet.example:4320/v1/opamp"
 ```
@@ -246,7 +256,7 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 
 `[tls] client_ca_file` is required, and the Agent plane asks every peer for a client certificate
 **in the TLS handshake**
-([ADR-0039](../adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)):
+([ADR-0059](../adr/0059-admission-by-a-client-certificate-alone.md)):
 
 ```toml
 [tls]
@@ -261,9 +271,12 @@ chains to neither, fails the handshake and reaches no route. That covers the pac
 much as `/v1/opamp`. The Operator plane asks for no client certificate; a browser reaches it with
 the password of [`[rest.auth]`](#the-operator-plane-restauth).
 
-**Both proofs must always succeed.** Every request to `/v1/opamp` needs a connection bearing a
-valid certificate **and** an `Authorization` header matching `[auth]`. No configuration drops
-either proof, and neither stands in for the other.
+**The certificate is the whole of admission.** A connection is a member's when its certificate was
+issued directly by the client CA, is valid, and is not
+[revoked](#revocation-withdrawing-a-certificate); any other certificate that passes the handshake
+makes an enrolment connection. No configuration admits a peer without a certificate. `/v1/opamp`
+and the download route read no `Authorization` header: one a Client sends is ignored, never
+refused, and no refusal carries a `WWW-Authenticate` challenge.
 
 A certificate proves **fleet membership, not identity**. The Server does not match its subject
 against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
@@ -307,10 +320,10 @@ A host needs a certificate before it can connect at all, and it gets one in one 
 2. **The host enrols.** It is given a bootstrap certificate, and an operator approves its request —
    see [Enrolment](#enrolment-a-new-host-approved-by-an-operator).
 
-**Behind a Gateway the credential travels end to end.** Mutual TLS is per hop: the Gateway checks
-the Agents connecting to it, and presents its own certificate to the Server. The `Authorization`
-header is the only per-Agent proof that reaches the Server through it. A Gateway trusts the client
-CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
+**Behind a Gateway, the Gateway's handshake admits the Agents it carries.** Mutual TLS is per hop:
+the Gateway checks the Agents connecting to it against the client CA and the Server's revocation
+list, and presents its own certificate to the Server. It forwards no `Authorization` header. A
+Gateway trusts the client CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
 provisioned a certificate by an operator.
 
 **A certificate names its host.** The Server puts `urn:opamp-fleet:host:<id>` into every
@@ -322,7 +335,7 @@ for it is given an `instance_uid` of its own instead. A host holds at most three
 certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
 host. **A Gateway admits nobody until its host is marked:** only a marked host is handed the
 revocation list a Gateway refuses by (see
-[Revocation](#revocation-withdrawing-a-certificate-or-a-credential)):
+[Revocation](#revocation-withdrawing-a-certificate)):
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/hosts
@@ -332,11 +345,12 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 ```
 
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
-proves. A third-party client that sends no renewal proof renews the certificate it presents.
+proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
+client that sends no renewal proof renews the certificate it presents.
 
 **A certificate lives 30 days by default** and is renewed at two thirds of that; a host is ejected
-sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate-or-a-credential)).
-An expired certificate locks a host out even with a valid credential: a Client switched off longer than its validity enrols again
+sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate)).
+An expired certificate locks a host out: a Client switched off longer than its validity enrols again
 with a bootstrap certificate, or is given a new certificate by an operator.
 
 ## Enrolment: a new host, approved by an operator
@@ -351,8 +365,7 @@ bootstrap_ca_file = "bootstrap-ca.pem"
 
 The **bootstrap CA** is a CA of its own, never the client CA; a bootstrap CA that shares a
 certificate with `client_ca_file` is refused at startup. A bootstrap certificate opens nothing by
-itself. It needs the fleet credential beside it, an open enrolment window, and an operator's
-approval, so one bootstrap certificate may serve the whole fleet. Keep its validity short.
+itself. It needs an open enrolment window and an operator's approval, so one bootstrap certificate may serve the whole fleet. Keep its validity short.
 Without `[enrolment]` no bootstrap certificate passes the handshake.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
@@ -409,10 +422,9 @@ A request whose subject or SANs name an `instance_uid` other than the host's own
 The bootstrap certificate stays in the host's `supervisor.toml`, unused once the issued pair is
 stored. Approve only what you can match to a host you are setting up.
 
-## Revocation: withdrawing a certificate or a credential
+## Revocation: withdrawing a certificate
 
-A certificate stays valid until it expires, and the credential until it leaves `server.toml`. To
-shut a host out sooner, revoke what it presents. The Server refuses it from then on, on both
+A certificate stays valid until it expires. To shut a host out sooner, revoke its certificate. The Server refuses it from then on, on both
 transports and on the package download, and closes at once every WebSocket session it admitted,
 with close code `1008`. No other session is touched, and no restart is needed. The list lives
 under `config_dir` and survives a restart.
@@ -446,16 +458,10 @@ $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
  "certificate":{"authority":"client","serial":"5c0f…"}}
 ```
 
-Revoke a credential by its exact `Authorization` value. Only one that `[auth]` holds can be
-revoked, and only its SHA-256 is stored. The credential is the fleet's, so revoke it only after a
-rotation through `[connection_offer]` has reached the fleet; every Agent still presenting it is
-shut out. Then remove it from `server.toml`; until you do, the Server names it at startup by the
-first eight digits of its hash.
-
-```console
-$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
-       -d '{"credential": "Bearer old-fleet-token"}' https://127.0.0.1:4321/api/v1/revocations
-```
+There is no credential to revoke. A request naming `"credential"` is answered `400`, naming the
+field and saying that the Agent plane admits by client certificate alone. A credential entry
+`revocations.json` holds is dropped when the list is loaded, with one log line giving the number
+dropped, and the list is written back without it.
 
 `GET /api/v1/revocations` lists every entry, and `DELETE /api/v1/revocations/<id>` lifts one; the
 next connection is admitted again. The list holds at most 100 000 entries; an entry for a
@@ -480,10 +486,13 @@ host not marked — answers every downstream peer `503` and closes their session
 
 Every security decision leaves one line in `config_dir/audit/`: each admission and refusal on the
 Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
-certificate issued, each revocation and the session it ended, each credential rotation, each
+certificate issued, each revocation and the session it ended, each request for the Gateways'
+revocation list from a host not marked as a Gateway, each download a host may not fetch, each
 operator act with the operator's name, and each package an Agent reports installed or failed. A
 plain-HTTP Agent's admission is recorded once an hour per address and certificate, a WebSocket
-session every time. No line holds a credential, a key or a CSR body.
+session every time. No line holds a secret in any form — an `Authorization` value is never
+written, not even as a hash, whether an operator presented it or an Agent sent it unasked — nor a
+key or a CSR body.
 
 ```console
 $ tail -n1 /var/lib/opamp-fleet-server/audit/audit-1.jsonl
@@ -500,7 +509,8 @@ host. The record also goes to the Server's log under the target `audit`.
 
 The Server never takes a decision it cannot record: when the record cannot be written — a full
 disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
-can. Refusals past ten a second from one address are counted into one line, not dropped.
+can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
+Agent asks again. Refusals past ten a second from one address are counted into one line, not dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
 
 ## Configurations: what the fleet runs
@@ -856,7 +866,7 @@ Supervisor will look for it. A Client opens those two and `.zip`; an artifact th
 three is taken to *be* the program. [The rollout walkthrough](rollout.md) puts the whole sequence
 together.
 
-The download route sits on the **Agent plane**, outside the credential check and behind the same
+The download route sits on the **Agent plane**, outside `[rest.auth]` and behind the same
 TLS handshake as `/v1/opamp`. A downloading Client presents its client certificate, and it presents
 it to this Server's own origin and to no other host. Guarding the Operator plane therefore cannot
 break a rollout. The content hash and the signature are what protect an installed binary.
@@ -865,6 +875,50 @@ break a rollout. The content hash and the signature are what protect an installe
 A Client without it takes no package at all, its own update included, and says so at startup
 ([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)). Give every Client the
 key.
+
+### A host fetches only what its Agents are offered
+
+The download route serves an uploaded artifact only to a host whose certificate speaks for an
+Agent that is offered that artifact — its Agent type, version and Platform — by a rollout. A host
+speaks for the Agents that reported with its certificate, and a host marked as a Gateway for any
+Agent. An artifact stays offered until the Agent's assignment changes, so an Agent that echoed its
+offer and then failed to install can fetch it again. A version saved in a Deployment but not yet
+released by a rollout is offered to no one and cannot be fetched by anyone.
+
+Every other request for an artifact is answered `404` with the same status, body and headers as
+a request for an artifact the store does not hold: an artifact released to another host's Agents,
+one released to nobody yet, an entry that is only a reference, and any request over a certificate
+that names no host. A malformed type, version or Platform is still answered `400`, and a
+certificate that is not a member's still `401`. Each refused fetch leaves a `download.refused`
+entry in [the audit record](#the-audit-record) with `check` `not offered`, the host, the
+certificate's serial and the type, version and Platform asked for. The certificate is admitted
+before the route decides what it may fetch, so a refused fetch leaves both a `download.admitted`
+and a `download.refused` entry: a `download.admitted` says the certificate was let in, not that
+an artifact was served. Such a refusal is no failed admission, so it does not count toward
+[the throttle](#repeated-failures-are-throttled). Each download, served or refused, takes a token
+from the host's bucket ([How often a member may be heard](#how-often-a-member-may-be-heard)); for
+a Gateway, from its aggregate bucket.
+
+A `404` for an Agent that was offered an artifact therefore means one of three things: its host's
+certificate names no host (provision it with `urn:opamp-fleet:host:<id>`, see
+[`[client_ca]`](#client_ca)), the Agent now reports another Agent type than the Package was built
+for, or a later rollout changed what it is offered.
+
+A Client behind a Gateway receives uploaded artifacts through the Gateway
+([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)).
+Its offer names the path on this route, which it resolves against its own endpoint, the Gateway.
+The Gateway fetches each such artifact from this Server once, with its own certificate, as soon
+as it relays an offer of it, and serves it on the same path only to the hosts whose Agents it
+relayed that offer to. So the Gateway's host must be marked as a Gateway, and each artifact costs
+this Server one download, counted against the Gateway's aggregate bucket and recorded under the
+Gateway's host, however many Agents behind it install it. A Client that asks while the Gateway is
+still fetching is answered `503` with `Retry-After: 30` and asks again. **With `advertised_url` set, uploaded
+artifacts are not delivered to Clients behind a Gateway:** the offered URL is absolute and names
+this Server, which is not the Client's own origin, so the Client refuses it as a source not
+allowed, or presents no certificate to it and this Server's handshake refuses it. Leave
+`advertised_url` unset in a fleet with Gateways. Referenced artifacts are always fetched from
+their source directly. How the Gateway holds what it fetches is in
+[the Client's manual](client.md#the-package-cache).
 
 ## The REST API
 
@@ -893,7 +947,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "headers": {…}}`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package — and every per-Agent assignment that referenced it. Uninstalls nothing. |
-| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. |
+| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
 | `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
 | `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
@@ -974,9 +1028,10 @@ A host that was decommissioned leaves a row behind, and nothing ages it out. `DE
 /api/v1/agents/{instance_uid}` — the `✕ forget` action on a fleet row — drops what this Server knows
 about that Agent.
 
-**It does nothing on the machine.** No process is stopped, nothing is uninstalled, and no credential
-is revoked: a credential here proves *fleet membership*, never which Agent is speaking, so there is
-none belonging to one Agent to take away. A Client that is still running and still pointed at this
+**It does nothing on the machine.** No process is stopped, nothing is uninstalled, and nothing is
+revoked: a certificate proves *fleet membership* and its host, never which Agent is speaking, so
+forgetting one Agent has nothing of it to take away. To shut a host out, [revoke its
+certificate](#revocation-withdrawing-a-certificate). A Client that is still running and still pointed at this
 Server reports again within its polling or heartbeat interval and the row comes back. Forgetting
 tidies the view; **to remove an agent for good, stop it on the host** (`supervisor service
 uninstall`) and then forget it here.
@@ -997,57 +1052,36 @@ until someone forgets it.
 
 ## Authentication
 
-`[auth]` guards **the OpAMP endpoint**, and it is required
-([ADR-0039](../adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)). A
-configuration without the section, or with a section holding no credential, is refused at startup
-with a message naming `[auth]`. Every OpAMP request — plain-HTTP `POST` or WebSocket upgrade —
-needs an `Authorization` header matching one of the listed credentials, and anything else is
-answered `401`. The header is the second proof: the client certificate in the handshake is the
-first, and both are always required.
+The Agent plane admits by **client certificate alone**
+([ADR-0059](../adr/0059-admission-by-a-client-certificate-alone.md)); see
+[Mutual TLS](#mutual-tls-proving-who-is-on-the-connection). It has no credential of its own, and
+`server.toml` has no `[auth]` section: one that is present is refused at startup, naming `[auth]`.
+`/v1/opamp` and the download route read no `Authorization` header and send no
+`WWW-Authenticate` challenge. A refusal behind the handshake — a revoked certificate, or a
+bootstrap certificate on the download route — is answered `401`.
 
-```toml
-[auth]
-bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f"]
-[auth.basic_users]
-fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
-```
-
-Both schemes may be configured at once, and several valid credentials may be listed — which is what
-makes an overlapping rotation possible.
+The Operator plane is the one with a credential, [`[rest.auth]`](#the-operator-plane-restauth)
+below. It never reaches an Agent's host.
 
 ### Credentials are kept as hashes
 
 No credential in `server.toml` authenticates on its own, so a copy of the file — in a backup, a
-diff, configuration management — admits no host and signs in no operator. A Bearer token is listed
-by its SHA-256 as `sha256:<64 hex digits>`; a Basic password, in `[auth]` and `[rest.auth]` alike,
-by its Argon2id hash. A value in clear is refused at startup, naming the section and the entry
-without repeating the value. Make each entry with the Server itself:
+diff, configuration management — admits no host and signs in no operator. An operator's Basic
+password is listed by its Argon2id hash, with at least `m=19456`, `t=2` and `p=1`. A value in clear
+or a weaker hash is refused at startup, naming the section and the user without repeating the
+value. Make each entry with the Server itself:
 
 ```console
-$ printf '%s' "$TOKEN" | server hash-credential --bearer
-sha256:2c0c8f8b…
 $ server hash-credential --basic
 secret:
 $argon2id$v=19$m=19456,t=2,p=1$…
 ```
 
-`--bearer` refuses a token shorter than 32 characters: a token's strength is its randomness alone,
-so make one with `openssl rand -base64 33`. `--basic` asks for the password without showing it on
-a terminal. A Client keeps its own credential in clear in `supervisor.toml`, because it has to
-present it; that file is readable by its owner alone.
+`--basic` is the one scheme; it reads the password from standard input, without showing it on a
+terminal, and prints the hash to paste.
 
-The one credential the Server must still be able to send — the rotated one `[connection_offer]`
-hands the fleet — is read from a file of its own named by `bearer_token_file` or `password_file`.
-The file must be readable by its owner alone (`0600`), or the Server does not start.
-
-**The REST API and the UI are not guarded by this** — they are a different plane with a credential
-of their own, `[rest.auth]` below. The package download route sits outside the credential check:
-it is guarded by the client certificate the handshake requires, and its content hash and signature
-protect what it serves.
-
-The credential never crosses a network in plaintext. The Agent plane serves TLS 1.3 alone, and a
-Client refuses at startup to send it over `ws://` or `http://` to any host but `127.0.0.1` or
-`::1`.
+The package download route sits outside `[rest.auth]`: it is guarded by the client certificate
+the handshake requires, and its content hash and signature protect what it serves.
 
 ### Repeated failures are throttled
 
@@ -1063,9 +1097,63 @@ backoff_secs = 300     # how long the address is answered 429
 Every `401` on `/v1/opamp` and on the download route counts as a failure of the peer's IP address.
 An address that reaches `max_failures` within `window_secs` is in back-off for `backoff_secs`.
 During the back-off each request is answered `429` with `Retry-After` set to the seconds remaining,
-before its credential is compared. A WebSocket upgrade is refused the same way before it completes.
-A successful admission clears the address's count. The Operator plane counts its own `401`s the same
+before anything else is checked. A WebSocket upgrade is refused the same way before it completes.
+A successful admission clears nothing — behind a shared address a member's success would wipe a
+guesser's count — so failures only age out of the window. On the Agent plane a `401` follows a
+handshake that succeeded, so the throttle bounds what a refused host that keeps retrying costs in
+handshakes, revocation lookups and audit entries. The Operator plane counts its own `401`s the same
 way, in a table of its own. `0` for any of the three keys is refused at startup.
+
+### How often a member may be heard
+
+A certificate admits a member; `[agent_rate_limit]` bounds how often it is heard after that
+([ADR-0066](../adr/0066-admitted-agents-are-rate-limited-per-host.md)):
+
+```toml
+[agent_rate_limit]
+messages_per_sec = 10            # tokens a host's or an Agent's bucket gains per second
+burst = 300                      # that bucket's capacity; a new bucket starts full
+gateway_messages_per_sec = 500   # tokens a marked Gateway's aggregate gains per second
+gateway_burst = 10000            # the aggregate's capacity
+```
+
+Each message on `/v1/opamp`, over either transport, takes one token before anything else is done
+with it, and so does each request on the package download route once the certificate is admitted.
+A message that cannot be decoded is counted too. The bucket is:
+
+- the host the certificate names;
+- the certificate's issuer and serial, for a certificate an operator provisioned that names no
+  host yet;
+- the peer address, an IPv6 one by its /64, on an enrolment connection: one bootstrap certificate
+  may serve the whole fleet;
+- for a host marked as a Gateway, two buckets, and a message takes a token from both: the bucket
+  of the Agent it names, sized by `messages_per_sec` and `burst`, and the Gateway's aggregate,
+  sized by the `gateway_` keys. A message naming no valid `instance_uid`, an undecodable one and
+  a download count in the aggregate alone. Marking or unmarking a Gateway takes effect at its next
+  message.
+
+A message past the limit is not processed: no record changes and no certificate is signed. It is
+answered with the message's own `instance_uid` and `error_response` `Unavailable` with
+`retry_info` of 30 seconds, on plain HTTP in the body of a `200`. The connection stays open. A
+Client waits the 30 seconds, and the next message the Server processes from that Agent is asked
+for a full report, so nothing is lost. A download past the limit is answered `429` with
+`Retry-After: 30`; it is no failure toward `[admission_throttle]`, and the Client waits it out
+before it asks again, for up to 30 minutes per download. Beyond this limit the Server
+honours the protocol's error and retry semantics as well, and answers malformed input with
+`BAD_REQUEST`.
+
+Every refusal is recorded as `agent_rate.throttled`, naming the host (or the serial and the CA's
+role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`) and the
+`route` (`opamp` with its `transport`, or `download`). Past ten a second from one address they are
+counted in `agent_rate.throttled.aggregated`.
+
+The default `burst` lets one full report from each of the 256 Agents a host may speak for through
+after a reconnect. `messages_per_sec` times the offered `[connection_offer]
+heartbeat_interval_secs`, or 30 seconds without one, is how many Agents one host can report for at
+that interval; the Server logs a warning at startup naming both keys when that is below 256. The
+buckets live in memory: the subjects and aggregates up to the certificate register's 100 000, the
+Agents behind Gateways up to `max_agents`, and a full table forgets the bucket used least
+recently. `0` for any key is refused at startup; no value switches the limit off.
 
 ### The Operator plane: `[rest.auth]`
 
@@ -1099,6 +1187,33 @@ Two limits worth stating plainly. It is **authentication, not authorization**: e
 do everything the plane offers — there are no roles, and one Server still manages one fleet. And
 Basic sends a reusable password on **every** request. The plane always serves TLS 1.3, so the
 password never crosses the network in cleartext, and `server.toml` holds only its Argon2id hash.
+
+## Upgrading to admission by certificate alone
+
+The Agent plane admits a Client by its client certificate alone and reads no `Authorization`
+header: a Client or Gateway that sends one is admitted on its certificate, and the header is
+ignored. A Client sends no credential, so a Server that still demands one answers it `401`.
+**Upgrade the Server first, then its Clients and Gateways.**
+
+1. **Delete the credential from `server.toml`.** Remove the `[auth]` section, and the credential
+   keys `bearer_token_file`, `username`, `password_file`, `bearer_token` and `password` from
+   `[connection_offer]`; a `[connection_offer]` left with neither `heartbeat_interval_secs` nor
+   `endpoint` goes whole. The Server refuses to start while either remains, and says which:
+
+   ```text
+   server.toml: [auth] is refused — the Agent plane admits by client certificate alone; remove the section
+   server.toml: [connection_offer] bearer_token_file is refused — the Agent plane admits by client certificate alone, so no credential is offered; remove the key
+   ```
+
+   A file the offered credential was read from can be deleted. `[rest.auth]` stays as it is.
+2. **Start the Server.** Every Client that holds a valid certificate keeps connecting. A credential
+   revocation in the persisted list is dropped when it is loaded, with one log line, and the list
+   is written back without it.
+3. **Upgrade the Clients**, through the self-update or by package. A Client sends no credential,
+   ignores a leftover `[auth]` in `supervisor.toml` with a notice at startup, and drops an
+   `Authorization` header a credential rotation left in its persisted connection settings,
+   rewriting the file without it (see [the Client](client.md#a-leftover-auth)). A Gateway forwards
+   no `Authorization` and shares its upstream connections among every Agent it carries.
 
 ## TLS
 
@@ -1179,27 +1294,22 @@ Two limits worth knowing before you point this somewhere:
 
 ## Moving the fleet: connection settings
 
-`[connection_offer]` is how the fleet is moved to a new credential, a new heartbeat
-interval, or a new endpoint without touching every host. The Server compiles the section into one
-hash-gated offer, and every Agent that accepts connection settings gets it, **verifies it by
-actually connecting**, and switches only on success. An Agent that cannot connect with the offered
-settings keeps the ones it has and reports the failure. A credential-bearing offer goes only to an
-Agent admitted on both proofs with a certificate from the client CA; an enrolling host receives
-none.
+`[connection_offer]` is how the fleet is moved to a new heartbeat interval or a new endpoint
+without touching every host. The Server compiles the section into one hash-gated offer, and every
+Agent that accepts connection settings gets it, **verifies it by actually connecting**, and
+switches only on success. An Agent that cannot connect with the offered settings keeps the ones it
+has and reports the failure. An offer goes only to an Agent admitted with a certificate from the
+client CA; an enrolling host receives none but the certificate it asked for.
 
-Rotating a credential is therefore a sequence with no window in which the fleet is locked out:
-
-1. Add the **new** token to `[auth]`, keeping the old one — both are accepted.
-2. Point `[connection_offer]` at the new token.
-3. Restart the Server. The offer goes out; each Agent verifies it and switches.
-4. Once the fleet has migrated, drop the old token from `[auth]` and restart again.
-
-Unless `endpoint` points at a *different* Server, the offered credential must be in this Server's
-accepted set — a Server that offered a credential it would itself reject would lock out the fleet,
-so it fails at startup instead.
+The offer carries **no credential and no `headers`**
+([ADR-0060](../adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)):
+the Agent plane reads no `Authorization`, so an offered one would be a value nothing reads. A
+credential key in the section — `bearer_token_file`, `username`, `password_file`, `bearer_token`,
+`password` — is refused at startup, naming the key. A Client that is offered `headers` by another
+Server applies the rest of the offer and reports it `FAILED`, naming the header keys.
 
 **The offered `endpoint` is never plaintext off the host**
-([ADR-0041](../adr/0041-connection-settings-offered-securely-and-server-capabilities.md)). It is
+([ADR-0060](../adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)). It is
 `wss://` or `https://`; `ws://` or `http://` only when its host is `127.0.0.1` or `::1`. Any other
 `endpoint` is refused at startup with a message naming `[connection_offer] endpoint`.
 
@@ -1211,9 +1321,9 @@ The standing offer carries no `tls` and no `proxy`: there is no configuration su
 - **It does not require a password on a loopback Operator plane.** `[rest.auth]` is optional
   there, because the address is the guard; it is required the moment the plane listens anywhere
   else.
-- **It throttles failed admission and nothing else.** A peer address past `[admission_throttle]`'s
-  failures is answered `429`; an admitted Agent is never told to slow down. It honours the
-  protocol's error and retry semantics and answers malformed input with `BAD_REQUEST`.
+- **It does not weigh a message by its cost.** Every message and download takes one token of
+  `[agent_rate_limit]`, whatever it carries. The Operator plane is not rate-limited; it is
+  guarded by `[rest.auth]` and `[admission_throttle]`.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;
   the Agents fetch it.
 - **It does not install itself as a service.** Run it under whatever supervises services on the

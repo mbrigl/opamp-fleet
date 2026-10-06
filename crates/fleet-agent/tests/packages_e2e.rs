@@ -175,7 +175,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
@@ -296,7 +296,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);

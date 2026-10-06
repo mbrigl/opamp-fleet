@@ -504,7 +504,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -642,7 +642,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
             key = signing_key().1,
             stub = stub,
             marker = marker.to_string_lossy(),
-        ) + &common::credentials(dir.path()),
+        ) + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -738,7 +738,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -838,7 +838,7 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "otelcol") + &common::credentials(dir.path()),
+        config_toml(addr, &state_dir, "otelcol") + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -930,7 +930,7 @@ async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::credentials(dir.path()),
+        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
     )
     .expect("write config");
 

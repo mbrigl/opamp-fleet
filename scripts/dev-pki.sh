@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, now that both refuse to run
-# without them (ADR-0038, ADR-0039). Everything lands in one directory, gitignored, and is for a
+# without them (ADR-0038, ADR-0059). Everything lands in one directory, gitignored, and is for a
 # development machine only: the keys are unencrypted and the CAs are throwaway.
 #
 #   ca.pem / ca-key.pem                 the development CA: it signs the Server's certificate, and it
@@ -88,16 +88,10 @@ key_file = "$OUT/ca-key.pem"
 
 [enrolment]
 bootstrap_ca_file = "$OUT/bootstrap-ca.pem"
-
-[auth]
-bearer_tokens = ["$(printf '%s' dev-fleet-token | sha256sum | cut -d' ' -f1 | sed 's/^/sha256:/')"]
 EOF
 
 cat >supervisor.toml <<EOF
 endpoint = "wss://127.0.0.1:4320/v1/opamp"
-
-[auth]
-bearer_token = "dev-fleet-token"
 
 [tls]
 ca_file = "$OUT/ca.pem"

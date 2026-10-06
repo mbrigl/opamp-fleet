@@ -625,7 +625,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 /// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
 /// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
 /// callers pass. The guard runs before the handler, so it decides regardless of the target.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0059
 #[tokio::test]
 async fn a_cross_site_state_changing_post_is_refused() {
     let server = spawn().await;

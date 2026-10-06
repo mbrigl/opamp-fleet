@@ -1,6 +1,6 @@
 # ADR-0055: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits only over mutual TLS 1.3 and refuses what the Server revoked
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)
 - **Date:** 2026-10-04
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state

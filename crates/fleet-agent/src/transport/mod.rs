@@ -124,7 +124,7 @@ pub async fn after_reply<S: ReportSink>(
     if flush_owed(engine, sink).await.is_err() {
         return AfterReply::ConnectionLost;
     }
-    if process_package_downloads(engine, config, sink).await
+    if process_package_downloads(engine, config, shutdown, sink).await
         && flush_owed(engine, sink).await.is_err()
     {
         return AfterReply::ConnectionLost;
@@ -148,11 +148,16 @@ pub async fn after_reply<S: ReportSink>(
 /// While an artifact is on the wire, interim `Downloading` reports go out through `sink`. A failed
 /// interim report is not fatal: the download continues, and the terminal status is reported by the
 /// caller on the next exchange.
+///
+/// A shutdown ends a download where it stands — on the wire or waiting out a `Retry-After`
+/// (ADR-0070 clause 15) — and nothing is reported for it.
 pub async fn process_package_downloads<S: ReportSink>(
     engine: &mut Engine,
     config: &ClientConfig,
+    shutdown: &Shutdown,
     sink: &mut S,
 ) -> bool {
+    let mut shutdown = shutdown.clone();
     let downloads = engine.take_package_downloads();
     if downloads.is_empty() {
         return false;
@@ -189,6 +194,10 @@ pub async fn process_package_downloads<S: ReportSink>(
         let result = loop {
             tokio::select! {
                 result = &mut download => break result,
+                () = shutdown.requested() => {
+                    tracing::info!(package = %name, "a shutdown ends the package download");
+                    return false;
+                }
                 () = tokio::time::sleep(DOWNLOAD_REPORT_INTERVAL) => {
                     engine.package_downloading(index, progress.details(started));
                     let _ = sink.send(engine.owed_reports()).await;
@@ -227,6 +236,16 @@ pub async fn process_self_configuration<S: ReportSink>(
     let Some(offer) = engine.take_self_config() else {
         return false;
     };
+    // A second gate behind the capability the Agent does not declare: on a host that keeps its
+    // set no path reaches the apply (ADR-0069 clause 23).
+    if !config.server_manages_set() {
+        tracing::warn!(
+            hash = %hex::encode(&offer.config_hash),
+            "refusing to apply a supervisor set: this Client keeps its supervisor set \
+             ([supervisors] server_manages_set = false in supervisor.toml)"
+        );
+        return false;
+    }
     let goodbyes = crate::reconfigure::apply(engine, config, offer, shutdown).await;
     if !goodbyes.is_empty() {
         let _ = sink.send(goodbyes).await;
@@ -263,8 +282,8 @@ pub enum OfferOutcome {
 ///    telemetry destination cannot be proved that way and is not: a receiver that is momentarily
 ///    down is not an offer that is wrong.
 /// 2. **Persist, then apply telemetry from what was persisted** — never from the raw offer. An
-///    offer that says nothing about telemetry — an endpoint move, a credential rotation, a
-///    certificate — would otherwise compare against `metrics: None, traces: None, logs: None` and
+///    offer that says nothing about telemetry — an endpoint move, a heartbeat, a certificate —
+///    would otherwise compare against `metrics: None, traces: None, logs: None` and
 ///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
 ///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
 ///    ADR-0025 is where the difference is decided.
@@ -355,30 +374,31 @@ pub async fn process_connection_offer(
     }
 }
 
-/// The upstream connection `supervisor.toml` describes, with the credential and the identity in
-/// force (ADR-0017, ADR-0018).
+/// The upstream connection `supervisor.toml` describes, with the client identity in force
+/// (ADR-0059).
 ///
 /// # Errors
-/// Returns an error when the credential or a TLS file cannot be read.
+/// Returns an error when a TLS file cannot be read.
 pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
-    connection_with(config, crate::tls::client_tls(config)?)
+    Ok(connection_with(config, crate::tls::client_tls(config)?))
 }
 
 /// The same connection with other TLS material — a candidate certificate under test.
 ///
-/// # Errors
-/// Returns an error when the credential cannot be read.
-pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Result<Connection, String> {
-    Ok(Connection {
+/// It carries no `Authorization`: the Server admits by the client certificate alone, and this
+/// Client sends no credential upstream (ADR-0059 clause 3).
+#[must_use]
+pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Connection {
+    Connection {
         endpoint: config.endpoint.clone(),
-        authorization: config.authorization_value()?,
+        authorization: None,
         tls,
         max_message_size: config.max_message_size_bytes,
         // The heartbeat (ReportsHeartbeat, Baseline default 30 s; 0 disables).
         heartbeat: (config.heartbeat_interval_secs > 0)
             .then(|| Duration::from_secs(config.heartbeat_interval_secs)),
         poll: Duration::from_secs(config.poll_interval_secs.max(1)),
-    })
+    }
 }
 
 /// Runs the Engine's Agents over the connection `config` describes, on the transport its endpoint
@@ -558,6 +578,136 @@ mod tests {
         }
     }
 
+    /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
+    /// front of it: nothing is written and nothing is sent (ADR-0069 clause 23).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, mut config, uid) = engine_with_state_dir(&dir);
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "# the operator's\n").expect("write");
+        config.path = Some(path.clone());
+        config.supervisor_defaults.server_manages_set = false;
+        engine.handle(&ServerToAgent {
+            instance_uid: uid,
+            remote_config: Some(opamp::proto::AgentRemoteConfig {
+                config: None,
+                config_hash: b"set-1".to_vec(),
+            }),
+            ..Default::default()
+        });
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut sink = Recorder(Vec::new());
+
+        let ran = process_self_configuration(&mut engine, &mut config, &shutdown, &mut sink).await;
+
+        assert!(!ran, "the apply ran");
+        assert!(sink.0.is_empty());
+        assert!(engine.take_self_config().is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# the operator's\n"
+        );
+    }
+
+    /// A shutdown ends a download that is waiting out a `Retry-After` from its Server origin: the
+    /// call returns at once, and no failure is reported for the download.
+    /// Verifies: ADR-0070
+    #[tokio::test]
+    async fn a_shutdown_stops_a_download_waiting_out_retry_after() {
+        opamp::tls::install_ring_provider();
+        let (asked_tx, asked) = tokio::sync::oneshot::channel::<()>();
+        let asked_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(asked_tx)));
+        let app = axum::Router::new().route(
+            "/otelcol",
+            axum::routing::get(move || {
+                let asked_tx = asked_tx.clone();
+                async move {
+                    if let Some(tx) = asked_tx.lock().expect("asked").take() {
+                        let _ = tx.send(());
+                    }
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        [(axum::http::header::RETRY_AFTER, "30")],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut state = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        state.accept_packages();
+        let mut engine = Engine::new(vec![state]);
+        let uid = engine.poll_reports()[0].instance_uid.clone();
+        let config = ClientConfig {
+            endpoint: format!("ws://{addr}/v1/opamp"),
+            state_dir: dir.path().to_path_buf(),
+            package_key: Some(vec![0; 32]),
+            ..ClientConfig::default()
+        };
+        engine.handle(&ServerToAgent {
+            instance_uid: uid,
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        version: "2.0.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "/otelcol".to_string(),
+                            content_hash: vec![1; 32],
+                            signature: vec![1; 64],
+                            ..Default::default()
+                        }),
+                        hash: b"pkg-hash".to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg".to_vec(),
+            }),
+            ..Default::default()
+        });
+        let (stop, shutdown) = crate::shutdown::shutdown_channel();
+        tokio::spawn(async move {
+            let _ = asked.await;
+            let _ = stop.send(true);
+            // Kept until the download has seen it.
+            std::future::pending::<()>().await;
+        });
+        let mut sink = Recorder(Vec::new());
+        let processed = tokio::time::timeout(
+            Duration::from_secs(10),
+            process_package_downloads(&mut engine, &config, &shutdown, &mut sink),
+        )
+        .await
+        .expect("the shutdown ended the wait");
+        assert!(!processed);
+        let failed = sink
+            .0
+            .iter()
+            .chain(engine.owed_reports().iter())
+            .filter_map(|report| report.package_statuses.as_ref())
+            .filter_map(|statuses| statuses.packages.get("otelcol"))
+            .any(|status| status.status == PackageStatusEnum::InstallFailed as i32);
+        assert!(
+            !failed,
+            "nothing is reported for a download a shutdown ended"
+        );
+    }
+
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
@@ -656,7 +806,8 @@ mod tests {
         });
 
         let mut sink = Recorder(Vec::new());
-        assert!(process_package_downloads(&mut engine, &config, &mut sink).await);
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        assert!(process_package_downloads(&mut engine, &config, &shutdown, &mut sink).await);
 
         // At least one interim report went out while the bytes were still arriving, and it says
         // Downloading — with a percentage that actually moved.

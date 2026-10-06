@@ -125,7 +125,7 @@ async fn an_undeclared_signal_gets_no_destination() {
 /// Keying the bit on `[connection_offer]` alone left this Server exercising a capability it had not
 /// declared — and a Client that took the bitmask literally would then have withheld the
 /// acknowledgement, leaving the hash gate open and this offer repeating for ever.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0060
 #[tokio::test]
 async fn a_telemetry_only_server_declares_that_it_offers_connection_settings() {
     let server = support::spawn_with_telemetry(offer()).await;

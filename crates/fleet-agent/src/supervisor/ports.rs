@@ -392,7 +392,7 @@ pub trait Plugin {
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
 
     /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
-    /// `args` (ADR-0051 clause 19): a kind whose settings name files the Supervisor reads confines
+    /// `args` (ADR-0069 clause 19): a kind whose settings name files the Supervisor reads confines
     /// them here. `running` is the settings of the running block of the same name, if any. By
     /// default a kind names no such file.
     ///

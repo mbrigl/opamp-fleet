@@ -46,9 +46,9 @@ use crate::packages::{PackageId, PackageSummary, Platform, Source};
                                               rolled out (ADR-0030)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
-                                            (ADR-0039)"),
-        (name = "revocation", description = "What the client CA signed, and the certificates and \
-                                             credentials the Server no longer admits (ADR-0049)")
+                                            (ADR-0059)"),
+        (name = "revocation", description = "What the client CA signed, and the certificates the \
+                                             Server no longer admits (ADR-0065)")
     )
 )]
 struct ApiDoc;
@@ -70,14 +70,14 @@ impl OperatorAuth {
         Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
     }
 
-    /// Records refused sign-ins in `audit` (ADR-0052 clause 1).
+    /// Records refused sign-ins in `audit` (ADR-0063 clause 1).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
         self.2 = audit;
         self
     }
 
-    /// Counts this plane's failures in a table of its own (ADR-0039 clause 24).
+    /// Counts this plane's failures in a table of its own (ADR-0059 clause 24).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
         self.1 = Some(throttle);
@@ -86,7 +86,7 @@ impl OperatorAuth {
 }
 
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
-/// that cannot be recorded is not run (ADR-0052 clauses 1, 6).
+/// that cannot be recorded is not run (ADR-0063 clauses 1, 6).
 async fn record_act(
     State(audit): State<Arc<dyn crate::audit::Audit>>,
     request: Request,
@@ -160,7 +160,7 @@ async fn authenticate(
         }
     }
     // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
-    // the back-off check first (ADR-0039 clause 2).
+    // the back-off check first (ADR-0059 clause 2).
     let _attempt = match (&auth.1, peer) {
         (Some(throttle), Some(peer)) => match throttle.begin(peer) {
             Some(attempt) => Some(attempt),
@@ -260,7 +260,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/", get(index))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
-    // operator who made it (ADR-0052 clause 1).
+    // operator who made it (ADR-0063 clause 1).
     let router = match state.audit().cloned() {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
@@ -792,8 +792,8 @@ async fn rollout_to_agent(
 
 /// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
 ///
-/// Reaches no host: nothing is stopped, nothing is uninstalled, and no credential is revoked —
-/// there is none per Agent to revoke. A Client that is still running reappears on its next report.
+/// Reaches no host: nothing is stopped, nothing is uninstalled, and no certificate is revoked —
+/// a certificate is the host's, not the Agent's. A Client that is still running reappears on its next report.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{instance_uid}",
@@ -801,8 +801,8 @@ async fn rollout_to_agent(
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
                    view (ADR-0026). Nothing happens on the host — no process is stopped, nothing \
-                   is uninstalled, and no credential is revoked, because a credential here proves \
-                   fleet membership rather than one Agent's identity. A Client still configured \
+                   is uninstalled, and no certificate is revoked, because a certificate here \
+                   proves fleet membership and its host rather than one Agent's identity. A Client still configured \
                    for this Server therefore comes back on its next report. Refused while the \
                    Agent is still reporting, since forgetting it would have its configuration \
                    offered again and a managed process restarted with it.",
@@ -1671,6 +1671,7 @@ async fn download_package(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
     Query(query): Query<PlatformQuery>,
+    request: Request,
 ) -> Response {
     let id = match PackageId::new(&agent_type, &version) {
         Ok(id) => id,
@@ -1680,17 +1681,46 @@ async fn download_package(
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
-    let Some(path) = state
-        .packages()
-        .and_then(|store| store.artifact_path(&id, &platform))
-    else {
-        return error(
+    // One answer for every artifact this requester may not fetch, whether or not the store holds
+    // it, so the store cannot be listed by probing (ADR-0070 clause 4).
+    let not_found = || {
+        error(
             StatusCode::NOT_FOUND,
             format!(
                 "no set {id} with an artifact for {}-{}",
                 platform.os, platform.arch
             ),
-        );
+        )
+    };
+    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0070
+    // clause 3). The download guard admitted the certificate and hands over what it proves; a
+    // request without one exists only where no certificate is required, and is tested here no
+    // more than at admission.
+    if let Some(proofs) = request.extensions().get::<crate::transport::Proofs>() {
+        let host = proofs.host.as_deref();
+        if !host.is_some_and(|host| state.offers_artifact(host, &id, &platform)) {
+            state.audit_refusal(
+                crate::audit::Entry::new("download.refused", "refused")
+                    .peer(crate::transport::peer_ip(&request))
+                    .with("plane", "agent")
+                    .with("check", "not offered")
+                    .with("host", host.map(str::to_string))
+                    .with(
+                        "serial",
+                        proofs.certificate.as_ref().map(|(id, _)| id.serial.clone()),
+                    )
+                    .with("agent_type", id.agent_type.clone())
+                    .with("version", id.version.clone())
+                    .with("platform", platform.tag()),
+            );
+            return not_found();
+        }
+    }
+    let Some(path) = state
+        .packages()
+        .and_then(|store| store.artifact_path(&id, &platform))
+    else {
+        return not_found();
     };
     // Streamed from disk, never buffered: a fleet updating at once means many concurrent
     // downloads of the same artifact, and each one holding a copy of a program in memory is how a
@@ -2216,7 +2246,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0039 clause 20).
+/// The enrolment window as the API answers with it (ADR-0059 clause 20).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2233,7 +2263,7 @@ struct OpenWindow {
     open_for_secs: u64,
 }
 
-/// One enrolment request waiting for an operator (ADR-0039 clause 22).
+/// One enrolment request waiting for an operator (ADR-0059 clause 22).
 #[derive(Serialize, ToSchema)]
 struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
@@ -2443,7 +2473,7 @@ async fn reject_enrolment(
     }
 }
 
-/// One certificate the client CA signed (ADR-0049 clause 2).
+/// One certificate the client CA signed (ADR-0065 clause 2).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -2462,12 +2492,12 @@ struct CertificateView {
     /// On a renewal, the certificate it renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     predecessor: Option<CertificateRef>,
-    /// The host it was issued to (ADR-0039 clause 7); absent on one an operator provisioned.
+    /// The host it was issued to (ADR-0059 clause 7); absent on one an operator provisioned.
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
 
-/// A host the client CA issued to (ADR-0039 clause 7).
+/// A host the client CA issued to (ADR-0059 clause 7).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
@@ -2497,58 +2527,39 @@ struct CertificateRef {
     serial: String,
 }
 
-/// What to revoke: exactly one of the two.
+/// What to revoke: a certificate (ADR-0065 clause 3).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct RevokeRequest {
-    #[serde(default)]
-    certificate: Option<CertificateRef>,
-    /// The exact `Authorization` value of a credential in `[auth]`, e.g. `Bearer …`. Only its
-    /// SHA-256 is kept.
-    #[serde(default)]
-    credential: Option<String>,
+    certificate: CertificateRef,
 }
 
-/// One revocation (ADR-0049 clause 7).
+/// One revocation (ADR-0065 clause 7).
 #[derive(Serialize, ToSchema)]
 struct RevocationView {
     /// What `DELETE` names.
     id: String,
-    /// `certificate` or `credential`.
+    /// `certificate`.
     kind: &'static str,
     revoked_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    certificate: Option<CertificateRef>,
-    /// The first eight hex digits of the credential's SHA-256.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    credential_sha256_prefix: Option<String>,
+    certificate: CertificateRef,
 }
 
 impl RevocationView {
     fn of(entry: crate::revocation::Revocation) -> Self {
-        use crate::revocation::Revoked;
-        match entry.revoked {
-            Revoked::Certificate {
-                authority, serial, ..
-            } => RevocationView {
-                id: entry.id,
-                kind: "certificate",
-                revoked_ms: entry.revoked_ms,
-                certificate: Some(CertificateRef { authority, serial }),
-                credential_sha256_prefix: None,
-            },
-            Revoked::Credential { sha256 } => RevocationView {
-                id: entry.id,
-                kind: "credential",
-                revoked_ms: entry.revoked_ms,
-                certificate: None,
-                credential_sha256_prefix: Some(sha256[..8].to_string()),
-            },
+        let crate::revocation::Revoked::Certificate {
+            authority, serial, ..
+        } = entry.revoked;
+        RevocationView {
+            id: entry.id,
+            kind: "certificate",
+            revoked_ms: entry.revoked_ms,
+            certificate: CertificateRef { authority, serial },
         }
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0052 clause 1). The act was
+/// Records what an operator act did, beside the act itself (ADR-0063 clause 1). The act was
 /// already recorded before it ran, so a detail that cannot be recorded changes nothing.
 fn note(state: &AppState, entry: crate::audit::Entry) {
     if let Some(audit) = state.audit() {
@@ -2561,19 +2572,14 @@ fn revocation_entry(
     outcome: &str,
     entry: &crate::revocation::Revocation,
 ) -> crate::audit::Entry {
-    use crate::revocation::Revoked;
-    let base = crate::audit::Entry::new(event, outcome).with("id", entry.id.clone());
-    match &entry.revoked {
-        Revoked::Certificate {
-            authority, serial, ..
-        } => base
-            .with("kind", "certificate")
-            .with("authority", authority.clone())
-            .with("serial", serial.clone()),
-        Revoked::Credential { sha256 } => base
-            .with("kind", "credential")
-            .with("credential_sha256_prefix", sha256[..8].to_string()),
-    }
+    let crate::revocation::Revoked::Certificate {
+        authority, serial, ..
+    } = &entry.revoked;
+    crate::audit::Entry::new(event, outcome)
+        .with("id", entry.id.clone())
+        .with("kind", "certificate")
+        .with("authority", authority.clone())
+        .with("serial", serial.clone())
 }
 
 fn revocation_off() -> Response {
@@ -2710,8 +2716,9 @@ async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
     Json(list).into_response()
 }
 
-/// Revokes a certificate, and every renewal of it, or a credential of `[auth]`. Every session it
-/// admitted ends at once, and no new one is admitted.
+/// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no
+/// new one is admitted. There is no credential to revoke: the Agent plane admits by client
+/// certificate alone (ADR-0065 clause 5).
 #[utoipa::path(
     post,
     path = "/api/v1/revocations",
@@ -2719,7 +2726,7 @@ async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
     request_body = RevokeRequest,
     responses(
         (status = 201, body = RevocationView),
-        (status = 400, description = "Not exactly one of the two, an authority this Server does not have, a serial that is not hex, or a credential [auth] does not hold", body = ErrorBody),
+        (status = 400, description = "No certificate named, a field this route does not know, an authority this Server does not have, a serial that is not hex, or a credential named, which the Agent plane does not have", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
         (status = 507, description = "The list is full", body = ErrorBody)
@@ -2728,24 +2735,27 @@ async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
 async fn revoke(
     State(state): State<Arc<AppState>>,
     _csrf: SameOrigin,
-    Json(request): Json<RevokeRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     use crate::revocation::RevokeError;
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
-    let outcome = match (request.certificate, request.credential) {
-        (Some(certificate), None) => {
-            revocations.revoke_certificate(&certificate.authority, &certificate.serial)
-        }
-        (None, Some(credential)) => revocations.revoke_credential(&credential),
-        _ => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "name exactly one of certificate and credential",
-            )
-        }
+    // Named before the body is read as a request, so the answer says why rather than that the
+    // field is unknown.
+    if body.get("credential").is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "credential is refused — the Agent plane admits by client certificate alone, so \
+             there is no credential to revoke; name a certificate",
+        );
+    }
+    let request = match serde_json::from_value::<RevokeRequest>(body) {
+        Ok(request) => request,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    let outcome =
+        revocations.revoke_certificate(&request.certificate.authority, &request.certificate.serial);
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
