@@ -1,8 +1,8 @@
 //! The supervision `Runner` (ADR-0011) across everything it does *to a host*: spawn and watchdog,
 //! the health-gated apply, the binary swap and its rollback (ADR-0015), and the tree install
-//! (ADR-0023).
+//! (ADR-0015).
 //!
-//! An integration test rather than a unit test, and that is the reason ADR-0024 exists: these cases
+//! An integration test rather than a unit test, and that is the reason ADR-0005 exists: these cases
 //! need the supervision core **and** a real program to spawn, and Cargo hands a test the path of a
 //! helper binary "only … when building an integration test or benchmark". As unit tests inside a
 //! binary crate they could reach no such program, so they ran `/bin/sh` scripts and were gated to
@@ -189,7 +189,7 @@ async fn apply(harness: &Harness, hash: &[u8]) {
                 config_hash: hash.to_vec(),
                 ..Default::default()
             },
-            // The apply's span (ADR-0090). The core opens a real one; a test drives the Runner
+            // The apply's span (ADR-0023). The core opens a real one; a test drives the Runner
             // directly, so what it hands over is the span it is already running in.
             span: tracing::Span::current(),
         })
@@ -266,7 +266,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.task.await.expect("join");
 }
 
-/// A program named by a **relative** path still starts — which it did not, once ADR-0091 had the
+/// A program named by a **relative** path still starts — which it did not, once ADR-0037 had the
 /// process begin in its own directory.
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
@@ -436,7 +436,7 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
     let _ = harness.task.await;
 }
 
-// ── Reload and uninstall (ADR-0060) ──────────────────────────────────────────
+// ── Reload and uninstall (ADR-0011) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -490,7 +490,7 @@ async fn wait_until_started(marker: &Path) {
     }
 }
 
-/// A kind that declared a reload applies a configuration in place (ADR-0060): the process is
+/// A kind that declared a reload applies a configuration in place (ADR-0011): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -537,7 +537,7 @@ async fn a_declared_reload_applies_without_a_restart() {
     let _ = harness.task.await;
 }
 
-/// `reload-or-restart` (ADR-0060): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (ADR-0011): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
 #[cfg(unix)]
@@ -566,9 +566,9 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
     let _ = harness.task.await;
 }
 
-/// The generic uninstall (ADR-0060): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (ADR-0011): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (ADR-0059).
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0029).
 #[tokio::test]
 async fn an_uninstall_stops_the_process_answers_and_exits() {
     let mut harness = start(|| Some(spec(&stub_agent())));
@@ -776,7 +776,7 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
     )
 }
 
-/// ADR-0068: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// ADR-0033: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -876,7 +876,7 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     let _ = harness.task.await;
 }
 
-/// The case ADR-0018 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
+/// The case ADR-0015 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
 #[tokio::test]
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
@@ -984,7 +984,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let _ = harness.task.await;
 }
 
-/// ADR-0058: a *first* install that will not start has nothing to roll back to, so it is **kept**
+/// ADR-0015: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
 /// empty the directory and set the Server re-offering the same artifact in a loop.
 #[tokio::test]
@@ -1002,7 +1002,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     // Not rolled back to nothing: the verified program is still there.
     assert!(
         binary.exists(),
-        "the first install is kept, not discarded (ADR-0058)"
+        "the first install is kept, not discarded (ADR-0015)"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
@@ -1014,7 +1014,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let _ = harness.task.await;
 }
 
-/// ADR-0058: a program that keeps failing to start is **held** after a few tries, not restarted
+/// ADR-0015: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
 #[tokio::test]
@@ -1046,7 +1046,7 @@ async fn a_program_that_keeps_crashing_is_held_not_looped() {
     let _ = harness.task.await;
 }
 
-/// ADR-0058: a successful update does not delete the version it superseded — it is retained for the
+/// ADR-0015: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
 #[tokio::test]
 async fn a_successful_update_keeps_the_previous_version_for_the_window() {
@@ -1092,7 +1092,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let _ = harness.task.await;
 }
 
-// ── The tree install (ADR-0023) ──────────────────────────────────────────────
+// ── The tree install (ADR-0015) ──────────────────────────────────────────────
 
 /// Writes a `.tar.gz` holding `members` — (path inside the archive, contents).
 fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
@@ -1112,7 +1112,7 @@ fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
 }
 
 /// A release-shaped `.tar.gz`: the program and a library it "loads", under one version-named
-/// wrapper directory (ADR-0023).
+/// wrapper directory (ADR-0015).
 fn tree_release(path: &Path, wrapper: &str, program: &Path, library: &[u8]) {
     tar_gz(
         path,
@@ -1141,7 +1141,7 @@ fn tree_harness(root: &Path) -> Harness {
     )
 }
 
-/// The case ADR-0023 exists for: an agent that is a program *plus* what it loads, arriving with
+/// The case ADR-0015 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
 #[tokio::test]
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
@@ -1280,7 +1280,7 @@ async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() 
     let _ = harness.task.await;
 }
 
-// ── The trace an install leaves (ADR-0090) ───────────────────────────────────
+// ── The trace an install leaves (ADR-0023) ───────────────────────────────────
 
 /// Every span this test binary's subscriber saw: its id, the parent the registry gave it, and its
 /// name. Enough to answer the one question worth asking of the instrumentation — *what hangs off
@@ -1344,7 +1344,7 @@ fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> 
     names
 }
 
-/// ADR-0090's central mechanical claim: an install is **one** trace, although it is begun by the
+/// ADR-0023's central mechanical claim: an install is **one** trace, although it is begun by the
 /// task that downloaded the artifact and finished by the Supervisor's own.
 ///
 /// The span travels with the command through the Port; if it did not, each phase would open a trace

@@ -2,7 +2,7 @@
 name = "client"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0003)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p client` means this one.
-# The operator tools are not here at all: they are `crates/package-tools` (ADR-0065).
+# The operator tools are not here at all: they are `crates/package-tools` (ADR-0005).
 default-run = "supervisor"
 version.workspace = true
 edition.workspace = true
@@ -10,7 +10,7 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# ADR-0028, renamed by ADR-0080: the package keeps its build-time name, the shipped binary does
+# ADR-0022, renamed by ADR-0022: the package keeps its build-time name, the shipped binary does
 # not. A Cargo package name never leaves the repository; this is the name on the host, in `ps`, and
 # in the unit file.
 [[bin]]
@@ -22,7 +22,7 @@ clap.workspace = true
 opamp.workspace = true
 # ADR-0010: service lifecycle and the content hash in the install layout's manifest.
 service-manager.workspace = true
-# ADR-0027: the questionnaire `service install --interactive` runs, and the hidden prompt the
+# ADR-0020: the questionnaire `service install --interactive` runs, and the hidden prompt the
 # credential in it is typed into.
 dialoguer.workspace = true
 sha2.workspace = true
@@ -31,7 +31,7 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# ADR-0056: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
+# ADR-0029: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written.
 toml_edit.workspace = true
 futures-util.workspace = true
@@ -56,17 +56,17 @@ tracing-opentelemetry.workspace = true
 opentelemetry-http.workspace = true
 async-trait.workspace = true
 # `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
-# `host.mac` (ADR-0050).
+# `host.mac` (ADR-0028).
 sysinfo = { workspace = true, features = ["network"] }
-# The downstream OpAMP endpoint of Gateway Mode (ADR-0037): a WebSocket upgrade and a plain-HTTP
+# The downstream OpAMP endpoint of Gateway Mode (ADR-0024): a WebSocket upgrade and a plain-HTTP
 # POST on one path, which is a server this Client otherwise has no way to be. The HTTP engine under
 # it — hyper, tower, http-body — is already linked through reqwest; this adds the routing layer.
 axum = { workspace = true, features = ["ws"] }
-# ADR-0037: the downstream hop's TLS. The same server-side rustls terminator the Server already
+# ADR-0024: the downstream hop's TLS. The same server-side rustls terminator the Server already
 # serves with (`crates/server`), reused here so the two ends of a hop are built the same way.
 axum-server.workspace = true
 webpki-roots.workspace = true
-# ADR-0018: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# ADR-0015: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true
 tar.workspace = true
@@ -83,14 +83,14 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
 
-# ADR-0046: the native installers. Both tools read the fields above rather than restating them, and
+# ADR-0020: the native installers. Both tools read the fields above rather than restating them, and
 # both package the binary the release job already built (`--no-build` / a plain `--target`), so the
 # bytes in a `.deb` are the bytes in its sibling `.7z`.
 #
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
-# a second registration knowing nothing of ADR-0030's service name or ADR-0020's restart policy; the
+# a second registration knowing nothing of ADR-0010 clause 11's service name or ADR-0017's restart policy; the
 # maintainer scripts call `service install` instead, which is the one install path (ADR-0010).
-# The package carries the **product's** name (ADR-0084 clause 10), not the program's: a second
+# The package carries the **product's** name (ADR-0010 clause 16), not the program's: a second
 # instance is a second build, and two variants that shared a package name could not be installed
 # side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
 # would use to override it without templating this manifest.
@@ -113,11 +113,11 @@ depends = "$auto"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
 #
-# `usr/libexec`, not `usr/bin` (ADR-0048): what an operator invokes on PATH is the symlink the
+# `usr/libexec`, not `usr/bin` (ADR-0020): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
 #
-# A directory named after the product, holding a file named after the program (ADR-0084 clauses 9
+# A directory named after the product, holding a file named after the program (ADR-0010 clauses 15
 # and 10): two variant builds ship the same program under different products, so a bare
 # `usr/libexec/supervisor` would be one file two packages both claim to own.
 assets = [["target/release/supervisor", "usr/libexec/opamp-fleet/", "755"]]
@@ -125,7 +125,7 @@ maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
 name = "opamp-fleet"
-# One `Release`, forever: ADR-0026 releases a version once, so there is never a second build of one.
+# One `Release`, forever: ADR-0009 releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
     { source = "target/release/supervisor", dest = "/usr/libexec/opamp-fleet/supervisor", mode = "755" },
@@ -134,7 +134,7 @@ assets = [
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
 # landed in the package is the script and not its file name.
 #
-# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0048): on an upgrade, rpm erases the *old*
+# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0020): on an upgrade, rpm erases the *old*
 # package's files after the new `%post` has run, which deletes the link `%post` just created — the
 # transaction scriptlet runs after that erasure, so its link is the one that survives.
 post_install_script = "../../packaging/linux/postinst"
@@ -145,7 +145,7 @@ post_trans_script = "../../packaging/linux/posttrans"
 [dev-dependencies]
 tempfile = "3"
 # Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
-# encoder rides here alone again now that `pack` has moved to its own crate (ADR-0065) — a
+# encoder rides here alone again now that `pack` has moved to its own crate (ADR-0005) — a
 # dev-dependency reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0011: the end-to-end test runs the real Server in-process against the real Client binary.

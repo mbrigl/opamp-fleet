@@ -1,6 +1,6 @@
-//! The first configuration file, written by `service install` (ADR-0027, ADR-0046).
+//! The first configuration file, written by `service install` (ADR-0020).
 //!
-//! A release artifact is the bare binary (ADR-0025), so a fresh host has nothing to copy from, and
+//! A release artifact is the bare binary (ADR-0019), so a fresh host has nothing to copy from, and
 //! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
 //! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
 //! This module is the way out of that state: it asks the handful of questions a fresh host cannot
@@ -19,27 +19,27 @@ use dialoguer::{Confirm, Input, Password, Select};
 use crate::config::ClientConfig;
 
 /// The file name written inside the install root when the operator named no `--config` path
-/// (ADR-0027): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
+/// (ADR-0020): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
 /// `%ProgramData%` policy per platform.
 pub const FILE_NAME: &str = "supervisor.toml";
 
 /// What the questionnaire asked for. Everything else in `supervisor.toml` has a default that is right
-/// on a fresh host, and is written as a comment rather than as a value (ADR-0027).
+/// on a fresh host, and is written as a comment rather than as a value (ADR-0020).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answers {
     /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0007).
     pub endpoint: String,
-    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0033) — which
+    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0022) — which
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
-    /// constant `supervisor` (ADR-0077), the same on every host and nothing to ask about.
+    /// constant `supervisor` (ADR-0022), the same on every host and nothing to ask about.
     pub name: String,
     /// The `[auth]` block (ADR-0013), or `None` for an endpoint that needs no credential.
     pub auth: Option<Auth>,
     /// A private CA for a `wss://` / `https://` endpoint (ADR-0007), or `None` for the built-in
     /// webpki roots.
     pub ca_file: Option<PathBuf>,
-    /// The package name `[self_update]` consents to (ADR-0020), or `None` for the withdrawal.
-    /// `Some` is the default and what the questionnaire defaults to (ADR-0075): a Client the fleet
+    /// The package name `[self_update]` consents to (ADR-0017), or `None` for the withdrawal.
+    /// `Some` is the default and what the questionnaire defaults to (ADR-0017): a Client the fleet
     /// cannot update has to be updated by hand on every host. `None` renders as an explicit
     /// `enabled = false`, so the file says which of the two it is either way.
     pub self_update_package: Option<String>,
@@ -53,7 +53,7 @@ pub enum Auth {
     Basic { username: String, password: String },
 }
 
-/// Ask, write, and report — the whole of `--interactive` (ADR-0027).
+/// Ask, write, and report — the whole of `--interactive` (ADR-0020).
 ///
 /// A file that already exists is kept, not overwritten and not merged: it may hold a credential
 /// that was typed once, and a re-install that eats it is a worse failure than one that declines to
@@ -86,14 +86,14 @@ pub fn run(path: &Path) -> Result<(), String> {
 }
 
 /// Write the first configuration from an endpoint *given* rather than asked for — the whole of
-/// `--endpoint` (ADR-0046 clause 7).
+/// `--endpoint` (ADR-0020 clause 15).
 ///
-/// This is the half of ADR-0027 a packaged install can reach. An MSI dialog and a `%post` script
+/// This is the half of ADR-0020 a packaged install can reach. An MSI dialog and a `%post` script
 /// both have an answer and no terminal, and [`run`] is deliberately an error without one; the file
 /// they need is the same file, rendered by the same [`render`] and created by the same
 /// [`write_new`], so the never-overwrite rule and the `0600` mode are not restated here.
 ///
-/// Only the endpoint is taken. ADR-0027 put the credential behind a hidden prompt so that it never
+/// Only the endpoint is taken. ADR-0020 put the credential behind a hidden prompt so that it never
 /// reaches a process list, and an MSI property is written to the installer log — so the rest of the
 /// questionnaire has no non-interactive twin on purpose.
 ///
@@ -125,7 +125,7 @@ pub fn run_with_endpoint(
 
 /// Whether a configuration is already there — in which case it is kept, whichever path asked.
 ///
-/// ADR-0027's rule is that a file holding a credential somebody typed once is never overwritten by
+/// ADR-0020's rule is that a file holding a credential somebody typed once is never overwritten by
 /// a later install, and a packaged re-install is exactly the later install it had in mind.
 fn keeping_existing(path: &Path) -> bool {
     if path.exists() {
@@ -215,7 +215,7 @@ pub fn ask() -> Result<Answers, String> {
         None
     };
 
-    // Last, and defaulting to yes (ADR-0075, superseding ADR-0027 point 4). It is still the
+    // Last, and defaulting to yes (ADR-0017, superseding ADR-0020 point 4). It is still the
     // largest grant in this file — the Server may replace the binary that manages every other
     // binary on the host — but the alternative is a fleet whose own agent is the one thing left to
     // patch by hand, and the package name below is what the grant is narrowed to.
@@ -402,7 +402,7 @@ mod tests {
     use super::*;
 
     /// The baseline: everything optional declined, except the self-update consent, which since
-    /// ADR-0075 is what declining nothing means.
+    /// ADR-0017 is what declining nothing means.
     fn answers() -> Answers {
         Answers {
             endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
@@ -464,7 +464,7 @@ mod tests {
         );
     }
 
-    /// ADR-0046 clause 7: the packaged path has to produce a file the loader accepts, carrying the
+    /// ADR-0020 clause 15: the packaged path has to produce a file the loader accepts, carrying the
     /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
     #[test]
     fn an_endpoint_given_is_written_and_loads() {
@@ -481,7 +481,7 @@ mod tests {
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
         // No credential is invented — one is never accepted on a command line — while the
-        // self-update consent the installer passed *is* written, standing by default (ADR-0075).
+        // self-update consent the installer passed *is* written, standing by default (ADR-0017).
         assert_eq!(loaded.authorization_value().expect("authorization"), None);
         assert_eq!(loaded.self_update_package(), Some("supervisor"));
     }
@@ -514,7 +514,7 @@ mod tests {
         assert!(!path.exists(), "nothing may be left behind");
     }
 
-    /// ADR-0027 point 2 holds on the packaged path too: a `.deb` reinstalled over a configured host
+    /// ADR-0020 point 2 holds on the packaged path too: a `.deb` reinstalled over a configured host
     /// must not eat the credential somebody typed into the first install.
     #[test]
     fn an_endpoint_given_never_overwrites_an_existing_file() {
@@ -555,7 +555,7 @@ mod tests {
     }
 
     /// A declined section is absent rather than empty — a bare `[auth]` would fail the load.
-    /// `[self_update]` is the one exception and it is the point of ADR-0075: absent now *means*
+    /// `[self_update]` is the one exception and it is the point of ADR-0017: absent now *means*
     /// consent, so both answers are written out. The consent names its package; the withdrawal says
     /// `enabled = false`. A reader of the file can tell which was answered either way.
     #[test]
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(loaded.self_update_package(), Some("supervisor"));
     }
 
-    /// The refusal that protects a credential typed once (ADR-0027).
+    /// The refusal that protects a credential typed once (ADR-0020).
     #[test]
     fn an_existing_file_is_never_overwritten() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -663,7 +663,7 @@ mod tests {
     }
 
     /// Without a terminal there is nobody to answer, and blocking a provisioning run forever is
-    /// the failure mode this refuses (ADR-0027). Under `cargo test` stdin is not a tty, which is
+    /// the failure mode this refuses (ADR-0020). Under `cargo test` stdin is not a tty, which is
     /// exactly the condition being asserted.
     #[test]
     fn interactive_without_a_terminal_fails_instead_of_blocking() {

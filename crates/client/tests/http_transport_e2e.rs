@@ -23,10 +23,10 @@ use server::fleet::{AgentView, AppState, PackageOffering};
 use server::packages::{PackageStore, Platform};
 
 /// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
-/// name. Aim belongs to the Deployment now (ADR-0096): a Package reaches nobody by itself, so a
+/// name. Aim belongs to the Deployment now (ADR-0040): a Package reaches nobody by itself, so a
 /// test that wants one delivered has to say which ring the host is in — which is the model.
 /// The same, recording the artifact's signature on the ring — where a signature lives since
-/// ADR-0096. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
+/// ADR-0040. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
 /// ring is what has to carry it.
 fn ring_holding_signed(
     state: &server::fleet::AppState,
@@ -269,7 +269,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0095, and this block states none — so it is
+        // The wire name is the Agent type since ADR-0039, and this block states none — so it is
         // the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())

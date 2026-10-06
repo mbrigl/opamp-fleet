@@ -1,4 +1,4 @@
-//! The own-telemetry offer (ADR-0036): the Server names destinations, and only for the signals an
+//! The own-telemetry offer (ADR-0023): the Server names destinations, and only for the signals an
 //! Agent says it can report.
 
 mod support;
@@ -72,7 +72,7 @@ async fn every_declared_signal_is_offered_a_destination() {
     assert!(settings.opamp.is_none());
 }
 
-/// A withdrawal reaches the Agent (ADR-0089 rule 3): an endpoint configured empty is sent as an
+/// A withdrawal reaches the Agent (ADR-0023 rule 25): an endpoint configured empty is sent as an
 /// empty `destination_endpoint`, which is what stops that signal. It travels without the backend's
 /// credential — nobody is going to open that connection — and the offer is still an offer, so the
 /// Server declares `OffersConnectionSettings` and the hash gate closes on the acknowledgement like
@@ -118,7 +118,7 @@ async fn an_undeclared_signal_gets_no_destination() {
     assert!(settings.own_traces.is_none());
 }
 
-/// ADR-0086 clause 5: a Server that can offer *anything* declares `OffersConnectionSettings`.
+/// ADR-0023 clause 11: a Server that can offer *anything* declares `OffersConnectionSettings`.
 /// Keying the bit on `[connection_offer]` alone left this Server exercising a capability it had not
 /// declared — and a Client that took the bitmask literally would then have withheld the
 /// acknowledgement, leaving the hash gate open and this offer repeating for ever.

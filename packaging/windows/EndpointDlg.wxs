@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The one dialog this installer adds to the stock set (ADR-0046 clause 5): where the Server is, and
-  whether the fleet may update this Client itself (ADR-0075).
+  The one dialog this installer adds to the stock set (ADR-0020 clause 13): where the Server is, and
+  whether the fleet may update this Client itself (ADR-0017).
 
   Geometry, control ids and button positions are InstallDirDlg's, so the page it follows and this
   one are the same page with a different field. The `!(loc.…)` strings resolve out of the WiX UI
@@ -31,7 +31,7 @@
         <Control Id="EndpointEdit" Type="Edit" X="20" Y="86" Width="320" Height="18" Property="ENDPOINT" />
 
         <!--
-          Checked by default (ADR-0075). The box is checked whenever SELFUPDATE is non-empty, and
+          Checked by default (ADR-0017). The box is checked whenever SELFUPDATE is non-empty, and
           clearing it empties the property — which is what the package's SELFUPDATEFLAG condition
           reads. The answer goes into supervisor.toml either way, so it is visible and editable on the
           host afterwards rather than sunk into the installer.

@@ -1,7 +1,7 @@
 // Two things both ends need before they compile, in the crate both ends already depend on.
 //
 // 1. The OpAMP protobuf types, generated from the vendored, pinned schema (ADR-0006).
-// 2. The version this build reports (ADR-0009, as amended by ADR-0026), baked in as
+// 2. The version this build reports (ADR-0009, as amended by ADR-0009), baked in as
 //    `OPAMP_BUILD_VERSION` and read back through `opamp::version::current`.
 //
 // The version lives here rather than in one binary's build script because ADR-0009 asks for a
@@ -25,7 +25,7 @@ fn main() {
     match resolve_version() {
         Ok(version) => println!("cargo:rustc-env=OPAMP_BUILD_VERSION={version}"),
         Err(e) => {
-            eprintln!("cannot resolve the build version (ADR-0009, ADR-0026): {e}");
+            eprintln!("cannot resolve the build version (ADR-0009): {e}");
             std::process::exit(1);
         }
     }
@@ -85,7 +85,7 @@ fn resolve_version() -> Result<String, String> {
         );
     }
 
-    // The number itself, from the file that decides it (ADR-0026) or from the override.
+    // The number itself, from the file that decides it (ADR-0009) or from the override.
     let (base, source) = match std::env::var("OPAMP_FLEET_VERSION") {
         Ok(raw) => (
             parse_components(&raw).ok_or_else(|| {
@@ -127,7 +127,7 @@ fn resolve_version() -> Result<String, String> {
         // which, so it says so instead of shipping a binary that disagrees with its own tag.
         Some(tag) => Err(format!(
             "HEAD carries the tag {tag:?} but {source} says {base} — a release tag and the version \
-             it releases must be the same (ADR-0026)"
+             it releases must be the same (ADR-0009)"
         )),
         // No release tag here: a build on the way to `base`, and unmistakably not it.
         None => Ok(format!("{base}-dev+{hash}")),

@@ -1,8 +1,8 @@
-//! The credential check both planes use (ADR-0013, ADR-0067).
+//! The credential check both planes use (ADR-0013, ADR-0032).
 //!
 //! One primitive, because the two planes ask the same question of a request — does this
 //! `Authorization` header match something configured? — and the *answer* is what differs: the Agent
-//! plane pairs it with a client certificate (ADR-0035), the Operator plane guards a browser. What
+//! plane pairs it with a client certificate (ADR-0013), the Operator plane guards a browser. What
 //! must not differ is how the comparison is made, which is why it is written once.
 
 use axum::http::{header, HeaderMap};

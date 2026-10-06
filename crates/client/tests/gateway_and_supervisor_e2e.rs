@@ -4,7 +4,7 @@
 //!
 //! They are orthogonal by design, and everything they share is where that could stop being true:
 //! one configuration file, one shutdown signal, one upstream endpoint, one TLS setup, and — since
-//! ADR-0037 — a gateway task that is restarted when a verified offer moves the endpoint, while the
+//! ADR-0024 — a gateway task that is restarted when a verified offer moves the endpoint, while the
 //! Supervisors carry on. So the real Client binary runs here with both armed at once.
 
 use std::path::{Path, PathBuf};
@@ -64,7 +64,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
-/// An Agent by the operator's name for it (`service.instance.name`, ADR-0033).
+/// An Agent by the operator's name for it (`service.instance.name`, ADR-0022).
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
@@ -77,7 +77,7 @@ fn free_port() -> u16 {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
-/// Places the stub where a Managed Process must live since ADR-0085: inside the Supervisor's own
+/// Places the stub where a Managed Process must live since ADR-0018: inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. Copied rather than
 /// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
 /// installed package would leave behind.
@@ -193,7 +193,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 
 /// The interaction that only exists because both modes share a process: a verified connection
 /// settings offer ends the transport run, and the gateway task is restarted with the new
-/// configuration (ADR-0037) — because the pool dials the endpoint an offer can move. The
+/// configuration (ADR-0024) — because the pool dials the endpoint an offer can move. The
 /// Supervisors must live straight through it, and the Gateway must come back serving.
 #[tokio::test]
 async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running() {

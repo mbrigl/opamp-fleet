@@ -27,7 +27,7 @@ fn spawn_client(config_path: &Path) -> Child {
         .expect("spawn the client")
 }
 
-/// Places the stub where a Managed Process must live since ADR-0085: inside the Supervisor's own
+/// Places the stub where a Managed Process must live since ADR-0018: inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. `root` is whatever
 /// `supervisor_dir` resolves to for the Client under test — `<state_dir>/supervisors` by default.
 ///
@@ -62,7 +62,7 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
     path
 }
 
-/// ADR-0022 end to end: what the Foreign Agent is actually invoked with. The stub writes every
+/// ADR-0018 end to end: what the Foreign Agent is actually invoked with. The stub writes every
 /// argument it received into the marker, so this asserts on the expanded command line rather than
 /// on the substitution function — the argument has to survive all the way into `argv`, which is
 /// the only place the silent failure this prevents would show up.
@@ -114,7 +114,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     let _ = client.wait();
 }
 
-/// ADR-0023 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// ADR-0015 end to end: a Supervisor configured for a package that is a whole tree runs the
 /// program from inside it. The tree is put in place here rather than delivered, because what this
 /// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
 /// at startup is the path the process is actually spawned from, across the process boundary.
@@ -212,7 +212,7 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
     let _ = client.wait();
 }
 
-/// ADR-0016: supplementary content is on disk next to the configuration — that is what makes a
+/// ADR-0012: supplementary content is on disk next to the configuration — that is what makes a
 /// `${file:...}` reference resolve — but it is never handed to the Collector as `--config`.
 #[test]
 fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags() {

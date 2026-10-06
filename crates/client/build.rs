@@ -1,4 +1,4 @@
-// The product's name, fixed at build time (ADR-0084).
+// The product's name, fixed at build time (ADR-0010).
 //
 // `PRODUCT_NAME` names the installation: the directory under the platform's base, the service, the
 // `.deb`/`.rpm` package, the `/usr/libexec` payload directory and the `PATH` symlink. A second
@@ -11,7 +11,7 @@
 //
 // The grammar is the one ADR-0010 set for instance names, for the same reason: the value must be
 // simultaneously a systemd unit name, a launchd label, an SCM service name and a directory name on
-// every platform. Breaking it fails *this build* — the class of failure ADR-0084 clause 1 moves
+// every platform. Breaking it fails *this build* — the class of failure ADR-0010 clause 7 moves
 // from a runtime parse of operator input to a compile-time check, so an illegal name cannot reach
 // a service manager at all.
 
@@ -32,7 +32,7 @@ fn main() {
     let name = std::env::var("OPAMP_FLEET_PRODUCT_NAME")
         .unwrap_or_else(|_| DEFAULT_PRODUCT_NAME.to_string());
     if let Err(e) = check_product_name(&name) {
-        eprintln!("OPAMP_FLEET_PRODUCT_NAME={name:?} is not a usable product name (ADR-0084): {e}");
+        eprintln!("OPAMP_FLEET_PRODUCT_NAME={name:?} is not a usable product name (ADR-0010): {e}");
         std::process::exit(1);
     }
 
@@ -42,7 +42,7 @@ fn main() {
     let display = std::env::var("OPAMP_FLEET_PRODUCT_DISPLAY_NAME")
         .unwrap_or_else(|_| DEFAULT_PRODUCT_DISPLAY_NAME.to_string());
     if display.trim().is_empty() {
-        eprintln!("OPAMP_FLEET_PRODUCT_DISPLAY_NAME is empty (ADR-0084)");
+        eprintln!("OPAMP_FLEET_PRODUCT_DISPLAY_NAME is empty (ADR-0010)");
         std::process::exit(1);
     }
 

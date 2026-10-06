@@ -23,7 +23,7 @@ use axum::Router;
 
 use fleet::AppState;
 
-/// The **Agent plane** (ADR-0066): the OpAMP endpoint, guarded by Admission (ADR-0013, ADR-0035),
+/// The **Agent plane** (ADR-0032): the OpAMP endpoint, guarded by Admission (ADR-0013),
 /// and the package download route beside it — outside that guard, because a downloading Client
 /// presents neither credential nor certificate and the artifact's hash and signature are what
 /// protect it (ADR-0015).
@@ -35,9 +35,9 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
     transport::router(state.clone(), admission).merge(api::download_router(state))
 }
 
-/// The **Operator plane** (ADR-0066): the REST API, its OpenAPI document and docs page, and the
+/// The **Operator plane** (ADR-0032): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
-/// (ADR-0067). Without it the plane is open, which is what its loopback default is for.
+/// (ADR-0032). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
     api::router(state, auth)
 }

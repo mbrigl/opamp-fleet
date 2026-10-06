@@ -71,7 +71,7 @@ pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::
 ///
 /// The **OpAMP** settings carry only what changes — a headers-only rotation must not erase a
 /// previously offered endpoint, and vice versa. The **own-telemetry** destinations do not: an offer
-/// that names any of them states all three (ADR-0089). The two rules live in one function because
+/// that names any of them states all three (ADR-0023). The two rules live in one function because
 /// one message carries both, and the difference between them is the whole of what this fold does.
 pub fn merge(
     stored: Option<&ConnectionSettingsOffers>,
@@ -82,7 +82,7 @@ pub fn merge(
     let pick = |field: fn(&OpAmpConnectionSettings) -> bool| -> Option<OpAmpConnectionSettings> {
         offered.filter(|s| field(s)).or(previous).cloned()
     };
-    // The own-telemetry destinations do not fold per signal (ADR-0089). An offer that names any of
+    // The own-telemetry destinations do not fold per signal (ADR-0023). An offer that names any of
     // the three states all three: a signal it leaves out is *stopped*, and a signal whose endpoint
     // it offers empty is withdrawn. An offer that names none of them says nothing about telemetry
     // — an OpAMP endpoint move, a credential rotation, a certificate — and leaves all three alone.
@@ -118,7 +118,7 @@ pub fn merge(
             offer.own_logs.as_ref(),
             stored.and_then(|s| s.own_logs.as_ref()),
         ),
-        // Built only when one of the two sides actually has OpAMP settings (ADR-0086 clause 6).
+        // Built only when one of the two sides actually has OpAMP settings (ADR-0023 clause 16).
         // Emitting a block unconditionally would have a telemetry-only offer persist the claim that
         // the Server offered OpAMP settings it never offered — a lie in the one file an operator is
         // told to inspect and delete, and one that makes the honest assertion untestable.
@@ -127,7 +127,7 @@ pub fn merge(
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
             headers: pick(|s| s.headers.is_some()).and_then(|s| s.headers),
-            // The issued client identity (ADR-0035). Folded like every other field: a later offer
+            // The issued client identity (ADR-0013). Folded like every other field: a later offer
             // that says nothing about the certificate leaves the one in force alone, which is what
             // makes an endpoint or credential rotation safe for a fleet already on mutual TLS.
             certificate: pick(|s| s.certificate.is_some()).and_then(|s| s.certificate),
@@ -140,7 +140,7 @@ pub fn merge(
     }
 }
 
-/// Whether an offer carries anything this Client can put in force (ADR-0086 clause 1): OpAMP
+/// Whether an offer carries anything this Client can put in force (ADR-0023 clause 12): OpAMP
 /// settings, or a destination for one of the three own-telemetry signals.
 ///
 /// `other_connections` deliberately does not count. `AcceptsOtherConnectionSettings` is undeclared,
@@ -154,7 +154,7 @@ pub fn carries_settings(offers: &ConnectionSettingsOffers) -> bool {
 }
 
 /// What to report for an offer that has been verified and applied: `Ok` when the Client honoured
-/// all of it, `Err` naming the fields it dropped (ADR-0035).
+/// all of it, `Err` naming the fields it dropped (ADR-0013).
 ///
 /// The Client applies what it understands and then says so. Reporting `APPLIED` for an offer whose
 /// `tls` or `proxy` it silently discarded — which is what it used to do — tells the Server the
@@ -231,7 +231,7 @@ pub async fn verify(
         None => config.authorization_value()?,
     };
     // An offered client certificate is proved the same way the endpoint and the credential are:
-    // by connecting with it (ADR-0035). Until that succeeds the one in force stays in force, so a
+    // by connecting with it (ADR-0013). Until that succeeds the one in force stays in force, so a
     // certificate that cannot authenticate costs nothing.
     let candidate_cert = settings
         .certificate
@@ -343,7 +343,7 @@ mod tests {
         }
     }
 
-    /// ADR-0086 clause 1: an offer that names a telemetry destination is actionable, whether or not
+    /// ADR-0023 clause 12: an offer that names a telemetry destination is actionable, whether or not
     /// it carries OpAMP settings — and one that carries nothing this Client applies is not.
     #[test]
     fn an_offer_carries_settings_when_it_names_anything_this_client_applies() {
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(merged.hash, b"t1");
     }
 
-    /// ADR-0089 rule 1: an offer that names any telemetry destination states all three. The
+    /// ADR-0023 rule 23: an offer that names any telemetry destination states all three. The
     /// traces endpoint in force is *stopped* by a metrics-only offer, not carried forward — which
     /// is the whole difference between a fleet that can turn a signal off and one that cannot.
     #[test]
@@ -400,7 +400,7 @@ mod tests {
 
     /// Rule 2: an offer that names none of the three says nothing about telemetry. A credential
     /// rotation must not take the exporters down with it — that is what keeps the classes of
-    /// ADR-0086 independent, and it is the schema's own "not set means unchanged", held at the
+    /// ADR-0023 independent, and it is the schema's own "not set means unchanged", held at the
     /// level it still holds at.
     #[test]
     fn an_offer_silent_about_telemetry_leaves_all_three_alone() {

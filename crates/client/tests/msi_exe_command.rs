@@ -1,7 +1,7 @@
 //! The MSI's custom-action command lines, parsed the way Windows will parse them
-//! (`packaging/windows/supervisor.wxs`, ADR-0046).
+//! (`packaging/windows/supervisor.wxs`, ADR-0020).
 //!
-//! Regression test, and since ADR-0084 clause 3 also a guard on how the hazard was retired.
+//! Regression test, and since ADR-0010 clause 9 also a guard on how the hazard was retired.
 //!
 //! `[INSTALLFOLDER]` always resolves with a trailing backslash, and the C runtime that builds a
 //! process's argv treats a backslash before a quote as an escaped, literal quote — so
@@ -191,7 +191,7 @@ fn register_service_survives_the_crt() {
     assert_eq!(args.endpoint, None);
 }
 
-/// ADR-0084 clause 3: the MSI names neither root, so the install takes the platform defaults —
+/// ADR-0010 clause 9: the MSI names neither root, so the install takes the platform defaults —
 /// `%ProgramData%\opamp-fleet` for both halves — and `Program Files` holds only the payload.
 ///
 /// This is also what keeps error 1722 retired. A directory property resolves with a trailing
@@ -202,7 +202,7 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
         assert!(
             !command.contains("[INSTALLFOLDER]"),
             "{id} passes a directory property again — the trailing backslash that resolves into \
-             it is what produced error 1722 (ADR-0084 clause 3)"
+             it is what produced error 1722 (ADR-0010 clause 9)"
         );
         assert!(
             !command.contains("--root") && !command.contains("--data-root"),
@@ -215,11 +215,11 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     assert_eq!(args.data_root, None);
 }
 
-/// The endpoint prefill (ADR-0049): the development Server in its `http://` form, held to the
+/// The endpoint prefill (ADR-0020): the development Server in its `http://` form, held to the
 /// loader's own endpoint rule so the dialog can never offer a value that `service install
 /// --endpoint` would then reject. And it must stay confined to the UI sequence: leaking it into a
 /// silent install would write the development default on every unattended host, the state
-/// ADR-0046 refuses to manufacture.
+/// ADR-0020 refuses to manufacture.
 #[test]
 fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     let element = set_property("ENDPOINT");
@@ -235,7 +235,7 @@ fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     assert_eq!(attribute(element, "Sequence").as_deref(), Some("ui"));
 }
 
-/// ADR-0075: the consent stands unless the install was told otherwise, and the MSI's answer travels
+/// ADR-0017: the consent stands unless the install was told otherwise, and the MSI's answer travels
 /// as a flag appended to the same command line. Two things have to hold, and the second is the one
 /// that would break silently: the withdrawing line must parse to `--no-self-update`, and the
 /// *consenting* line must be character for character what this package sent before the flag
@@ -296,7 +296,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
 
     // Default-on for every install path — unlike the endpoint prefill, whose UI-only scope is the
     // point of `endpoint_prefill_is_the_development_server_and_interactive_only`. A silent install
-    // that names nothing must still get a fleet-updatable Client (ADR-0075). The default lives on
+    // that names nothing must still get a fleet-updatable Client (ADR-0017). The default lives on
     // the `Property` element, which both sequences see; the flag it feeds is computed in the
     // execute sequence alone, because `InstallInitialize` — the place a SetProperty feeding a
     // deferred action belongs before — exists only there.

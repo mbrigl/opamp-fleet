@@ -1,4 +1,4 @@
-//! The Supervisor-set apply (ADR-0056): what the Client does with a remote configuration offered
+//! The Supervisor-set apply (ADR-0029): what the Client does with a remote configuration offered
 //! to its **own** Agent.
 //!
 //! Only the `[[supervisor]]` blocks of the offered document are read — every other top-level key
@@ -6,7 +6,7 @@
 //! never write. The offered set is validated against the running configuration's globals first;
 //! then the Supervisors that left or changed are stopped, the merged document is written to
 //! `supervisor.toml` — surgically, so the operator's comments and layout survive — the removed
-//! Supervisors' directories are purged (ADR-0059), and the changed and added Supervisors are
+//! Supervisors' directories are purged (ADR-0029), and the changed and added Supervisors are
 //! started from the file just written. Unchanged Supervisors ride through untouched.
 
 use std::path::Path;
@@ -41,7 +41,7 @@ pub async fn apply(
     shutdown: &Shutdown,
 ) -> Vec<AgentToServer> {
     let hash = offer.config_hash.clone();
-    // The outcome the Server is told is the outcome the trace carries (ADR-0090), including the
+    // The outcome the Server is told is the outcome the trace carries (ADR-0023), including the
     // distinction this module exists to keep: a refusal touched nothing, a failure did.
     let span = tracing::Span::current();
     match apply_inner(engine, config, &offer, shutdown).await {
@@ -113,7 +113,7 @@ async fn apply_inner(
         .collect();
     let removed = removed_names(&config.supervisors, &blocks);
 
-    // A removed Supervisor is uninstalled (ADR-0060) — its adapter answers before the purge
+    // A removed Supervisor is uninstalled (ADR-0011) — its adapter answers before the purge
     // below — while a changed one is only stopped and restarts under its name.
     let goodbyes = engine
         .retire_supervisors(&stopping, &removed)
@@ -140,7 +140,7 @@ async fn apply_inner(
     };
 
     // Written: the file no longer names the removed Supervisors, so their directories go with
-    // them (ADR-0059) — program, packages, configuration, identity. The changed blocks in
+    // them (ADR-0029) — program, packages, configuration, identity. The changed blocks in
     // `stopping` restart under their names and keep theirs.
     drop(write);
     {
@@ -179,7 +179,7 @@ async fn apply_inner(
 }
 
 /// The names the offered set removed: present in the running blocks, absent — **by name** — from
-/// the offered ones (ADR-0059). A changed block keeps its name and is stopped-and-restarted, not
+/// the offered ones (ADR-0029). A changed block keeps its name and is stopped-and-restarted, not
 /// removed, so its directory rides through.
 fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Vec<String> {
     running
@@ -190,7 +190,7 @@ fn removed_names(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Ve
 }
 
 /// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
-/// `instance-uid` whose Agent has already said its goodbye (ADR-0059). Runs only after the
+/// `instance-uid` whose Agent has already said its goodbye (ADR-0029). Runs only after the
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
@@ -202,9 +202,9 @@ fn purge_removed(config: &ClientConfig, removed: &[String]) {
     let canon_root = config.supervisors_root().canonicalize().ok();
     for name in removed {
         let dir = config.supervisor_dir(name);
-        // The delete is confined to the Supervisor's own directory *self-containedly* (ADR-0059),
+        // The delete is confined to the Supervisor's own directory *self-containedly* (ADR-0029),
         // not by trusting `remove_dir_all`'s symlink handling. `name` is already a validated single
-        // component (ADR-0057), so `dir` cannot traverse; the risk this guards is a symlink planted
+        // component (ADR-0029), so `dir` cannot traverse; the risk this guards is a symlink planted
         // where the directory should be. Refuse to recurse through one — unlink the stray link
         // itself — and refuse a resolved path that is not under the supervisors root.
         match std::fs::symlink_metadata(&dir) {
@@ -274,7 +274,7 @@ fn restart_stopped(
     }
 }
 
-/// Reads the offered Supervisor set out of the composed config map (ADR-0056): every entry is
+/// Reads the offered Supervisor set out of the composed config map (ADR-0029): every entry is
 /// parsed as TOML, the union of their `[[supervisor]]` blocks is the set, and every other
 /// top-level key is ignored — the boundary is enforced by what the Client takes. Returns the
 /// parsed blocks beside their verbatim tables, which is what the write puts into `supervisor.toml`
@@ -351,15 +351,15 @@ fn offered_blocks(
 }
 
 /// Validates one offered `[[supervisor]]` block before any running process is touched: the startup
-/// loader's own checks (block schema, program-path resolution, ports, timeouts — ADR-0056 point 2),
-/// and then the delivery-path constraint of ADR-0057.
+/// loader's own checks (block schema, program-path resolution, ports, timeouts — ADR-0029 point 2),
+/// and then the delivery-path constraint of ADR-0029.
 ///
 /// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
 /// program lives in a directory this Client created and updates from signature-verified packages
-/// (ADR-0057). Letting the Server spawn a program on the machine would be arbitrary code execution
+/// (ADR-0029). Letting the Server spawn a program on the machine would be arbitrary code execution
 /// that never passes through package signing.
 ///
-/// Since ADR-0085 that rule **cannot fire**: no block naming a program on the machine parses at
+/// Since ADR-0018 that rule **cannot fire**: no block naming a program on the machine parses at
 /// all, from any principal, so every block reaching here already satisfies it. The check stays as
 /// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
 /// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
@@ -388,7 +388,7 @@ fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
 
 /// Replaces the `[[supervisor]]` blocks of `supervisor.toml` with the offered ones and leaves every
 /// other line of the file exactly as the operator wrote it — comments, ordering, formatting
-/// (ADR-0056). A file that does not exist yet is created; the write goes through a sibling
+/// (ADR-0029). A file that does not exist yet is created; the write goes through a sibling
 /// temporary file so a crash never leaves a half-written configuration. Returns the new text.
 fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<String, String> {
     let text = match std::fs::read_to_string(path) {
@@ -426,7 +426,7 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
 /// widened after — so the rename cannot loosen permissions. `supervisor.toml` holds the OpAMP
 /// credential in cleartext and is created `0600` (`config_init::write_new`); writing the temp file
 /// at the default umask (`0644`) and renaming it over the original, as this did before, left that
-/// credential world-readable after every Server-driven reconfigure (ADR-0056). A file that does not
+/// credential world-readable after every Server-driven reconfigure (ADR-0029). A file that does not
 /// exist yet falls back to `0600`, the same floor `write_new` uses. The operator's own mode, if
 /// they widened or narrowed it deliberately, is preserved.
 fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), String> {
@@ -478,7 +478,7 @@ mod tests {
         }
     }
 
-    /// ADR-0056 point 1: only the `[[supervisor]]` blocks are read; a full `supervisor.toml`-shaped
+    /// ADR-0029 point 1: only the `[[supervisor]]` blocks are read; a full `supervisor.toml`-shaped
     /// document may be offered and exactly its fleet-manageable half takes effect.
     #[test]
     fn foreign_top_level_keys_are_ignored() {
@@ -526,7 +526,7 @@ mod tests {
         assert!(err.contains("needs a `name`"), "{err}");
     }
 
-    /// ADR-0057: a Server-delivered block that names an **absolute** program path is refused as a
+    /// ADR-0029: a Server-delivered block that names an **absolute** program path is refused as a
     /// whole — that is the machine's own process, and letting the Server spawn one would run
     /// arbitrary code that never passed through package signing. The refusal names the block and the
     /// path, and (being a validation failure) leaves the running set and the file untouched.
@@ -542,7 +542,7 @@ mod tests {
     }
 
     /// The attack this guard was written against: a Server that delivers a block spawning a
-    /// program on the machine with arguments of its choosing. Since ADR-0085 it is refused a step
+    /// program on the machine with arguments of its choosing. Since ADR-0018 it is refused a step
     /// earlier and for a broader reason — no block naming a program on the machine parses, from
     /// any principal — but the delivery path must still refuse it, which is what this asserts.
     #[test]
@@ -565,8 +565,8 @@ mod tests {
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (ADR-0021, ADR-0085), so a
-    /// delivered block that names one is accepted — since ADR-0085 the only shape there is.
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0018), so a
+    /// delivered block that names one is accepted — since ADR-0018 the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
         let offer = offer_of(&[(
@@ -620,7 +620,7 @@ mod tests {
     }
 
     /// The write replaces exactly the `[[supervisor]]` blocks. Everything the operator wrote —
-    /// comments, ordering, unrelated sections — survives byte for byte (ADR-0056 point 4).
+    /// comments, ordering, unrelated sections — survives byte for byte (ADR-0029 point 4).
     #[test]
     fn the_write_replaces_blocks_and_keeps_the_operators_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(mode, 0o600, "a new file is owner-only, got {mode:o}");
     }
 
-    /// ADR-0059 point 1: removal is keyed by name. A block that *changed* keeps its name — it is
+    /// ADR-0029 point 9: removal is keyed by name. A block that *changed* keeps its name — it is
     /// stopped and restarted, never purged; only a name absent from the offered set is removed.
     #[test]
     fn removed_is_by_name_so_a_changed_block_is_not_removed() {
@@ -732,7 +732,7 @@ mod tests {
         );
     }
 
-    /// ADR-0059: the purge deletes exactly the removed Supervisor's directory — whole, identity
+    /// ADR-0029: the purge deletes exactly the removed Supervisor's directory — whole, identity
     /// included — leaves the neighbours untouched, and a directory that never materialized is
     /// nothing to report.
     #[test]
@@ -759,9 +759,9 @@ mod tests {
         );
     }
 
-    /// ADR-0059 hardening: the purge never recurses through a symlink planted where a Supervisor's
+    /// ADR-0029 hardening: the purge never recurses through a symlink planted where a Supervisor's
     /// directory should be — it removes the link, not what it points at. A `name` cannot itself
-    /// traverse (ADR-0057), so this is the only way the delete could have escaped, and it does not.
+    /// traverse (ADR-0029), so this is the only way the delete could have escaped, and it does not.
     #[cfg(unix)]
     #[test]
     fn the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root() {

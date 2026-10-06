@@ -1,4 +1,4 @@
-//! Taking a version string apart (ADR-0029).
+//! Taking a version string apart (ADR-0009).
 //!
 //! A version this project produces looks like `1.2.3`, `1.2.3+a1b2c3d`, or `1.2.3-dev+a1b2c3d`
 //! (ADR-0009). Three different questions get asked of that one string, and they do not want the
@@ -27,7 +27,7 @@
 /// attribute, both CLIs' `--version` output, and the install layout of ADR-0010 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
-/// (ADR-0026), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// (ADR-0009), the `-dev` marker and the commit short-hash from git — so a binary carries the
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
@@ -120,7 +120,7 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
-/// when the value is not a version (ADR-0029).
+/// when the value is not a version (ADR-0009).
 ///
 /// `1.2.3+a1b2c3d` yields `1.2.3`; `1.2.3-dev+a1b2c3d` yields `1.2.3-dev`.
 #[must_use]
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(dev.identity(), "0.1.1-dev");
     }
 
-    /// The failure that prompted ADR-0029: a package uploaded as the release number against a
+    /// The failure that prompted ADR-0009: a package uploaded as the release number against a
     /// binary that reports the commit it was built from.
     #[test]
     fn a_release_matches_the_build_that_carries_it() {

@@ -26,12 +26,12 @@ use crate::credentials::Credentials;
 use crate::fleet::{bad_request, AppState, Transport};
 
 /// The endpoint path the Baseline names as the default, and the protobuf media type it requires —
-/// both from the shared crate, because the Gateway serves the same endpoint (ADR-0044).
+/// both from the shared crate, because the Gateway serves the same endpoint (ADR-0005).
 pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
 /// The OpAMP endpoint's credential check (ADR-0013), precomputed from the `[auth]` section — Bearer
 /// and Basic alike. The comparison itself lives in [`crate::credentials`], shared with the Operator
-/// plane's own check (ADR-0067).
+/// plane's own check (ADR-0032).
 pub struct OpampAuth(Credentials);
 
 impl OpampAuth {
@@ -41,7 +41,7 @@ impl OpampAuth {
 }
 
 /// What a peer must prove to reach `/v1/opamp`. **Every configured mechanism must succeed**
-/// (ADR-0035): a credential when `[auth]` is set, a client certificate when `[tls] client_ca_file`
+/// (ADR-0013): a credential when `[auth]` is set, a client certificate when `[tls] client_ca_file`
 /// is, both when both are. Nothing configured leaves the endpoint open, as it has always been.
 ///
 /// The rule is deliberately not "either one". Header authorization is what the Baseline expects an
@@ -89,7 +89,7 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
         // WebSocket upgrade completes — answers 401 when a required proof is missing (ADR-0013,
-        // ADR-0035).
+        // ADR-0013).
         router = router.layer(middleware::from_fn_with_state(Arc::new(admission), admit));
     }
     router
@@ -98,7 +98,7 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
 async fn admit(State(admission): State<Arc<Admission>>, request: Request, next: Next) -> Response {
     // What this gate proves is *fleet membership*, not which Agent is speaking: the credential and
     // the client certificate are fleet-wide, and `instance_uid` stays self-asserted behind them
-    // (ADR-0047). Admission is the trust boundary; there is no authorization between admitted Agents.
+    // (ADR-0013). Admission is the trust boundary; there is no authorization between admitted Agents.
     // Every configured proof, not the first that happens to pass.
     if admission.require_client_certificate {
         let presented = request
@@ -163,7 +163,7 @@ fn plain_http(state: &AppState, headers: &HeaderMap, body: Bytes) -> Response {
 
     let limit = state.max_message_size();
     // Accepting gzip is a Baseline MUST, and the limit applying *after* decompression is the other
-    // half of it. Both live in `opamp::endpoint` (ADR-0044), so the Gateway's endpoint follows the
+    // half of it. Both live in `opamp::endpoint` (ADR-0005), so the Gateway's endpoint follows the
     // same rule instead of a reading of its own; what stays here is the status code, which is this
     // transport's decision.
     let raw = match opamp::endpoint::decode_body(

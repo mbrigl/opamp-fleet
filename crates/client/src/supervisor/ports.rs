@@ -26,7 +26,7 @@ pub enum ProcessCommand {
     /// [`ProcessEvent::ConfigApplied`].
     ApplyConfig {
         config: AgentRemoteConfig,
-        /// The span of the apply this command is one half of (ADR-0090). The core opens it when the
+        /// The span of the apply this command is one half of (ADR-0023). The core opens it when the
         /// configuration is handed over and the adapter's phases hang off it, so one trace covers
         /// the restart and its health gate rather than ending where the message does.
         span: tracing::Span,
@@ -41,7 +41,7 @@ pub enum ProcessCommand {
         staged: PathBuf,
         version: String,
         hash: Vec<u8>,
-        /// The span of the install (ADR-0090), opened where the download started. Carried rather
+        /// The span of the install (ADR-0023), opened where the download started. Carried rather
         /// than reopened here: staging, preflight, swap, gate and rollback happen in the adapter's
         /// task, and a trace that ended at the hand-over would stop one phase before the failures
         /// worth tracing.
@@ -53,11 +53,11 @@ pub enum ProcessCommand {
     Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
-    /// The Supervisor is retired for good (ADR-0060): stop the Managed Process, undo whatever
+    /// The Supervisor is retired for good (ADR-0011): stop the Managed Process, undo whatever
     /// installing it left *outside* the Supervisor's directory — the generic implementation has
     /// nothing there, so its uninstall is exactly the graceful stop — answer with
     /// [`ProcessEvent::Uninstalled`], and exit. The directory itself is the core's to purge
-    /// (ADR-0059), after the answer.
+    /// (ADR-0029), after the answer.
     Uninstall,
 }
 
@@ -67,7 +67,7 @@ pub enum ProcessEvent {
     /// The process's own description (reported through the Supervisor Endpoint), folded into
     /// the Agent's — its identity (`service.instance.id`) stays the Supervisor's.
     Description(AgentDescription),
-    /// The pid of the running Managed Process, or `None` once it is gone (ADR-0036). It is what
+    /// The pid of the running Managed Process, or `None` once it is gone (ADR-0023). It is what
     /// lets this Client sample the process's own CPU and memory from the outside, which is the
     /// only honest reading of "own telemetry" for a process whose configuration it must not touch
     /// (ADR-0011).
@@ -91,7 +91,7 @@ pub enum ProcessEvent {
         hash: Vec<u8>,
         result: Result<String, String>,
     },
-    /// Outcome of a [`ProcessCommand::Uninstall`] (ADR-0060), the adapter's last event. The
+    /// Outcome of a [`ProcessCommand::Uninstall`] (ADR-0011), the adapter's last event. The
     /// Agent's goodbye carries no status, so the outcome is a log line — but an `Err` names what
     /// the retired kind could not undo, which the operator otherwise learns from nothing.
     Uninstalled { result: Result<(), String> },
@@ -122,17 +122,17 @@ pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
-    /// (ADR-0021). Placed by `supervisor_dir`, so nothing may assume where it is.
+    /// (ADR-0018). Placed by `supervisor_dir`, so nothing may assume where it is.
     pub supervisor_dir: PathBuf,
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
-    /// The Managed Process itself, already resolved (ADR-0021): either inside this Supervisor's
+    /// The Managed Process itself, already resolved (ADR-0018): either inside this Supervisor's
     /// own `program/` directory, or the absolute path the block named. The plugin spawns this
     /// rather than reading its own `binary`/`command` key, so the path rule — and the package
     /// consent derived from it — lives in one place instead of once per plugin.
     pub program: PathBuf,
-    /// What an offered package replaces (ADR-0015, ADR-0023) — resolved beside `program` and for
+    /// What an offered package replaces (ADR-0015) — resolved beside `program` and for
     /// the same reason: a plugin that decided this for itself could disagree with the Agent's
     /// declared consent.
     pub install: crate::supervisor::process::InstallTarget,
@@ -141,11 +141,11 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0011). Zero acknowledges on start.
     pub apply_grace: Duration,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0058),
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0015),
     /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
     /// success.
     pub retain_previous: Duration,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0018); `None` when none is
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0015); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<String>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
@@ -157,7 +157,7 @@ pub struct SupervisorContext {
 }
 
 impl SupervisorContext {
-    /// Expands the placeholders naming this Supervisor's own directories (ADR-0022):
+    /// Expands the placeholders naming this Supervisor's own directories (ADR-0018):
     /// `${supervisor_dir}` and `${config_dir}`.
     ///
     /// They exist because a Custom Supervisor is told where its configuration is *through its own
@@ -170,7 +170,7 @@ impl SupervisorContext {
     /// and eating those to catch a typo would break a working deployment. What this substitutes
     /// is the two names below; everything else is the process's business.
     ///
-    /// Never applied to the program itself: under ADR-0021 the written shape of that path is what
+    /// Never applied to the program itself: under ADR-0018 the written shape of that path is what
     /// decides whether the Agent declares `AcceptsPackages`, and a substituted one would make a
     /// fleet-visible capability depend on something the file does not literally say.
     #[must_use]
@@ -181,7 +181,7 @@ impl SupervisorContext {
     }
 }
 
-/// What a kind knows about its own agent, so a block does not have to say it (ADR-0091).
+/// What a kind knows about its own agent, so a block does not have to say it (ADR-0037).
 ///
 /// Every field is a `&'static str` resolved **per platform** at compile time, which is the point:
 /// a constant can be asserted against the artifact this project packs, where a path written in a
@@ -193,17 +193,17 @@ impl SupervisorContext {
 /// quietly differs from what the fleet believes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KindDefaults {
-    /// The program's file name in this Supervisor's own `program/` directory (ADR-0021, ADR-0085).
+    /// The program's file name in this Supervisor's own `program/` directory (ADR-0018).
     /// `None` leaves it to the block's program key.
     pub program: Option<&'static str>,
-    /// Where the program sits inside an unpacked package tree (ADR-0023); `None` is a single-file
+    /// Where the program sits inside an unpacked package tree (ADR-0015); `None` is a single-file
     /// package, or a kind that leaves the question to the block.
     pub program_path: Option<&'static str>,
-    /// The Agent *type* this kind presents (ADR-0033). `None` falls back to the program's file
+    /// The Agent *type* this kind presents (ADR-0022). `None` falls back to the program's file
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
     /// What this kind corrects about the fleet's timing policy, and whether its block may state
-    /// any of it at all (ADR-0091). `None` — an unwrapped kind — leaves the three keys in the
+    /// any of it at all (ADR-0037). `None` — an unwrapped kind — leaves the three keys in the
     /// block, because no kind exists there to hold a value; `Some` takes them out of the block and
     /// states the kind's own corrections, each `None` meaning "the fleet's number is right".
     pub timing: Option<KindTiming>,
@@ -213,7 +213,7 @@ pub struct KindDefaults {
     pub endpoint_port: bool,
 }
 
-/// What a wrapped kind says about timing, over the fleet's own policy (ADR-0091).
+/// What a wrapped kind says about timing, over the fleet's own policy (ADR-0037).
 ///
 /// Every field is an *agent's* property rather than a host's: how long it needs to shut down, how
 /// long a restart of it has to hold before the fleet may believe it, how long its superseded
@@ -226,7 +226,7 @@ pub struct KindTiming {
     pub stop_timeout: Option<Duration>,
     /// Overrides `[supervisors] apply_grace_secs`.
     pub apply_grace: Option<Duration>,
-    /// Overrides `[updates] retain_previous_secs` (ADR-0058).
+    /// Overrides `[updates] retain_previous_secs` (ADR-0015).
     pub retain_previous: Option<Duration>,
 }
 
@@ -251,14 +251,14 @@ pub trait Plugin {
     /// The TOML `type` value this plugin serves.
     fn kind(&self) -> &'static str;
 
-    /// What this kind knows about its agent, so a block need not repeat it (ADR-0091). Stated by
+    /// What this kind knows about its agent, so a block need not repeat it (ADR-0037). Stated by
     /// every plugin rather than defaulted, because "this kind knows nothing" is an answer worth
     /// writing down where a reader of the plugin will see it.
     fn defaults(&self) -> KindDefaults;
 
     /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
     /// for the example Custom Supervisor. The core takes that key out of the settings, applies
-    /// ADR-0021's path rule to it, and hands the result back as
+    /// ADR-0018's path rule to it, and hands the result back as
     /// [`SupervisorContext::program`]; the plugin never sees the raw value.
     fn program_key(&self) -> &'static str;
 
@@ -269,7 +269,7 @@ pub trait Plugin {
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
 
     /// The strict settings parse [`start`](Self::start) performs, without the side effects
-    /// (ADR-0056): what validates an offered Supervisor set *before* any running process is
+    /// (ADR-0029): what validates an offered Supervisor set *before* any running process is
     /// touched. `settings` is the block's table with the program key already taken out, exactly
     /// as `start` receives it.
     ///
@@ -284,7 +284,7 @@ mod tests {
     use crate::service::runtime::shutdown_channel;
 
     /// A per-Supervisor root that is absolute on *this* platform — on Windows that means naming a
-    /// drive (ADR-0021), and it is why nothing below spells a path out with POSIX separators: what
+    /// drive (ADR-0018), and it is why nothing below spells a path out with POSIX separators: what
     /// a placeholder expands to is a `PathBuf`, so its separators are the platform's own.
     #[cfg(windows)]
     fn root(place: &str) -> PathBuf {
@@ -317,7 +317,7 @@ mod tests {
         }
     }
 
-    /// The case ADR-0022 exists for: the argument that points a Foreign Agent at its configuration
+    /// The case ADR-0018 exists for: the argument that points a Foreign Agent at its configuration
     /// is derived from the same value the Client derives it from, so relocating `supervisor_dir`
     /// cannot leave the process reading a file nobody writes to.
     #[test]
@@ -353,7 +353,7 @@ mod tests {
 
     /// Anything else is left exactly as written. Fluent Bit's own configuration language uses
     /// `${…}` too, and a Client that ate or refused those would break a working deployment to
-    /// catch a typo — which is the trade ADR-0022 makes, deliberately and in this direction.
+    /// catch a typo — which is the trade ADR-0018 makes, deliberately and in this direction.
     #[test]
     fn an_unknown_placeholder_is_passed_through_untouched() {
         let ctx = context(root("opt"));

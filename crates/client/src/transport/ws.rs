@@ -32,7 +32,7 @@ enum Served {
     ConnectionLost,
     /// Verified connection settings took effect (ADR-0014); the runtime reconnects with them.
     Reconfigured,
-    /// A self-update switched to a new version (ADR-0020); the run ends and the process asks the
+    /// A self-update switched to a new version (ADR-0017); the run ends and the process asks the
     /// service manager for a restart.
     RestartForUpdate,
 }
@@ -44,7 +44,7 @@ pub async fn run(
     telemetry: &crate::telemetry::Telemetry,
 ) -> Result<RunOutcome, String> {
     // Trust and identity in one configuration: a private CA when one is configured, and this
-    // Client's client certificate when it has one (ADR-0007, ADR-0035).
+    // Client's client certificate when it has one (ADR-0007, ADR-0013).
     let connector = crate::tls::rustls_client_config(config)?.map(Connector::Rustls);
 
     // The Authorization header (ADR-0013, rotated per ADR-0014) rides the upgrade request — the
@@ -203,11 +203,11 @@ async fn serve(
                         if send_all(&mut socket, engine.owed_reports(), limit).await.is_err() {
                             return Served::ConnectionLost;
                         }
-                        // Enrolment (ADR-0035): with the Server's capabilities now known, ask it
+                        // Enrolment (ADR-0013): with the Server's capabilities now known, ask it
                         // to sign a certificate if it signs them and this Client needs one. The
                         // answer arrives as an ordinary connection-settings offer.
                         engine.request_certificate(config);
-                        // A connection-settings offer (ADR-0014, ADR-0086): the APPLYING
+                        // A connection-settings offer (ADR-0014, ADR-0023): the APPLYING
                         // acknowledgement just went out with the owed reports. A verified OpAMP
                         // half reconnects; a telemetry-only offer is applied in place and its
                         // acknowledgement is flushed here, on the connection that is staying up.
@@ -218,7 +218,7 @@ async fn serve(
                                 let _ = socket.close(None).await;
                                 return Served::Reconfigured;
                             }
-                            // Both an APPLIED and a FAILED are owed now — before ADR-0086 only the
+                            // Both an APPLIED and a FAILED are owed now — before ADR-0023 only the
                             // failure branch flushed, which would have left a telemetry-only
                             // acknowledgement sitting on the machine until something else spoke.
                             OfferOutcome::Applied => {
@@ -240,7 +240,7 @@ async fn serve(
                         {
                             return Served::ConnectionLost;
                         }
-                        // The `Installing` above is the last thing this version says (ADR-0020).
+                        // The `Installing` above is the last thing this version says (ADR-0017).
                         // Then exit for the restart *cleanly*: stop the Managed Processes and send
                         // the goodbyes over this connection, exactly as an ordinary shutdown does,
                         // rather than abandoning the children when the process exits.
@@ -251,7 +251,7 @@ async fn serve(
                             info!("disconnected for the self-update restart");
                             return Served::RestartForUpdate;
                         }
-                        // The self-Agent's configuration is its Supervisor set (ADR-0056):
+                        // The self-Agent's configuration is its Supervisor set (ADR-0029):
                         // apply it — stop what left, rewrite `supervisor.toml`, start what arrived —
                         // send the retired Agents' goodbyes, and flush the outcome.
                         let mut sink = FrameSink { socket: &mut socket, limit };

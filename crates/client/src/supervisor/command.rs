@@ -14,7 +14,7 @@ use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
-/// `command` is not among them: the core takes it out and resolves it (ADR-0021), and what
+/// `command` is not among them: the core takes it out and resolves it (ADR-0018), and what
 /// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +30,7 @@ struct CommandSettings {
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     ///
-    /// They are also this kind's **preflight** (ADR-0068): a package's staged program is run with
+    /// They are also this kind's **preflight** (ADR-0033): a package's staged program is run with
     /// them before the running one is stopped, and a non-zero exit refuses the package with the
     /// program's own message. Same arguments, same contract — a check that is cheap and touches
     /// no state — asked where a refusal costs nothing rather than after the swap.
@@ -38,7 +38,7 @@ struct CommandSettings {
     version_args: Option<Vec<String>>,
 }
 
-/// The keys this kind used to take and no longer does (ADR-0091), each with what answers it now.
+/// The keys this kind used to take and no longer does (ADR-0037), each with what answers it now.
 /// Refused by name rather than met with serde's "unknown field", for the reason `icinga2` refuses
 /// its own: a block carrying one was written against a Client that needed it, and the operator
 /// deleting the line deserves to be told where the value went.
@@ -78,7 +78,7 @@ impl Plugin for CommandPlugin {
     }
 
     /// Nothing at all. This is the kind for an agent nobody has written a wrapper for, so every
-    /// value is the operator's to state (ADR-0091).
+    /// value is the operator's to state (ADR-0037).
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults::none()
     }
@@ -92,7 +92,7 @@ impl Plugin for CommandPlugin {
             .try_into()
             .map_err(|e| format!("supervisor {:?}: {e}", ctx.name))?;
         // Everything the operator wrote about *where* things are goes through the placeholders
-        // (ADR-0022) — the program itself deliberately does not.
+        // (ADR-0018) — the program itself deliberately does not.
         let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
         let env: Vec<(String, String)> = settings
             .env
@@ -108,11 +108,11 @@ impl Plugin for CommandPlugin {
             program: command.clone(),
             args,
             // A Foreign Agent's version flag is its own convention, and so is its banner: the
-            // strict SemVer read stays the default here (ADR-0068).
+            // strict SemVer read stays the default here (ADR-0033).
             parse: None,
         });
         // The same arguments, asked of the *staged* program before the running one is stopped
-        // (ADR-0068). This kind knows no argument of its own to be safe to run — but an operator
+        // (ADR-0033). This kind knows no argument of its own to be safe to run — but an operator
         // who set `version_args` has named one: the contract on that key is that the command may
         // be invoked with exactly these and will print its version, which is precisely a check
         // that is cheap and touches no state. Nothing new is asked of anyone; the arguments that
@@ -126,7 +126,7 @@ impl Plugin for CommandPlugin {
             env: Vec::new(),
         });
         // What this Foreign Agent will actually be invoked with, after the placeholders were
-        // expanded (ADR-0022). The spawn line names the program; the arguments are where a
+        // expanded (ADR-0018). The spawn line names the program; the arguments are where a
         // placeholder that did not resolve — or a working directory that is not the one the
         // operator meant — becomes visible, and the process itself usually reports neither.
         //
@@ -151,8 +151,8 @@ impl Plugin for CommandPlugin {
             archive_key: ctx.archive_key.clone(),
             version_probe,
             preflight,
-            // Not this kind's to know (ADR-0091): an agent nobody wrote a wrapper for applies a
-            // configuration by restarting, which is ADR-0060's generic behaviour.
+            // Not this kind's to know (ADR-0037): an agent nobody wrote a wrapper for applies a
+            // configuration by restarting, which is ADR-0011's generic behaviour.
             reload_signal: None,
             events: ctx.events,
             commands: command_rx,
@@ -162,7 +162,7 @@ impl Plugin for CommandPlugin {
                     program: command.clone(),
                     args: args.clone(),
                     env: env.clone(),
-                    // The program's own directory (ADR-0091), resolved at the spawn.
+                    // The program's own directory (ADR-0037), resolved at the spawn.
                     working_dir: None,
                     // Whatever the operator points this at is supervised as one process.
                     own_process_group: false,
@@ -190,7 +190,7 @@ impl Plugin for CommandPlugin {
 mod tests {
     use super::*;
 
-    /// `command` is gone from these settings — the core resolves it (ADR-0021) — so a block that
+    /// `command` is gone from these settings — the core resolves it (ADR-0018) — so a block that
     /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
@@ -211,8 +211,8 @@ mod tests {
         assert!(typo.try_into::<CommandSettings>().is_err());
     }
 
-    /// The two keys ADR-0091 retires are refused by name, on both sides of the seam: at startup,
-    /// and in an offered Supervisor set before any running process is touched (ADR-0056). Each
+    /// The two keys ADR-0037 retires are refused by name, on both sides of the seam: at startup,
+    /// and in an offered Supervisor set before any running process is touched (ADR-0029). Each
     /// message says what supplies the value now, because a block carrying one was written against
     /// a Client that took it.
     #[test]

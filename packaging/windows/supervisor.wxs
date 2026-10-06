@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The Windows installer (ADR-0046).
+  The Windows installer (ADR-0020).
 
   The package delivers one file into `Program Files` and then calls the Client's own
   `service install` (ADR-0010), which builds the layout and the state directory under
-  `%ProgramData%\opamp-fleet`. That division is ADR-0084 clause 3: `Program Files` is
+  `%ProgramData%\opamp-fleet`. That division is ADR-0010 clause 9: `Program Files` is
   `TrustedInstaller`-owned and read-only once installation finishes, and the layout is rewritten at
   runtime by the daemon — the self-update stages a new version directory and swings `current`. It
   is the same line the `.deb` and `.rpm` draw between `/usr/libexec` and `/opt`. The MSI therefore
@@ -12,12 +12,12 @@
   host installed from the archive and one installed by this package identical.
 
   It registers no service of its own. An MSI `ServiceInstall` element would write a registration
-  knowing nothing of ADR-0030's service name and display name, nor of ADR-0020's SCM recovery
+  knowing nothing of ADR-0010 clause 11's service name and display name, nor of ADR-0017's SCM recovery
   actions, both of which `service install` sets through calls the `service-manager` backend cannot
   make. There is one install path on four operating systems and this is not a second one.
 
   Built by `wix build` with the UI extension; `Version` and `BinaryPath` come in as -d arguments
-  from the release workflow, so the version in the MSI is the one the binary reports (ADR-0026).
+  from the release workflow, so the version in the MSI is the one the binary reports (ADR-0009).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
@@ -62,20 +62,20 @@
 
       ENDPOINT is empty by default in the execute sequence: an empty one is a legal answer meaning
       "configure later", and it selects the second custom action below. Only the interactive dialog
-      is prefilled with the development default (ADR-0049) — the SetProperty runs in the UI
+      is prefilled with the development default (ADR-0020) — the SetProperty runs in the UI
       sequence alone, so a silent deploy (`/qn`, Intune, Group Policy) that names no ENDPOINT still
       defers configuration instead of pinning every host it touches to localhost, which is the
-      thousand-hosts state ADR-0046 refuses to manufacture. A value given on the command line wins
+      thousand-hosts state ADR-0020 refuses to manufacture. A value given on the command line wins
       over the prefill, and a maintenance run never re-answers a question the first install already
       settled. The value is the development Server in its `http://` form — deliberately not the
-      loader's own `ws://` default: the scheme selects the transport, and ADR-0049 records the
+      loader's own `ws://` default: the scheme selects the transport, and ADR-0020 records the
       operator's choice of HTTP for the click-through install. `tests/msi_exe_command.rs` holds
       the value to the loader's endpoint rule and to this string.
     -->
     <Property Id="ENDPOINT" Secure="yes" />
 
     <!--
-      The self-update consent (ADR-0075). Unlike ENDPOINT's prefill this default is set in *both*
+      The self-update consent (ADR-0017). Unlike ENDPOINT's prefill this default is set in *both*
       sequences, because default-on is the decision rather than a convenience for the click-through
       path: a silent `/qn` deploy that names nothing gets a fleet-updatable Client, which is the
       point. An administrator withdraws it the same way the dialog's cleared checkbox does:
@@ -121,12 +121,12 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes" />
 
     <!--
-      One directory the operator configures (ADR-0046 clause 5), holding the payload this package
+      One directory the operator configures (ADR-0020 clause 13), holding the payload this package
       delivers: `supervisor.exe` and nothing else. The layout and the state directory are not here
-      — `service install` puts them under `%ProgramData%\opamp-fleet`, for ADR-0084 clause 3's
+      — `service install` puts them under `%ProgramData%\opamp-fleet`, for ADR-0010 clause 9's
       reason. The operator still configures one path; it simply is not the install root.
 
-      Named after the **product**, not its display name (ADR-0084 clause 2): `nodejs`, `Git` and
+      Named after the **product**, not its display name (ADR-0010 clause 8): `nodejs`, `Git` and
       `PowerShell` sit under `Program Files` under their own slugs, and a directory named for the
       display name would be the one place a variant build could not tell itself apart.
     -->
@@ -169,9 +169,9 @@
       The self-update answer needs no third and fourth action, because unlike the endpoint it *has*
       a no-op spelling: `[SELFUPDATEFLAG]` is empty when the consent stands, and a formatted field
       of an unset property resolves to nothing — so the consenting command line is character for
-      character the one this package sent before ADR-0075.
+      character the one this package sent before ADR-0017.
 
-      **No root flag here, and that is ADR-0084 clause 3.** These lines used to pass one, naming
+      **No root flag here, and that is ADR-0010 clause 9.** These lines used to pass one, naming
       `[INSTALLFOLDER]` with a doubled backslash that was load-bearing: a directory property always
       resolves with a trailing backslash, and the C runtime that builds the client's argv reads a
       backslash before a quote as an escaped, literal quote rather than the end of the argument —
@@ -204,9 +204,9 @@
       type 18 action needs its executable to still be on disk.
 
       `service uninstall` leaves both roots behind, as it does everywhere (ADR-0010) — deleting a
-      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0027
+      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0020
       refused, one step later. What this package's uninstaller then empties is INSTALLFOLDER, which
-      holds only the payload it delivered: exactly right, and the reason ADR-0084 clause 3 moved
+      holds only the payload it delivered: exactly right, and the reason ADR-0010 clause 9 moved
       the data out of `Program Files`. The configuration and the state survive under
       `%ProgramData%\opamp-fleet`, the same remove-versus-purge shape the `.deb` has.
     -->
@@ -230,7 +230,7 @@
         so it has to exist first.
 
         The service is registered and left stopped, exactly as the `.deb` and `.rpm` post-install
-        does and for the same reason (ADR-0046 clause 3, ADR-0027): a Client with no configuration
+        does and for the same reason (ADR-0020 clause 11): a Client with no configuration
         dials the development default and manages nothing, and an installer must not manufacture
         that state on every host it touches. An install that was given an ENDPOINT still does not
         start — the credential, if the Server needs one, is not in yet.

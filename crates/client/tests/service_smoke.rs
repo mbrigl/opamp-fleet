@@ -1,5 +1,5 @@
 //! The Client under the machine's **real** service manager — systemd, launchd, or the SCM
-//! (ADR-0010, ADR-0020).
+//! (ADR-0010, ADR-0017).
 //!
 //! Every other test in this project stands in for the service manager: the self-update end-to-end
 //! test restarts the Client itself, "exactly as systemd would". That is what makes the update loop
@@ -31,11 +31,11 @@ use client::service::{ServiceControl, ServiceLevel, ServiceState};
 use server::fleet::{AgentView, AppState};
 
 /// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
-/// reported as `service.instance.name` (ADR-0033), which is what the fleet view is searched by.
+/// reported as `service.instance.name` (ADR-0022), which is what the fleet view is searched by.
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
-/// `supervisor` (ADR-0077).
+/// `supervisor` (ADR-0022).
 ///
-/// Since ADR-0084 there is no `--instance` to isolate this run under, and the service it registers
+/// Since ADR-0010 there is no `--instance` to isolate this run under, and the service it registers
 /// carries the product's name like any other install. This test therefore takes over the host's
 /// one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
@@ -99,7 +99,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform since ADR-0030, so this is what systemd, launchd, and the SCM
+    // One name on every platform since ADR-0010 clause 11, so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]

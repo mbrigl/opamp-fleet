@@ -10,8 +10,8 @@ use serde::Deserialize;
 /// The default OpAMP endpoint port, from the Baseline.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:4320";
 
-/// The default Operator-plane address (ADR-0066): the port above the protocol's, on loopback.
-/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0067) — until then its
+/// The default Operator-plane address (ADR-0032): the port above the protocol's, on loopback.
+/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0032) — until then its
 /// reachability *is* its protection, so publishing it is a line an operator writes deliberately.
 pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 
@@ -21,11 +21,11 @@ pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Address and port the **Agent plane** binds: the OpAMP endpoint and the package download
-    /// route the offers point at (ADR-0066, superseding ADR-0005 on this point).
+    /// route the offers point at (ADR-0032, superseding ADR-0005 on this point).
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// The **Operator plane** — REST API, API docs, and the bundled UI — on its own listener
-    /// (ADR-0066). Absent means the default, which is loopback.
+    /// (ADR-0032). Absent means the default, which is loopback.
     #[serde(default)]
     pub rest: RestConfig,
     /// Where Configurations are persisted — one JSON file each (ADR-0012) — so a Server restart
@@ -34,16 +34,16 @@ pub struct ServerConfig {
     #[serde(default = "default_config_dir")]
     pub config_dir: PathBuf,
     /// Optional TLS; when present **both** listeners serve HTTPS/WSS, with one certificate and
-    /// key (ADR-0007, ADR-0066).
+    /// key (ADR-0007, ADR-0032).
     pub tls: Option<TlsConfig>,
     /// Optional authentication on the OpAMP endpoint (ADR-0013); absent means open, as before.
     pub auth: Option<AuthConfig>,
     /// Optional connection settings offered to the fleet (ADR-0014); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
-    /// Optional certificate authority for signing Agent CSRs (ADR-0035); absent means the Server
+    /// Optional certificate authority for signing Agent CSRs (ADR-0013); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
-    /// Optional destinations for the Agents' own telemetry (ADR-0036); absent means none is
+    /// Optional destinations for the Agents' own telemetry (ADR-0023); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Where software packages are persisted — artifact + metadata each (ADR-0015). An empty or
@@ -53,7 +53,7 @@ pub struct ServerConfig {
     /// The absolute base URL the Server advertises for package downloads (ADR-0015), e.g.
     /// `https://fleet.example:4320`. When unset, the Server offers a path-only `download_url`
     /// that the Client resolves against its own OpAMP endpoint — the Agent plane, which is where
-    /// the download is served (ADR-0066); set it when downloads must go through a different host.
+    /// the download is served (ADR-0032); set it when downloads must go through a different host.
     pub advertised_url: Option<String>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
     /// direction. The Baseline requires the limit, recommends this default, and asks that it be
@@ -72,12 +72,12 @@ pub struct ServerConfig {
     #[serde(default = "default_max_total_package_size")]
     pub max_total_package_bytes: u64,
     /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
-    /// it stale (ADR-0038). Ignored when `[connection_offer]` names a heartbeat interval — the
+    /// it stale (ADR-0025). Ignored when `[connection_offer]` names a heartbeat interval — the
     /// period this Server asked for is a better answer than a default.
     #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: u64,
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
-    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0047)
+    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0013)
     /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
     /// anonymous flood is `[auth]` (ADR-0013) — this is the backstop while it is off. `0` is refused
     /// at load: a fleet that can hold no Agent is a misconfiguration, not a limit.
@@ -85,7 +85,7 @@ pub struct ServerConfig {
     pub max_agents: usize,
 }
 
-/// The `[rest]` section (ADR-0066): the Operator plane's own listener. It is a section rather than
+/// The `[rest]` section (ADR-0032): the Operator plane's own listener. It is a section rather than
 /// a bare key because the plane is what grows next — an authentication decision belongs inside it,
 /// not beside it.
 #[derive(Debug, Deserialize)]
@@ -94,7 +94,7 @@ pub struct RestConfig {
     /// Address and port the REST API, the API docs, and the bundled UI bind.
     #[serde(default = "default_rest_listen")]
     pub listen: SocketAddr,
-    /// Optional Basic authentication over the whole plane (ADR-0067); absent means open, which is
+    /// Optional Basic authentication over the whole plane (ADR-0032); absent means open, which is
     /// what the loopback default above is there to make tolerable.
     pub auth: Option<RestAuthConfig>,
 }
@@ -108,7 +108,7 @@ impl Default for RestConfig {
     }
 }
 
-/// The `[rest.auth]` section (ADR-0067): who may reach the Operator plane. Basic only — the
+/// The `[rest.auth]` section (ADR-0032): who may reach the Operator plane. Basic only — the
 /// audience is a browser and `curl`, and Basic is the one scheme both speak without a login page.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,13 +281,13 @@ impl AuthConfig {
     }
 }
 
-/// The `[telemetry_offer]` section (ADR-0036): where Agents send their own telemetry.
+/// The `[telemetry_offer]` section (ADR-0023): where Agents send their own telemetry.
 ///
 /// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
 /// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
 /// telemetry disappears into a 404 nobody looks at.
 ///
-/// **What this section says, it says about all three signals** (ADR-0089). A signal left out is
+/// **What this section says, it says about all three signals** (ADR-0023). A signal left out is
 /// offered no destination and is *stopped* on an Agent that was reporting it, and an endpoint set
 /// to the empty string is an explicit withdrawal — the one way to say "stop all three", since a
 /// Server that offers nothing at all is a Server that says nothing at all. Removing the section
@@ -309,7 +309,7 @@ impl TelemetryOfferConfig {
     /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
     ///
     /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
-    /// (ADR-0089), which is a thing to be said rather than a URL to be checked.
+    /// (ADR-0023), which is a thing to be said rather than a URL to be checked.
     fn check(&self) -> Result<(), String> {
         let endpoints = [
             ("metrics_endpoint", &self.metrics_endpoint),
@@ -343,17 +343,17 @@ pub struct TlsConfig {
     /// PEM private key.
     pub key_file: PathBuf,
     /// Optional PEM bundle of the certificate authorities a **client** certificate must chain to
-    /// (ADR-0035). Present turns mutual TLS on for the OpAMP endpoint: every request to
+    /// (ADR-0013). Present turns mutual TLS on for the OpAMP endpoint: every request to
     /// `/v1/opamp` must arrive over a connection bearing a certificate this bundle verifies.
     ///
     /// Client authentication stays *optional at the TLS layer* — the same listener also serves the
-    /// package download, which a Client fetches presenting no certificate (ADR-0066) — so the
+    /// package download, which a Client fetches presenting no certificate (ADR-0032) — so the
     /// requirement is enforced on the OpAMP route rather than on the socket. A certificate that **is** presented
     /// is always verified: rustls refuses a bad one before any route is reached.
     pub client_ca_file: Option<PathBuf>,
 }
 
-/// The `[client_ca]` section (ADR-0035): the certificate authority this Server signs Agent CSRs
+/// The `[client_ca]` section (ADR-0013): the certificate authority this Server signs Agent CSRs
 /// with. Present is what arms the CSR flow — `AcceptsConnectionSettingsRequest` is declared only
 /// while it is, the same "declare what is actually armed" rule `[connection_offer]` follows.
 ///
@@ -368,7 +368,7 @@ pub struct ClientCaConfig {
     /// PEM private key of the issuing CA.
     pub key_file: PathBuf,
     /// How long an issued certificate is valid. Short is the point: this project has no revocation
-    /// story, so validity plus renewal is what bounds a certificate's reach (ADR-0035).
+    /// story, so validity plus renewal is what bounds a certificate's reach (ADR-0013).
     #[serde(default = "default_validity_days")]
     pub validity_days: u32,
 }
@@ -412,8 +412,8 @@ fn default_max_message_size() -> usize {
 }
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
-/// enough that a certificate is not a permanent grant (ADR-0035).
-/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0038): one missed beat is a
+/// enough that a certificate is not a permanent grant (ADR-0013).
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0025): one missed beat is a
 /// lost packet, and a fleet view that flickers is one nobody trusts.
 fn default_stale_after_secs() -> u64 {
     90
@@ -503,7 +503,7 @@ impl ServerConfig {
             auth.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
-        // The two planes are two listeners (ADR-0066). Addresses that collide would surface as the
+        // The two planes are two listeners (ADR-0032). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
         if listeners_collide(config.listen, config.rest.listen) {
@@ -517,7 +517,7 @@ impl ServerConfig {
         }
         // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
         // this can only be a `[client_ca]` without one — issuing certificates for a channel that
-        // will never ask for them (ADR-0035).
+        // will never ask for them (ADR-0013).
         if config.client_ca.is_some() && config.tls.is_none() {
             return Err(format!(
                 "{}: [client_ca] issues client certificates, which only a TLS listener can ask \
@@ -566,7 +566,7 @@ impl ServerConfig {
     /// The configured offers that hand a credential to any Agent that asks, while `[auth]` is unset
     /// so the OpAMP endpoint admits anyone (ADR-0013). The connection-settings offer carries an
     /// `Authorization` value (ADR-0014) and the telemetry offer carries headers that are "typically
-    /// an access token" (ADR-0036); with no admission in front of them, a report declaring the
+    /// an access token" (ADR-0023); with no admission in front of them, a report declaring the
     /// matching capability is answered with those secrets. Names the sections so the operator can
     /// act. Empty when `[auth]` is set or no offer carries a secret — nothing to warn about.
     ///
@@ -621,7 +621,7 @@ mod tests {
         assert!(cfg.tls.is_none());
     }
 
-    /// ADR-0066: the Operator plane is a second listener, and by default it is on loopback — the
+    /// ADR-0032: the Operator plane is a second listener, and by default it is on loopback — the
     /// only protection it has while nothing authenticates it.
     #[test]
     fn the_operator_plane_defaults_to_loopback_and_is_configurable() {
@@ -637,7 +637,7 @@ mod tests {
     }
 
     /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,
-    /// and it is named as one rather than surfacing as "address already in use" (ADR-0066).
+    /// and it is named as one rather than surfacing as "address already in use" (ADR-0032).
     #[test]
     fn two_planes_on_one_address_are_refused() {
         assert!(listeners_collide(
@@ -708,7 +708,7 @@ mod tests {
     }
 
     /// The three shapes `[telemetry_offer]` admits: a destination, a withdrawal, and a mistake.
-    /// The withdrawal is the one ADR-0089 adds — an empty endpoint is a thing to say, not a URL to
+    /// The withdrawal is the one ADR-0023 adds — an empty endpoint is a thing to say, not a URL to
     /// check — and it must not be waved through for a value that is merely wrong.
     #[test]
     fn an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error() {
@@ -801,7 +801,7 @@ mod tests {
         assert!(bearer_only.check().is_ok());
     }
 
-    /// ADR-0067: the Operator plane's own credentials, precomputed into the header values that
+    /// ADR-0032: the Operator plane's own credentials, precomputed into the header values that
     /// authenticate, with the challenge that makes a browser ask rather than give up.
     #[test]
     fn rest_auth_precomputes_the_accepted_headers_and_the_basic_challenge() {
@@ -840,7 +840,7 @@ mod tests {
         let err = ServerConfig::load(&path).expect_err("an empty section must fail startup");
         assert!(err.contains("[rest.auth.basic_users]"), "{err}");
 
-        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0067).
+        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0032).
         assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 

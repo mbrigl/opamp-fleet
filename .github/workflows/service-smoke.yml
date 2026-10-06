@@ -1,7 +1,7 @@
 name: Service smoke
 
 # The one thing every other test stands in for: the machine's *real* service manager (ADR-0010,
-# ADR-0020). `crates/client/tests/service_smoke.rs` installs the Client as a system service, starts
+# ADR-0017). `crates/client/tests/service_smoke.rs` installs the Client as a system service, starts
 # it, kills its process, and asserts the manager brings it back — the restart a self-update depends
 # on and that no in-process stand-in can prove.
 #

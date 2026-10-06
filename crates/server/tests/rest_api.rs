@@ -39,7 +39,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(stored["body"], "receivers: {}\n");
     assert!(
         stored.get("published").is_none() && stored.get("pending_changes").is_none(),
-        "ADR-0061: content has one state — saved; rollout is a fact about Agents: {stored}"
+        "ADR-0030: content has one state — saved; rollout is a fact about Agents: {stored}"
     );
 
     // Read back, singly and as the list.
@@ -83,7 +83,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(gone.status(), 404);
 }
 
-/// ADR-0016: `role` is optional on the way in and absent on the way out when unset, so every
+/// ADR-0012: `role` is optional on the way in and absent on the way out when unset, so every
 /// stored Configuration and every generated client keeps working unchanged.
 #[tokio::test]
 async fn a_configuration_carries_an_optional_role() {
@@ -141,7 +141,7 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// ADR-0061 over the wire: saving proposes, the rollout act distributes — resource-wide or per
+/// ADR-0030 over the wire: saving proposes, the rollout act distributes — resource-wide or per
 /// Agent — and a later edit waits as `update` until the next act pins it.
 #[tokio::test]
 async fn a_configuration_waits_until_it_is_rolled_out() {
@@ -243,7 +243,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     assert_eq!(missing.status(), 404);
 }
 
-/// ADR-0061 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
+/// ADR-0030 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
 /// and receives nothing until an act of its own. The bulk act must be repeated (or the per-Agent
 /// one pressed) for latecomers.
 #[tokio::test]
@@ -309,7 +309,7 @@ async fn an_agent_that_appears_later_waits() {
     assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
-/// ADR-0054 over the wire: a Configuration stating an Agent type reaches only Agents reporting
+/// ADR-0012 over the wire: a Configuration stating an Agent type reaches only Agents reporting
 /// that `service.name`, whatever its Selector says.
 #[tokio::test]
 async fn a_typed_configuration_reaches_only_agents_of_its_type() {
@@ -340,7 +340,7 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
         "the type is a fit, not an aim: the other type's Configuration is no candidate"
     );
 
-    // And the per-Agent act refuses the one that does not fit (ADR-0061).
+    // And the per-Agent act refuses the one that does not fit (ADR-0030).
     let refused = client
         .post(url(
             server.rest_addr,
@@ -405,7 +405,7 @@ async fn the_openapi_document_describes_the_contract() {
     let document: serde_json::Value = response.json().await.expect("json");
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
-    // Deployments are part of the contract from the moment they exist (ADR-0096) — a portal
+    // Deployments are part of the contract from the moment they exist (ADR-0040) — a portal
     // generates against this document, and a route it cannot see is a route it cannot call.
     for route in [
         "/api/v1/deployments",
@@ -416,7 +416,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // And the retired package paths are gone rather than lingering as a promise (ADR-0095).
+    // And the retired package paths are gone rather than lingering as a promise (ADR-0039).
     assert!(
         !paths
             .keys()
@@ -424,7 +424,7 @@ async fn the_openapi_document_describes_the_contract() {
         "no package route still carries a name segment: {:?}",
         paths.keys().collect::<Vec<_>>()
     );
-    // Forgetting an Agent is part of the contract a portal generates against (ADR-0039), and the
+    // Forgetting an Agent is part of the contract a portal generates against (ADR-0025), and the
     // description is where the "reaches no host" caveat has to be readable.
     let forget = &paths["/api/v1/agents/{instance_uid}"]["delete"];
     assert!(forget.is_object(), "DELETE on an Agent is described");
@@ -439,12 +439,12 @@ async fn the_openapi_document_describes_the_contract() {
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
     assert!(
         paths.contains_key("/api/v1/configurations/{name}/rollout"),
-        "the rollout act is part of the contract (ADR-0061)"
+        "the rollout act is part of the contract (ADR-0030)"
     );
     assert!(paths.contains_key("/api/v1/agents/{instance_uid}/rollout"));
     assert!(
         !paths.contains_key("/api/v1/configurations/{name}/publication"),
-        "publication left the contract with ADR-0061"
+        "publication left the contract with ADR-0030"
     );
     // The resource schemas ride along, so a client can be generated without the source.
     assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
@@ -523,7 +523,7 @@ async fn configurations_survive_a_server_restart() {
     assert_eq!(restored[0].saved.body, "receivers: {}\n");
 }
 
-/// ADR-0039. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
+/// ADR-0025. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
 /// it would have its configuration offered again — which restarts a Managed Process.
 #[tokio::test]
 async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
@@ -553,7 +553,7 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     );
 }
 
-/// ADR-0039, points 1 and 3: forgetting drops the record and reaches no host, so a Client that is
+/// ADR-0025, points 7 and 9: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
 #[tokio::test]
@@ -709,7 +709,7 @@ async fn report(
         .expect("decode")
 }
 
-/// ADR-0042, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
+/// ADR-0027, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
 /// reports nothing about `rollout`, so before the label the canary Configuration cannot reach it —
 /// and moving it into the ring is one API call rather than an edit and a restart on that host.
 #[tokio::test]
@@ -720,7 +720,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
     // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes
-    // itself to nobody — and since ADR-0061 even a match only proposes.
+    // itself to nobody — and since ADR-0030 even a match only proposes.
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
@@ -764,7 +764,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .is_empty());
 }
 
-/// The crux (ADR-0042 point 3): reported attributes decide which artifact fits a machine, so a
+/// The crux (ADR-0027 point 3): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
 #[tokio::test]
 async fn a_label_may_not_restate_what_the_agent_reports() {
@@ -773,7 +773,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0031).
+    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0021).
     let refused = set_labels(
         &client,
         server.rest_addr,
@@ -859,7 +859,7 @@ async fn the_view_carries_the_reported_health_and_its_reason() {
 }
 
 /// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
-/// (ADR-0039) does not undo them: a host that comes back is in the ring it was put in.
+/// (ADR-0025) does not undo them: a host that comes back is in the ring it was put in.
 #[tokio::test]
 async fn forgetting_an_agent_keeps_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;

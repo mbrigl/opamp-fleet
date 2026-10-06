@@ -1,6 +1,6 @@
-//! Deployments (ADR-0096): what reaches a channel of hosts, and the only thing rolled out.
+//! Deployments (ADR-0040): what reaches a channel of hosts, and the only thing rolled out.
 //!
-//! A Package is what an Agent type runs at a version and nothing else (ADR-0095) — no aim, no
+//! A Package is what an Agent type runs at a version and nothing else (ADR-0039) — no aim, no
 //! signature, no act of its own. All three live here. A Deployment carries a **name**, a
 //! **Selector** over the channel it addresses, **one Package per Agent type**, and the **signature**
 //! of each artifact it offers.
@@ -8,15 +8,15 @@
 //! Two rules give the object its shape, and both are refusals:
 //!
 //! **An Agent belongs to at most one Deployment.** Where two match, that is a conflict and the
-//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0017's
+//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0016's
 //! specificity ranking is withdrawn with no successor: it decided "which artifact does this host
 //! get" by a computation across every stored object, which is an answer no operator could read off
 //! anything. A refusal that names both Deployments is worse for nobody and legible to everyone.
 //!
 //! **A Selector is never empty.** An empty one is the channel that collides with every other, and a
 //! forgotten field would quietly become the base for the whole fleet — the class of accident
-//! ADR-0061 was built to prevent. Channels are therefore a *partition*: a Selector cannot express
-//! "not", so disjoint channels come from membership, which is what ADR-0042's labels already are.
+//! ADR-0030 was built to prevent. Channels are therefore a *partition*: a Selector cannot express
+//! "not", so disjoint channels come from membership, which is what ADR-0027's labels already are.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use crate::packages::{PackageId, Platform};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The operator's name for this channel. The one human-chosen label in the model, which is why
-    /// it keeps the ADR-0010 grammar a Package gave up (ADR-0095).
+    /// it keeps the ADR-0010 grammar a Package gave up (ADR-0039).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
     /// (ADR-0012 semantics, unchanged). **Never empty** — see the module note.
@@ -323,7 +323,7 @@ impl DeploymentStore {
     }
 
     /// Creates a Deployment or replaces its Selector. Distributes nothing: a Deployment reaches an
-    /// Agent only through a rollout act (ADR-0061), and this is the save.
+    /// Agent only through a rollout act (ADR-0030), and this is the save.
     pub fn put(
         &self,
         name: &str,
@@ -351,7 +351,7 @@ impl DeploymentStore {
     }
 
     /// Adds a Package to a Deployment, or replaces the one held for its Agent type when `replace`
-    /// is set. Without `replace`, a type already held is refused by name (ADR-0096 point 2).
+    /// is set. Without `replace`, a type already held is refused by name (ADR-0040 point 2).
     pub fn put_package(
         &self,
         name: &str,
@@ -435,7 +435,7 @@ impl DeploymentStore {
     }
 
     /// Deletes a Deployment. What it was rolled out to is the fleet's business, not the store's:
-    /// an assignment that named it is withdrawn there, and nothing is uninstalled (ADR-0061).
+    /// an assignment that named it is withdrawn there, and nothing is uninstalled (ADR-0030).
     pub fn delete(&self, name: &str) -> Result<bool, DeploymentError> {
         let mut deployments = self.deployments.write().expect("deployments lock");
         if deployments.remove(name).is_none() {
@@ -542,7 +542,7 @@ mod tests {
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
-    /// why (ADR-0096 point 5).
+    /// why (ADR-0040 point 5).
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -588,7 +588,7 @@ mod tests {
     }
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
-    /// ordinary state (ADR-0096 point 4).
+    /// ordinary state (ADR-0040 point 4).
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");

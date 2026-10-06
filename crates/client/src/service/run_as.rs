@@ -1,15 +1,15 @@
-//! The operator-named service account of ADR-0062: resolved before anything is written, and the
+//! The operator-named service account of ADR-0010 clause 18: resolved before anything is written, and the
 //! ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` makes the system service run as that account, and the
 //! installation's files — the configuration, the state directory, and the executable layout,
-//! across both roots since ADR-0084 clause 3 — belong
+//! across both roots since ADR-0010 clause 9 — belong
 //! to it afterwards. The two halves live here; *what* the service manager is told is
 //! [`manager`](super::manager)'s and [`windows_config`](super::windows_config)'s business.
 //!
 //! **Resolution comes first** because ADR-0010 wants an install that cannot succeed to fail
 //! before it writes: an account that does not exist (Unix), or a Windows account form that would
-//! need a password nobody may pass (ADR-0046), is such an install. On Unix the account is
+//! need a password nobody may pass (ADR-0020), is such an install. On Unix the account is
 //! resolved through `id(1)` — POSIX, present on every Linux and macOS host, and the alternative
 //! is `getpwnam(3)` behind `unsafe` or a user-lookup dependency for two integers.
 //!
@@ -36,7 +36,7 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the service's name, which since ADR-0084 is the product's — on Windows the
+    /// `service` is the service's name, which since ADR-0010 is the product's — on Windows the
     /// one virtual account that may be
     /// named is the service's own.
     ///
@@ -168,7 +168,7 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
 }
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
-/// parameter must not exist (ADR-0046: it would stand in the process list and the installer log).
+/// parameter must not exist (ADR-0020: it would stand in the process list and the installer log).
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
@@ -199,7 +199,7 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     }
     Err(format!(
         "the account {account} would need a password, and a password is never taken on a command \
-         line (ADR-0046). Passwordless forms: the service's own virtual account \
+         line (ADR-0020). Passwordless forms: the service's own virtual account \
          (NT SERVICE\\{service}), a group-managed service account (name ending in $), NT \
          AUTHORITY\\LocalService, or NT AUTHORITY\\NetworkService."
     ))
@@ -209,7 +209,7 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// ADR-0062: the accepted Windows forms are exactly the passwordless ones, and the refusal
+    /// ADR-0010 clause 18: the accepted Windows forms are exactly the passwordless ones, and the refusal
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
     #[test]
     fn windows_forms_are_the_passwordless_ones() {
@@ -232,7 +232,7 @@ mod tests {
         let plain = windows_account_form("bob", svc).expect_err("needs a password");
         assert!(plain.contains("password"), "{plain}");
         assert!(plain.contains(r"NT SERVICE\supervisor"), "{plain}");
-        assert!(plain.contains("ADR-0046"), "{plain}");
+        assert!(plain.contains("ADR-0020"), "{plain}");
     }
 
     /// The refusal for a missing Unix account is the actionable message ADR-0010 asks installs to
