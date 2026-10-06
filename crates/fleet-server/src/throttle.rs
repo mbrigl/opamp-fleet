@@ -1,8 +1,8 @@
 //! Repeated admission failures from one peer address are throttled (ADR-0026 clause 24).
 //!
 //! Every `401` counts as a failure of the peer's IP address. A peer with `max_failures` failures
-//! within `window_secs` is in back-off for `backoff_secs`, and is answered before its credential
-//! is compared. A success clears nothing: behind a shared address a member's success would wipe a
+//! within `window_secs` is in back-off for `backoff_secs`, and is answered before anything else is
+//! checked. A success clears nothing: behind a shared address a member's success would wipe a
 //! guesser's count, so failures only age out of the window. The table is bounded; when it is full
 //! the address heard from least recently that is not in back-off is dropped first, so a flood of
 //! fresh addresses costs memory once and cannot push a blocked address out.
@@ -111,7 +111,7 @@ impl Throttle {
         (until > now).then(|| (until - now).div_ceil(1000).max(1))
     }
 
-    /// Starts an attempt of `peer` before its credential is verified; `None` when its failures and
+    /// Starts an attempt of `peer` before an operator's credential is verified; `None` when its failures and
     /// the attempts already under way reach `max_failures`. Without this, every attempt sent at
     /// once would pass the back-off check before the first of them had failed.
     #[must_use]

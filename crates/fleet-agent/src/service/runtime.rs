@@ -232,8 +232,8 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // restarted it, and the host stayed on a version that never reached the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
-    // Without the credential and a certificate the Server refuses this Client; it says so and
-    // stops rather than retrying for ever (ADR-0026).
+    // Without a client certificate the Server refuses this Client; it says so and stops rather
+    // than retrying for ever (ADR-0026).
     config
         .check_admission()
         .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
@@ -243,6 +243,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // After the log file, so the line that says which version is running is the first line *in the
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
+    // Once per start, not per reconnect: a leftover [auth] is ignored and nothing from it is sent
+    // (ADR-0026 clause 3).
+    if let Some(notice) = config.leftover_auth_notice() {
+        tracing::warn!(config = %spec.config_path.display(), "{notice}");
+    }
 
     // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
@@ -350,7 +355,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 return Ok(Exit::RestartForUpdate);
             }
             // Verified connection settings took effect (ADR-0027): re-resolve the effective
-            // configuration — endpoint, credential, intervals, possibly the other transport —
+            // configuration — endpoint, certificate, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;

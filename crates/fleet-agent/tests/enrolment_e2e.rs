@@ -229,7 +229,6 @@ impl Served {
                     fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
                 ),
                 clock,
-                Arc::new(|_: &str| false),
                 vec![
                     client_ca.authority("client"),
                     bootstrap_ca.authority("bootstrap"),
@@ -269,15 +268,7 @@ impl Served {
             }),
         )
         .expect("server material");
-        let auth = fleet_server::transport::OpampAuth::from_config(
-            &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
-                "bearer_tokens = [{:?}]",
-                fleet_server::credentials::bearer_entry("test-fleet-token")
-            ))
-            .expect("auth config"),
-        )
-        .expect("auth");
-        let admission = fleet_server::transport::Admission::new(Some(auth), true)
+        let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, Some(enrolment.clone()))
             .with_revocations(Some(revocations.clone()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -312,7 +303,6 @@ impl Served {
             &config_path,
             format!(
                 "endpoint = \"{scheme}://localhost:{}/v1/opamp\"\nstate_dir = {:?}\n{settings}\n\
-                 [auth]\nbearer_token = \"test-fleet-token\"\n\n\
                  [tls]\nca_file = {:?}\ncert_file = {:?}\nkey_file = {:?}\n",
                 self.port,
                 self.state_dir.display().to_string(),

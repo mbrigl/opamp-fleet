@@ -96,7 +96,7 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         state_dir.display().to_string()
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
     let _client = ClientUnderTest(
         Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")

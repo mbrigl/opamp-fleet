@@ -19,7 +19,6 @@ use rcgen::{CertificateParams, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-const TOKEN: &str = "the-fleet-token-of-at-least-32-chars";
 const REFRESH: Duration = Duration::from_millis(200);
 const MAX_AGE: Duration = Duration::from_secs(2);
 
@@ -75,6 +74,11 @@ struct Fleet {
 
 impl Fleet {
     async fn start(mark: bool) -> Self {
+        Fleet::start_with(mark, None).await
+    }
+
+    /// The same, with the Server's rate limit on the Agent plane armed (ADR-0023).
+    async fn start_with(mark: bool, agent_rate: Option<fleet_server::agent_rate::Limits>) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let pki = dir.path();
@@ -90,8 +94,7 @@ impl Fleet {
                 Box::new(
                     fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
                 ),
-                clock,
-                Arc::new(|_: &str| true),
+                clock.clone(),
                 vec![fleet_server::revocation::Authority {
                     role: "client".to_string(),
                     subject: facts.id.issuer,
@@ -133,7 +136,10 @@ impl Fleet {
             AppState::new(pki.join("fleet-configs"))
                 .expect("state")
                 .with_client_ca(Some(signer))
-                .with_revocations(Some(revocations.clone())),
+                .with_revocations(Some(revocations.clone()))
+                .with_agent_rate(agent_rate.map(|limits| {
+                    Arc::new(fleet_server::agent_rate::AgentRate::new(limits, 100, clock))
+                })),
         );
         let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
             "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
@@ -143,15 +149,7 @@ impl Fleet {
         ))
         .expect("tls config");
         let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
-        let auth = fleet_server::transport::OpampAuth::from_config(
-            &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
-                "bearer_tokens = [{:?}]",
-                fleet_server::credentials::bearer_entry(TOKEN)
-            ))
-            .expect("auth config"),
-        )
-        .expect("auth");
-        let admission = fleet_server::transport::Admission::new(Some(auth), true)
+        let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, None)
             .with_revocations(Some(revocations.clone()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -168,8 +166,6 @@ impl Fleet {
         let config: ClientConfig = toml::from_str(&format!(
             r#"
             endpoint = "wss://{server}/v1/opamp"
-            [auth]
-            bearer_token = "{TOKEN}"
             [tls]
             ca_file = {:?}
             cert_file = {:?}
@@ -247,12 +243,44 @@ impl Fleet {
         client
             .post(format!("https://{}/v1/opamp", self.gateway))
             .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(report.encode_to_vec())
             .send()
             .await
             .expect("send")
             .status()
+    }
+
+    /// One plain-HTTP report for `uid` through the Gateway as the peer `(cert, key)`, and the reply
+    /// the Gateway hands back.
+    async fn exchange(
+        &self,
+        cert: &str,
+        key: &str,
+        uid: &InstanceUid,
+        sequence_num: u64,
+    ) -> opamp::proto::ServerToAgent {
+        let mut pem = key.as_bytes().to_vec();
+        pem.extend_from_slice(cert.as_bytes());
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .tls_certs_only([reqwest::Certificate::from_pem(self.ca.pem.as_bytes()).expect("ca")])
+            .identity(reqwest::Identity::from_pem(&pem).expect("identity"))
+            .build()
+            .expect("client");
+        let report = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num,
+            ..Default::default()
+        };
+        let response = client
+            .post(format!("https://{}/v1/opamp", self.gateway))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .body(report.encode_to_vec())
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        opamp::proto::ServerToAgent::decode(response.bytes().await.expect("body")).expect("decode")
     }
 
     /// A WebSocket through the Gateway as the peer `(cert, key)`.
@@ -285,15 +313,11 @@ impl Fleet {
                 opamp::tls::private_key(key.as_bytes()).expect("key"),
             )
             .expect("client config");
-        let mut request =
+        let request =
             tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
                 format!("wss://{}/v1/opamp", self.gateway),
             )
             .expect("request");
-        request.headers_mut().insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {TOKEN}").parse().expect("header"),
-        );
         tokio_tungstenite::connect_async_tls_with_config(
             request,
             None,
@@ -406,4 +430,57 @@ async fn a_gateway_whose_list_goes_stale_admits_nobody() {
         fleet.post(&cert, &key).await,
         reqwest::StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+/// Two Agents ride the Gateway's folded connection to the Server, and one floods. Only it is told
+/// `Unavailable`, routed back to it by its `instance_uid`; its neighbour's reports keep being
+/// processed, because behind a marked Gateway each Agent has a bucket of its own inside the
+/// Gateway's aggregate.
+/// Verifies: ADR-0023, ADR-0034
+#[tokio::test]
+async fn a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not() {
+    let unavailable = |reply: &opamp::proto::ServerToAgent| {
+        reply.error_response.as_ref().is_some_and(|error| {
+            error.r#type == opamp::proto::ServerErrorResponseType::Unavailable as i32
+        })
+    };
+    let fleet = Fleet::start_with(
+        true,
+        Some(fleet_server::agent_rate::Limits {
+            messages_per_sec: 1,
+            burst: 3,
+            gateway_messages_per_sec: 1_000,
+            gateway_burst: 1_000,
+        }),
+    )
+    .await;
+    let (cert, key, _) = fleet.peer("edge");
+    let (flooding, neighbour) = (InstanceUid::default(), InstanceUid::default());
+
+    let mut throttled = 0;
+    for sequence in 1..=20 {
+        let reply = fleet.exchange(&cert, &key, &flooding, sequence).await;
+        assert_eq!(
+            reply.instance_uid,
+            flooding.as_bytes(),
+            "routed to the sender"
+        );
+        if unavailable(&reply) {
+            throttled += 1;
+        }
+    }
+    assert!(
+        throttled > 0,
+        "twenty messages at once passed a burst of three"
+    );
+
+    for sequence in 1..=2 {
+        let reply = fleet.exchange(&cert, &key, &neighbour, sequence).await;
+        assert_eq!(reply.instance_uid, neighbour.as_bytes());
+        assert!(
+            reply.error_response.is_none(),
+            "the neighbour was throttled: {:?}",
+            reply.error_response
+        );
+    }
 }

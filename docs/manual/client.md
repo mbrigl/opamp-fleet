@@ -38,9 +38,9 @@ puts things, and every configuration key.
 - **Presents one or more Agents to the Server.** The Client is always its own Agent, whether or not
   it supervises anything, so the Server can see which version each host runs. Each configured
   Supervisor is an additional Agent. All of them share one connection. The Client's own Agent
-  reports `supervisor.toml` itself as its effective configuration — with credential values (`[auth]`'s
-  `bearer_token` and `password`, `[packages]`'s `archive_key`) masked as `***`, since the Server
-  persists what it receives.
+  reports `supervisor.toml` itself as its effective configuration — with secret values masked as
+  `***` (`[packages]`'s `archive_key`, and `bearer_token` and `password` should a leftover `[auth]`
+  still hold them), since the Server persists what it receives.
 - **Supervises processes**: starts them, watches them, restarts them on a configuration
   change or a Server-issued restart command, stops them gracefully on shutdown.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
@@ -53,8 +53,8 @@ puts things, and every configuration key.
   `[packages] verification_key` is set.
 - **Updates its own binary** from a signed package while it consents, which it does by default,
   staging the new version beside the running one and asking the service manager for a restart.
-- **Accepts Server-offered connection settings**: a new credential, heartbeat interval, or endpoint,
-  which it verifies by connecting before it switches.
+- **Accepts Server-offered connection settings**: a heartbeat interval, an endpoint, or a newly
+  issued client certificate, which it verifies by connecting before it switches.
 
 ## How it is built
 The sections below are the load-bearing ideas — what each buys and where each stops. Skip to
@@ -91,7 +91,7 @@ Three things follow, and they are the reason for the design rather than side eff
 - The Client can be **updated** the same way anything else is — the update mechanism did not have to
   be invented twice.
 
-Its effective configuration is the configuration file itself, with credentials masked before it goes
+Its effective configuration is the configuration file itself, with secrets masked before it goes
 out, because the Server stores what it receives.
 
 ### Two names, and they are not interchangeable
@@ -146,7 +146,7 @@ no environment-variable fallbacks — what the file says is what runs.
 
 But the file is not entirely yours. The Server may send the `[[supervisor]]` blocks, and when it
 does the Client rewrites that part of the file and leaves the rest alone. Your endpoint, your
-credentials, your logging stay yours.
+client identity, your logging stay yours.
 
 Three guards make that safe to have. The whole offer is **validated before anything is written** —
 if one block is bad, nothing changes and the Client reports the failure naming the block. A
@@ -231,10 +231,10 @@ leaving the restart to the service manager whose job that is. In full:
 [Updating the Client itself](#updating-the-client-itself).
 
 **Connectivity.** The URL scheme picks the transport, and every connection off the host is TLS 1.3.
-The Client proves membership twice: a static credential travels end to end and is what the Server
-checks, and a client certificate, whose private key never leaves the host, is required in every
-TLS handshake. The Server can move the fleet to a new endpoint or credential, and the Client proves
-an offered setting by connecting with it before it switches. In full:
+The Client proves membership with one thing: a client certificate, whose private key never leaves
+the host, presented in every TLS handshake. It sends no credential. The Server can move the fleet
+to a new endpoint and renews the certificate before it expires, and the Client proves an offered
+setting by connecting with it before it switches. In full:
 [Connecting to the Server](#connecting-to-the-server).
 
 ### What the Client will not do
@@ -260,8 +260,8 @@ Knowing the edges is half of knowing the design.
   start.
 
 On the last point, a related one worth knowing: a Client that cannot find its configuration file
-does not carry on with the defaults. The defaults hold no fleet credential and no client
-certificate, so it refuses to start and names `[auth]`. Coming up anyway would mean dialling a
+does not carry on with the defaults. The defaults hold no client
+certificate, so it refuses to start and names `[tls] cert_file` and `key_file`. Coming up anyway would mean dialling a
 development endpoint and managing nothing, which is the failure hardest to notice.
 
 ## Running it
@@ -274,7 +274,7 @@ $ opamp-fleet --version
 
 | Global flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `supervisor.toml`. A missing file means the defaults, which hold no credential and no certificate, so `run` refuses to start. `service install` is the one place where "not given" means something else: there the file is `supervisor.toml` inside the data root, because a path resolved against this shell's working directory is not one the service manager shares. |
+| `--config <path>` | The TOML configuration file. Defaults to `supervisor.toml`. A missing file means the defaults, which hold no client certificate, so `run` refuses to start. `service install` is the one place where "not given" means something else: there the file is `supervisor.toml` inside the data root, because a path resolved against this shell's working directory is not one the service manager shares. |
 | `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
 
 There are no environment-variable fallbacks for configuration — the flags say only where
@@ -304,7 +304,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--root <dir>` | `service install` | The layout root: `versions/` and the `current` pointer. Given alone it also takes the data — `supervisor.toml` and `state/` — so everything lands under the one directory you named, whose file labeling is then yours to manage. Without it the defaults apply per platform and scope, and on Linux system installs they are two directories: `/opt/opamp-fleet` for the layout, `/var/lib/opamp-fleet` for the data, because SELinux never lets systemd start a binary labeled for `/var/lib`. macOS uses `/Library/Application Support/opamp-fleet`, Windows `%ProgramData%\opamp-fleet`, and user scope the user's own data directory — one directory each. No path is ever fixed. See [On-disk layout](#on-disk-layout). |
 | `--data-root <dir>` | `service install` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service. See below. |
-| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. Takes no credential on purpose: a flag stands in the shell history and the process list. |
+| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: those are files the operator puts on the host and names in the file. |
 | `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand its files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 
 ### Running it under its own account
@@ -326,7 +326,7 @@ On Linux and macOS the account must already exist; the install refuses early if 
 ```
 
 On Windows only **passwordless** account forms are accepted — there is deliberately no password
-flag, for the same reason `--endpoint` takes no credential. The recommended form is the service's
+flag: a flag stands in the shell history and the process list. The recommended form is the service's
 own virtual account, which Windows provisions and password-manages by itself:
 
 ```console
@@ -354,16 +354,14 @@ without the flag it registers exactly as before — root/`LocalSystem`, no hando
 ### The first configuration, on a host that has none
 
 A release artifact is the bare binary, so a freshly downloaded Client has no `supervisor.toml` to
-edit. Without one it still installs, but the service refuses to start: the defaults hold no fleet
-credential and no client certificate. `--interactive` is the way past that:
+edit. Without one it still installs, but the service refuses to start: the defaults hold no client
+certificate. `--interactive` is the way past that:
 
 ```console
 $ opamp-fleet service install --interactive        # root / Administrator
 No configuration at /var/lib/opamp-fleet/supervisor.toml — answering these writes it (everything else keeps its default).
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
-The fleet credential: bearer token
-Bearer token: ********
 Does the Server present a certificate from a private CA? [y/N]: y
 PEM CA bundle path: /etc/opamp/ca.pem
 Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
@@ -382,28 +380,28 @@ What it asks about is only what has no useful default here
 - **the endpoint**, suggesting `wss://127.0.0.1:4320/v1/opamp`. A `ws://` or `http://` endpoint is
   refused unless its host is `127.0.0.1` or `::1`, and the question is asked again;
 - **the Agent's name**;
-- **the fleet credential** ([`[auth]`](#auth)), required: there is no "no authentication" answer,
-  and an empty credential is asked for again;
 - **a private CA**, when the endpoint is `wss://` or `https://` ([`[tls]`](#tls));
 - **the client identity**, a certificate and its key: a **bootstrap certificate** to
-  [enrol](#enrolment-the-first-certificate) with, or a certificate the client CA already issued;
+  [enrol](#enrolment-the-first-certificate) with, or a certificate the client CA already issued.
+  It is required, and a path that names no readable file is asked for again: the certificate is
+  the one proof the Server admits a host by;
 - **the package verification key** ([`[packages]`](#packages)). An empty answer is accepted, and the
   install then says that this Client installs no package, its own update included, until a key is
   set;
 - and last, defaulting to **yes**, consent for the Server to replace this Client's own binary
   ([`[self_update]`](#self_update)).
 
-Everything else is written into the file as commented defaults. The credential is typed into a
-hidden prompt rather than passed as a flag, so it stays out of the shell history and out of the
-process list; on Unix the file is created mode `0600`.
+Everything else is written into the file as commented defaults. No question asks for a
+credential, and the file it writes has no `[auth]` section; on Unix the file is created mode
+`0600`.
 
 Four rules worth knowing before you script around it:
 
 - **Interactivity is never assumed.** Without the flag, `install` asks nothing. It prints a warning
-  when the path it is about to bake into the unit holds no file, or a file without a credential or
-  a client certificate.
+  when the path it is about to bake into the unit holds no file, or a file without a client
+  certificate.
 - **An existing file is kept, never overwritten.** Re-running `--interactive` on a configured host
-  says so and carries on, so a re-install cannot eat a credential typed into the first one.
+  says so and carries on, so a re-install cannot eat the answers typed into the first one, or the edits made since.
 - **No terminal, no questionnaire.** `--interactive` in a provisioning run, a container build, or a
   pipeline fails with a message instead of blocking forever on an answer nobody can give.
 - **Where it writes:** the path from `--config` when you name one, and otherwise
@@ -417,14 +415,14 @@ Where there is an answer but no terminal — a provisioning run, an MSI dialog, 
 ```console
 $ opamp-fleet service install --endpoint wss://fleet.example.com/v1/opamp
 wrote /var/lib/opamp-fleet/supervisor.toml for wss://fleet.example.com/v1/opamp
-warning: /var/lib/opamp-fleet/supervisor.toml: [auth] is required — … The service is registered, and refuses to start until this is set (or re-run with --interactive).
+warning: /var/lib/opamp-fleet/supervisor.toml: [tls] cert_file and key_file are required — … The service is registered, and refuses to start until this is set (or re-run with --interactive).
 installed opamp-fleet
 …
 ```
 
 It writes only the endpoint; everything else keeps its default. The service is registered, and it
-refuses to start until you add the credential ([`[auth]`](#auth)) and the client certificate
-([`[tls]`](#tls)) to the file. All four rules above hold unchanged — in particular, an existing file
+refuses to start until you add the client certificate and its key ([`[tls]`](#tls)) to the
+file. All four rules above hold unchanged — in particular, an existing file
 is kept.
 
 ### Installing from a native package
@@ -442,16 +440,15 @@ $ sudo dnf install ./supervisor_1.2.3_linux_amd64.rpm
 ```
 
 **The service is registered and left stopped.** That is deliberate: a Client with no configuration
-holds no credential and no certificate, and it is refused at startup. Two steps remain:
+holds no client certificate, and it is refused at startup. Two steps remain:
 
 ```console
 $ sudo opamp-fleet service install --interactive
 $ sudo systemctl start opamp-fleet
 ```
 
-The first asks for the credential behind a hidden prompt, together with the certificate and the
-verification key. `--endpoint` alone writes a file the Client refuses until you add the credential
-and the certificate. An upgrade of a host whose service was running restarts it on the delivered
+The first asks for the endpoint, the client certificate and its key, and the verification key.
+`--endpoint` alone writes a file the Client refuses until you add the certificate and its key. An upgrade of a host whose service was running restarts it on the delivered
 binary.
 
 On Windows the `.msi` asks for the installation folder, the endpoint, and the self-update consent.
@@ -467,9 +464,10 @@ C:\> msiexec /i supervisor_1.2.3_windows_amd64.msi /qn ^
        ENDPOINT="wss://fleet.example.com/v1/opamp"
 ```
 
-A silent install that names no `ENDPOINT` writes no configuration. The MSI asks for no credential,
-because a value typed into an installer is written to its log, and it starts no service. Add
-`[auth]` and the client certificate to `supervisor.toml`, then start the service.
+A silent install that names no `ENDPOINT` writes no configuration. The MSI asks for no client
+identity, because the certificate and its key are files you put on the host, and it starts no
+service. Name them as `cert_file` and `key_file` under `[tls]` in
+`%ProgramData%\opamp-fleet\supervisor.toml`, then start the service.
 
 Two things to know about living with a packaged install:
 
@@ -481,8 +479,8 @@ Two things to know about living with a packaged install:
   are the truth.
 - **Removing the package stops and unregisters the service and uninstalls every staged version.**
   `versions/` and the `current` pointer go with the package; the state directory and
-  `supervisor.toml` stay, for the same reason an install never overwrites a configuration: it may hold
-  a credential you typed. `apt purge` deletes those too — the instance directory whole. A reinstall
+  `supervisor.toml` stay, for the same reason an install never overwrites a configuration: it holds
+  what you wrote, and the host's identity. `apt purge` deletes those too — the instance directory whole. A reinstall
   after a plain remove keeps the host's identity and configuration and stages its own binary fresh.
 
 macOS has no native installer; there, unpack the `.tar.gz` and run `service install` yourself.
@@ -602,7 +600,8 @@ Two roots, and everything hangs off them:
 The split is worth reading twice, because it is the rule the rest of this page follows. The
 **layout root holds what a package can put back**: program files, one directory per version, and a
 pointer at the live one. The **data root holds what nothing can put back**: the identity this host
-reports to the Server, the credential an operator typed, and the configuration the fleet sent.
+reports to the Server, its client certificate and key, the configuration an operator wrote, and the
+configuration the fleet sent.
 
 Directories are named after the **product**; the file inside is the **program**. They are not the
 same name and are not meant to be — two products built from this source differ in the first and
@@ -753,23 +752,24 @@ command line would, so a Windows host ends up with the same structure by a diffe
 
 The pattern is the same everywhere: **removing the program is not removing the host from the
 fleet.** A reinstall over a surviving data root comes back as the same Agent, with the same identity
-and the same credential, and the Agents it supervises come back as themselves too.
+and the same client certificate, and the Agents it supervises come back as themselves too.
 
 This is also why the data root is not under `Program Files` on Windows or under `/opt` on Linux: an
-uninstall clears those, and a credential someone typed is not something an uninstall should quietly
-take with it.
+uninstall clears those, and a host's identity and the configuration someone wrote are not things an
+uninstall should quietly take with it.
 
 ### Persisted connection settings override the file
 
-`<data-root>/state/connection-settings.pb` takes precedence over `endpoint`, `[auth]`, and the
+`<data-root>/state/connection-settings.pb` takes precedence over `endpoint` and the
 intervals in `supervisor.toml`. Delete it to revert to what the file says.
 
 ## Configuration reference
 
 The full annotated example is [`config/supervisor.toml`](../../config/supervisor.toml). Every key is
-shown below with its default. The fleet credential in [`[auth]`](#auth) and a client certificate in
-[`[tls]`](#tls) are required, and the Client refuses to start without them; every other key is
-optional. An unknown key fails startup rather than being ignored.
+shown below with its default. A client certificate in [`[tls]`](#tls) is required, and the Client
+refuses to start without one; every other key is optional. An unknown key fails startup rather
+than being ignored, with one exception: a leftover [`[auth]`](#a-leftover-auth) is ignored with a
+notice.
 
 ### Top level
 
@@ -865,7 +865,7 @@ Enrolment then runs like this:
 
 1. An operator opens the Server's enrolment window (see
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).
-2. The Client connects with the bootstrap certificate and the fleet credential. It generates a key,
+2. The Client connects with the bootstrap certificate. It generates a key,
    which never leaves the host, and sends a certificate signing request for it as soon as the
    Server's first answer says it signs certificates.
 3. The Client logs the SHA-256 fingerprint of that key:
@@ -886,24 +886,24 @@ involved. The private key is written `0600`; on Windows the state directory's AC
 it. A host behind a Gateway enrols by connecting to the Server directly once, or is given a
 certificate by an operator.
 
-### `[auth]`
+### A leftover `[auth]`
 
-Required. Exactly one scheme: `bearer_token`, **or** `username` and `password` together. Mixing
-them, giving half of one, or leaving the section out fails at startup with a message naming
-`[auth]`.
+The Client has no credential to configure: the Server admits it by its client certificate alone,
+and it sends no `Authorization` header on either transport, on the verification of an offered
+setting, or to anything else upstream. A `supervisor.toml` may still hold an `[auth]` section. The
+Client ignores it, whatever keys it holds, sends nothing from it, and says so once at startup:
 
-```toml
-[auth]
-bearer_token = "a-long-random-token"
-# --- or ---
-# username = "fleet"
-# password = "a-strong-password"
+```text
+WARN [auth] is ignored: the Server admits this Client by its client certificate alone, and nothing from the section is sent — it can be deleted from the file config=/var/lib/opamp-fleet/supervisor.toml
 ```
 
-The `Authorization` header rides every plain-HTTP request and the WebSocket upgrade. It never
-crosses a network in plaintext: an endpoint is `wss://` or `https://` off the loopback, and a
-plaintext one there is refused at startup. A credential the Server rotates through an offer
-outranks this section.
+It is not refused, because a Client the Server updates starts with the file it already has and
+nobody at the host. Its values stay masked in the effective configuration the Client reports. Delete
+the section when convenient.
+
+The Server is upgraded before its Clients: a Server that demands a credential answers this Client
+`401`, because it sends none. See
+[Upgrading to admission by certificate alone](server.md#upgrading-to-admission-by-certificate-alone).
 
 ### `[packages]`
 
@@ -918,7 +918,7 @@ archive_key = "the key an encrypted .7z was packed with"
 |---|---|
 | `verification_key` | **Required to take any package.** Every Server-offered package must carry a valid Ed25519 signature over its artifact, and the signature must verify against this key. Without it, no Agent of this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent — and the Client says so once at startup. A package offered regardless is refused before anything is downloaded and reported `InstallFailed`, naming the key. A malformed key fails startup. Generate the key with `opamp-package-sign keygen` (see [the Server](server.md#packages-and-deployments-distributing-software)). |
 | `allowed_sources` | `https://` URL prefixes a download may come from besides the Server's own origin. Empty by default. See [Where a download may come from](#where-a-download-may-come-from). |
-| `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent — and never the `[auth]` credential, which the Server may rotate on its own: a rotation would leave every archive unopenable. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
+| `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
 
 Note what is *not* here: which artifact a Supervisor receives is the Server's decision, expressed as
 the Deployment that holds the package, never a key in this file.
@@ -945,6 +945,12 @@ needs no entry, and an empty list allows it alone.
   scheme, host and port stay the same.
 - **The client certificate goes only to the Server's own origin.** To a mirror, and on a hop that
   leaves the Server's origin, the Client presents none.
+- **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**
+  ([ADR-0033](../adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). That origin answers so when its rate limit is reached, or —
+  for a Client behind a Gateway — while the Gateway is still fetching the artifact. Each wait is
+  the `Retry-After`, at least 1 and at most 60 seconds, and the asking stops 30 minutes after the
+  download's first request; the status stays `Downloading` meanwhile, and a shutdown ends it. Past that, or for such an answer from any
+  other host, the download fails and is reported `InstallFailed`.
 
 Every download is TLS 1.3, on this Client's trust: `[tls] ca_file` when it is set, the system's
 trust store otherwise.
@@ -989,6 +995,7 @@ them over mutual TLS 1.3 only, and `[gateway.tls]` with its `client_ca_file` is 
 [gateway]
 listen = "0.0.0.0:4320"
 upstream_connections = 10          # a cap, not a count
+package_cache_bytes = 10737418240  # the package cache's bound, 10 GiB
 [gateway.tls]
 cert_file = "gateway.pem"          # what this Gateway presents to its Agents
 key_file = "gateway-key.pem"
@@ -1000,26 +1007,85 @@ loopback `listen` too. There is no plaintext Gateway. The downstream handshake r
 certificate that chains to `client_ca_file`, so a peer without one never reaches OpAMP.
 
 Point the Clients behind it at this address instead of the Server's, as a `wss://` or `https://`
-endpoint. Each of them still needs its credential and its client certificate. Nothing else about
+endpoint. Each of them still needs its client certificate. Nothing else about
 them changes: the Server tells Agents apart by `instance_uid`, never by the connection that carried them,
 so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
 downstream, so a polling Client works as well as a WebSocket one.
 
 `upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
-front of three Agents holds three, and each Agent stays on its connection while that lives. A
-connection carries only Agents whose Clients present the credential it was opened with, because
-the Server checks a credential when a connection opens; while a credential rotation is under way
-the Gateway needs a connection for each credential in use.
+front of three Agents holds three, and each Agent stays on its connection while that lives. Any
+connection carries any Agent: every one presents this Gateway's own certificate upstream, so
+nothing the Gateway sends depends on which downstream peer an Agent came through.
 
 This mode composes with `[[supervisor]]` blocks: one host may supervise its own processes *and*
 gateway for others.
 
+### The package cache
+
+A Gateway delivers the packages the Server hosts to the Agents behind it, so that one artifact
+crosses the Gateway's upstream link once instead of once per Agent
+([ADR-0033](../adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)):
+
+- **What it fetches.** When the Gateway relays a package offer whose `download_url` is a path on
+  the Server's download route — what the Server offers for an uploaded artifact while its
+  `advertised_url` is unset — it fetches that artifact once, before any Agent asks, with this
+  Client's own certificate. A request for it while that fetch runs is answered `503` with
+  `Retry-After: 30`, which the Client behind the Gateway waits out (see
+  [Where a download may come from](#where-a-download-may-come-from)). At most four fetches run at
+  a time, and a fetch that falls below 64 KiB/s on average after its first minute is cut. The
+  Server serves a Gateway's certificate only once the operator has marked its host as a Gateway;
+  until then the fetch is refused and the log says so. Each fetch costs one request of the
+  Gateway's rate at the Server; a `429` from it is waited out, and the fetch gives its slot back
+  while it waits. A fetch that fails — refused,
+  interrupted, or bytes that do not match — is not repeated by the Agents' requests, which are
+  answered `404`, nor by the same offer relayed again; the Gateway fetches it again when the
+  artifact newly appears in an Agent's offer.
+- **What it does not fetch.** An offer with an absolute URL is left alone. A referenced artifact
+  on an operator's own server is fetched by the Agent behind the Gateway directly, as it would
+  without one, under its own `[packages] allowed_sources`. **With the Server's `advertised_url`
+  set, an uploaded artifact is not delivered behind a Gateway at all:** the offer names the
+  Server, the Client's own origin is the Gateway, so the download is refused as a source not
+  allowed, or — when the Server's URL is listed in `allowed_sources` — by the Server's handshake,
+  because the Client presents its certificate only to its own origin. Leave `advertised_url` unset
+  in a fleet with Gateways.
+- **What it holds.** Only bytes whose SHA-256 is the one the offer names: a download is staged,
+  hashed as it arrives and renamed into place only when it matches. The Agent behind it still
+  checks the hash and the signature itself before it installs anything.
+- **Who receives it.** The Gateway serves the download route on its own `listen` address, behind
+  the same handshake and revocation list as its OpAMP endpoint. A downstream Client is served an
+  artifact only when the Gateway relayed an offer of it to an Agent carried over a connection whose
+  certificate names the same host (`urn:opamp-fleet:host:<id>`) as the requesting certificate. An
+  Agent's `instance_uid` belongs to the host of the first report for it since the Gateway
+  started; an offer relayed for it over another host's connection is not recorded, and the log
+  says so. If a host locks another host's Agent out this way, restart the Gateway: the real
+  host's next report then binds it. A host binds at most `max_carried_agents` `instance_uid`s;
+  at the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
+  has neither a connection nor an offer. An offer relayed over a certificate that names no host serves nobody and is not
+  fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
+  the host, the certificate's serial and the path — the first five per host and minute one by one,
+  the rest counted into one line.
+- **Where, and how much.** `<state_dir>/gateway-packages`, owner-only, emptied when the Gateway
+  starts. `[gateway] package_cache_bytes` (default `10737418240`, 10 GiB; `0` fails startup) bounds
+  what it holds and what it is fetching: before a fetch writes a byte it reserves the artifact's
+  size. To make room it deletes artifacts no current offer names first, then the least recently
+  used. An offered artifact deleted this way is fetched again by the next request for it, once per
+  relayed offer. An artifact larger than `package_cache_bytes` or `max_artifact_size_bytes` is not
+  stored and not delivered through the Gateway: the log names it, and the Agent behind the Gateway
+  reports its download as failed. Raise `package_cache_bytes` before rolling out such an artifact
+  behind a Gateway.
+
+The offers the cache serves are kept in memory. After the Gateway restarts, an Agent whose install
+is still under way re-draws its offer when it reconnects. One that already reported a failed
+install and retries is answered `404` until the Server offers it another version; rolling out the
+same version again does not re-send the offer.
+
 ### What a Gateway does not do
 
-- **It makes no authentication decision of its own.** Each downstream peer's credential is
-  forwarded upstream untouched, so policy stays on the Server and rotating a credential never means
-  visiting gateways. The one refusal it makes beyond its handshake is the Server's: it fetches the
-  revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
+- **It makes no authentication decision of its own.** A downstream peer is admitted by its
+  handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA.
+  The Gateway forwards no `Authorization` header: one a downstream peer sends is ignored, never
+  refused, and nothing is sent upstream in its place. The one admission refusal it makes beyond
+  its handshake is the Server's: it fetches the revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
   `401`. Until it has a list younger than 300 seconds — at startup, while its Server is away, or
   while the operator has not marked its host as a Gateway — it answers every peer `503`.
 - **It never speaks for an Agent.** If a downstream Client disappears without sending
@@ -1070,7 +1136,7 @@ Configuration typed for the Client itself — `service_name = "supervisor"` —
 carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
-  the endpoint, the credential, the state directory stay the host's, and can never arrive over
+  the endpoint, the client identity, the state directory stay the host's, and can never arrive over
   the wire. You may roll out a full `supervisor.toml`-shaped document; exactly its supervisor half
   takes effect. A duplicate `name` fails the offer, as it would fail the file.
 - **The apply is a diff, keyed by `name`.** Removed and changed Supervisors are stopped, the
@@ -1093,8 +1159,107 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   one more reason to state whom a Configuration is for.
 
 A Client whose Server never rolls such a Configuration out runs its locally written blocks
-exactly as before. Note that once one applied, the Server's set is authoritative: a later local
-edit to the blocks stands only until the next rollout act overwrites it.
+exactly as before. Note that once one applied, the Server's set is authoritative, unless
+`server_manages_set = false`
+([Keeping the Supervisor set on the host](#keeping-the-supervisor-set-on-the-host)): a later
+local edit to the blocks stands only until the next rollout act overwrites it.
+
+### Keeping the Supervisor set on the host
+
+A host whose Supervisors only its operator should add, change or remove takes no set from the
+Server:
+
+```toml
+[supervisors]
+server_manages_set = false   # default true
+```
+
+The key is read from this file only, and the Server never writes `[supervisors]`. A change takes
+effect when the Client next starts.
+
+- **What the Server sees.** The Client's own Agent declares neither `AcceptsRemoteConfig` nor
+  `ReportsRemoteConfig`, so the Server offers it no set, whatever a rollout is aimed at. Everything
+  else it declares stays, self-update included: it still reports its status, its health and this
+  file as its effective configuration, takes connection settings, and takes a signed Client
+  package where `[self_update]` consents. A set that arrives anyway is not stored, not applied and
+  not answered; the Client logs one warning per hash.
+- **The blocks stay yours.** Nothing in this file is rewritten when you set the key. Every
+  `[[supervisor]]` block runs as written, **including blocks a set the Server delivered earlier
+  wrote**, and from then on only you change them. Review the blocks before you switch the key off.
+- **What happens to a set delivered earlier.** At start the Client deletes the `remote-config.pb`
+  in its `state_dir` first, then the unchanged copies of that set's entries in
+  `<state_dir>/config/`, and logs the stored hash. Nothing runs on those files, so one that cannot
+  be deleted is a warning and the Client starts; it is not reported either way.
+- **Supervisors are not affected.** Each Supervisor's Agent keeps taking its own configuration
+  unless it is named in `remote_config_disabled`. With both set, the Server can no longer remove a
+  listed Supervisor and add the same agent under a name that is not listed.
+- **What the key holds, and what it does not.** It holds against the Server only while every
+  Supervisor whose configuration language can run commands as the Client's account — a Telegraf
+  `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command` Supervisor's program
+  reads — is named in `remote_config_disabled`. Otherwise the Server can configure such a
+  Supervisor to rewrite this file, and the key changes at the next start. A signed Client build
+  can still replace the Client itself where `[self_update]` consents, and that build reads the
+  key.
+- **Switching it back on.** Set the key to `true`, or remove it, and restart the Client. Its own
+  Agent declares both capabilities again, reports no hash — unless that earlier start warned that
+  it could not remove `remote-config.pb` itself — and is offered whatever set is released to it. The first set it applies replaces every `[[supervisor]]` block, yours included,
+  and purges each Supervisor it removes.
+
+### Switching remote configuration off for one Supervisor
+
+Some agents should not take their configuration from the fleet: one whose configuration language
+can run commands, such as Telegraf's `inputs.exec` or an Icinga `CheckCommand`, or one another
+system already configures. Name them in `[supervisors]`:
+
+```toml
+[supervisors]
+remote_config_disabled = ["icinga2", "telegraf"]   # Supervisor names, by their block's `name`
+```
+
+The key is read from this file only. The Server never writes `[supervisors]`, so a Supervisor set
+that removes a listed block and delivers it again under the same name gets a Supervisor that is
+still listed. Each value must be a valid Supervisor name, or the Client does not start. A listed
+name that no block carries yet is a startup notice, not an error, since the block may arrive later
+from the Server. The switch covers Supervisors only: a listed name equal to the Client's own
+`name` earns a notice that the Client's own Agent is not covered. That Agent takes its Supervisor
+set unless `server_manages_set = false`
+([Keeping the Supervisor set on the host](#keeping-the-supervisor-set-on-the-host)).
+
+- **What the Server sees.** A listed Supervisor's Agent declares neither `AcceptsRemoteConfig` nor
+  `ReportsRemoteConfig`, so the Server offers it no configuration, whatever a rollout is aimed at.
+  It still restarts on command and still takes signed packages. A configuration that arrives anyway
+  is not stored, not written, not applied and not answered; the Client logs one warning per hash.
+- **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
+  kind reads: any unroled file for `collector`, `telegraf-conf` for `telegraf`,
+  `glpi-agent-conf` for `glpi`, the `role = "main"` entry or `icinga2-conf` for `icinga2`, and
+  for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
+  line. Nothing else writes into that directory while the switch is on. Without such a file a
+  `collector` or `icinga2` waits and says so, and `telegraf` exits and is reported.
+- **The block stays yours.** A delivered block for a listed Supervisor must repeat its running
+  block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
+  delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
+  program where the kind does not name its own: `binary` for `collector`, `command` for `command`,
+  nothing more for `telegraf`, `glpi` and `icinga2`. Otherwise the whole set is refused before
+  anything stops. Any other key would be remote configuration by another route: a Collector reads
+  a whole configuration from `--config=yaml:…` or an environment variable, and an `icinga2` block
+  names the parent it enrols with and the certificate it pins.
+- **What happens to a configuration delivered earlier.** When a listed Supervisor starts, the
+  Client deletes the `remote-config.pb` in its directory, and from `config/` each file that stored
+  configuration wrote whose content is unchanged, `.supplementary` included. A file you edited
+  since, or added yourself, stays; the log names the kept files. A `remote-config.pb` that cannot
+  be read is deleted and `config/` is left as it is, with a warning that it may still hold files
+  the Server wrote. The Supervisor then reports no configuration status and no hash. When a file
+  that has to go cannot be read or deleted, the Supervisor does not start; at Client startup that
+  stops the whole Client with an error naming the Supervisor, so it fails closed rather than run
+  the Server's configuration under the switch.
+- **Switching it back on.** Remove the name and restart the Client. The Agent declares both
+  capabilities again, reports no hash, and is offered whatever is released to it. The first
+  configuration it stores replaces every file in `config/`, yours included, so move anything you
+  want to keep before switching back.
+
+The switch binds a name, not an agent: while the Server manages the set, it can remove a listed
+Supervisor and add the same agent under a name that is not listed. Set `server_manages_set =
+false` as well to close that. A change to the list takes effect when the Client next starts.
 
 ### Keys every block accepts
 
@@ -1277,7 +1442,7 @@ parent for one common name, and a node that differs from it does not enrol.
 | `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
 | `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
 | `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0016). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
-| `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Absent falls back to trust on first sight, which is logged as such. |
+| `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Not named at all falls back to trust on first sight, which is logged as such; a named file that is not there makes enrolment wait for it, never fall back. |
 
 Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
 name and place in the tree, the Agent type it presents, its state, log, cache, spool and run
@@ -1591,27 +1756,33 @@ be reached. `ws://` and `http://` are accepted only when the endpoint's host is 
 `127.0.0.1` or `::1`. A host name is never the loopback, `localhost` included, and a private
 address is not either. Any other plaintext endpoint fails at startup with a message naming it.
 
-**Two proofs on every connection.** The Client presents its client certificate in the TLS
-handshake, on both transports, and its `[auth]` credential in the `Authorization` header. The
-Server requires both. A `401` is logged as a credential failure and retried with the usual
-backoff, so fixing the credential on either side needs no restart. A `429` means the Server is
-throttling this host's address after repeated failed admissions; fix the credential or the
-certificate, and the back-off ends by itself.
+**One proof on every connection**
+([ADR-0026](../adr/0026-admission-by-a-client-certificate-alone.md)). The Client presents its
+client certificate in the TLS handshake, on both transports, and the Server admits it on that
+alone. It sends no `Authorization` header. A `401` after the handshake means the Server refused
+the certificate — revoked, or a bootstrap certificate where an issued one is needed; it is logged
+as `admission failed` and retried with the usual backoff, so fixing it on either side needs no
+restart. A `429` means the Server is throttling this host's address after repeated failed
+admissions; fix the certificate, and the back-off ends by itself.
 
 **Reconnecting.** A dropped connection is retried with capped exponential backoff, and the Client
 honours the Server's `UNAVAILABLE` retry hints.
 
 **Server-offered connection settings**
 ([ADR-0027](../adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)). When
-the Server offers a new credential, heartbeat interval, endpoint, or certificate, the Client
+the Server offers a new heartbeat interval, endpoint, or certificate, the Client
 **verifies the offer by actually connecting with it**, persists it, and only then switches —
 across transports if the offered endpoint demands it. An offered `ws://` or `http://` endpoint
 whose host is not `127.0.0.1` or `::1` is refused without connecting, and the offer is reported
 `FAILED` naming it. A failed verification leaves the current settings in force and is reported as
 such, so a bad offer cannot strand the fleet. An offered `certificate` is how an issued client
-certificate arrives. The `tls` and `proxy` fields are not honoured: the Client applies everything
-else and reports the offer `FAILED`, naming the dropped fields. Trust stays the operator's file,
-never a Server's instruction; see [`docs/CONFORMANCE.md`](../CONFORMANCE.md).
+certificate arrives. The `tls`, `proxy` and `headers` fields are not honoured: the Client applies
+everything else and reports the offer `FAILED`, naming the dropped fields, offered headers by their
+keys and never their values. Trust stays the operator's file, never a Server's instruction, and an
+offered header would be a value the Server plants on every connection with no reader on the Agent
+plane. An `Authorization` header persisted in `connection-settings.pb` is dropped when the file is
+loaded, with one log line naming the header keys, and the file is rewritten without it. See
+[`docs/CONFORMANCE.md`](../CONFORMANCE.md).
 
 ## Troubleshooting
 
@@ -1623,7 +1794,6 @@ The ones you are most likely to meet:
 | `accepts_packages` / `package` in a `[[supervisor]]` block | Both keys were removed. Delete them; every Agent consents to packages, and the Server's Deployment decides which artifact. See [`CHANGELOG.md`](../../CHANGELOG.md) for the per-host migration. |
 | a program that is not a bare file name | `binary`/`command` name a file in the Supervisor's own `program/` directory, never a path. See [How a block names its program](#how-a-block-names-its-program). |
 | an unknown key | Every key is checked; a typo is refused rather than ignored. |
-| `[auth] is required`, or `[auth]` | Write the fleet credential: exactly one scheme — a bearer token, or a username *and* a password. |
 | `[tls] cert_file and key_file are required` | Give the Client its certificate and key: one the client CA issued, or a bootstrap certificate to [enrol](#enrolment-the-first-certificate) with. |
 | an endpoint refused as plaintext | `ws://` and `http://` are accepted only to `127.0.0.1` or `::1`. Use `wss://` or `https://`, and set `[tls] ca_file` for a private CA. |
 | `[gateway.tls] is required`, or its `client_ca_file` | A Gateway serves its Agents over mutual TLS only; give it `cert_file`, `key_file` and `client_ca_file`. |

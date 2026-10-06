@@ -184,8 +184,9 @@ pub struct InstallArgs {
     /// the MSI's endpoint dialog and a `.deb`/`.rpm` post-install both have an answer and no
     /// terminal. An existing file is kept, never overwritten, exactly as with `--interactive`.
     ///
-    /// Only the endpoint. A credential is not accepted here — it would stand in the process list
-    /// and in the installer log; write it into the file afterwards, or use `--interactive`.
+    /// Only the endpoint. The client identity is a certificate and its key already on the host:
+    /// name them in the file afterwards as `[tls] cert_file` and `key_file`, or use
+    /// `--interactive`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
     // ADR-0020.
@@ -222,8 +223,8 @@ pub struct InstallArgs {
     /// System scope only: a `--user` service already runs as its user. On Linux and macOS the
     /// account must exist. On Windows only passwordless account forms are accepted — the
     /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`), or
-    /// `NT AUTHORITY\LocalService`/`NetworkService`; a password is never taken here, for the
-    /// same reason no credential is (ADR-0029).
+    /// `NT AUTHORITY\LocalService`/`NetworkService`; a password is never taken here — it would
+    /// stand in the process list and in the installer log (ADR-0028).
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub run_as: Option<String>,
 }

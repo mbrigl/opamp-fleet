@@ -204,8 +204,8 @@
       type 18 action needs its executable to still be on disk.
 
       `service uninstall` leaves both roots behind, as it does everywhere (ADR-0028) — deleting a
-      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0028
-      refused, one step later. What this package's uninstaller then empties is INSTALLFOLDER, which
+      supervisor.toml the operator answered or edited would be the overwrite ADR-0028 refuses, one
+      step later. What this package's uninstaller then empties is INSTALLFOLDER, which
       holds only the payload it delivered: exactly right, and the reason ADR-0028 clause 8 moved
       the data out of `Program Files`. The configuration and the state survive under
       `%ProgramData%\opamp-fleet`, the same remove-versus-purge shape the `.deb` has.
@@ -233,7 +233,7 @@
         does and for the same reason (ADR-0029 clause 13, ADR-0028): a Client with no configuration
         dials the development default and manages nothing, and an installer must not manufacture
         that state on every host it touches. An install that was given an ENDPOINT still does not
-        start — the credential, if the Server needs one, is not in yet.
+        start — the client identity is not in yet (ADR-0029).
       -->
       <Custom Action="RegisterServiceWithEndpoint" After="InstallFiles"
               Condition="NOT REMOVE AND ENDPOINT&lt;&gt;&quot;&quot;" />

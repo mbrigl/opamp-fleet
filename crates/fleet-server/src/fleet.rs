@@ -30,7 +30,7 @@ use crate::deployments::{deployment_for, Deployment, DeploymentError, Deployment
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
-use crate::revocation::{CertId, Facts, Presented, Revocations, Signed};
+use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -378,8 +378,7 @@ pub struct PackageOffering {
 impl PackageOffering {
     /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
     /// against its own endpoint — which is the Agent plane, where the download is served
-    /// (ADR-0023). It sits outside Admission (ADR-0026): the artifact's content hash and signature
-    /// are what protect it, so no credential rides it.
+    /// (ADR-0023), behind the same handshake as `/v1/opamp` (ADR-0026 clause 23).
     pub fn with_deployments(
         store: PackageStore,
         deployments: DeploymentStore,
@@ -436,9 +435,8 @@ pub struct AppState {
     revocations: Option<Arc<Revocations>>,
     /// The audit record every security decision goes to (ADR-0030); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
-    /// The connection-settings hash last recorded as offered to each Agent, so a rotation is
-    /// recorded once per offer and not once per poll.
-    offered: Mutex<HashMap<InstanceUid, Vec<u8>>>,
+    /// How often an admitted peer may be heard (ADR-0023); `None` only in tests.
+    agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0022); empty offers no destination.
@@ -460,8 +458,8 @@ pub struct AppState {
     /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
     /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
     /// disk (a self-asserted UID is free to mint, ADR-0026). Existing Agents keep reporting; only
-    /// growth past the ceiling is refused. The real defence against an anonymous flood is admission
-    /// (`[auth]`, ADR-0026); this is the backstop that bounds the damage while it is off.
+    /// growth past the ceiling is refused. The real defence against a flood is admission by client
+    /// certificate (ADR-0026); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
 }
 
@@ -514,7 +512,7 @@ impl AppState {
             enrolment: None,
             revocations: None,
             audit: None,
-            offered: Mutex::new(HashMap::new()),
+            agent_rate: None,
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -616,7 +614,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk on an endpoint left without `[auth]` (ADR-0026).
+    /// fresh UIDs to exhaust memory and disk (ADR-0026 clause 14).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -686,6 +684,21 @@ impl AppState {
         self.audit.as_ref()
     }
 
+    /// Arms the rate limit on the Agent plane (ADR-0023).
+    #[must_use]
+    pub fn with_agent_rate(
+        mut self,
+        agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
+    ) -> Self {
+        self.agent_rate = agent_rate;
+        self
+    }
+
+    /// The rate limit on the Agent plane.
+    pub fn agent_rate(&self) -> Option<&Arc<crate::agent_rate::AgentRate>> {
+        self.agent_rate.as_ref()
+    }
+
     /// Records a decision this Server is about to act on; without a record it is not taken
     /// (ADR-0030 clause 6).
     fn audited(&self, entry: Entry) -> Result<(), String> {
@@ -698,7 +711,7 @@ impl AppState {
     }
 
     /// Records a refusal; it is refused either way.
-    fn audit_refusal(&self, entry: Entry) {
+    pub(crate) fn audit_refusal(&self, entry: Entry) {
         if let Some(audit) = &self.audit {
             audit.refusal(entry);
         }
@@ -1253,8 +1266,8 @@ impl AppState {
 
     /// Forgets everything this Server knows about one Agent (ADR-0013): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
-    /// credential revoked, since a credential here proves fleet membership and never which Agent
-    /// is speaking (ADR-0026). A Client still running therefore reappears on its next
+    /// certificate revoked, since a certificate here proves fleet membership and its host, never
+    /// which Agent is speaking (ADR-0026 clause 7). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
@@ -1510,7 +1523,10 @@ impl AppState {
                 "refusing a new agent: the fleet is at its record ceiling"
             );
             return Processed {
-                reply: unavailable("the Server is at its Agent-record ceiling; retry later"),
+                reply: unavailable(
+                    &msg.instance_uid,
+                    "the Server is at its Agent-record ceiling; retry later",
+                ),
                 uid: None,
                 disconnected: false,
             };
@@ -1575,47 +1591,6 @@ impl AppState {
         if let Some(status) = msg.connection_settings_status {
             if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
-            }
-            let settled = status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
-                || status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32;
-            let changed = record
-                .connection_settings_status
-                .as_ref()
-                .is_none_or(|previous| {
-                    previous.status != status.status
-                        || previous.last_connection_settings_hash
-                            != status.last_connection_settings_hash
-                });
-            let rotated = self
-                .offered
-                .lock()
-                .expect("offered lock")
-                .get(&uid)
-                .is_some_and(|hash| *hash == status.last_connection_settings_hash);
-            // An acknowledgement of the standing offer when it carries a credential — recorded
-            // whether or not this Server's memory of having offered it survived a restart.
-            let credential_offered = self
-                .connection_offer
-                .as_ref()
-                .is_some_and(|offer| offer.settings.headers.is_some());
-            if settled && changed && (rotated || credential_offered) {
-                self.audit_refusal(
-                    Entry::new(
-                        "rotation.acknowledged",
-                        if status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
-                        {
-                            "applied"
-                        } else {
-                            "failed"
-                        },
-                    )
-                    .with("instance_uid", uid.to_string())
-                    .with("hash", hex::encode(&status.last_connection_settings_hash))
-                    .with(
-                        "error",
-                        (!status.error_message.is_empty()).then(|| status.error_message.clone()),
-                    ),
-                );
             }
             record.connection_settings_status = Some(status);
         }
@@ -1690,20 +1665,37 @@ impl AppState {
         {
             None => None,
             Some(request) => {
-                let outcome = match &self.client_ca {
+                // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
+                // which the Agent retries (ADR-0030 clause 6).
+                let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
                     // The Baseline's MUST when the Server cannot act on the request. An Agent
                     // reaching here ignored the undeclared capability, so it is a client error.
-                    None => Err("this Server issues no client certificates".to_string()),
-                    Some(ca) => String::from_utf8(request.csr.clone())
+                    None => Ok(Err("this Server issues no client certificates".to_string())),
+                    Some(ca) => match String::from_utf8(request.csr.clone())
                         .map_err(|_| "the certificate signing request is not PEM".to_string())
                         .and_then(|csr| {
                             // The message's own instance_uid, before any re-key (ADR-0026).
                             ca.check_claims(&csr, &sender)?;
                             let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
-                            let signed = ca.sign(&csr, &host)?;
-                            self.record_issued(&signed, &sender, predecessor)?;
-                            Ok(signed)
-                        }),
+                            Ok((ca.sign(&csr, &host)?, predecessor))
+                        }) {
+                        Err(e) => Ok(Err(e)),
+                        Ok((signed, predecessor)) => self
+                            .record_issued(&signed, &sender, predecessor)
+                            .map(|()| Ok(signed)),
+                    },
+                };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
+                        self.persist_if_dirty(&uid, record);
+                        return Processed {
+                            reply: unavailable(&msg.instance_uid, &e),
+                            uid: Some(uid),
+                            disconnected: false,
+                        };
+                    }
                 };
                 match outcome {
                     Ok(signed) => {
@@ -1801,7 +1793,7 @@ impl AppState {
         let connection_settings = if disconnected {
             None
         } else {
-            self.settings_offer(&uid, record, issued)
+            self.settings_offer(record, issued)
         };
 
         // The package offer (ADR-0018), gated by capability and the reported
@@ -1837,12 +1829,13 @@ impl AppState {
     /// never given.
     fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
         let offering = self.packages.as_ref()?;
-        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+        if !accepts_packages(record) {
             return None;
         }
         let effective = record.effective_description();
         let description = effective.as_deref();
         let assigned = record.assigned_package();
+        let deployment = assigned_deployment(offering, record);
         let reported = record
             .package_statuses
             .as_ref()
@@ -1851,24 +1844,59 @@ impl AppState {
         if reported
             == offering
                 .store
-                .assigned_hash_for(assigned, description)
+                .assigned_hash_for(assigned, deployment.as_ref(), description)
                 .as_slice()
         {
             return None;
         }
-        // The channel the act named, not the one that claims the Agent today — see the note in
-        // `offer_for_assigned`.
-        let deployment = record
-            .package_assignment
-            .as_ref()
-            .and_then(|a| offering.deployments.get(&a.deployment));
         offering.store.offer_for_assigned(
             assigned,
             deployment.as_ref(),
             description,
             &offering.download_base,
-            None,
         )
+    }
+
+    /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
+    /// the download route (ADR-0033): it is offered to an Agent the host speaks for. The offer's
+    /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
+    /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
+    /// register.
+    ///
+    /// The package store, the Deployments and the host register are read first and released
+    /// before the fleet is locked: no two of those locks are held together here.
+    pub fn offers_artifact(&self, host: &str, id: &PackageId, platform: &Platform) -> bool {
+        let (Some(offering), Some(revocations)) = (&self.packages, &self.revocations) else {
+            return false;
+        };
+        // What does not depend on the Agent is resolved once, before the fleet is locked.
+        let Some(artifact) = offering.store.uploaded(id, platform) else {
+            return false;
+        };
+        let signing = offering.deployments.signing(id, platform);
+        let speaks_for = revocations.speaks_for(host);
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let offered = |record: &AgentRecord| {
+            // The cheap half of the test first: most Agents are assigned something else.
+            accepts_packages(record)
+                && record.assigned_package() == Some(id)
+                && artifact.offered_to(
+                    record.assigned_package(),
+                    record
+                        .package_assignment
+                        .as_ref()
+                        .is_some_and(|a| signing.contains(&a.deployment)),
+                    record.effective_description().as_deref(),
+                )
+        };
+        match speaks_for {
+            SpeaksFor::Any => fleet.values().any(offered),
+            SpeaksFor::Agents(uids) => uids
+                .iter()
+                .filter_map(|uid| <[u8; 16]>::try_from(hex::decode(uid).ok()?).ok())
+                .filter_map(|uid| fleet.get(&InstanceUid(uid)))
+                .any(offered),
+        }
     }
 
     /// Why this Agent is **proposed** nothing although it accepts packages: more than one
@@ -1885,7 +1913,7 @@ impl AppState {
         record: &AgentRecord,
         claim: &Result<Option<&Deployment>, String>,
     ) -> Option<String> {
-        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+        if !accepts_packages(record) {
             return None;
         }
         claim.as_ref().err().cloned()
@@ -1896,11 +1924,10 @@ impl AppState {
     ///
     /// `issued` is a certificate just signed for this Agent (ADR-0026). It overrides the hash gate
     /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
-    /// carries, so one message can hand over a certificate and the endpoint or credential that go
+    /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
     /// with it, exactly as the Baseline describes.
     fn settings_offer(
         &self,
-        uid: &InstanceUid,
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
@@ -1945,29 +1972,7 @@ impl AppState {
         if settings.is_none() && telemetry.is_empty() {
             return None;
         }
-        let carries_credential = settings
-            .as_ref()
-            .is_some_and(|settings| settings.headers.is_some());
-        let offer = gate(record, compose_settings_offer(settings, telemetry))?;
-        if carries_credential {
-            let fresh = self.offered.lock().expect("offered lock").get(uid) != Some(&offer.hash);
-            if fresh {
-                // A credential is not handed out unrecorded (ADR-0030 clause 6): without a record
-                // there is no offer this time, and the next report asks again.
-                self.audited(
-                    Entry::new("rotation.offered", "offered")
-                        .with("instance_uid", uid.to_string())
-                        .with("hash", hex::encode(&offer.hash)),
-                )
-                .ok()?;
-                let mut offered = self.offered.lock().expect("offered lock");
-                if offered.len() >= 100_000 {
-                    offered.clear();
-                }
-                offered.insert(*uid, offer.hash.clone());
-            }
-        }
-        Some(offer)
+        gate(record, compose_settings_offer(settings, telemetry))
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a rollout act changes an assignment;
@@ -2362,6 +2367,21 @@ fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> B
         .filter_map(|record| record.config_assignments.get(name))
         .cloned()
         .collect()
+}
+
+/// Whether this Agent declared that it accepts packages — the first condition of every offer
+/// (ADR-0033 clause 1).
+fn accepts_packages(record: &AgentRecord) -> bool {
+    record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
+}
+
+/// The Deployment this Agent's package assignment names: the channel the act released through,
+/// not the one that claims the Agent today, because an offer travels with what the act released.
+fn assigned_deployment(offering: &PackageOffering, record: &AgentRecord) -> Option<Deployment> {
+    record
+        .package_assignment
+        .as_ref()
+        .and_then(|a| offering.deployments.get(&a.deployment))
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
@@ -2890,16 +2910,25 @@ pub fn bad_request(message: &str) -> ServerToAgent {
     }
 }
 
+/// How long an Agent told `Unavailable` waits before it asks again.
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
-/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up.
-/// Used when a new Agent arrives past the record ceiling.
-pub fn unavailable(message: &str) -> ServerToAgent {
+/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
+/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
+/// field a Client and a Gateway route a reply by (ADR-0023 clause 25).
+pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
+        instance_uid: instance_uid.to_vec(),
         capabilities: SERVER_CAPABILITIES,
         error_response: Some(ServerErrorResponse {
             r#type: ServerErrorResponseType::Unavailable as i32,
             error_message: message.to_string(),
-            ..Default::default()
+            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
+                opamp::proto::RetryInfo {
+                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
+                },
+            )),
         }),
         ..Default::default()
     }
@@ -3013,8 +3042,7 @@ mod tests {
                 "heartbeat_interval_secs = 10\n",
             )
             .expect("offer config"),
-        )
-        .expect("offer");
+        );
         let state = AppState::new(dir.path().join("configs"))
             .expect("state")
             .with_connection_offer(Some(offer))
@@ -3173,6 +3201,24 @@ mod tests {
             !snapshot[0].connected,
             "connectedness is runtime-only and never restored"
         );
+    }
+
+    /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
+    /// be written — tells the Agent when to ask again, so it retries instead of giving up or
+    /// hammering (ADR-0026 clause 21, ADR-0030 clause 6).
+    /// Verifies: ADR-0026, ADR-0030, ADR-0023
+    #[test]
+    fn unavailable_tells_the_agent_when_to_retry() {
+        let reply = unavailable(&[7; 16], "busy");
+        assert_eq!(reply.instance_uid, [7; 16], "it names the Agent it answers");
+        let error = reply.error_response.expect("an error");
+        assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+        match error.details {
+            Some(opamp::proto::server_error_response::Details::RetryInfo(info)) => {
+                assert_eq!(info.retry_after_nanoseconds, RETRY_AFTER.as_nanos() as u64);
+            }
+            other => panic!("no retry_info: {other:?}"),
+        }
     }
 
     /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
@@ -3527,7 +3573,6 @@ mod tests {
                     crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
                 ),
                 Arc::new(crate::clock::SystemClock),
-                Arc::new(|_: &str| false),
                 Vec::new(),
             )
             .expect("revocations"),
@@ -3583,5 +3628,174 @@ mod tests {
                 .any(|agent| agent.instance_uid == victim.to_string()),
             "the claimed Agent's record moved"
         );
+    }
+
+    // ---- Who may fetch an uploaded artifact (ADR-0033) ----
+
+    /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
+    /// channel that claims every `otelcol`, with a host register.
+    fn delivering_fleet(dir: &std::path::Path) -> (AppState, Arc<Revocations>, PackageId) {
+        let store = PackageStore::open(dir.join("packages")).expect("store");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        store.create(&id).expect("create");
+        store
+            .put_entry(&id, &linux(), b"v1".to_vec())
+            .expect("entry");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.join("configs"))
+            .expect("state")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("offering"),
+            ))
+            .with_revocations(Some(revocations.clone()));
+        state
+            .deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+            )
+            .expect("deployment");
+        put_signed(&state, &id);
+        (state, revocations, id)
+    }
+
+    fn linux() -> Platform {
+        Platform::new("linux", "amd64").expect("platform")
+    }
+
+    /// Puts `id` into the `stable` channel, signed for linux/amd64 — saved, released to nobody.
+    fn put_signed(state: &AppState, id: &PackageId) {
+        state
+            .put_deployment_package("stable", id, true)
+            .expect("package");
+        state
+            .put_deployment_signature("stable", id, &linux(), vec![1; 64])
+            .expect("signature");
+    }
+
+    /// One report of an `otelcol` Agent on linux/amd64 that accepts packages, over a certificate
+    /// naming `host`, echoing `echoed` as the aggregate hash it holds.
+    fn report_from(state: &AppState, host: &str, uid: InstanceUid, echoed: &[u8]) -> Processed {
+        let attr = opamp::attributes::string_attr;
+        state.process_presented(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64
+                    | opamp::proto::AgentCapabilities::AcceptsPackages as u64
+                    | opamp::proto::AgentCapabilities::ReportsPackageStatuses as u64,
+                agent_description: Some(AgentDescription {
+                    identifying_attributes: vec![attr("service.name", "otelcol")],
+                    non_identifying_attributes: vec![
+                        attr("os.type", "linux"),
+                        attr("host.arch", "amd64"),
+                    ],
+                }),
+                package_statuses: (!echoed.is_empty()).then(|| PackageStatuses {
+                    server_provided_all_packages_hash: echoed.to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", host),
+                host: Some(host.to_string()),
+            }),
+        )
+    }
+
+    /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
+    /// it was released to, not another host, not a host the register does not know, and not for
+    /// another Platform or version — until that other host is marked as a Gateway.
+    /// Verifies: ADR-0033
+    #[test]
+    fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, revocations, id) = delivering_fleet(dir.path());
+        report_from(&state, "h1", InstanceUid([1; 16]), &[]);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        // h2 reports an Agent of its own, released nothing.
+        state.process_presented(
+            AgentToServer {
+                instance_uid: vec![2; 16],
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", "h2"),
+                host: Some("h2".to_string()),
+            }),
+        );
+
+        assert!(state.offers_artifact("h1", &id, &linux()));
+        assert!(!state.offers_artifact("h2", &id, &linux()));
+        assert!(!state.offers_artifact("unknown", &id, &linux()));
+        let windows = Platform::new("windows", "amd64").expect("platform");
+        assert!(!state.offers_artifact("h1", &id, &windows));
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        assert!(!state.offers_artifact("h1", &v2, &linux()));
+
+        assert!(revocations.set_gateway("h2", true).expect("mark"));
+        assert!(
+            state.offers_artifact("h2", &id, &linux()),
+            "a Gateway speaks for any Agent"
+        );
+    }
+
+    /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
+    /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
+    /// Verifies: ADR-0033
+    #[test]
+    fn an_offer_still_stands_after_its_hash_is_echoed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _, id) = delivering_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_from(&state, "h1", uid, &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let offer = report_from(&state, "h1", uid, &[])
+            .reply
+            .packages_available
+            .expect("an offer");
+        let echoed = report_from(&state, "h1", uid, &offer.all_packages_hash);
+        assert!(echoed.reply.packages_available.is_none(), "the hash gate");
+        assert!(state.offers_artifact("h1", &id, &linux()));
+    }
+
+    /// A version saved into the channel but not yet released by an operator's press is no one's
+    /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_version_waiting_for_its_press_is_offered_to_no_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, revocations, v1) = delivering_fleet(dir.path());
+        report_from(&state, "h1", InstanceUid([1; 16]), &[]);
+        report_from(&state, "gw", InstanceUid([9; 16]), &[]);
+        assert!(revocations.set_gateway("gw", true).expect("mark"));
+        state.rollout_deployment("stable").expect("rollout");
+
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        let store = state.packages().expect("store");
+        store.create(&v2).expect("create");
+        store
+            .put_entry(&v2, &linux(), b"v2".to_vec())
+            .expect("entry");
+        put_signed(&state, &v2);
+        for host in ["h1", "gw"] {
+            assert!(!state.offers_artifact(host, &v2, &linux()), "{host}");
+            assert!(state.offers_artifact(host, &v1, &linux()), "{host}");
+        }
+        assert_eq!(state.rollout_deployment("stable").expect("the press"), 2);
+        assert!(state.offers_artifact("h1", &v2, &linux()));
     }
 }

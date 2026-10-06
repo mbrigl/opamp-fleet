@@ -3,6 +3,7 @@
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
 
+pub mod agent_rate;
 pub mod agent_store;
 pub mod api;
 pub mod audit;
@@ -84,14 +85,16 @@ impl PackageOffering {
 }
 
 /// The **Agent plane** (ADR-0023): the OpAMP endpoint, guarded by Admission (ADR-0026), and the
-/// package download route beside it — outside the credential check, behind the same handshake, and
-/// reached only with a certificate of the fleet (ADR-0026 clause 23).
+/// package download route beside it — behind the same handshake, and reached only with a
+/// certificate of the fleet (ADR-0026 clause 23).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
 /// `download_url` is resolved against the Agent's own endpoint.
 pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    let guard = admission.download_guard();
+    let guard = admission
+        .download_guard()
+        .with_agent_rate(state.agent_rate().cloned());
     transport::router(state.clone(), admission).merge(transport::guard_download(
         api::download_router(state),
         guard,

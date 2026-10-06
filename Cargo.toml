@@ -85,7 +85,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Ed25519 verification of downloaded package artifacts (ADR-0018) — the same ring already vendored
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
-# Operator and fleet Basic passwords are kept as Argon2id hashes, never in clear (ADR-0026); the
+# Operators' Basic passwords are kept as Argon2id hashes, never in clear (ADR-0026); the
 # RustCrypto implementation, pure Rust, no system library.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 # The client-certificate CSR flow (ADR-0026): the Client produces the request, the Server signs it
@@ -166,12 +166,11 @@ clap = { version = "4", features = ["derive"] }
 # Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
 # (ADR-0028). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0023) holds.
 service-manager = "0.11"
-# The interactive first configuration `service install --interactive` writes (ADR-0028). It is
-# here for one thing that must not be hand-rolled three times: reading a credential without
-# echoing it, which is terminal control (termios / SetConsoleMode) rather than string handling.
-# `password` is the only feature asked for — no editor, no fuzzy select — and it pulls no
-# TLS/crypto backend, so ADR-0023 holds.
-dialoguer = { version = "0.12", default-features = false, features = ["password"] }
+# The interactive first configuration `service install --interactive` writes (ADR-0028 clause
+# 21): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
+# No feature is asked for — the questionnaire asks for no secret, so no prompt hides its input —
+# and it pulls no TLS/crypto backend, so ADR-0023 holds.
+dialoguer = { version = "0.12", default-features = false }
 # The Windows-only SCM runtime shim (ADR-0028): status reporting and the stop control handler,
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"

@@ -83,7 +83,7 @@ fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
 /// Cuts a system-scope data root off from what `%ProgramData%` lets every local user do.
 ///
 /// Every folder created under `%ProgramData%` inherits `BUILTIN\Users:(OI)(CI)(RX)`: any local
-/// user could read the configuration with the fleet credential in it, the private key and the
+/// user could read the configuration and the archive key it may hold, the private key and the
 /// stored connection settings. On Unix the Client writes those `0600` in a `0700` directory itself;
 /// here the install removes the inherited rights and leaves the directory to LocalSystem and the
 /// Administrators, before the handover grants the service account its own. A user-scope install

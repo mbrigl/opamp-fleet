@@ -120,7 +120,9 @@ max_package_size_bytes = 1073741824
 #
 # client_ca_file is REQUIRED too (ADR-0026): the Agent plane asks every peer for a client
 # certificate IN THE HANDSHAKE, and one that chains to neither this CA nor the bootstrap CA of
-# [enrolment] never reaches the Server — the package download included. The Operator plane asks
+# [enrolment] never reaches the Server — the package download included. That certificate is the
+# whole of admission: the Agent plane has no credential, and an [auth] section is refused at
+# startup. The Operator plane asks
 # for none; a browser reaches it with the password of [rest.auth].
 [tls]
 cert_file = "cert.pem"
@@ -143,7 +145,7 @@ client_ca_file = "client-ca.pem"
 # validity_days = 30
 
 # ENROLMENT (ADR-0026): how a fresh host gets its first certificate. It connects with a BOOTSTRAP
-# certificate from a CA of its own — never the client CA — and the fleet credential. That opens
+# certificate from a CA of its own — never the client CA. That opens
 # nothing by itself: the connection is admitted only while an operator holds the enrolment window
 # open, it may only send a certificate signing request, and the request waits until an operator
 # approves it:
@@ -156,31 +158,28 @@ client_ca_file = "client-ca.pem"
 # [enrolment]
 # bootstrap_ca_file = "bootstrap-ca.pem"
 
-# THE FLEET CREDENTIAL, REQUIRED (ADR-0026): every OpAMP request — plain-HTTP POST or WebSocket
-# upgrade — needs an Authorization header matching a listed credential, in addition to the client
-# certificate; anything else is answered 401. Both schemes may be configured at once; several valid
-# credentials allow overlapping rotation. The REST API and the UI are not guarded by this — that is
-# [rest.auth] at the end of this file.
-#
-# NO CREDENTIAL IS KEPT IN CLEAR (ADR-0026): a token is listed by its SHA-256, a password by its
-# Argon2id hash, and a value in clear is refused at startup. Make each entry with
-#   printf '%s' "$TOKEN" | server hash-credential --bearer     (a token of 32 characters or more)
-#   server hash-credential --basic                              (asks for the password)
-[auth]
-bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f"]
-# [auth.basic_users]
-# fleet = "$argon2id$v=19$m=19456,t=2,p=1$…"
-
 # Repeated admission failures from one peer address (ADR-0026): past max_failures 401s within
-# window_secs, the address is answered 429 with Retry-After for backoff_secs, before its credential
-# is even compared. The Operator plane counts its own failures the same way.
+# window_secs, the address is answered 429 with Retry-After for backoff_secs, before anything else
+# is checked. The Operator plane counts its own failures the same way.
 # [admission_throttle]
 # max_failures = 10
 # window_secs = 60
 # backoff_secs = 300
 
+# How often an admitted peer is heard on the Agent plane (ADR-0023). Every OpAMP message and every
+# package download takes a token from the bucket of the host its certificate names — of the Agent
+# it names and of the aggregate, for a host marked as a Gateway. A message past the limit is
+# answered Unavailable with a 30 s retry_info, a download 429 with Retry-After: 30. 0 is refused;
+# the Server warns at startup when messages_per_sec times the heartbeat carries fewer than 256
+# Agents per host.
+# [agent_rate_limit]
+# messages_per_sec = 10
+# burst = 300
+# gateway_messages_per_sec = 500
+# gateway_burst = 10000
+
 # The audit record (ADR-0030): one JSON line per security decision — admissions and refusals,
-# enrolment, issuance, revocation, rotation, operator acts, package outcomes — in
+# enrolment, issuance, revocation, operator acts, package outcomes — in
 # <config_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
 #   server audit-verify <config_dir>/audit
 # A Server that cannot write it admits no one until it can. Bounded by size, never switched off.
@@ -190,13 +189,10 @@ bearer_tokens = ["sha256:2c0c8f8b3d6e0f5a1c9a7e4b2d6f8a0c3e5b7d9f1a3c5e7b9d1f3a5
 
 # Optional connection settings offered to the fleet (ADR-0027): every Agent declaring
 # AcceptsOpAMPConnectionSettings is offered these, verifies them by actually connecting, and
-# switches only on success. Any subset of the keys works, but not an empty section. To rotate
-# credentials: add the new token's hash to [auth] (old and new both accepted), write the token to
-# a file only this Server's account can read (mode 0600) and name it below, restart the Server, and
-# drop the old hash once the fleet has migrated. The token itself is never in this file
-# (ADR-0027). Unless endpoint points to another Server, [auth] must accept the offered credential.
+# switches only on success. Either key or both works, but not an empty section. The offer carries
+# no credential and no headers: a credential key (bearer_token_file, username, password_file,
+# bearer_token, password) is refused at startup, naming the key.
 # [connection_offer]
-# bearer_token_file = "/etc/opamp-fleet/offered-token"   # or username = "..." / password_file = "..."
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
 

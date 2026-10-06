@@ -24,9 +24,12 @@ Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor
 admits only the process its Supervisor started (ADR-0034).
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
-names as non-goals. The boundary is worth stating precisely because the host binding (ADR-0026 clause 7)
-runs close to it — *which Agent is speaking* is authentication and belongs here; *what that Agent is
-allowed to do* is authorization and does not.
+names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
+configurations and packages released to an Agent it speaks for (ADR-0033), on the Server and from
+a Gateway's package cache alike. The boundary is worth
+stating precisely because the host binding (ADR-0026 clause 7) runs close to it — *which Agent is
+speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
+*what that Agent is allowed to do* beyond that is authorization and does not.
 
 ## What already holds
 
@@ -34,14 +37,16 @@ Stated first so the list below is not read as a list of absences. On this link t
 has:
 
 - TLS on both transports, on both ends, with a private CA supported on the Client (ADR-0023).
-- **Cumulative** admission on `/v1/opamp`: every configured proof must succeed — a credential when
-  `[auth]` is set, a client certificate when a client CA is, both when both are (ADR-0026,
-  `transport::Admission`). Not "either one", which is what keeps switching mutual TLS on from ever
-  admitting more than before.
-- Constant-time comparison of the presented `Authorization` value, so a comparison leaks nothing
-  about how far it matched — on both planes, from one primitive (`credentials.rs`).
-- Optional Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
-  ADR-0026), on a listener that is loopback until an operator publishes it (ADR-0023).
+- **One proof on the Agent plane, required in the handshake** (ADR-0026,
+  `transport::Admission`): a client certificate the client CA issued, valid and not revoked. No
+  configuration admits a peer without one. The plane has no credential: `server.toml` refuses an
+  `[auth]` section and a credential key in `[connection_offer]` at startup, and `/v1/opamp` and the
+  download route read no `Authorization` header. The Client sends none, and nothing in
+  `supervisor.toml` admits a host; its only secret on the Agent plane is its private key.
+- Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
+  ADR-0026), required beyond the loopback, on a listener that is loopback until an operator
+  publishes it (ADR-0023). A verification that succeeded is remembered by the SHA-256 of the
+  header and compared in constant time (`credentials.rs`).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
@@ -52,12 +57,11 @@ has:
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
-- **Both proofs, in the handshake, and enrolment by approval** (ADR-0026, ADR-0034): every
-  Agent presents the fleet credential and a client certificate the Agent plane and every Gateway
-  ask for in the TLS handshake. A fresh host enrols with a bootstrap certificate from a CA of its
-  own, only inside an operator-opened window, and only once an operator approves its request.
-  Repeated admission failures from one address are answered `429` before the credential is
-  compared, on both planes.
+- **A certificate in the handshake, and enrolment by approval** (ADR-0026, ADR-0034): every
+  Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
+  handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
+  operator-opened window, and only once an operator approves its request. Repeated admission
+  failures from one address are answered `429` before anything else is checked, on both planes.
 - **Nothing installed unsigned, and downloads only from allowed sources** (ADR-0018, ADR-0021):
   a Client without the verification key takes no package, the Server offers no entry its
   Deployment has not signed, and every download hop is held to `https://` and the Server's origin
@@ -73,13 +77,15 @@ has:
 - Package content hashed always, and Ed25519-verified when a key is configured; archive members
   validated before anything is written.
 - **Revocation that ends sessions** (ADR-0031): the Server keeps a persisted
-  list of revoked certificates, by issuing CA and serial and extended along every renewal it signed,
-  and of revoked credentials, by hash. Admission refuses them on both transports and on the
+  list of revoked certificates, by issuing CA and serial and extended along every renewal it
+  signed. Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, and every
   session ends when the certificate that admitted it expires.
 - **A Gateway refuses what the Server revoked** (ADR-0034, ADR-0031): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
+  It forwards no `Authorization` upstream, and every upstream connection carries its own
+  certificate alone.
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0026): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
@@ -89,7 +95,7 @@ has:
   reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
   certificate it renews with that certificate's key, so it keeps its host and chain through a
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
-- **Key material and credentials readable by their owner alone** (ADR-0026 clause 8, ADR-0028
+- **Key material and configuration readable by their owner alone** (ADR-0026 clause 8, ADR-0028
   clause 18): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories; on Windows a system-scope install cuts the data root off
   from the read right every local user inherits under `%ProgramData%` and leaves it to LocalSystem,
@@ -97,12 +103,12 @@ has:
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0032): no
   environment or arguments beyond what the running block has or the operator allowed, never a
   loader variable or `PATH`, and no file outside its own `config/` directory.
-- **No credential in `server.toml` authenticates on its own** (ADR-0026, ADR-0027): Bearer tokens
-  as SHA-256, Basic passwords as Argon2id hashes, verified in constant time; the credential the
-  Server offers for rotation lives in an owner-only file of its own.
+- **No credential in `server.toml` authenticates on its own** (ADR-0026 clause 26): an operator's
+  Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
+  refused at startup without being echoed. The Server offers no credential (ADR-0027).
 - **An audit record of every security decision** (ADR-0030): admissions and refusals, enrolment,
-  issuance, revocation, rotation, operator acts and package outcomes, one hash-chained line each;
-  no admission without its record.
+  issuance, revocation, operator acts and package outcomes, one hash-chained line each; no
+  admission without its record, and no `Authorization` value in any line, not even as a hash.
 - **Certificates live 30 days by default** (ADR-0026 clause 9) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
@@ -113,9 +119,10 @@ has:
 - **A package signature covers the Agent type, the version and the hash** (ADR-0018): a signed
   artifact installs as its own type's program at its own version and nowhere else, and a
   Supervisor refuses a version older than the one it runs.
-- `TLSConnectionSettings` and `ProxyConnectionSettings` refused on merit, so a Server cannot command
-  a Client to weaken its own verification
-  ([`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
+- `TLSConnectionSettings`, `ProxyConnectionSettings` and offered `headers` refused on merit, so a
+  Server cannot command a Client to weaken its own verification or plant a header on every
+  connection of the fleet (ADR-0027 clause 8,
+  [`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
 
 ### Where each bound applies today
 
@@ -128,11 +135,12 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   off — `408`, or a `1008` close — while nothing has a deadline and an idle connection is left alone.
 - **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0023).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
-    ✅ gzip bounded *after* decompression · ✅ Admission, cumulative
+    ✅ gzip bounded *after* decompression · ✅ Admission by client certificate
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
-  - ✅ failed admissions throttled per address
+  - ✅ failed admissions throttled per address · ✅ admitted members rate-limited per host, and
+    per Agent within a Gateway's aggregate (ADR-0023)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0023).
-  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ optional Basic over the whole plane (ADR-0026) ·
+  - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the loopback (ADR-0026) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
   - ✅ the package upload has no deadline, but is held to the floor above, and its size to
     `max_package_size_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
@@ -142,8 +150,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0034).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
     is served on (ADR-0024) · ✅ message size, gzip after decompression, per-hop exchange timeout,
-    `max_carried_agents` · ✅ an upstream connection carries only the Agents of the credential it
-    was opened with
+    `max_carried_agents` · ✅ no downstream `Authorization` forwarded; every upstream connection
+    carries the Gateway's own certificate alone (ADR-0034)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
@@ -154,7 +162,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ([`endpoint.rs`](../crates/fleet-agent/src/supervisor/endpoint.rs))
 
 What follows is therefore not "make it secure" but two narrower things: **close the windows during
-which a withdrawn credential still works**, and **shrink the surface that sits beside the protocol**.
+which a revoked certificate still works**, and **shrink the surface that sits beside the protocol**.
 
 **Status of each measure below:** 🔴 not taken · 🟡 partly in force · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
@@ -168,22 +176,37 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 
 **What a remote configuration can and cannot cause on a host.** The Server reaches a Client host
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
-restart its process; add, change, purge and restart Supervisors of the compiled-in kinds, each
-running a program from its own `program/` directory; install any package signed with the
-operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
-fleet to another TLS endpoint its trust accepts, rotate the credential, install a certificate for
+restart its process, except for a Supervisor the host lists in `[supervisors]
+remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
+repeat the one it runs (ADR-0032); add, change, purge and restart Supervisors of the compiled-in
+kinds, each running a program from its own `program/` directory, except on a host that sets
+`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0032);
+install any package signed with the operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
+fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a Telegraf
 `inputs.exec`, an Icinga `CheckCommand` — it allows as the process's account; that is the product.
+The switch of ADR-0032 binds a name: while the Server manages the set, it can remove a listed
+Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
+the Server's again. A host that also sets `server_manages_set = false` closes that: the Server
+can neither remove the listed Supervisor nor add another (ADR-0032). Both keys hold against the
+Server only while every Supervisor whose configuration language can run commands as the Client's
+account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command`
+kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
+Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. A signed Client
+build can still replace the program that reads them where `[self_update]` consents (ADR-0020).
 
 It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
 at all; start a kind that is not compiled in; change any key of `supervisor.toml` but the
-`[[supervisor]]` array — not the endpoint, `state_dir`, `[auth]`, `[tls]`, the verification key,
+`[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key,
 `allowed_sources` or `[self_update]`; apply a set with one bad block; purge outside the Supervisors'
 root; install anything unsigned, from a source not allowed, or with an archive member that climbs
-out; downgrade the Client or install a program that is not the Client as the Client; switch to
-plaintext beyond the loopback; weaken TLS verification or set a proxy; hand the Client a private
+out; serve a host from its download route an artifact that is not offered to an Agent the host
+speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
+that host's Agents — within the residual that the Gateway binds an `instance_uid` to the host of
+its first report since the Gateway started (ADR-0033); downgrade the Client or install a program that is not the Client as the Client; switch to
+plaintext beyond the loopback; weaken TLS verification, set a proxy or plant a header; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 
 ## Verifying a measure is in force

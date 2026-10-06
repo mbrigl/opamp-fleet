@@ -215,7 +215,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
         &config,
         format!(
             "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n{}",
-            common::credentials(dir.path())
+            common::client_identity(dir.path())
         ),
     )
     .expect("write supervisor.toml");

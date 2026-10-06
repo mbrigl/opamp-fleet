@@ -582,6 +582,49 @@ mod tests {
         assert!(aggregate.contains("\"count\":15"), "{aggregate}");
     }
 
+    /// A refusal of the rate limit never waits for its entry: one that finds the channel full is
+    /// counted, and the next entry written says so in `unrecorded_before`.
+    /// Verifies: ADR-0023, ADR-0030
+    #[test]
+    fn a_throttle_refusal_that_finds_the_channel_full_is_counted_unrecorded() {
+        let memory = Memory::default();
+        let audit =
+            AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
+        // The writer waits on the store while the test holds it, and the channel fills.
+        let held = memory.0.lock().expect("lock");
+        let mut queued = 0;
+        while audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .is_ok()
+        {
+            queued += 1;
+            assert!(queued <= CHANNEL_CAPACITY + 1, "the channel never filled");
+        }
+        audit.refusal(
+            Entry::new("agent_rate.throttled", "throttled")
+                .peer(Some("192.0.2.1".parse().expect("ip")))
+                .with("bucket", "host"),
+        );
+        drop(held);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while memory.lines().len() < queued {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer fell behind"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let lines = memory.lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("agent_rate.throttled")),
+            "the refusal found no room"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("\"unrecorded_before\":2")),
+            "the admission that found no room and the refusal are counted"
+        );
+    }
+
     /// Verifies: ADR-0030
     #[tokio::test]
     async fn a_write_that_fails_refuses_until_one_succeeds() {

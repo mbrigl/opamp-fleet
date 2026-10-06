@@ -78,6 +78,40 @@ pub async fn download_and_verify(
     staging_dir: &Path,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
+    download_and_verify_patiently(package, config, staging_dir, progress, Patience::default()).await
+}
+
+/// How long a download waits when its own Server origin answers `429` or `503` with
+/// `Retry-After` (ADR-0033 clause 15): each wait the `Retry-After`, capped, and the waits of one
+/// download together bounded.
+#[derive(Debug, Clone, Copy)]
+pub struct Patience {
+    /// The longest single wait, whatever `Retry-After` asks.
+    pub per_wait: std::time::Duration,
+    /// The most all waits of one download add up to.
+    pub total: std::time::Duration,
+}
+
+impl Default for Patience {
+    fn default() -> Self {
+        Patience {
+            per_wait: std::time::Duration::from_secs(60),
+            total: std::time::Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+/// [`download_and_verify`] with the waits on `Retry-After` stated — what a test drives short.
+///
+/// # Errors
+/// As [`download_and_verify`].
+pub async fn download_and_verify_patiently(
+    package: &PackageDownload,
+    config: &ClientConfig,
+    staging_dir: &Path,
+    progress: &Progress,
+    patience: Patience,
+) -> Result<PathBuf, String> {
     // First, before any URL is resolved or a byte is written: the staged path is built from this
     // name, and a name that could escape the staging directory is refused outright.
     ensure_safe_package_name(&package.name)?;
@@ -96,9 +130,16 @@ pub async fn download_and_verify(
     let source = source_of(&url);
     info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
     let download = tracing::info_span!("download", source = %source);
-    let mut response = send_download(&sources, &anonymous, &identified, &url, &package.headers)
-        .instrument(download.clone())
-        .await?;
+    let mut response = send_patiently(
+        &sources,
+        &anonymous,
+        &identified,
+        &url,
+        &package.headers,
+        patience,
+    )
+    .instrument(download.clone())
+    .await?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -157,7 +198,7 @@ const MAX_REDIRECTS: usize = 5;
 /// A download client over `tls`: TLS 1.3, no redirect of its own — every hop is checked here
 /// (`send_download`) — and per-operation timeouts rather than one for the whole transfer, since a
 /// large artifact over a modest link legitimately takes minutes.
-fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
+pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .use_rustls_tls()
         .redirect(reqwest::redirect::Policy::none())
@@ -265,7 +306,7 @@ fn origin_label(url: &reqwest::Url) -> String {
 /// redirect crosses origins, so a custom credential — `X-JFrog-Art-Api`, `PRIVATE-TOKEN` — would
 /// otherwise be re-sent to wherever a mirror points it. Integrity is unaffected either way, since
 /// the content hash and the signature are checked after the bytes land.
-async fn send_download(
+pub(crate) async fn send_download(
     sources: &Sources,
     anonymous: &reqwest::Client,
     identified: &reqwest::Client,
@@ -298,6 +339,95 @@ async fn send_download(
             .map_err(|e| format!("{current} redirected to an unusable location: {e}"))?;
     }
     Err(format!("{url} redirected more than {MAX_REDIRECTS} times"))
+}
+
+/// [`send_download`], waiting out a `429` or `503` with `Retry-After` in seconds from the Server's
+/// own origin — a Gateway behind one, whose cache is still fetching, or the Server's rate limit —
+/// within `patience` (ADR-0033 clause 15). Anything else is returned as it came, for the caller to
+/// fail on.
+pub(crate) async fn send_patiently(
+    sources: &Sources,
+    anonymous: &reqwest::Client,
+    identified: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    patience: Patience,
+) -> Result<reqwest::Response, String> {
+    let waits = Waits::new(patience);
+    loop {
+        let response = send_download(sources, anonymous, identified, url, headers).await?;
+        match waits.asked(sources, url, &response)? {
+            Some(wait) => tokio::time::sleep(wait).await,
+            None => return Ok(response),
+        }
+    }
+}
+
+/// The waits of one download on `Retry-After` (ADR-0033 clause 15): each one at least a second and
+/// at most [`Patience::per_wait`], and none begun that would end past the deadline set when the
+/// download began — so the requests count against the bound as well as the waits.
+pub(crate) struct Waits {
+    deadline: tokio::time::Instant,
+    per_wait: std::time::Duration,
+    total: std::time::Duration,
+}
+
+impl Waits {
+    pub(crate) fn new(patience: Patience) -> Self {
+        Waits {
+            deadline: tokio::time::Instant::now() + patience.total,
+            per_wait: patience.per_wait,
+            total: patience.total,
+        }
+    }
+
+    /// How long `response` asks the download to wait before it asks again: `None` when it is not a
+    /// `429` or `503` with `Retry-After` in seconds from the Server's own origin, which the caller
+    /// takes as it is.
+    ///
+    /// # Errors
+    /// Returns the failure once a wait would end past the deadline.
+    pub(crate) fn asked(
+        &self,
+        sources: &Sources,
+        url: &str,
+        response: &reqwest::Response,
+    ) -> Result<Option<std::time::Duration>, String> {
+        let status = response.status();
+        let busy = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+        if !busy || !sources.is_server(response.url()) {
+            return Ok(None);
+        }
+        let Some(after) = retry_after(response) else {
+            return Ok(None);
+        };
+        let wait = after
+            .max(std::time::Duration::from_secs(1))
+            .min(self.per_wait);
+        if tokio::time::Instant::now() + wait > self.deadline {
+            return Err(format!(
+                "{} answered {status} for longer than this Client waits ({} s)",
+                source_of(url),
+                self.total.as_secs()
+            ));
+        }
+        info!(url = %source_of(url), %status, wait_secs = wait.as_secs_f64(), "the download is asked to wait");
+        Ok(Some(wait))
+    }
+}
+
+/// A `Retry-After` in seconds; an HTTP date is not used, and neither is anything unreadable.
+fn retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 /// Attaches the offered headers to a request.
@@ -335,7 +465,7 @@ fn with_headers(
 ///
 /// A URL that will not parse is reported as nothing rather than as itself: the one case where the
 /// query cannot be found is the case where it must not be assumed absent.
-fn source_of(url: &str) -> String {
+pub(crate) fn source_of(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return "an unparseable url".to_string();
     };
@@ -513,6 +643,279 @@ fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), Str
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
+
+    /// A loopback server answering each request with the next of `answers` — a status and an
+    /// optional `Retry-After` — and `200 the-bytes` once they run out; returns its address and the
+    /// count of requests.
+    async fn answering(
+        answers: Vec<(u16, Option<&'static str>)>,
+    ) -> (std::net::SocketAddr, std::sync::Arc<AtomicU64>) {
+        let count = std::sync::Arc::new(AtomicU64::new(0));
+        let seen = count.clone();
+        let answers = std::sync::Arc::new(answers);
+        let app = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let (seen, answers) = (seen.clone(), answers.clone());
+                async move {
+                    use axum::response::IntoResponse as _;
+                    let n = seen.fetch_add(1, Ordering::SeqCst) as usize;
+                    match answers.get(n) {
+                        Some((status, after)) => {
+                            let mut response = axum::http::StatusCode::from_u16(*status)
+                                .expect("status")
+                                .into_response();
+                            if let Some(after) = after {
+                                response.headers_mut().insert(
+                                    axum::http::header::RETRY_AFTER,
+                                    axum::http::HeaderValue::from_static(after),
+                                );
+                            }
+                            response
+                        }
+                        None => "the-bytes".into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (addr, count)
+    }
+
+    fn sources_for(endpoint: &str) -> (Sources, reqwest::Client) {
+        opamp::tls::install_ring_provider();
+        let config: ClientConfig =
+            toml::from_str(&format!("endpoint = \"{endpoint}\"\n")).expect("config");
+        let client = download_client(crate::tls::trust(&config).expect("trust")).expect("client");
+        (Sources::new(&config).expect("sources"), client)
+    }
+
+    const SHORT: Patience = Patience {
+        per_wait: std::time::Duration::from_millis(10),
+        total: std::time::Duration::from_secs(5),
+    };
+
+    /// A `503` and a `429` with `Retry-After` from the Client's own Server origin are waited out,
+    /// and the download goes on.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn a_download_waits_out_retry_after_from_its_server_origin() {
+        let (server, count) = answering(vec![(503, Some("30")), (429, Some("30"))]).await;
+        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let response = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            SHORT,
+        )
+        .await
+        .expect("waited out");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    /// The waits of one download are bounded: a Server origin that keeps answering `503` makes the
+    /// download fail once the next wait would pass the bound.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn a_download_gives_up_once_its_waits_reach_the_bound() {
+        let (server, count) = answering(vec![(503, Some("30")); 100]).await;
+        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let patience = Patience {
+            per_wait: std::time::Duration::from_millis(10),
+            total: std::time::Duration::from_millis(35),
+        };
+        let err = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            patience,
+        )
+        .await
+        .expect_err("gave up");
+        assert!(err.contains("longer than this Client waits"), "{err}");
+        let requests = count.load(Ordering::SeqCst);
+        assert!(
+            (2..=4).contains(&requests),
+            "at most three waits of 10 ms fit in 35 ms: {requests}"
+        );
+    }
+
+    /// A `Retry-After: 0` does not make the download ask in a tight loop for ever: the asking ends
+    /// at the deadline, after a bounded number of requests.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn a_retry_after_of_zero_does_not_loop_without_bound() {
+        let (server, count) = answering(vec![(503, Some("0")); 1000]).await;
+        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let patience = Patience {
+            per_wait: std::time::Duration::from_millis(10),
+            total: std::time::Duration::from_millis(100),
+        };
+        let err = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            patience,
+        )
+        .await
+        .expect_err("gave up");
+        assert!(err.contains("longer than this Client waits"), "{err}");
+        let requests = count.load(Ordering::SeqCst);
+        assert!((1..=11).contains(&requests), "{requests} requests");
+    }
+
+    /// The time the requests take counts against the bound, not only the waits: a slow origin
+    /// exhausts it although the waits alone would not.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn request_time_counts_against_the_bound() {
+        let count = std::sync::Arc::new(AtomicU64::new(0));
+        let seen = count.clone();
+        let app = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        [(axum::http::header::RETRY_AFTER, "0")],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let patience = Patience {
+            per_wait: std::time::Duration::from_millis(1),
+            total: std::time::Duration::from_millis(150),
+        };
+        let err = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            patience,
+        )
+        .await
+        .expect_err("gave up");
+        assert!(err.contains("longer than this Client waits"), "{err}");
+        let requests = count.load(Ordering::SeqCst);
+        assert!(
+            (2..=3).contains(&requests),
+            "{requests} requests in 150 ms of 60 ms each"
+        );
+    }
+
+    /// A `503` whose `Retry-After` is an HTTP date, missing or unreadable is not waited out.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn an_unusable_retry_after_is_not_waited_out() {
+        for after in [Some("Wed, 21 Oct 2015 07:28:00 GMT"), None, Some("soon")] {
+            let (server, count) = answering(vec![(503, after)]).await;
+            let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+            let response = send_patiently(
+                &sources,
+                &client,
+                &client,
+                &format!("http://{server}/file"),
+                &[],
+                SHORT,
+            )
+            .await
+            .expect("a response");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "{after:?}"
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 1, "{after:?}");
+        }
+    }
+
+    /// A `503` with `Retry-After` from the host a redirect off the Server's origin led to is not
+    /// waited out.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn a_retry_after_after_a_redirect_off_the_origin_is_not_waited_out() {
+        let (mirror, count) = answering(vec![(503, Some("1"))]).await;
+        let target = format!("http://{mirror}/file");
+        let app = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || {
+                let target = target.clone();
+                async move { axum::response::Redirect::temporary(&target) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        opamp::tls::install_ring_provider();
+        let config: ClientConfig = toml::from_str(&format!(
+            "endpoint = \"ws://{server}/v1/opamp\"\n[packages]\nallowed_sources = [\"http://{mirror}/\"]\n"
+        ))
+        .expect("config");
+        let sources = Sources::new(&config).expect("sources");
+        let client = download_client(crate::tls::trust(&config).expect("trust")).expect("client");
+        let response = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            SHORT,
+        )
+        .await
+        .expect("a response");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    /// A `503` with `Retry-After` from a host that is not the Client's own Server origin is not
+    /// waited out: the response comes back as it is, for the download to fail on.
+    /// Verifies: ADR-0033
+    #[tokio::test]
+    async fn a_retry_after_from_another_host_fails_the_download() {
+        let (server, count) = answering(vec![(503, Some("1"))]).await;
+        let (_, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let (other, _) = answering(Vec::new()).await;
+        let config: ClientConfig = toml::from_str(&format!(
+            "endpoint = \"ws://{other}/v1/opamp\"\n[packages]\nallowed_sources = [\"http://{server}/\"]\n"
+        ))
+        .expect("config");
+        let sources = Sources::new(&config).expect("sources");
+        let response = send_patiently(
+            &sources,
+            &client,
+            &client,
+            &format!("http://{server}/file"),
+            &[],
+            SHORT,
+        )
+        .await
+        .expect("a response");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
 
     /// What labels the download span must not carry what authorises the download: the span goes to
     /// a destination the Server named (ADR-0022 clause 13), and a pre-signed URL is a credential.

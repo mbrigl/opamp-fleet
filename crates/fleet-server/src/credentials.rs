@@ -1,15 +1,9 @@
-//! The credential check both planes use (ADR-0026).
+//! The Operator plane's credential check (ADR-0026 clause 2).
 //!
-//! One primitive, because the two planes ask the same question of a request — does this
-//! `Authorization` header match something configured? — and the *answer* is what differs: the Agent
-//! plane pairs it with a client certificate, the Operator plane guards a browser. What must not
-//! differ is how the comparison is made, which is why it is written once.
-//!
-//! Nothing configured authenticates on its own (ADR-0026 clause 26): a Bearer token is kept as its
-//! SHA-256, a Basic password as an Argon2id hash. A Bearer token is compared by hash in constant
-//! time; a Basic password is verified with Argon2id, and a success is remembered for a while by the
-//! hash of the whole header, so an Agent polling with Basic pays the password hash once and not per
-//! request.
+//! Nothing configured authenticates on its own (ADR-0026 clause 26): a Basic password is kept as an
+//! Argon2id hash and verified against it, and a success is remembered for a while by the hash of
+//! the whole header, so a browser that re-sends the header with every request pays the password
+//! hash once and not per request.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -20,12 +14,6 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::{header, HeaderMap};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
-
-/// The prefix of a stored Bearer entry.
-pub const BEARER_PREFIX: &str = "sha256:";
-
-/// The shortest Bearer token `hash-credential` accepts: its strength is its entropy alone.
-pub const MIN_BEARER_LEN: usize = 32;
 
 /// The least an Argon2id hash may cost: OWASP's minimum (`m=19456`, `t=2`, `p=1`).
 pub const MIN_MEMORY_KIB: u32 = 19_456;
@@ -55,10 +43,8 @@ pub enum Verdict {
     Busy,
 }
 
-/// The configured credentials of one plane, and the challenge a refusal carries.
+/// The configured credentials of the Operator plane, and the challenge a refusal carries.
 pub struct Credentials {
-    /// SHA-256 of every accepted Bearer token.
-    bearer: Vec<[u8; 32]>,
     /// Every accepted Basic user and the Argon2id hash of its password.
     basic: BTreeMap<String, String>,
     /// SHA-256 of a Basic header that verified, and until when that holds.
@@ -72,20 +58,11 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    /// Credentials from entries [`check_bearer`] and [`check_basic`] accepted.
+    /// Credentials from entries [`check_basic`] accepted.
     ///
     /// # Errors
     /// Returns an error naming the first entry that is not a hash this Server keeps.
-    pub fn new(
-        bearer: &[String],
-        basic: &BTreeMap<String, String>,
-        challenge: String,
-    ) -> Result<Self, String> {
-        let bearer = bearer
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| check_bearer(entry).map_err(|e| format!("entry {index}: {e}")))
-            .collect::<Result<Vec<_>, _>>()?;
+    pub fn new(basic: &BTreeMap<String, String>, challenge: String) -> Result<Self, String> {
         let mut costliest = Params::new(MIN_MEMORY_KIB, MIN_ITERATIONS, MIN_PARALLELISM, None)
             .map_err(|e| format!("cannot set Argon2 parameters: {e}"))?;
         for (user, phc) in basic {
@@ -110,7 +87,6 @@ impl Credentials {
                 .to_string()
         };
         Ok(Credentials {
-            bearer,
             basic: basic.clone(),
             remembered: Mutex::new(HashMap::new()),
             dummy,
@@ -158,38 +134,34 @@ impl Credentials {
     }
 
     fn is_remembered(&self, header: &str) -> bool {
-        let key: [u8; 32] = Sha256::digest(header.as_bytes()).into();
+        self.remembers(&Sha256::digest(header.as_bytes()).into(), Instant::now())
+    }
+
+    /// Whether a success with this header hash is remembered and still holds. Compared in constant
+    /// time, so a lookup never leaks how far a remembered hash matched.
+    fn remembers(&self, key: &[u8; 32], now: Instant) -> bool {
         self.remembered
             .lock()
             .expect("credentials lock")
-            .get(&key)
-            .is_some_and(|until| *until > Instant::now())
+            .iter()
+            .any(|(remembered, until)| {
+                *until > now && constant_time_eq::constant_time_eq(remembered, key)
+            })
     }
 
-    /// Whether an `Authorization` value matches a configured credential.
+    /// Whether an `Authorization` value matches a configured Basic credential.
     #[must_use]
     pub fn verify(&self, authorization: &str) -> bool {
-        if let Some(token) = authorization.strip_prefix("Bearer ") {
-            let presented: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-            // Constant-time per candidate, so a comparison never leaks how far it matched.
-            return self.bearer.iter().fold(false, |found, accepted| {
-                found | constant_time_eq::constant_time_eq(accepted, &presented)
-            });
-        }
-        if let Some(encoded) = authorization.strip_prefix("Basic ") {
-            return self.verify_basic(authorization, encoded);
-        }
-        false
+        authorization
+            .strip_prefix("Basic ")
+            .is_some_and(|encoded| self.verify_basic(authorization, encoded))
     }
 
     fn verify_basic(&self, header: &str, encoded: &str) -> bool {
         let key: [u8; 32] = Sha256::digest(header.as_bytes()).into();
         let now = Instant::now();
-        {
-            let remembered = self.remembered.lock().expect("credentials lock");
-            if remembered.get(&key).is_some_and(|until| *until > now) {
-                return true;
-            }
+        if self.remembers(&key, now) {
+            return true;
         }
         let Some((user, password)) = base64::engine::general_purpose::STANDARD
             .decode(encoded)
@@ -232,24 +204,6 @@ impl Credentials {
     }
 }
 
-/// A Bearer entry as `server.toml` keeps it: `sha256:` and 64 hex digits.
-///
-/// # Errors
-/// Returns an error saying what the entry must be, never echoing it.
-pub fn check_bearer(entry: &str) -> Result<[u8; 32], String> {
-    let mut hash = [0u8; 32];
-    entry
-        .strip_prefix(BEARER_PREFIX)
-        .filter(|hex| hex.len() == 64)
-        .and_then(|hex| hex::decode_to_slice(hex, &mut hash).ok())
-        .ok_or_else(|| {
-            "is not `sha256:` and 64 hex digits — a token is never kept in clear; \
-             make the entry with `server hash-credential --bearer`"
-                .to_string()
-        })?;
-    Ok(hash)
-}
-
 /// A Basic entry as `server.toml` keeps it: an Argon2id PHC string at least as costly as OWASP's
 /// minimum.
 ///
@@ -285,29 +239,6 @@ pub fn check_basic(phc: &str) -> Result<Params, String> {
         ));
     }
     Ok(params)
-}
-
-/// The entry `server.toml` keeps for a Bearer token.
-///
-/// # Errors
-/// Refuses a token shorter than [`MIN_BEARER_LEN`].
-pub fn hash_bearer(token: &str) -> Result<String, String> {
-    if token.chars().count() < MIN_BEARER_LEN {
-        return Err(format!(
-            "a Bearer token needs at least {MIN_BEARER_LEN} characters — its strength is its \
-             entropy alone"
-        ));
-    }
-    Ok(bearer_entry(token))
-}
-
-/// The entry for a Bearer token, whatever its length — what a test with a short token uses.
-#[must_use]
-pub fn bearer_entry(token: &str) -> String {
-    format!(
-        "{BEARER_PREFIX}{}",
-        hex::encode(Sha256::digest(token.as_bytes()))
-    )
 }
 
 /// The entry `server.toml` keeps for a Basic password: Argon2id at OWASP's minimum cost.
@@ -346,8 +277,6 @@ fn salt() -> Result<SaltString, String> {
 mod tests {
     use super::*;
 
-    const TOKEN: &str = "a-fleet-token-of-at-least-32-characters";
-
     fn header(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value.parse().expect("header"));
@@ -363,24 +292,11 @@ mod tests {
 
     /// Verifies: ADR-0026
     #[test]
-    fn a_bearer_token_is_admitted_by_its_hash() {
-        let entry = hash_bearer(TOKEN).expect("hash");
-        assert!(!entry.contains(TOKEN));
-        let credentials =
-            Credentials::new(&[entry], &BTreeMap::new(), "Bearer".into()).expect("credentials");
-        assert!(credentials.verify(&format!("Bearer {TOKEN}")));
-        assert!(!credentials.verify("Bearer another-token-of-32-characters-xx"));
-        assert!(!credentials.verify(TOKEN), "the scheme is part of it");
-        assert!(hash_bearer("short").is_err());
-    }
-
-    /// Verifies: ADR-0026
-    #[test]
     fn a_basic_password_is_verified_against_its_argon2id_hash() {
         let phc = hash_basic("s3cret").expect("hash");
         assert!(phc.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"), "{phc}");
         let users = BTreeMap::from([("ops".to_string(), phc)]);
-        let credentials = Credentials::new(&[], &users, "Basic".into()).expect("credentials");
+        let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
         assert!(credentials.verify(&basic("ops", "s3cret")));
         assert!(!credentials.verify(&basic("ops", "wrong")));
     }
@@ -389,7 +305,7 @@ mod tests {
     #[test]
     fn an_unknown_user_costs_the_same_verification() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
-        let credentials = Credentials::new(&[], &users, "Basic".into()).expect("credentials");
+        let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
         let started = Instant::now();
         assert!(!credentials.verify(&basic("ops", "wrong")));
         let known = started.elapsed();
@@ -410,7 +326,7 @@ mod tests {
     #[test]
     fn a_basic_verification_is_remembered_and_bounded() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
-        let credentials = Credentials::new(&[], &users, "Basic".into()).expect("credentials");
+        let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
         assert!(credentials.verify(&basic("ops", "s3cret")));
         let started = Instant::now();
         assert!(credentials.verify(&basic("ops", "s3cret")));
@@ -444,8 +360,6 @@ mod tests {
         .expect("hash")
         .to_string();
         assert!(check_basic(&cheap).expect_err("cheap").contains("cheaper"));
-        assert!(check_bearer("sha256:abcd").is_err());
-        assert!(check_bearer(TOKEN).is_err());
     }
 
     /// Password hashes run off the async workers and at most a few at once; past that a request
@@ -454,8 +368,7 @@ mod tests {
     #[tokio::test]
     async fn password_hashes_are_bounded_and_off_the_async_workers() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
-        let credentials =
-            Arc::new(Credentials::new(&[], &users, "Basic".into()).expect("credentials"));
+        let credentials = Arc::new(Credentials::new(&users, "Basic".into()).expect("credentials"));
         assert_eq!(
             credentials.check(&header(&basic("ops", "s3cret"))).await,
             Verdict::Permitted
@@ -498,7 +411,7 @@ mod tests {
         .expect("hash")
         .to_string();
         let users = BTreeMap::from([("ops".to_string(), costly)]);
-        let credentials = Credentials::new(&[], &users, "Basic".into()).expect("credentials");
+        let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
         let dummy = PasswordHash::new(&credentials.dummy).expect("phc");
         let params = Params::try_from(&dummy).expect("params");
         assert_eq!((params.m_cost(), params.t_cost()), (MIN_MEMORY_KIB * 2, 3));

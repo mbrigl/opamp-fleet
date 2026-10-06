@@ -21,7 +21,7 @@ than anywhere else, and none beats one that has stopped being true.
 ```text
  operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
                                                          │  Server (Linux)
- Client ──── OpAMP, mTLS + credential ──▶ Agent plane :4320 ─┘   │
+ Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │
    │  ▲                                                          ├─▶ config_dir: fleet state,
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients    │   register, audit record
    │                                                             └─▶ packages_dir: artifacts
@@ -35,8 +35,8 @@ than anywhere else, and none beats one that has stopped being true.
 - **Operators** drive the fleet through the REST API on the Operator plane, guarded by
   `[rest.auth]` beyond the loopback; the bundled UI uses the same API
   ([ADR-0026](adr/0026-admission-by-a-client-certificate-alone.md)).
-- **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — with a client
-  certificate in the TLS 1.3 handshake and the fleet credential on every request
+- **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
+  certificate in the TLS 1.3 handshake alone
   ([ADR-0023](adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
   ADR-0026). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
@@ -101,8 +101,8 @@ core module names an adapter or a technology, and when a module has no role.
   Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0023](adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
-- **Server admission** — `transport::Admission` requires the fleet credential and the client
-  certificate on every request to `/v1/opamp`, admits a bootstrap certificate only while the
+- **Server admission** — `transport::Admission` requires the client certificate on every request
+  to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Two core
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
@@ -110,6 +110,10 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0026](adr/0026-admission-by-a-client-certificate-alone.md)). `revocation`
   holds the register of issued certificates, the revocation list and the hosts, behind the
   `LedgerStore` port ([ADR-0031](adr/0031-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
+  `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
+  marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
+  message before the handler does anything else and for each download in the guard
+  ([ADR-0023](adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
   `config_dir/audit/` ([ADR-0030](adr/0030-an-append-only-audit-record-chained-by-hash.md)).
@@ -139,6 +143,9 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0024](adr/0024-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0034](adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+  The Gateway's `cache` sees every offer `registry` hands down, fetches each Server-hosted
+  artifact once into the state directory, and serves it on the downstream download route to the
+  hosts it was offered to ([ADR-0033](adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0034](adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
@@ -167,7 +174,11 @@ itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes in
 **A package reaches an Agent.** An operator uploads an artifact into `packages`, puts it into a
 Deployment with a Selector and the operator's signature, and releases it. The Agent is offered the
 package; the Client downloads it from the Server's origin — presenting its certificate there and
-nowhere else — or from an allowed mirror, checks hash and signature in `packages`, and the
+nowhere else, and `api` serves it only when `fleet` finds it offered to an Agent the
+certificate's host speaks for, by the test `packages` shares with the offer
+([ADR-0033](adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)); behind a Gateway the
+Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server — or from an
+allowed mirror, checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
 new one does not stay up. The Client's own package goes through `update` instead: a version
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on

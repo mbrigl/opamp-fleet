@@ -40,6 +40,12 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsOwnTraces as u64
     | AgentCapabilities::ReportsOwnLogs as u64;
 
+/// What a Supervisor's Agent declares when the operator switched its remote configuration off
+/// (ADR-0032 clause 30): the base set without either remote-configuration bit.
+pub const AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG: u64 = AGENT_CAPABILITIES
+    & !(AgentCapabilities::AcceptsRemoteConfig as u64
+        | AgentCapabilities::ReportsRemoteConfig as u64);
+
 /// What a handled `ServerToAgent` asks of the transport loop.
 #[derive(Debug, Default, PartialEq)]
 pub struct Handled {
@@ -91,6 +97,26 @@ pub struct AgentState {
     applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
+    /// The SHA-256 of each remote configuration hash ignored since start, when the operator
+    /// switched remote configuration off for this Agent (ADR-0032, ADR-0032); `None` when it takes
+    /// them. A digest and not the hash itself, and at most [`IGNORED_CONFIGS_CAP`] of them,
+    /// because the hash is whatever the Server sends.
+    ignored_configs: Option<std::collections::HashSet<[u8; 32]>>,
+}
+
+/// How many ignored remote configuration hashes a Supervisor with remote configuration switched
+/// off remembers before it starts over (ADR-0032 clause 31).
+const IGNORED_CONFIGS_CAP: usize = 1024;
+
+/// A Server-sent hash as a log field: hex, cut after its first 32 bytes, since its length is the
+/// Server's to choose.
+fn logged_hash(hash: &[u8]) -> String {
+    const SHOWN: usize = 32;
+    if hash.len() > SHOWN {
+        format!("{}…", hex::encode(&hash[..SHOWN]))
+    } else {
+        hex::encode(hash)
+    }
 }
 
 /// What this Client reports about one Agent, and the package bookkeeping behind its status — the
@@ -184,9 +210,37 @@ impl AgentState {
         storage: impl AgentStorage + 'static,
         host: impl HostFacts + 'static,
     ) -> std::io::Result<Self> {
+        Self::restore(instance_name, storage, host, true)
+    }
+
+    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (ADR-0032):
+    /// it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores no stored
+    /// set, and ignores a set that arrives anyway. Every other capability is the one
+    /// [`new`](Self::new) declares.
+    pub fn new_without_remote_config(
+        instance_name: String,
+        storage: impl AgentStorage + 'static,
+        host: impl HostFacts + 'static,
+    ) -> std::io::Result<Self> {
+        Self::restore(instance_name, storage, host, false)
+    }
+
+    /// [`new`](Self::new), with `remote_config` saying whether this Agent takes remote
+    /// configuration at all (ADR-0032): without it the Agent declares neither remote-configuration
+    /// capability, restores no stored configuration, and ignores every offer.
+    fn restore(
+        instance_name: String,
+        storage: impl AgentStorage + 'static,
+        host: impl HostFacts + 'static,
+        remote_config: bool,
+    ) -> std::io::Result<Self> {
         let uid = storage.load_or_create_uid()?;
-        let applied = storage.load_remote_config();
-        let mut protocol = AgentProtocol::new(uid, AGENT_CAPABILITIES);
+        let (capabilities, applied) = if remote_config {
+            (AGENT_CAPABILITIES, storage.load_remote_config())
+        } else {
+            (AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG, None)
+        };
+        let mut protocol = AgentProtocol::new(uid, capabilities);
         if let Some(config) = &applied {
             protocol.restore_remote_config_status(config_status(
                 config.config_hash.clone(),
@@ -228,6 +282,7 @@ impl AgentState {
             pending_apply: None,
             applying: None,
             pending_restart: false,
+            ignored_configs: (!remote_config).then(Default::default),
         })
     }
 
@@ -324,7 +379,30 @@ impl AgentState {
         storage: impl AgentStorage + 'static,
         host: impl HostFacts + 'static,
     ) -> std::io::Result<Self> {
-        let mut state = Self::new(instance_name, storage, host)?;
+        Self::supervised_with(instance_name, service_name, storage, host, true)
+    }
+
+    /// A Supervisor-backed Agent whose remote configuration the operator switched off
+    /// (ADR-0032): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
+    /// no stored configuration, and ignores an offer that arrives anyway. Built without the bits
+    /// rather than stripped of them afterwards, because a declared capability only ever grows.
+    pub fn supervised_without_remote_config(
+        instance_name: String,
+        service_name: String,
+        storage: impl AgentStorage + 'static,
+        host: impl HostFacts + 'static,
+    ) -> std::io::Result<Self> {
+        Self::supervised_with(instance_name, service_name, storage, host, false)
+    }
+
+    fn supervised_with(
+        instance_name: String,
+        service_name: String,
+        storage: impl AgentStorage + 'static,
+        host: impl HostFacts + 'static,
+        remote_config: bool,
+    ) -> std::io::Result<Self> {
+        let mut state = Self::restore(instance_name, storage, host, remote_config)?;
         state.local.service_name = service_name;
         state.local.managed = true;
         state.declare_capability(AgentCapabilities::AcceptsRestartCommand);
@@ -525,8 +603,38 @@ impl AgentState {
         }
 
         if let Some(remote_config) = received.remote_config {
-            self.apply(remote_config);
-            handled.send_report = true;
+            if let Some(ignored) = &mut self.ignored_configs {
+                // Not declared, so not acted on and not reported (ADR-0032 clause 31, ADR-0032
+                // clause 3); said once per hash, so a Server resending its offer on every exchange
+                // does not flood the log.
+                use sha2::Digest as _;
+                let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
+                if ignored.len() >= IGNORED_CONFIGS_CAP && !ignored.contains(&seen) {
+                    // A Server that sends ever new hashes is answered with an occasional repeat
+                    // warning, not with memory that grows without end.
+                    ignored.clear();
+                }
+                if ignored.insert(seen) {
+                    if self.local.managed {
+                        warn!(
+                            supervisor = %self.local.instance_name,
+                            hash = %logged_hash(&remote_config.config_hash),
+                            "ignoring a remote configuration: remote configuration is switched \
+                             off for this supervisor in [supervisors] remote_config_disabled"
+                        );
+                    } else {
+                        // The Client's own Agent, offered a Supervisor set (ADR-0032 clause 23).
+                        warn!(
+                            hash = %logged_hash(&remote_config.config_hash),
+                            "ignoring a supervisor set: this Client keeps its supervisor set \
+                             ([supervisors] server_manages_set = false in supervisor.toml)"
+                        );
+                    }
+                }
+            } else {
+                self.apply(remote_config);
+                handled.send_report = true;
+            }
         }
 
         // A connection-settings offer (ADR-0027): acknowledge APPLYING and hand it to the
@@ -1250,7 +1358,7 @@ pub struct PackageDownload {
 /// Written by hand rather than derived, because a header value is a credential.
 ///
 /// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
-/// later would otherwise put a fleet credential in the log file that ADR-0028 writes to disk in
+/// later would otherwise put a download credential in the log file that ADR-0028 writes to disk in
 /// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
 impl std::fmt::Debug for PackageDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2967,5 +3075,289 @@ mod tests {
         });
         agent.force_full();
         assert!(agent.next_report().effective_config.is_none());
+    }
+
+    fn listed_supervisor(dir: &std::path::Path) -> AgentState {
+        let storage = Storage::new(dir.to_path_buf()).expect("storage");
+        AgentState::supervised_without_remote_config(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+    }
+
+    /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
+    /// every other capability a Supervisor declares (ADR-0032 clause 30).
+    /// Verifies: ADR-0032
+    #[test]
+    fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = listed_supervisor(dir.path());
+        agent.accept_packages();
+        let declared = agent.next_report().capabilities;
+        for absent in [
+            AgentCapabilities::AcceptsRemoteConfig,
+            AgentCapabilities::ReportsRemoteConfig,
+        ] {
+            assert_eq!(declared & absent as u64, 0, "{absent:?} is declared");
+        }
+        for present in [
+            AgentCapabilities::ReportsEffectiveConfig,
+            AgentCapabilities::AcceptsRestartCommand,
+            AgentCapabilities::AcceptsPackages,
+            AgentCapabilities::ReportsPackageStatuses,
+        ] {
+            assert_ne!(declared & present as u64, 0, "{present:?} is missing");
+        }
+    }
+
+    /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
+    /// the process adapter, and no status reported (ADR-0032 clause 31).
+    /// Verifies: ADR-0032
+    #[test]
+    fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = listed_supervisor(dir.path());
+        agent.next_report();
+        let handled = agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(b"receivers: {}\n", b"hash-1")),
+            ..Default::default()
+        });
+        assert!(
+            !handled.send_report,
+            "nothing changed that the Server must hear"
+        );
+        assert!(agent.take_pending_apply().is_none());
+        assert!(!dir.path().join("remote-config.pb").exists());
+        assert!(
+            !dir.path().join("config").exists()
+                || std::fs::read_dir(dir.path().join("config"))
+                    .expect("read config/")
+                    .next()
+                    .is_none(),
+            "an entry file was written"
+        );
+        assert!(agent.next_report().remote_config_status.is_none());
+        agent.force_full();
+        assert!(agent.next_report().remote_config_status.is_none());
+    }
+
+    /// The warning about an ignored offer is said once per hash seen since start (ADR-0032 clause
+    /// 4), so a Server resending the same offer does not flood the log.
+    /// Verifies: ADR-0032
+    #[test]
+    fn an_ignored_remote_config_is_logged_once_per_hash() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = listed_supervisor(dir.path());
+        tracing::subscriber::with_default(subscriber, || {
+            for hash in [b"aaaa", b"aaaa", b"bbbb", b"aaaa", b"bbbb"] {
+                agent.handle(&ServerToAgent {
+                    remote_config: Some(remote_config(b"x: 1\n", hash)),
+                    ..Default::default()
+                });
+            }
+        });
+        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
+        let ignored: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("ignoring a remote configuration"))
+            .collect();
+        assert_eq!(ignored.len(), 2, "{log}");
+        assert!(ignored[0].contains(&hex::encode(b"aaaa")), "{log}");
+        assert!(ignored[1].contains(&hex::encode(b"bbbb")), "{log}");
+        assert!(ignored.iter().all(|line| line.contains("otelcol")), "{log}");
+    }
+
+    /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
+    /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
+    /// hash cut short in the log (ADR-0032 clause 31).
+    /// Verifies: ADR-0032
+    #[test]
+    fn what_ignored_remote_configs_leave_behind_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = listed_supervisor(dir.path());
+        for n in 0..=super::IGNORED_CONFIGS_CAP * 2 {
+            let hash = vec![b'h'; 4096]
+                .into_iter()
+                .chain(n.to_be_bytes())
+                .collect::<Vec<u8>>();
+            agent.handle(&ServerToAgent {
+                remote_config: Some(remote_config(b"x: 1\n", &hash)),
+                ..Default::default()
+            });
+            let remembered = agent.ignored_configs.as_ref().expect("listed").len();
+            assert!(
+                remembered <= super::IGNORED_CONFIGS_CAP,
+                "{remembered} after {n}"
+            );
+        }
+        let logged = super::logged_hash(&[0xab; 4096]);
+        assert_eq!(logged, format!("{}…", "ab".repeat(32)));
+        assert_eq!(super::logged_hash(b"aaaa"), hex::encode(b"aaaa"));
+    }
+
+    fn own_agent_of_a_host_that_keeps_its_set(dir: &std::path::Path) -> AgentState {
+        let storage = Storage::new(dir.to_path_buf()).expect("storage");
+        AgentState::new_without_remote_config(
+            "edge-1".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+    }
+
+    /// The Client's own Agent on a host that keeps its set is built without either
+    /// remote-configuration bit and keeps everything else it declares, self-update included
+    /// (ADR-0032 clause 22).
+    /// Verifies: ADR-0032
+    #[test]
+    fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = own_agent_of_a_host_that_keeps_its_set(dir.path());
+        agent.accept_packages_named(CLIENT_AGENT_TYPE.to_string());
+        let declared = agent.next_report().capabilities;
+        assert_eq!(
+            declared,
+            (AGENT_CAPABILITIES
+                | AgentCapabilities::AcceptsPackages as u64
+                | AgentCapabilities::ReportsPackageStatuses as u64)
+                & !(AgentCapabilities::AcceptsRemoteConfig as u64
+                    | AgentCapabilities::ReportsRemoteConfig as u64),
+            "only the two remote-configuration bits are withdrawn"
+        );
+        assert_ne!(
+            declared & AgentCapabilities::ReportsEffectiveConfig as u64,
+            0
+        );
+        assert_eq!(
+            declared & AgentCapabilities::AcceptsRestartCommand as u64,
+            0,
+            "the Client's own Agent has no process to restart"
+        );
+    }
+
+    /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
+    /// answered (ADR-0032 clause 23).
+    /// Verifies: ADR-0032
+    #[test]
+    fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = own_agent_of_a_host_that_keeps_its_set(dir.path());
+        agent.next_report();
+        let handled = agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(
+                b"[[supervisor]]\ntype = \"command\"\nname = \"x\"\ncommand = \"x\"\n",
+                b"set-1",
+            )),
+            ..Default::default()
+        });
+        assert!(
+            !handled.send_report,
+            "nothing changed that the Server must hear"
+        );
+        assert!(
+            agent.take_pending_apply().is_none(),
+            "the set would be applied"
+        );
+        assert!(!dir.path().join("remote-config.pb").exists());
+        assert!(
+            !dir.path().join("config").exists(),
+            "an entry copy was written"
+        );
+        assert!(agent.next_report().remote_config_status.is_none());
+        agent.force_full();
+        assert!(agent.next_report().remote_config_status.is_none());
+    }
+
+    /// The warning about an ignored set is said once per hash and names the key that keeps the
+    /// set on the host (ADR-0032 clause 23).
+    /// Verifies: ADR-0032
+    #[test]
+    fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = own_agent_of_a_host_that_keeps_its_set(dir.path());
+        tracing::subscriber::with_default(subscriber, || {
+            for hash in [b"aaaa", b"aaaa", b"bbbb", b"bbbb", b"aaaa"] {
+                agent.handle(&ServerToAgent {
+                    remote_config: Some(remote_config(b"[[supervisor]]\n", hash)),
+                    ..Default::default()
+                });
+            }
+        });
+        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
+        let ignored: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("ignoring a supervisor set"))
+            .collect();
+        assert_eq!(ignored.len(), 2, "{log}");
+        assert!(ignored[0].contains(&hex::encode(b"aaaa")), "{log}");
+        assert!(ignored[1].contains(&hex::encode(b"bbbb")), "{log}");
+        assert!(
+            ignored
+                .iter()
+                .all(|line| line.contains("server_manages_set = false")),
+            "{log}"
+        );
+
+        // Bounded however many distinct hashes arrive: full, the next new one starts over.
+        let mut agent = own_agent_of_a_host_that_keeps_its_set(dir.path());
+        let offer = |agent: &mut AgentState, n: usize| {
+            agent.handle(&ServerToAgent {
+                remote_config: Some(remote_config(b"[[supervisor]]\n", &n.to_be_bytes())),
+                ..Default::default()
+            });
+            agent.ignored_configs.as_ref().expect("kept").len()
+        };
+        for n in 0..super::IGNORED_CONFIGS_CAP {
+            assert_eq!(offer(&mut agent, n), n + 1);
+        }
+        assert_eq!(
+            offer(&mut agent, 0),
+            super::IGNORED_CONFIGS_CAP,
+            "a seen hash adds nothing"
+        );
+        assert_eq!(
+            offer(&mut agent, super::IGNORED_CONFIGS_CAP),
+            1,
+            "the hash past the bound starts over"
+        );
     }
 }

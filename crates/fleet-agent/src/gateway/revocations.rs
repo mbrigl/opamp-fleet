@@ -1,10 +1,10 @@
-//! The one refusal a Gateway makes beyond its handshake: a downstream certificate its Server has
+//! The one admission refusal a Gateway makes beyond its handshake: a downstream certificate its Server has
 //! revoked (ADR-0034 clause 14).
 //!
 //! The Server never sees a downstream certificate — the Gateway terminates that handshake and
 //! presents its own upstream — so the Server hands its Gateways the revoked certificates of the
 //! fleet's client CA instead, chains already resolved (ADR-0031 clause 12). The Gateway fetches the
-//! list over its own upstream origin, with its own certificate and credential, keeps it in memory,
+//! list over its own upstream origin, with its own certificate, keeps it in memory,
 //! and refuses what it names. While it holds no list young enough to trust, it admits nobody: a
 //! Gateway whose Server is away forwards nothing anyway, and a list kept for ever would admit a
 //! certificate revoked in the meantime.
@@ -190,10 +190,8 @@ async fn fetch(list: &RevocationList, config: &ClientConfig) -> Result<Option<us
         .apply(builder)?
         .build()
         .map_err(|e| format!("cannot build the client: {e}"))?;
+    // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0026 clause 3).
     let mut request = client.get(&url);
-    if let Some(authorization) = config.authorization_value()? {
-        request = request.header(reqwest::header::AUTHORIZATION, authorization);
-    }
     if let Some(etag) = list.etag() {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -236,6 +234,55 @@ mod tests {
             .expect("cert")
             .der()
             .to_vec()
+    }
+
+    /// The Gateway fetches the list with its own identity and no `Authorization`, even when
+    /// `supervisor.toml` still holds an `[auth]` section from an earlier version.
+    /// Verifies: ADR-0034, ADR-0026
+    #[tokio::test]
+    async fn the_revocation_list_is_fetched_without_authorization() {
+        opamp::tls::install_ring_provider();
+        let seen: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+        let recorder = seen.clone();
+        let app = axum::Router::new().route(
+            PATH,
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let seen = recorder.clone();
+                async move {
+                    seen.lock().expect("seen lock").push(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned()),
+                    );
+                    axum::Json(serde_json::json!({ "certificates": [] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::config_init::FILE_NAME);
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"ws://{server}/v1/opamp\"\n\
+                 [auth]\nbearer_token = \"s3cret\"\nusername = \"fleet\"\npassword = \"s3cret\"\n"
+            ),
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("a leftover [auth] still loads");
+
+        let list = RevocationList::new(REVOCATION_MAX_AGE);
+        assert_eq!(fetch(&list, &config).await, Ok(Some(0)));
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![None],
+            "the list was fetched once, without an Authorization"
+        );
     }
 
     /// A Gateway with no list yet, or one past its age, admits nobody; with a fresh list it admits

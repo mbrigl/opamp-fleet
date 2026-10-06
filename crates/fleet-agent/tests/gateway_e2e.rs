@@ -246,7 +246,7 @@ async fn two_agents_reach_the_server_over_one_folded_connection() {
 }
 
 /// The pool grows lazily to its cap and no further: one Agent means one upstream connection, even
-/// with a cap of ten (ADR-0034 rule 8).
+/// with a cap of ten (ADR-0034 clause 8).
 /// Verifies: ADR-0034, G-15
 #[tokio::test]
 async fn one_agent_opens_one_upstream_connection() {

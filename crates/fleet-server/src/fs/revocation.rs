@@ -41,6 +41,34 @@ impl FsLedgerStore {
     }
 }
 
+impl FsLedgerStore {
+    /// The list as persisted, without the credential entries a list may still hold: the Agent
+    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0031
+    /// clause 5). They are dropped with one log line, and the list is written back without them.
+    fn certificate_revocations(&self, bytes: &[u8]) -> Result<Vec<Revocation>, String> {
+        let parse =
+            |e: serde_json::Error| format!("cannot parse {}: {e}", self.revocations.display());
+        let mut entries: Vec<serde_json::Value> = serde_json::from_slice(bytes).map_err(parse)?;
+        let before = entries.len();
+        entries.retain(|entry| entry.pointer("/revoked/credential").is_none());
+        let dropped = before - entries.len();
+        let revocations = entries
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Revocation>, _>>()
+            .map_err(parse)?;
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                file = %self.revocations.display(),
+                "dropped credential revocations: the Agent plane admits by client certificate alone"
+            );
+            self.save_revocations(&revocations)?;
+        }
+        Ok(revocations)
+    }
+}
+
 impl LedgerStore for FsLedgerStore {
     fn load(&self) -> Result<Ledger, String> {
         let mut issued = Vec::new();
@@ -61,8 +89,7 @@ impl LedgerStore for FsLedgerStore {
             );
         }
         let revocations = match std::fs::read(&self.revocations) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| format!("cannot parse {}: {e}", self.revocations.display()))?,
+            Ok(bytes) => self.certificate_revocations(&bytes)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("cannot read {}: {e}", self.revocations.display())),
         };
@@ -130,7 +157,11 @@ mod tests {
         store.put_issued(&issued).expect("put");
         let revocation = Revocation {
             id: "x".into(),
-            revoked: Revoked::Credential { sha256: "s".into() },
+            revoked: Revoked::Certificate {
+                authority: "client".into(),
+                issuers: vec![issued.facts.id.issuer.clone()],
+                serial: "0a".into(),
+            },
             revoked_ms: 2,
         };
         store
@@ -142,5 +173,74 @@ mod tests {
         assert_eq!(ledger.revocations, vec![revocation]);
         reopened.remove_issued(&issued.facts.id).expect("remove");
         assert!(reopened.load().expect("load").issued.is_empty());
+    }
+
+    /// A writer the log goes to, for a test to read back.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Verifies: ADR-0031
+    #[test]
+    fn a_persisted_credential_entry_is_dropped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsLedgerStore::open(dir.path().join("revocation")).expect("open");
+        let path = dir.path().join("revocation").join("revocations.json");
+        std::fs::write(
+            &path,
+            r#"[
+              {"id": "c1", "revoked": {"credential": {"sha256": "5eed"}}, "revoked_ms": 1},
+              {"id": "a2", "revoked": {"certificate":
+                {"authority": "client", "issuers": ["ab"], "serial": "a2"}}, "revoked_ms": 2},
+              {"id": "c3", "revoked": {"credential": {"sha256": "beef"}}, "revoked_ms": 3}
+            ]"#,
+        )
+        .expect("seed");
+
+        let log = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_ansi(false)
+            .finish();
+        let ledger = tracing::subscriber::with_default(subscriber, || store.load()).expect("load");
+
+        let certificate = Revocation {
+            id: "a2".into(),
+            revoked: Revoked::Certificate {
+                authority: "client".into(),
+                issuers: vec!["ab".into()],
+                serial: "a2".into(),
+            },
+            revoked_ms: 2,
+        };
+        assert_eq!(ledger.revocations, vec![certificate.clone()]);
+        let written = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !written.contains("credential"),
+            "written back without it: {written}"
+        );
+        assert_eq!(
+            store.load().expect("load again").revocations,
+            vec![certificate]
+        );
+        let log = String::from_utf8(log.0.lock().expect("log lock").clone()).expect("utf-8");
+        assert_eq!(
+            log.lines().filter(|line| line.contains("dropped")).count(),
+            1,
+            "one log line: {log}"
+        );
+        assert!(log.contains("dropped=2"), "names the number dropped: {log}");
     }
 }

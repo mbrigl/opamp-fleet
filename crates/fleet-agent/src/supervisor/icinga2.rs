@@ -56,8 +56,9 @@ struct Icinga2Settings {
     /// signing request waits for `icinga2 ca sign` on the parent.
     ticket_file: Option<String>,
     /// The parent's certificate — **its own**, not the CA that signed it: `pki request` compares
-    /// what the parent presents against this file. Pinned rather than trusted on sight; absent
-    /// falls back to `pki save-cert`, which is trust on first use and is logged as such.
+    /// what the parent presents against this file. Pinned rather than trusted on sight. Not named
+    /// at all falls back to `pki save-cert`, which is trust on first use and is logged as such; a
+    /// file named here that is not there is an error the enrolment retries, never that fallback.
     trusted_cert_file: Option<String>,
 }
 
@@ -481,6 +482,18 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
         }
     }
 
+    // The parent is pinned before it is talked to, and before a key is made for it. A named file
+    // that is missing — not yet arrived, or a path mistyped — is an error the enrolment retries:
+    // ADR-0016 clause 12 trusts on first use only when none was delivered. That holds for a renewal
+    // too: the pin kept from an earlier run may itself have come from trust on first use.
+    if let Some(delivered) = layout.trusted_cert_file.as_ref().filter(|f| !f.is_file()) {
+        return Err(format!(
+            "the parent certificate named in trusted_cert_file is not a file at {}: enrolment \
+             waits for it rather than trusting the parent on first use",
+            delivered.display()
+        ));
+    }
+
     tracing::info!(node = %layout.node_name, parent = %host, renewing, "requesting an Icinga certificate");
     if !renewing {
         // A renewal must not do this: it would overwrite the very key and certificate that
@@ -501,13 +514,15 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
         .await?;
     }
 
-    // The parent is pinned from what the fleet delivered; `save-cert` is the fallback, and it is
-    // trust on first use — logged, so an operator can see that it happened and against what.
-    match layout.trusted_cert_file.as_ref().filter(|f| f.is_file()) {
+    // The parent is pinned from what the fleet delivered. Only when no certificate was named at all
+    // is `save-cert` the fallback, and it is trust on first use — logged, so an operator can see
+    // that it happened and against what.
+    match layout.trusted_cert_file.as_ref() {
         Some(delivered) => {
             std::fs::copy(delivered, &layout.pinned_parent).map_err(|e| {
                 format!(
-                    "cannot keep the parent certificate at {}: {e}",
+                    "cannot copy the parent certificate {} to {}: {e}",
+                    delivered.display(),
                     layout.pinned_parent.display()
                 )
             })?;
@@ -1499,6 +1514,47 @@ mod tests {
         );
     }
 
+    /// A `trusted_cert_file` that is named but not there — not yet delivered, or mistyped — never
+    /// falls back to trust on first use: enrolment fails, nothing is saved from the parent, and it
+    /// pins the file once it arrives.
+    /// Verifies: ADR-0016
+    #[tokio::test]
+    async fn a_named_parent_certificate_that_is_missing_is_waited_for_not_trusted_on_sight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut layout = enrolling(dir.path());
+        let named = dir.path().join("config/parent.crt");
+        layout.trusted_cert_file = Some(named.clone());
+
+        let err = ensure_enrolled(&layout)
+            .await
+            .expect_err("a missing pin is not trusted on sight");
+        assert!(err.contains("trusted_cert_file"), "{err}");
+        assert!(
+            err.contains(&named.display().to_string()),
+            "names the path: {err}"
+        );
+        assert!(
+            !layout.certificate().is_file(),
+            "no key or certificate is made for a parent that cannot be pinned yet"
+        );
+        assert!(
+            !layout.pinned_parent.is_file(),
+            "nothing the parent presented was saved as trusted"
+        );
+        assert!(!layout.marker.is_file(), "nothing is recorded as enrolled");
+
+        std::fs::write(&named, "the-parents-own-cert").expect("deliver it");
+        assert!(
+            ensure_enrolled(&layout).await.expect("enrol"),
+            "enrols once it is there"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&layout.pinned_parent).expect("pinned"),
+            "the-parents-own-cert",
+            "the delivered certificate is what is pinned"
+        );
+    }
+
     /// A parent that cannot be reached is a wait: the error names the reason, and nothing is
     /// recorded as enrolled.
     #[tokio::test]
@@ -1582,6 +1638,37 @@ mod tests {
         // And once renewed, nothing runs again.
         assert!(!ensure_enrolled(&layout).await.expect("settled"));
         assert_eq!(requests(), "2");
+    }
+
+    /// A renewal whose named parent certificate is gone waits for it too: the pin kept from the
+    /// first enrolment is not reused and the parent is not trusted on sight, while the held
+    /// certificate is kept untouched.
+    /// Verifies: ADR-0016
+    #[tokio::test]
+    async fn a_renewal_whose_named_parent_certificate_is_gone_waits_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut layout = enrolling(dir.path());
+        let named = dir.path().join("config/parent.crt");
+        std::fs::write(&named, "the-parents-own-cert").expect("deliver it");
+        layout.trusted_cert_file = Some(named.clone());
+        ensure_enrolled(&layout).await.expect("enrol");
+
+        std::fs::write(layout.certificate(), "expiring").expect("write");
+        std::fs::remove_file(&named).expect("no longer delivered");
+        let err = ensure_enrolled(&layout)
+            .await
+            .expect_err("a renewal without its pin waits");
+        assert!(err.contains(&named.display().to_string()), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(layout.certificate()).expect("cert"),
+            "expiring",
+            "the held certificate is kept while the renewal waits"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&layout.pinned_parent).expect("pinned"),
+            "the-parents-own-cert",
+            "nothing the parent presented replaced the pin"
+        );
     }
 
     /// The measured case behind ADR-0016's validation gate: Icinga aborts a reload it cannot

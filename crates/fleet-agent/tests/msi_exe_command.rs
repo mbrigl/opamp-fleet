@@ -338,3 +338,41 @@ fn stop_and_unregister_survive_the_crt() {
         })
     ));
 }
+
+/// The endpoint dialog asks for no client identity and names where it goes instead: the client
+/// certificate and its key, as `cert_file` and `key_file`, in the configuration under
+/// `%ProgramData%` — not in the installation folder, which holds only the payload. It mentions no
+/// credential, since the Client reads none.
+/// Verifies: ADR-0029
+#[test]
+fn the_endpoint_dialog_names_the_identity_and_no_credential() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/windows/EndpointDlg.wxs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let texts: Vec<String> = source
+        .split("<Control")
+        .skip(1)
+        .filter_map(|block| attribute(&block[..block.find('>')?], "Text"))
+        .collect();
+    let shown = texts.join("\n");
+    for named in [
+        "client certificate",
+        "cert_file",
+        "key_file",
+        "%ProgramData%",
+    ] {
+        assert!(
+            shown.contains(named),
+            "the dialog does not name {named}: {shown}"
+        );
+    }
+    assert!(
+        !shown.contains("installation folder"),
+        "the configuration is not in the installation folder: {shown}"
+    );
+    let lower = source.to_lowercase();
+    for absent in ["credential", "[auth]", "bearer", "password"] {
+        assert!(!lower.contains(absent), "EndpointDlg.wxs mentions {absent}");
+    }
+}

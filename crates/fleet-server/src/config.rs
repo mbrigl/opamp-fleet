@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
 use opamp::proto::{Header, Headers, OpAmpConnectionSettings, TelemetryConnectionSettings};
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::fleet::{ConnectionOffer, TelemetryOffer};
@@ -40,9 +40,9 @@ pub struct ServerConfig {
     /// TLS for both listeners, with one certificate and key (ADR-0023). Required: a Server without
     /// it is refused at startup. It is an `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
-    /// The fleet credential every request to the OpAMP endpoint must carry (ADR-0026). Required: a
-    /// Server without it is refused at startup. An `Option` only so its absence can be named.
-    pub auth: Option<AuthConfig>,
+    /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
+    /// of its own (ADR-0026 clause 1). Read only so that a leftover section can be named.
+    pub auth: Option<IgnoredAny>,
     /// Optional connection settings offered to the fleet (ADR-0027); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
     /// Optional certificate authority for signing Agent CSRs (ADR-0026); absent means the Server
@@ -84,8 +84,9 @@ pub struct ServerConfig {
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
     /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0026)
     /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
-    /// anonymous flood is `[auth]` (ADR-0026) — this is the backstop while it is off. `0` is refused
-    /// at load: a fleet that can hold no Agent is a misconfiguration, not a limit.
+    /// anonymous flood is admission by client certificate (ADR-0026) — this is the backstop behind
+    /// it. `0` is refused at load: a fleet that can hold no Agent is a misconfiguration, not a
+    /// limit.
     #[serde(default = "default_max_agents")]
     pub max_agents: usize,
     /// The connections the Agent plane holds at once (ADR-0023). Past it a connection is closed on
@@ -102,7 +103,74 @@ pub struct ServerConfig {
     /// How large the audit record grows and how much of it is kept (ADR-0030).
     #[serde(default)]
     pub audit: AuditConfig,
+    /// How often an admitted peer may be heard on the Agent plane (ADR-0023).
+    #[serde(default)]
+    pub agent_rate_limit: AgentRateLimitConfig,
 }
+
+/// The `[agent_rate_limit]` section (ADR-0023 clause 19). Every key has a default, and none is `0`:
+/// no value switches the limit off.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AgentRateLimitConfig {
+    /// Tokens a host's or an Agent's bucket gains per second.
+    pub messages_per_sec: u32,
+    /// That bucket's capacity; a new bucket starts full.
+    pub burst: u32,
+    /// Tokens the aggregate bucket of a host marked as a Gateway gains per second.
+    pub gateway_messages_per_sec: u32,
+    /// The aggregate bucket's capacity.
+    pub gateway_burst: u32,
+}
+
+impl Default for AgentRateLimitConfig {
+    fn default() -> Self {
+        let limits = crate::agent_rate::Limits::default();
+        AgentRateLimitConfig {
+            messages_per_sec: limits.messages_per_sec,
+            burst: limits.burst,
+            gateway_messages_per_sec: limits.gateway_messages_per_sec,
+            gateway_burst: limits.gateway_burst,
+        }
+    }
+}
+
+impl AgentRateLimitConfig {
+    /// The limits the buckets count by.
+    #[must_use]
+    pub fn limits(&self) -> crate::agent_rate::Limits {
+        crate::agent_rate::Limits {
+            messages_per_sec: self.messages_per_sec,
+            burst: self.burst,
+            gateway_messages_per_sec: self.gateway_messages_per_sec,
+            gateway_burst: self.gateway_burst,
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("messages_per_sec", self.messages_per_sec),
+            ("burst", self.burst),
+            ("gateway_messages_per_sec", self.gateway_messages_per_sec),
+            ("gateway_burst", self.gateway_burst),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "[agent_rate_limit] {key} must be greater than zero — the limit is never \
+                     switched off; raise it instead"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The Agents a host may speak for at most (ADR-0026 clause 7), which the limit has to carry at
+/// the fleet's heartbeat (ADR-0023 clause 20).
+const AGENTS_PER_HOST: u64 = 256;
+
+/// The heartbeat the Baseline uses when none is offered.
+const BASELINE_HEARTBEAT_SECS: u64 = 30;
 
 /// The `[audit]` section (ADR-0030 clause 4).
 #[derive(Debug, Deserialize)]
@@ -139,8 +207,7 @@ impl AuditConfig {
 #[serde(deny_unknown_fields)]
 pub struct EnrolmentConfig {
     /// PEM certificate of the CA that issues bootstrap certificates. A certificate from it can
-    /// only enrol: it needs the credential beside it, an open enrolment window and an operator's
-    /// approval.
+    /// only enrol: it needs an open enrolment window and an operator's approval.
     pub bootstrap_ca_file: PathBuf,
 }
 
@@ -229,7 +296,7 @@ impl RestAuthConfig {
     /// # Errors
     /// Returns an error naming an entry that is not a hash this Server keeps.
     pub fn credentials(&self) -> Result<crate::credentials::Credentials, String> {
-        crate::credentials::Credentials::new(&[], &self.basic_users, self.challenge())
+        crate::credentials::Credentials::new(&self.basic_users, self.challenge())
             .map_err(|e| format!("[rest.auth.basic_users] {e}"))
     }
 
@@ -259,234 +326,56 @@ impl RestAuthConfig {
     }
 }
 
-/// The `[connection_offer]` section (ADR-0027): what every Agent declaring
-/// `AcceptsOpAMPConnectionSettings` is offered — a canonical credential (`bearer_token_file`, or
-/// `username` and `password_file`, exactly one scheme), a heartbeat interval, an endpoint. Any
-/// subset, but never none of them. The credential is read from its file, never from this one.
-#[derive(Deserialize)]
+/// The `[connection_offer]` section (ADR-0027 clause 1): what every Agent declaring
+/// `AcceptsOpAMPConnectionSettings` is offered — a heartbeat interval, an endpoint. Either or both,
+/// but never neither. It carries no credential: the Agent plane admits by client certificate alone
+/// (ADR-0026), so an offered credential would be one nothing reads.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionOfferConfig {
-    /// A file holding the offered Bearer token, readable by its owner alone.
-    pub bearer_token_file: Option<PathBuf>,
-    pub username: Option<String>,
-    /// A file holding the offered Basic password, readable by its owner alone.
-    pub password_file: Option<PathBuf>,
-    /// Refused: the credential is never kept inline (ADR-0027 clause 1).
-    pub bearer_token: Option<String>,
-    /// Refused, as `bearer_token`.
-    pub password: Option<String>,
-    /// The offered `Authorization` value, read once: what is checked against `[auth]` is what is
-    /// offered.
-    #[serde(skip)]
-    resolved: std::sync::OnceLock<Result<Option<String>, String>>,
     /// Offered heartbeat interval — on plain HTTP the polling interval (the Baseline's MUST).
     pub heartbeat_interval_secs: Option<u64>,
     /// Offered OpAMP endpoint, e.g. for a Server move; `ws(s)://` or `http(s)://`.
     pub endpoint: Option<String>,
-}
-
-impl std::fmt::Debug for ConnectionOfferConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionOfferConfig")
-            .field("bearer_token_file", &self.bearer_token_file)
-            .field("username", &self.username)
-            .field("password_file", &self.password_file)
-            .field("bearer_token", &redacted(&self.bearer_token))
-            .field("password", &redacted(&self.password))
-            .field("heartbeat_interval_secs", &self.heartbeat_interval_secs)
-            .field("endpoint", &self.endpoint)
-            .finish()
-    }
-}
-
-/// A credential kept in a file of its own (ADR-0027 clause 1): present, not empty, and readable by
-/// its owner alone on Unix. Trailing whitespace — the newline an editor adds — is dropped.
-fn secret_file(key: &str, path: &Path) -> Result<String, String> {
-    use std::io::Read as _;
-    let named = |e: std::io::Error| format!("[connection_offer] {key} {}: {e}", path.display());
-    // Opened once, and checked and read through that one handle, so the file read is the file
-    // checked — not one swapped in between.
-    let mut file = std::fs::File::open(path).map_err(named)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let meta = file.metadata().map_err(named)?;
-        if meta.mode() & 0o077 != 0 {
-            return Err(format!(
-                "[connection_offer] {key} {} is readable by others (mode {:o}) — make it 0600",
-                path.display(),
-                meta.mode() & 0o777
-            ));
-        }
-        // SAFETY: geteuid has no preconditions and touches no memory.
-        let me = unsafe { libc::geteuid() };
-        if meta.uid() != me {
-            return Err(format!(
-                "[connection_offer] {key} {} belongs to another account (uid {}) — it must be \
-                 this Server's own",
-                path.display(),
-                meta.uid()
-            ));
-        }
-    }
-    let mut text = String::new();
-    file.read_to_string(&mut text).map_err(named)?;
-    let secret = text.trim_end().to_string();
-    if secret.is_empty() {
-        return Err(format!(
-            "[connection_offer] {key} {} is empty",
-            path.display()
-        ));
-    }
-    Ok(secret)
-}
-
-/// Names what is configured, never the secret itself.
-fn redacted<T>(value: &Option<T>) -> &'static str {
-    if value.is_some() {
-        "<redacted>"
-    } else {
-        "None"
-    }
+    /// Refused at startup, each naming itself: the keys of an offered credential. Read only so that
+    /// a leftover one is named rather than reported as an unknown field.
+    bearer_token_file: Option<IgnoredAny>,
+    username: Option<IgnoredAny>,
+    password_file: Option<IgnoredAny>,
+    bearer_token: Option<IgnoredAny>,
+    password: Option<IgnoredAny>,
 }
 
 impl ConnectionOfferConfig {
-    /// The offered `Authorization` header value, read from its file; `None` for a
-    /// credential-less offer.
-    ///
-    /// # Errors
-    /// Refuses an inline credential, a scheme half given or both given, and a file that is
-    /// missing, empty or readable by anyone but its owner.
-    pub fn authorization(&self) -> Result<Option<String>, String> {
-        self.resolved
-            .get_or_init(|| self.read_authorization())
-            .clone()
-    }
-
-    fn read_authorization(&self) -> Result<Option<String>, String> {
-        for (key, inline) in [
+    /// Loud validation (ADR-0025): no credential key, at least one offered field, and an endpoint
+    /// that keeps the fleet on TLS off the loopback.
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("bearer_token_file", &self.bearer_token_file),
+            ("username", &self.username),
+            ("password_file", &self.password_file),
             ("bearer_token", &self.bearer_token),
             ("password", &self.password),
         ] {
-            if inline.is_some() {
+            if value.is_some() {
                 return Err(format!(
-                    "[connection_offer] {key} is never kept in server.toml — write it to a file \
-                     only this Server's account can read and name it with {key}_file"
+                    "[connection_offer] {key} is refused — the Agent plane admits by client \
+                     certificate alone, so no credential is offered; remove the key"
                 ));
             }
         }
-        match (&self.bearer_token_file, &self.username, &self.password_file) {
-            (None, None, None) => Ok(None),
-            (Some(file), None, None) => Ok(Some(format!(
-                "Bearer {}",
-                secret_file("bearer_token_file", file)?
-            ))),
-            (None, Some(user), Some(file)) => {
-                let password = secret_file("password_file", file)?;
-                let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-                Ok(Some(format!("Basic {encoded}")))
-            }
-            (Some(_), _, _) => Err(
-                "[connection_offer] must set either bearer_token_file or username/password_file, \
-                 not both"
-                    .to_string(),
-            ),
-            _ => Err("[connection_offer] needs username and password_file together".to_string()),
-        }
-    }
-
-    /// Loud validation (ADR-0025): a well-formed credential, at least one offered field, a sane
-    /// endpoint — and, unless the offer points at another Server, a credential this Server's own
-    /// `[auth]` accepts, so a rotation cannot lock the fleet out.
-    fn check(&self, auth: Option<&AuthConfig>) -> Result<(), String> {
-        let authorization = self.authorization()?;
-        if authorization.is_none()
-            && self.heartbeat_interval_secs.is_none()
-            && self.endpoint.is_none()
-        {
+        if self.heartbeat_interval_secs.is_none() && self.endpoint.is_none() {
             return Err(
-                "a [connection_offer] section needs a credential, heartbeat_interval_secs, or endpoint"
+                "a [connection_offer] section needs heartbeat_interval_secs or endpoint"
                     .to_string(),
             );
         }
-        // The Server never offers a fleet a plaintext path off the host (ADR-0027).
+        // The Server never offers a fleet a plaintext path off the host (ADR-0027 clause 1).
         if let Some(endpoint) = &self.endpoint {
             opamp::endpoint::check_url(endpoint)
                 .map_err(|e| format!("[connection_offer] endpoint {e}"))?;
         }
-        if let (Some(offered), Some(auth), None) = (&authorization, auth, self.endpoint.as_ref()) {
-            if !auth.credentials()?.verify(offered) {
-                return Err(
-                    "the [connection_offer] credential is not in the [auth] accepted set — \
-                     this rotation would lock the fleet out"
-                        .to_string(),
-                );
-            }
-        }
         Ok(())
-    }
-}
-
-/// The `[auth]` section (ADR-0026): the credentials the OpAMP endpoint accepts. Any listed
-/// credential passes — several valid at once is what makes overlapping rotation possible.
-/// REST API and UI are not touched by this; operator-facing auth is a separate decision.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    /// Accepted Bearer tokens, each as `sha256:<hex>` (ADR-0026 clause 26).
-    #[serde(default)]
-    pub bearer_tokens: Vec<String>,
-    /// Accepted Basic credentials, `user = "<Argon2id hash>"`.
-    #[serde(default)]
-    pub basic_users: BTreeMap<String, String>,
-}
-
-impl std::fmt::Debug for AuthConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthConfig")
-            .field("bearer_tokens", &self.bearer_tokens.len())
-            .field("basic_users", &self.basic_users.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-impl AuthConfig {
-    /// The check the Agent plane runs on every request (ADR-0026 clause 2).
-    ///
-    /// # Errors
-    /// Returns an error naming an entry that is not a hash this Server keeps.
-    pub fn credentials(&self) -> Result<crate::credentials::Credentials, String> {
-        crate::credentials::Credentials::new(
-            &self.bearer_tokens,
-            &self.basic_users,
-            self.challenge(),
-        )
-        .map_err(|e| format!("[auth] {e}"))
-    }
-
-    /// The `WWW-Authenticate` challenge advertising exactly the configured schemes (RFC 9110).
-    pub fn challenge(&self) -> String {
-        let mut schemes = Vec::new();
-        if !self.basic_users.is_empty() {
-            schemes.push(r#"Basic realm="opamp""#);
-        }
-        if !self.bearer_tokens.is_empty() {
-            schemes.push("Bearer");
-        }
-        schemes.join(", ")
-    }
-
-    /// An `[auth]` section without a single credential would lock the endpoint for everyone —
-    /// never what an operator meant, so it fails loudly (ADR-0025).
-    fn check(&self) -> Result<(), String> {
-        if self.bearer_tokens.is_empty() && self.basic_users.is_empty() {
-            return Err(
-                "an [auth] section needs at least one entry in bearer_tokens or [auth.basic_users]"
-                    .to_string(),
-            );
-        }
-        self.credentials().map(|_| ())
     }
 }
 
@@ -678,6 +567,7 @@ impl Default for ServerConfig {
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
+            agent_rate_limit: AgentRateLimitConfig::default(),
         }
     }
 }
@@ -702,13 +592,19 @@ impl ServerConfig {
         } else {
             ServerConfig::default()
         };
-        if let Some(auth) = &config.auth {
-            auth.check()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        // The Agent plane has no credential of its own (ADR-0026 clause 1). A leftover section is
+        // refused rather than ignored: an operator is present at a Server upgrade, and a section
+        // that silently did nothing would tell them the fleet still needs it.
+        if config.auth.is_some() {
+            return Err(format!(
+                "{}: [auth] is refused — the Agent plane admits by client certificate alone; \
+                 remove the section",
+                path.display()
+            ));
         }
         if let Some(offer) = &config.connection_offer {
             offer
-                .check(config.auth.as_ref())
+                .check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         if let Some(client_ca) = &config.client_ca {
@@ -782,6 +678,10 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        config
+            .agent_rate_limit
+            .check()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if config.max_connections == 0 || config.rest.max_connections == 0 {
             return Err(format!(
                 "{}: max_connections and [rest] max_connections must be greater than zero — a \
@@ -795,6 +695,30 @@ impl ServerConfig {
         Ok(config)
     }
 
+    /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
+    /// heartbeat (ADR-0023 clause 20): `messages_per_sec` times the offered heartbeat interval, or
+    /// the Baseline's 30 s, below 256. A limit set too low costs availability, not security, so
+    /// the Server starts.
+    #[must_use]
+    pub fn rate_limit_warning(&self) -> Option<String> {
+        let heartbeat = self
+            .connection_offer
+            .as_ref()
+            .and_then(|offer| offer.heartbeat_interval_secs)
+            .filter(|secs| *secs > 0)
+            .unwrap_or(BASELINE_HEARTBEAT_SECS);
+        let carried = u64::from(self.agent_rate_limit.messages_per_sec).saturating_mul(heartbeat);
+        (carried < AGENTS_PER_HOST).then(|| {
+            format!(
+                "[agent_rate_limit] messages_per_sec ({}) times [connection_offer] \
+                 heartbeat_interval_secs ({heartbeat}) carries {carried} Agents per host, below \
+                 the {AGENTS_PER_HOST} a host may speak for — a host with more Agents is \
+                 throttled at every heartbeat",
+                self.agent_rate_limit.messages_per_sec
+            )
+        })
+    }
+
     /// The transport rules of the specification's Q-1 (ADR-0023): the Agent plane always serves
     /// TLS, and the Operator plane off the loopback requires authentication.
     fn check_secure(&self) -> Result<(), String> {
@@ -805,18 +729,11 @@ impl ServerConfig {
                     .to_string(),
             );
         };
-        // Both proofs, always (ADR-0026 clauses 1, 5, 6).
+        // The certificate is the whole of admission (ADR-0026 clauses 5, 6).
         if tls.client_ca_file.is_none() {
             return Err(
                 "[tls] client_ca_file is required — every Agent presents a client certificate in \
                  the handshake"
-                    .to_string(),
-            );
-        }
-        if self.auth.is_none() {
-            return Err(
-                "[auth] is required — every request to the OpAMP endpoint carries the fleet \
-                 credential"
                     .to_string(),
             );
         }
@@ -853,25 +770,17 @@ impl ServerConfig {
     }
 }
 
-/// The `[connection_offer]` section as the offer the fleet makes (ADR-0027).
+/// The `[connection_offer]` section as the offer the fleet makes (ADR-0027). It carries no
+/// `headers`: nothing on the Agent plane reads one.
 impl ConnectionOffer {
     /// Compiles the section into the offer.
-    ///
-    /// # Errors
-    /// Returns an error when the section's credential cannot be read.
-    pub fn from_config(config: &ConnectionOfferConfig) -> Result<Self, String> {
-        let settings = OpAmpConnectionSettings {
+    #[must_use]
+    pub fn from_config(config: &ConnectionOfferConfig) -> Self {
+        ConnectionOffer::new(OpAmpConnectionSettings {
             destination_endpoint: config.endpoint.clone().unwrap_or_default(),
-            headers: config.authorization()?.map(|value| Headers {
-                headers: vec![Header {
-                    key: "Authorization".to_string(),
-                    value,
-                }],
-            }),
             heartbeat_interval_seconds: config.heartbeat_interval_secs.unwrap_or(0),
             ..Default::default()
-        };
-        Ok(ConnectionOffer::new(settings))
+        })
     }
 }
 
@@ -912,35 +821,9 @@ impl TelemetryOffer {
 mod tests {
     use super::*;
 
-    /// The entry `server.toml` keeps for a Bearer token, for any token a test names.
-    fn bearer(token: &str) -> String {
-        use sha2::Digest as _;
-        format!(
-            "sha256:{}",
-            hex::encode(sha2::Sha256::digest(token.as_bytes()))
-        )
-    }
-
-    /// The `[auth]` line accepting the token `t`.
-    fn auth_t() -> String {
-        format!("[auth]\nbearer_tokens = [{:?}]\n", bearer("t"))
-    }
-
-    /// A credential file, owner-only, as ADR-0027 asks.
-    fn secret_in(dir: &Path, name: &str, value: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, format!("{value}\n")).expect("write");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
-        }
-        path
-    }
-
-    fn offer_with(body: &str) -> ConnectionOfferConfig {
-        toml::from_str(body).expect("parse")
-    }
+    /// A `[tls]` section with everything admission needs.
+    const TLS: &str =
+        "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n";
 
     #[test]
     fn parses_a_full_config() {
@@ -1085,57 +968,58 @@ mod tests {
         assert!(toml::from_str::<ServerConfig>("listne = \"0.0.0.0:1\"").is_err());
     }
 
-    /// Verifies: ADR-0026
-    #[test]
-    fn auth_keeps_hashes_and_advertises_both_schemes() {
-        let cfg: ServerConfig = toml::from_str(&format!(
-            "[auth]\nbearer_tokens = [{:?}]\n[auth.basic_users]\nfleet = {:?}\n",
-            bearer("tok"),
-            crate::credentials::hash_basic("secret").expect("hash"),
-        ))
-        .expect("parse");
-        let auth = cfg.auth.expect("auth");
-        assert!(auth.check().is_ok());
-        let credentials = auth.credentials().expect("credentials");
-        assert!(credentials.verify("Bearer tok"));
-        // base64("fleet:secret")
-        assert!(credentials.verify("Basic ZmxlZXQ6c2VjcmV0"));
-        assert!(!credentials.verify("Bearer secret"));
-        assert_eq!(auth.challenge(), r#"Basic realm="opamp", Bearer"#);
-    }
-
-    /// No credential in `server.toml` authenticates on its own: a token or a password in clear is
-    /// refused at startup, the entry named and the value never echoed (ADR-0026 clause 26).
+    /// No credential in `server.toml` authenticates on its own: an operator's password in clear is
+    /// refused at startup, the section and the user named and the value never echoed (ADR-0026
+    /// clause 26).
     /// Verifies: ADR-0026
     #[test]
     fn a_plaintext_credential_is_refused_naming_its_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
-        let tls =
-            "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n";
-        for (body, names) in [
-            (
-                format!("[auth]\nbearer_tokens = [{:?}, \"plain-token-value\"]\n{tls}", bearer("t")),
-                "entry 1",
-            ),
-            (
-                format!("{}[auth.basic_users]\nfleet = \"plain-password\"\n{tls}", auth_t()),
-                "user \"fleet\"",
-            ),
-            (
+        for listen in ["127.0.0.1:4321", "0.0.0.0:4321"] {
+            std::fs::write(
+                &path,
                 format!(
-                    "{}[rest]\nlisten = \"0.0.0.0:4321\"\n[rest.auth.basic_users]\nops = \"plain-password\"\n{tls}",
-                    auth_t()
+                    "[rest]\nlisten = \"{listen}\"\n[rest.auth.basic_users]\nops = \"plain-password\"\n{TLS}"
                 ),
-                "[rest.auth.basic_users] user \"ops\"",
-            ),
-        ] {
-            std::fs::write(&path, body).expect("write");
-            let err = ServerConfig::load(&path).expect_err("a credential in clear");
-            assert!(err.contains(names), "names the entry: {err}");
-            assert!(err.contains("hash-credential"), "says how to fix it: {err}");
+            )
+            .expect("write");
+            let err = ServerConfig::load(&path).expect_err("a password in clear");
+            assert!(
+                err.contains("[rest.auth.basic_users] user \"ops\""),
+                "names the entry: {err}"
+            );
+            assert!(
+                err.contains("hash-credential --basic"),
+                "says how to fix it: {err}"
+            );
             assert!(!err.contains("plain-"), "never echoes the value: {err}");
         }
+    }
+
+    /// The Agent plane has no credential of its own: a leftover `[auth]` is refused at startup,
+    /// named, with the reason, whatever it holds (ADR-0026 clause 1).
+    /// Verifies: ADR-0026
+    #[test]
+    fn an_auth_section_is_refused_at_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for auth in [
+            "[auth]\n",
+            "[auth]\nbearer_tokens = [\"sha256:00\"]\n",
+            "[auth.basic_users]\nfleet = \"plain-password\"\n",
+        ] {
+            std::fs::write(&path, format!("{auth}{TLS}")).expect("write");
+            let err = ServerConfig::load(&path).expect_err(auth);
+            assert!(err.contains("[auth]"), "names the section: {err}");
+            assert!(
+                err.contains("admits by client certificate alone"),
+                "says why: {err}"
+            );
+            assert!(!err.contains("plain-"), "never echoes a value: {err}");
+        }
+        std::fs::write(&path, TLS).expect("write");
+        ServerConfig::load(&path).expect("no [auth], no refusal");
     }
 
     /// Verifies: ADR-0026
@@ -1157,14 +1041,6 @@ mod tests {
             toml::from_str(&format!("[basic_users]\nops = {cheap:?}\n")).expect("parse");
         let err = auth.check().expect_err("cheaper than the minimum");
         assert!(err.contains("cheaper"), "{err}");
-    }
-
-    #[test]
-    fn the_challenge_advertises_only_the_configured_scheme() {
-        let bearer_only: AuthConfig =
-            toml::from_str(&format!("bearer_tokens = [{:?}]", bearer("tok"))).expect("parse");
-        assert_eq!(bearer_only.challenge(), "Bearer");
-        assert!(bearer_only.check().is_ok());
     }
 
     /// The Operator plane's own credentials (ADR-0026), precomputed into the header values that
@@ -1211,90 +1087,42 @@ mod tests {
         assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 
-    /// Verifies: ADR-0026
-    #[test]
-    fn an_empty_auth_section_is_rejected() {
-        let empty: AuthConfig = toml::from_str("").expect("parses; emptiness is semantic");
-        assert!(empty.check().is_err());
-        // Unknown keys fail loudly, as everywhere (ADR-0025).
-        assert!(toml::from_str::<ServerConfig>("[auth]\nbearer_token = \"tok\"").is_err());
-    }
-
-    /// Verifies: ADR-0027
-    #[test]
-    fn an_offered_credential_is_read_from_its_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let token = secret_in(dir.path(), "token", "tok");
-        let bearer = offer_with(&format!(
-            "bearer_token_file = {:?}",
-            token.display().to_string()
-        ));
-        assert_eq!(
-            bearer.authorization().expect("value"),
-            Some("Bearer tok".to_string()),
-            "the trailing newline is dropped"
-        );
-
-        let password = secret_in(dir.path(), "password", "secret");
-        let basic = offer_with(&format!(
-            "username = \"fleet\"\npassword_file = {:?}",
-            password.display().to_string()
-        ));
-        assert_eq!(
-            basic.authorization().expect("value"),
-            Some("Basic ZmxlZXQ6c2VjcmV0".to_string())
-        );
-
-        // Heartbeat-only: no credential, still valid.
-        let heartbeat_only: ConnectionOfferConfig =
-            toml::from_str("heartbeat_interval_secs = 15").expect("parse");
-        assert_eq!(heartbeat_only.authorization().expect("value"), None);
-    }
-
-    /// Verifies: ADR-0027
-    #[test]
-    fn an_inline_offered_credential_is_refused() {
-        for body in [
-            "bearer_token = \"tok\"",
-            "username = \"fleet\"\npassword = \"secret\"",
-        ] {
-            let err = offer_with(body).authorization().expect_err(body);
-            assert!(err.contains("never kept in server.toml"), "{err}");
-            assert!(!err.contains("tok\"") && !err.contains("secret\""), "{err}");
-        }
-    }
-
-    /// Verifies: ADR-0027
-    #[cfg(unix)]
-    #[test]
-    fn an_offered_credential_file_readable_by_others_is_refused() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let token = secret_in(dir.path(), "token", "tok");
-        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        let offer = offer_with(&format!(
-            "bearer_token_file = {:?}",
-            token.display().to_string()
-        ));
-        let err = offer.authorization().expect_err("readable by others");
-        assert!(
-            err.contains("bearer_token_file") && err.contains("0600"),
-            "{err}"
-        );
-        let empty = secret_in(dir.path(), "empty", "");
-        let offer = offer_with(&format!(
-            "bearer_token_file = {:?}",
-            empty.display().to_string()
-        ));
-        assert!(offer.authorization().expect_err("empty").contains("empty"));
-    }
-
     /// Verifies: ADR-0027
     #[test]
     fn a_connection_offer_needs_at_least_one_field() {
         let empty: ConnectionOfferConfig =
             toml::from_str("").expect("parses; emptiness is semantic");
-        assert!(empty.check(None).is_err());
+        assert!(empty.check().is_err());
+    }
+
+    /// A credential key is refused by name, whatever else the section offers (ADR-0027 clause 1).
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_connection_offer_refuses_a_credential_key_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for (key, value) in [
+            ("bearer_token_file", "\"/etc/fleet/token\""),
+            ("username", "\"fleet\""),
+            ("password_file", "\"/etc/fleet/password\""),
+            ("bearer_token", "\"secret-token\""),
+            ("password", "\"secret-password\""),
+        ] {
+            let offer: ConnectionOfferConfig =
+                toml::from_str(&format!("heartbeat_interval_secs = 15\n{key} = {value}\n"))
+                    .expect("parses; the refusal is semantic");
+            let err = offer.check().expect_err(key);
+            assert!(err.contains(&format!("[connection_offer] {key} ")), "{err}");
+            assert!(!err.contains("secret-"), "never echoes the value: {err}");
+
+            std::fs::write(
+                &path,
+                format!("[connection_offer]\nheartbeat_interval_secs = 15\n{key} = {value}\n{TLS}"),
+            )
+            .expect("write");
+            let err = ServerConfig::load(&path).expect_err("refused at startup");
+            assert!(err.contains(&format!("[connection_offer] {key} ")), "{err}");
+        }
     }
 
     /// Verifies: ADR-0027
@@ -1302,10 +1130,10 @@ mod tests {
     fn a_connection_offer_rejects_a_bad_endpoint_scheme() {
         let bad: ConnectionOfferConfig =
             toml::from_str("endpoint = \"ftp://x/v1/opamp\"").expect("parse");
-        assert!(bad.check(None).is_err());
+        assert!(bad.check().is_err());
         let good: ConnectionOfferConfig =
             toml::from_str("endpoint = \"wss://x/v1/opamp\"").expect("parse");
-        assert!(good.check(None).is_ok());
+        assert!(good.check().is_ok());
     }
 
     /// Verifies: ADR-0027
@@ -1317,7 +1145,7 @@ mod tests {
         ] {
             let offer: ConnectionOfferConfig =
                 toml::from_str(&format!("endpoint = \"{endpoint}\"")).expect("parse");
-            let err = offer.check(None).expect_err(endpoint);
+            let err = offer.check().expect_err(endpoint);
             assert!(err.contains("[connection_offer] endpoint"), "{err}");
         }
     }
@@ -1328,7 +1156,7 @@ mod tests {
         for endpoint in ["ws://127.0.0.1:4320/v1/opamp", "http://[::1]:4320/v1/opamp"] {
             let offer: ConnectionOfferConfig =
                 toml::from_str(&format!("endpoint = \"{endpoint}\"")).expect("parse");
-            assert_eq!(offer.check(None), Ok(()), "{endpoint}");
+            assert_eq!(offer.check(), Ok(()), "{endpoint}");
         }
     }
 
@@ -1337,33 +1165,30 @@ mod tests {
     fn a_connection_offer_refuses_a_plaintext_endpoint_on_localhost() {
         let offer: ConnectionOfferConfig =
             toml::from_str("endpoint = \"ws://localhost:4320/v1/opamp\"").expect("parse");
-        assert!(offer.check(None).is_err());
+        assert!(offer.check().is_err());
     }
 
-    /// Both proofs, always: a Server without the fleet credential or without the client CA does
-    /// not start, and neither does an `[enrolment]` without a CA to sign what it approves.
+    /// The certificate is the whole of admission: a Server without the client CA does not start,
+    /// and neither does an `[enrolment]` without a CA to sign what it approves.
     /// Verifies: ADR-0026, Q-1
     #[test]
-    fn the_credential_and_the_client_ca_are_required_at_startup() {
+    fn the_client_ca_is_required_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
-        let tls = "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\n";
-        std::fs::write(&path, format!("{}{tls}", auth_t())).expect("write");
+        std::fs::write(
+            &path,
+            "[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\n",
+        )
+        .expect("write");
         let err = ServerConfig::load(&path).expect_err("no client CA");
         assert!(err.contains("client_ca_file is required"), "{err}");
 
-        let tls = format!("{tls}client_ca_file = \"ca.pem\"\n");
-        std::fs::write(&path, &tls).expect("write");
-        let err = ServerConfig::load(&path).expect_err("no credential");
-        assert!(err.contains("[auth] is required"), "{err}");
-
-        let complete = format!("{}{tls}", auth_t());
-        std::fs::write(&path, &complete).expect("write");
-        ServerConfig::load(&path).expect("both proofs configured");
+        std::fs::write(&path, TLS).expect("write");
+        ServerConfig::load(&path).expect("the client CA is all admission needs");
 
         std::fs::write(
             &path,
-            format!("{complete}[enrolment]\nbootstrap_ca_file = \"boot.pem\"\n"),
+            format!("{TLS}[enrolment]\nbootstrap_ca_file = \"boot.pem\"\n"),
         )
         .expect("write");
         let err = ServerConfig::load(&path).expect_err("enrolment without a CA");
@@ -1383,6 +1208,74 @@ mod tests {
             let err = ServerConfig::load(&path).expect_err("zero must fail startup");
             assert!(err.contains("max_connections"), "{err}");
         }
+    }
+
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_agent_rate_limit_defaults_and_refuses_zero() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(
+            cfg.agent_rate_limit.limits(),
+            crate::agent_rate::Limits {
+                messages_per_sec: 10,
+                burst: 300,
+                gateway_messages_per_sec: 500,
+                gateway_burst: 10_000,
+            }
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for key in [
+            "messages_per_sec",
+            "burst",
+            "gateway_messages_per_sec",
+            "gateway_burst",
+        ] {
+            std::fs::write(&path, format!("{TLS}[agent_rate_limit]\n{key} = 0\n")).expect("write");
+            let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+            assert!(err.contains(&format!("[agent_rate_limit] {key}")), "{err}");
+        }
+        std::fs::write(
+            &path,
+            format!("{TLS}[agent_rate_limit]\nmessages_per_second = 5\n"),
+        )
+        .expect("write");
+        let err = ServerConfig::load(&path).expect_err("an unknown key");
+        assert!(err.contains("messages_per_second"), "{err}");
+        std::fs::write(&path, format!("{TLS}[agent_rate_limit]\nburst = 50\n")).expect("write");
+        assert_eq!(
+            ServerConfig::load(&path)
+                .expect("loads")
+                .agent_rate_limit
+                .burst,
+            50
+        );
+    }
+
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_limit_below_the_heartbeat_for_256_agents_warns_naming_both_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{TLS}[agent_rate_limit]\nmessages_per_sec = 5\n\
+                 [connection_offer]\nheartbeat_interval_secs = 30\n"
+            ),
+        )
+        .expect("write");
+        let config = ServerConfig::load(&path).expect("a low limit still starts");
+        let warning = config.rate_limit_warning().expect("a warning");
+        assert!(
+            warning.contains("[agent_rate_limit] messages_per_sec")
+                && warning.contains("[connection_offer] heartbeat_interval_secs"),
+            "{warning}"
+        );
+
+        std::fs::write(&path, TLS).expect("write");
+        let config = ServerConfig::load(&path).expect("defaults");
+        assert_eq!(config.rate_limit_warning(), None, "10 times 30 carries 300");
     }
 
     /// Verifies: ADR-0023
@@ -1408,10 +1301,7 @@ mod tests {
     /// Verifies: ADR-0023, ADR-0026
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
-        let tls = format!(
-            "{}[tls]\ncert_file = \"c.pem\"\nkey_file = \"k.pem\"\nclient_ca_file = \"ca.pem\"\n",
-            auth_t()
-        );
+        let tls = TLS;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("server.toml");
         std::fs::write(&path, format!("[rest]\nlisten = \"0.0.0.0:4321\"\n{tls}")).expect("write");
@@ -1425,33 +1315,7 @@ mod tests {
         std::fs::write(&path, format!("{guarded}{tls}")).expect("write");
         ServerConfig::load(&path).expect("guarded plane loads");
 
-        std::fs::write(&path, &tls).expect("write");
+        std::fs::write(&path, tls).expect("write");
         ServerConfig::load(&path).expect("a loopback plane needs no authentication");
-    }
-
-    /// Verifies: ADR-0027
-    #[test]
-    fn a_credential_offer_must_be_accepted_by_auth_unless_the_endpoint_moves() {
-        let auth: AuthConfig =
-            toml::from_str(&format!("bearer_tokens = [{:?}]", bearer("new"))).expect("parse");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let new = secret_in(dir.path(), "new", "new").display().to_string();
-        let other = secret_in(dir.path(), "other", "other")
-            .display()
-            .to_string();
-
-        // Offering a credential [auth] does not accept would lock the fleet out.
-        let stranger = offer_with(&format!("bearer_token_file = {other:?}"));
-        assert!(stranger.check(Some(&auth)).is_err());
-
-        // Offering the accepted credential is fine.
-        let matching = offer_with(&format!("bearer_token_file = {new:?}"));
-        assert!(matching.check(Some(&auth)).is_ok());
-
-        // A move to another Server is exempt — the destination validates its own credential.
-        let moved = offer_with(&format!(
-            "bearer_token_file = {other:?}\nendpoint = \"wss://elsewhere/v1/opamp\""
-        ));
-        assert!(moved.check(Some(&auth)).is_ok());
     }
 }

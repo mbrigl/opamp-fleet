@@ -61,6 +61,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         &[
             ("", Root),
             ("main", Root),
+            ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),
             ("configs", Core),
@@ -117,6 +118,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("connection", Adapter),
             ("csr", Adapter),
             ("gateway", Adapter),
+            ("gateway::cache", Adapter),
             ("gateway::pool", Adapter),
             ("gateway::registry", Adapter),
             ("gateway::revocations", Adapter),

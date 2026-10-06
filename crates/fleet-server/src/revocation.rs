@@ -3,10 +3,9 @@
 //! The **register** holds every certificate the client CA signed, with the certificate it renewed
 //! as its predecessor, so a revocation reaches every renewal made after the certificate it names.
 //! An entry stays while it, or a certificate descended from it, is still valid. The **list** holds
-//! revoked certificates, by the CA that issued them and serial, and revoked credentials, by the
-//! SHA-256 of their `Authorization` value. Both persist through a [`LedgerStore`]; a change is
-//! written before it is answered, and every revocation is announced, so an open session can end
-//! the moment what admitted it is revoked.
+//! revoked certificates, by the CA that issued them and serial. Both persist through a
+//! [`LedgerStore`]; a change is written before it is answered, and every revocation is announced,
+//! so an open session can end the moment the certificate that admitted it is revoked.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -119,6 +118,16 @@ pub struct Host {
     pub instance_uids: BTreeSet<String>,
 }
 
+/// The Agents a host's certificate speaks for (ADR-0033 clause 3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpeaksFor {
+    /// A host marked as a Gateway: it carries other hosts' Agents, and the Server keeps no record
+    /// of which.
+    Any,
+    /// The `instance_uid`s bound to the host, hex.
+    Agents(BTreeSet<String>),
+}
+
 /// The certificates one host may hold at once (ADR-0026 clause 7): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
@@ -157,8 +166,6 @@ pub enum Revoked {
         issuers: Vec<String>,
         serial: String,
     },
-    /// The SHA-256 of the exact `Authorization` value, hex — never the value itself.
-    Credential { sha256: String },
 }
 
 /// One entry of the list.
@@ -222,21 +229,10 @@ pub enum RevokeError {
     Store(String),
 }
 
-/// The SHA-256 of an `Authorization` value, hex.
-#[must_use]
-pub fn credential_hash(authorization: &str) -> String {
-    hex::encode(Sha256::digest(authorization.as_bytes()))
-}
-
-/// The check that tells whether `[auth]` accepts an `Authorization` value.
-pub type Accepts = Arc<dyn Fn(&str) -> bool + Send + Sync>;
-
 /// The register and the list, in memory and in their store.
 pub struct Revocations {
     store: Box<dyn LedgerStore>,
     clock: Arc<dyn Clock>,
-    /// Whether `[auth]` accepts an `Authorization` value: only such a credential can be revoked.
-    accepts: Accepts,
     authorities: Vec<Authority>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
@@ -262,17 +258,14 @@ impl State {
     fn revoked_certificates(&self) -> BTreeSet<CertId> {
         self.revocations
             .iter()
-            .flat_map(|entry| match &entry.revoked {
-                Revoked::Certificate {
+            .flat_map(|entry| {
+                let Revoked::Certificate {
                     issuers, serial, ..
-                } => issuers
-                    .iter()
-                    .map(|issuer| CertId {
-                        issuer: issuer.clone(),
-                        serial: serial.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-                Revoked::Credential { .. } => Vec::new(),
+                } = &entry.revoked;
+                issuers.iter().map(|issuer| CertId {
+                    issuer: issuer.clone(),
+                    serial: serial.clone(),
+                })
             })
             .collect()
     }
@@ -359,12 +352,10 @@ impl Revocations {
     pub fn open(
         store: Box<dyn LedgerStore>,
         clock: Arc<dyn Clock>,
-        accepts: Accepts,
         authorities: Vec<Authority>,
     ) -> Result<Self, String> {
         let ledger = store.load()?;
         let revocations = Revocations {
-            accepts,
             authorities,
             state: Mutex::new({
                 let mut state = State {
@@ -517,6 +508,19 @@ impl Revocations {
         self.store.save_hosts(&state.hosts)
     }
 
+    /// The Agents a certificate naming `host` speaks for (ADR-0033 clause 3): the `instance_uid`s
+    /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
+    /// speaks for none.
+    #[must_use]
+    pub fn speaks_for(&self, host: &str) -> SpeaksFor {
+        let state = self.state.lock().expect("revocation lock");
+        match state.hosts.get(host) {
+            Some(entry) if entry.gateway => SpeaksFor::Any,
+            Some(entry) => SpeaksFor::Agents(entry.instance_uids.clone()),
+            None => SpeaksFor::Agents(BTreeSet::new()),
+        }
+    }
+
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
     /// orphans a host's certificate (ADR-0026 clause 7).
     ///
@@ -628,21 +632,6 @@ impl Revocations {
         })
     }
 
-    /// Revokes a credential `[auth]` accepts (clause 5).
-    ///
-    /// # Errors
-    /// Refuses a credential `[auth]` does not accept, a full list, and a failed write.
-    pub fn revoke_credential(&self, authorization: &str) -> Result<Revocation, RevokeError> {
-        if !(self.accepts)(authorization) {
-            return Err(RevokeError::Invalid(
-                "no credential of [auth] has this value".into(),
-            ));
-        }
-        self.add(Revoked::Credential {
-            sha256: credential_hash(authorization),
-        })
-    }
-
     fn add(&self, revoked: Revoked) -> Result<Revocation, RevokeError> {
         let mut state = self.state.lock().expect("revocation lock");
         if let Some(existing) = state.revocations.iter().find(|e| e.revoked == revoked) {
@@ -745,17 +734,6 @@ impl Revocations {
             .is_some_and(|host| host.gateway)
     }
 
-    /// Whether the `Authorization` value with this hash is revoked.
-    #[must_use]
-    pub fn is_credential_revoked(&self, sha256: &str) -> bool {
-        self.state
-            .lock()
-            .expect("revocation lock")
-            .revocations
-            .iter()
-            .any(|entry| matches!(&entry.revoked, Revoked::Credential { sha256: s } if s == sha256))
-    }
-
     /// Announces every new revocation; an open session checks itself against the list on each.
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -810,13 +788,13 @@ impl Revocations {
             state.remove(id);
         }
         let before = state.revocations.len();
-        state.revocations.retain(|entry| match &entry.revoked {
-            Revoked::Certificate {
+        state.revocations.retain(|entry| {
+            let Revoked::Certificate {
                 issuers, serial, ..
-            } => !gone
+            } = &entry.revoked;
+            !gone
                 .iter()
-                .any(|id| &id.serial == serial && issuers.contains(&id.issuer)),
-            Revoked::Credential { .. } => true,
+                .any(|id| &id.serial == serial && issuers.contains(&id.issuer))
         });
         if state.revocations.len() != before {
             self.store.save_revocations(&state.revocations)?;
@@ -827,12 +805,10 @@ impl Revocations {
 
 /// A stable id: the same revocation twice is one entry.
 fn entry_id(revoked: &Revoked) -> String {
-    let text = match revoked {
-        Revoked::Certificate {
-            authority, serial, ..
-        } => format!("certificate\n{authority}\n{serial}"),
-        Revoked::Credential { sha256 } => format!("credential\n{sha256}"),
-    };
+    let Revoked::Certificate {
+        authority, serial, ..
+    } = revoked;
+    let text = format!("certificate\n{authority}\n{serial}");
     hex::encode(&Sha256::digest(text.as_bytes())[..8])
 }
 
@@ -882,14 +858,12 @@ mod tests {
 
     const NOW: u64 = 1_000_000_000;
     const CA: &[u8] = b"fleet client CA";
-    const TOKEN: &str = "Bearer fleet-token";
 
     fn open(store: &Memory) -> (Revocations, Arc<Manual>) {
         let clock = Arc::new(Manual(AtomicU64::new(NOW)));
         let revocations = Revocations::open(
             Box::new(store.clone()),
             clock.clone(),
-            Arc::new(|authorization: &str| authorization == TOKEN),
             vec![Authority {
                 role: "client".into(),
                 subject: name_hash(CA),
@@ -977,6 +951,45 @@ mod tests {
             .expect("still a Gateway");
     }
 
+    /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
+    /// register does not know for none, and a Gateway for any Agent.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
+        let (revocations, _) = open(&Memory::default());
+        revocations
+            .record(on_host("a1", "h1"), &[1; 16], None)
+            .expect("record");
+        revocations
+            .record(on_host("b1", "h2"), &[2; 16], None)
+            .expect("record");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents(BTreeSet::new()),
+            "nothing reported yet"
+        );
+        revocations.check_report("h1", &[1; 16]).expect("binds");
+        revocations.check_report("h1", &[3; 16]).expect("binds");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode([1; 16]), hex::encode([3; 16])].into())
+        );
+        assert_eq!(
+            revocations.speaks_for("unknown"),
+            SpeaksFor::Agents(BTreeSet::new())
+        );
+        assert!(revocations.set_gateway("h2", true).expect("mark"));
+        assert_eq!(revocations.speaks_for("h2"), SpeaksFor::Any);
+        revocations
+            .check_report("h2", &[1; 16])
+            .expect("a Gateway reports for h1's Agent");
+        assert_eq!(
+            revocations.speaks_for("h2"),
+            SpeaksFor::Any,
+            "a Gateway binds nothing"
+        );
+    }
+
     /// Verifies: ADR-0031
     #[test]
     fn a_revocation_follows_every_renewal() {
@@ -1041,26 +1054,6 @@ mod tests {
 
     /// Verifies: ADR-0031
     #[test]
-    fn a_credential_is_kept_by_its_hash_alone() {
-        let store = Memory::default();
-        let (revocations, _) = open(&store);
-        assert!(matches!(
-            revocations.revoke_credential("Bearer typo"),
-            Err(RevokeError::Invalid(_))
-        ));
-        let entry = revocations.revoke_credential(TOKEN).expect("revoke");
-        assert!(revocations.is_credential_revoked(&credential_hash(TOKEN)));
-        let persisted = format!("{:?}", store.load().expect("load"));
-        assert!(!persisted.contains("fleet-token"), "{persisted}");
-        assert_eq!(
-            revocations.revoke_credential(TOKEN).expect("again").id,
-            entry.id,
-            "one value, one entry"
-        );
-    }
-
-    /// Verifies: ADR-0031
-    #[test]
     fn the_list_survives_a_restart_and_can_be_lifted() {
         let store = Memory::default();
         {
@@ -1091,8 +1084,10 @@ mod tests {
                 &(0..MAX_REVOCATIONS)
                     .map(|n| Revocation {
                         id: n.to_string(),
-                        revoked: Revoked::Credential {
-                            sha256: n.to_string(),
+                        revoked: Revoked::Certificate {
+                            authority: "client".into(),
+                            issuers: vec![name_hash(CA)],
+                            serial: format!("{n:x}"),
                         },
                         revoked_ms: NOW,
                     })

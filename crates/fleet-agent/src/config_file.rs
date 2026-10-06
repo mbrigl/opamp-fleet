@@ -46,21 +46,14 @@ impl ClientConfig {
         config.checked(path)
     }
 
-    /// What this Client must hold before it connects (ADR-0026, ADR-0028): the fleet credential, and
-    /// a client certificate — the one the Server issued, or the one `[tls]` names, a bootstrap
-    /// certificate included. Without either the Server would refuse it, so the Client refuses to
-    /// start, naming what is missing.
+    /// What this Client must hold before it connects (ADR-0026, ADR-0028): a client certificate —
+    /// the one the Server issued, or the one `[tls]` names, a bootstrap certificate included. It is
+    /// the one proof the Server admits a peer by, so without it the Client refuses to start, naming
+    /// what is missing.
     ///
     /// # Errors
     /// Returns a sentence naming the missing setting.
     pub fn check_admission(&self) -> Result<(), String> {
-        if self.authorization_value()?.is_none() {
-            return Err(
-                "[auth] is required — the Server admits no Agent without the fleet credential \
-                 (bearer_token, or username and password)"
-                    .to_string(),
-            );
-        }
         if self.client_identity().is_none() {
             return Err(
                 "[tls] cert_file and key_file are required — the Server admits no Agent without \
@@ -140,11 +133,12 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// A Client without the fleet credential, or without a certificate, does not start: the Server
-    /// would refuse it at admission or in the handshake anyway (ADR-0026 clause 3).
-    /// Verifies: ADR-0026, Q-1
+    /// The client identity is all a Client needs to start: a file naming one passes with no
+    /// `[auth]`, and a file without one is refused, naming `[tls] cert_file` and `key_file` — the
+    /// Server would refuse it in the handshake anyway.
+    /// Verifies: ADR-0026, ADR-0028, Q-1
     #[test]
-    fn a_client_without_its_credential_or_a_certificate_does_not_start() {
+    fn admission_needs_a_client_identity_and_nothing_else() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cert = dir.path().join("c.pem");
         let key = dir.path().join("k.pem");
@@ -154,24 +148,28 @@ mod tests {
 
         let bare: ClientConfig =
             toml::from_str(&format!("state_dir = {state:?}\n")).expect("parse");
-        let err = bare.check_admission().expect_err("no credential");
-        assert!(err.contains("[auth] is required"), "{err}");
-
-        let with_auth: ClientConfig = toml::from_str(&format!(
-            "state_dir = {state:?}\n[auth]\nbearer_token = \"t\"\n"
-        ))
-        .expect("parse");
-        let err = with_auth.check_admission().expect_err("no certificate");
+        let err = bare.check_admission().expect_err("no certificate");
         assert!(err.contains("cert_file and key_file are required"), "{err}");
 
         let complete: ClientConfig = toml::from_str(&format!(
-            "state_dir = {state:?}\n[auth]\nbearer_token = \"t\"\n[tls]\ncert_file = {:?}\nkey_file = {:?}\n",
+            "state_dir = {state:?}\n[tls]\ncert_file = {:?}\nkey_file = {:?}\n",
             cert.display().to_string(),
             key.display().to_string()
         ))
         .expect("parse");
         complete
             .check_admission()
-            .expect("the credential and a certificate");
+            .expect("a certificate and nothing else");
+
+        // A leftover [auth] is no reason to refuse, or to warn at install: it is ignored.
+        let leftover: ClientConfig = toml::from_str(&format!(
+            "state_dir = {state:?}\n[auth]\nbearer_token = \"t\"\n[tls]\ncert_file = {:?}\nkey_file = {:?}\n",
+            cert.display().to_string(),
+            key.display().to_string()
+        ))
+        .expect("parse");
+        leftover
+            .check_admission()
+            .expect("a leftover [auth] beside a certificate");
     }
 }

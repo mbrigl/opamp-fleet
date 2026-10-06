@@ -42,6 +42,147 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
     )
 }
 
+/// A host of the fleet on an Agent plane that requires a client certificate, as the binary serves
+/// it: its client presents a certificate naming the host (ADR-0026 clause 7), so a download is
+/// tested for an offer (ADR-0033).
+struct Member {
+    client: reqwest::Client,
+    /// `https://localhost:<port>` — the Agent plane.
+    base: String,
+}
+
+impl Member {
+    async fn exchange(&self, msg: &AgentToServer) -> ServerToAgent {
+        let response = self
+            .client
+            .post(format!("{}/v1/opamp", self.base))
+            .header("content-type", PROTOBUF)
+            .body(msg.encode_to_vec())
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(response.status(), 200);
+        ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode")
+    }
+
+    async fn download(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}{path}", self.base))
+            .send()
+            .await
+            .expect("download")
+    }
+}
+
+/// A Server with package delivery armed and a host register, its Agent plane over mutual TLS and
+/// its Operator plane open, plus one member host.
+async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
+    use rcgen::{CertificateParams, IsCa, Issuer, KeyPair, SanType};
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca_key = KeyPair::generate().expect("ca key");
+    let mut ca = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca.distinguished_name
+        .push(rcgen::DnType::CommonName, "packages-test-ca");
+    ca.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_pem = ca.self_signed(&ca_key).expect("ca").pem();
+    let issuer = Issuer::from_ca_cert_pem(&ca_pem, ca_key).expect("issuer");
+    let leaf = |params: CertificateParams| {
+        let key = KeyPair::generate().expect("key");
+        let cert = params.signed_by(&key, &issuer).expect("signed");
+        (cert.pem(), key.serialize_pem())
+    };
+    let (server_cert, server_key) =
+        leaf(CertificateParams::new(vec!["localhost".to_string()]).expect("params"));
+    let mut host = CertificateParams::new(Vec::<String>::new()).expect("params");
+    host.subject_alt_names.push(SanType::URI(
+        format!("{}edge-01", fleet_server::ca::HOST_URI_PREFIX)
+            .try_into()
+            .expect("uri"),
+    ));
+    let (host_cert, host_key) = leaf(host);
+
+    let files = dir.path().join("tls");
+    std::fs::create_dir_all(&files).expect("tls dir");
+    for (name, pem) in [
+        ("cert.pem", &server_cert),
+        ("key.pem", &server_key),
+        ("ca.pem", &ca_pem),
+    ] {
+        std::fs::write(files.join(name), pem).expect("write");
+    }
+    let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
+        "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
+        files.join("cert.pem").display().to_string(),
+        files.join("key.pem").display().to_string(),
+        files.join("ca.pem").display().to_string(),
+    ))
+    .expect("tls config");
+    let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+    let agent_tls = planes.agent.rustls_config().expect("agent plane config");
+
+    let revocations = Arc::new(
+        fleet_server::revocation::Revocations::open(
+            Box::new(
+                fleet_server::fs::FsLedgerStore::open(dir.path().join("revocation"))
+                    .expect("ledger"),
+            ),
+            Arc::new(fleet_server::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations"),
+    );
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_revocations(Some(revocations.clone()))
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
+    );
+    let admission = fleet_server::transport::Admission::new(true)
+        .with_enrolment(planes.issuers, None)
+        .with_revocations(Some(revocations));
+    let handle = opamp::server::listen::Handle::new();
+    let agent_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let operator_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let (addr, rest_addr) = (
+        agent_listener.local_addr().expect("addr"),
+        operator_listener.local_addr().expect("addr"),
+    );
+    tokio::spawn(
+        fleet_server::listen::plane(agent_listener, Some(agent_tls), 64, handle.clone())
+            .serve(fleet_server::agent_app(state.clone(), admission)),
+    );
+    tokio::spawn(
+        fleet_server::listen::plane(operator_listener, None, 64, handle)
+            .serve(fleet_server::operator_app(state.clone(), None)),
+    );
+
+    let mut identity = host_key.into_bytes();
+    identity.extend_from_slice(host_cert.as_bytes());
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(ca_pem.as_bytes()).expect("ca")])
+        .resolve("localhost", addr)
+        .identity(reqwest::Identity::from_pem(&identity).expect("identity"))
+        .build()
+        .expect("client");
+    (
+        TestServer {
+            addr,
+            rest_addr,
+            state,
+            _dir: dir,
+        },
+        Member {
+            client,
+            base: format!("https://localhost:{}", addr.port()),
+        },
+    )
+}
+
 async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> ServerToAgent {
     let response = reqwest::Client::new()
         .post(format!("http://{}/v1/opamp", server.addr))
@@ -317,16 +458,16 @@ async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_pla
     );
 }
 
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0033
 #[tokio::test]
 async fn an_uploaded_set_is_offered_downloaded_and_gated() {
-    let (server, _scratch) = spawn_with_packages().await;
+    let (server, member) = spawn_with_packages_for_a_host().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "collector", 1);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
 
     // Nothing uploaded yet: no offer, and the capability is not declared.
-    let reply = exchange(&server, &report).await;
+    let reply = member.exchange(&report).await;
     assert!(reply.packages_available.is_none());
     assert_eq!(
         reply.capabilities & ServerCapabilities::OffersPackages as u64,
@@ -341,7 +482,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     );
 
     // Now the offer arrives, declares the capability, and carries a working download URL.
-    let reply = exchange(&server, &report).await;
+    let reply = member.exchange(&report).await;
     assert_ne!(
         reply.capabilities & ServerCapabilities::OffersPackages as u64,
         0
@@ -362,12 +503,11 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     );
     assert_eq!(file.content_hash, sha256(b"the-new-binary"));
 
-    // The artifact downloads byte-for-byte.
-    let downloaded = reqwest::Client::new()
-        .get(format!("http://{}{}", server.addr, file.download_url))
-        .send()
+    // The artifact downloads byte-for-byte, over the certificate of the host whose Agent it
+    // is offered to.
+    let downloaded = member
+        .download(&file.download_url)
         .await
-        .expect("download")
         .bytes()
         .await
         .expect("bytes");
@@ -391,7 +531,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
         server_provided_all_packages_hash: offer.all_packages_hash.clone(),
         error_message: String::new(),
     });
-    let reply = exchange(&server, &installed).await;
+    let reply = member.exchange(&installed).await;
     assert!(
         reply.packages_available.is_none(),
         "a matching reported hash stops the offer"
@@ -427,10 +567,13 @@ async fn an_entry_needs_its_set_first() {
 /// A package is a *program*: an `otelcol-contrib` binary weighs hundreds of megabytes, so the
 /// entry route must not be bounded by the framework's 2 MiB default, and the artifact must reach
 /// the Agent unchanged whatever its size.
-/// Verifies: ADR-0019
+/// Verifies: ADR-0019, ADR-0033
 #[tokio::test]
 async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact() {
-    let (server, _scratch) = spawn_with_packages().await;
+    let (server, member) = spawn_with_packages_for_a_host().await;
+    let mut report = full_report(&InstanceUid::default(), "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    member.exchange(&report).await;
 
     // Past axum's 2 MiB default body limit — the limit that used to make a real binary
     // undeliverable — and not a round number, so a truncation would show.
@@ -438,15 +581,14 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
         .map(|i| (i % 251) as u8)
         .collect();
     upload(&server, support::AGENT_TYPE, "1.2.3", &artifact).await;
+    rollout_ring(&server, &everyone(&server, "1.2.3").await).await;
 
-    let downloaded = reqwest::Client::new()
-        .get(format!(
-            "{}?os=linux&arch=amd64",
-            download_url(&server, support::AGENT_TYPE, "1.2.3")
+    let downloaded = member
+        .download(&format!(
+            "/api/v1/packages/{}/1.2.3/file?os=linux&arch=amd64",
+            support::AGENT_TYPE
         ))
-        .send()
-        .await
-        .expect("download");
+        .await;
     assert_eq!(
         downloaded
             .headers()
@@ -458,6 +600,39 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
     let bytes = downloaded.bytes().await.expect("bytes");
     assert_eq!(bytes.len(), artifact.len());
     assert_eq!(bytes.as_ref(), artifact.as_slice(), "byte-identical");
+}
+
+/// A version saved into the channel and signed, but not yet released by the operator's press, is
+/// no one's offer and cannot be fetched — while the version released before it still can. The
+/// press makes it fetchable.
+/// Verifies: ADR-0033
+#[tokio::test]
+async fn a_version_waiting_for_its_rollout_cannot_be_fetched() {
+    let (server, member) = spawn_with_packages_for_a_host().await;
+    let mut report = full_report(&InstanceUid::default(), "collector", 1);
+    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
+    member.exchange(&report).await;
+    let path = |version: &str| {
+        format!(
+            "/api/v1/packages/{}/{version}/file?os=linux&arch=amd64",
+            support::AGENT_TYPE
+        )
+    };
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"released").await;
+    rollout_ring(&server, &everyone(&server, "1.0.0").await).await;
+    upload(&server, support::AGENT_TYPE, "2.0.0", b"waiting").await;
+    let channel = everyone(&server, "2.0.0").await;
+
+    assert_eq!(member.download(&path("2.0.0")).await.status(), 404);
+    let released = member.download(&path("1.0.0")).await;
+    assert_eq!(released.status(), 200);
+    assert_eq!(released.bytes().await.expect("bytes").as_ref(), b"released");
+
+    rollout_ring(&server, &channel).await;
+    let pressed = member.download(&path("2.0.0")).await;
+    assert_eq!(pressed.status(), 200);
+    assert_eq!(pressed.bytes().await.expect("bytes").as_ref(), b"waiting");
 }
 
 /// The upload limit is a configured bound, not an accident of the framework: past it the API
@@ -2497,5 +2672,89 @@ async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
         staged_uploads(dir.path()).is_empty(),
         "{:?}",
         staged_uploads(dir.path())
+    );
+}
+
+/// A member over its rate is answered `429` with `Retry-After: 30` and not served the artifact;
+/// once its bucket refills the download is served again, and the refusals counted no failure
+/// toward the failed-admission throttle, which here backs off after a single one.
+/// Verifies: ADR-0023
+#[tokio::test]
+async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clock = support::ManualClock::new();
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let limits = fleet_server::agent_rate::Limits {
+        messages_per_sec: 1,
+        burst: 1,
+        gateway_messages_per_sec: 1,
+        gateway_burst: 1,
+    };
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            ))
+            .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
+                limits,
+                100,
+                clock.clone(),
+            )))),
+    );
+    let throttle = fleet_server::throttle::Throttle::new(
+        fleet_server::throttle::Limits {
+            max_failures: 1,
+            window_secs: 60,
+            backoff_secs: 300,
+        },
+        clock.clone(),
+    );
+    let (addr, rest_addr) = support::serve(
+        state.clone(),
+        fleet_server::transport::Admission::open().with_throttle(Arc::new(throttle)),
+    )
+    .await;
+    let server = TestServer {
+        addr,
+        rest_addr,
+        state,
+        _dir: dir,
+    };
+    upload(&server, support::AGENT_TYPE, "1.2.3", b"the-new-binary").await;
+    let url = format!(
+        "http://{addr}/api/v1/packages/{}/1.2.3/file?os=linux&arch=amd64",
+        support::AGENT_TYPE
+    );
+    let download = || reqwest::Client::new().get(&url).send();
+
+    assert_eq!(download().await.expect("download").status(), 200);
+    for _ in 0..2 {
+        let refused = download().await.expect("download");
+        assert_eq!(refused.status(), 429);
+        assert_eq!(
+            refused
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("30"),
+            "the rate limit's 30 s, never the failure back-off's 300"
+        );
+        assert_ne!(
+            refused.bytes().await.expect("body").as_ref(),
+            b"the-new-binary"
+        );
+    }
+    clock.advance(std::time::Duration::from_secs(1));
+    let served = download().await.expect("download");
+    assert_eq!(
+        served.status(),
+        200,
+        "no back-off for a member over its rate"
+    );
+    assert_eq!(
+        served.bytes().await.expect("bytes").as_ref(),
+        b"the-new-binary"
     );
 }
