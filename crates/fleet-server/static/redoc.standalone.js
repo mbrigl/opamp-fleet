@@ -1,5 +1,5 @@
 /*
- * Redoc — standalone bundle, vendored for the self-contained API docs page (ADR-0011).
+ * Redoc — standalone bundle, vendored for the self-contained API docs page (ADR-0025).
  * Source: https://cdn.jsdelivr.net/npm/redoc@2.5.3/bundles/redoc.standalone.js
  * Version: redoc@2.5.3
  * Retrieved: 2026-07-24

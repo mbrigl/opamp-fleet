@@ -56,14 +56,14 @@ wildcards = "deny"
 # The workspace's own crates depend on each other by path; only unpublished crates may, so a path
 # never reaches crates.io as a wildcard.
 allow-wildcard-paths = true
-# The TLS stack is rustls on ring and nothing else (ADR-0012): no system OpenSSL, and no aws-lc,
+# The TLS stack is rustls on ring and nothing else (ADR-0023): no system OpenSSL, and no aws-lc,
 # whose cmake and C build this project keeps out.
 deny = [
-    { name = "openssl", reason = "TLS is rustls on ring (ADR-0012)" },
-    { name = "openssl-sys", reason = "TLS is rustls on ring (ADR-0012)" },
-    { name = "native-tls", reason = "TLS is rustls on ring (ADR-0012)" },
-    { name = "aws-lc-rs", reason = "TLS is rustls on ring (ADR-0012)" },
-    { name = "aws-lc-sys", reason = "TLS is rustls on ring (ADR-0012)" },
+    { name = "openssl", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "openssl-sys", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "native-tls", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "aws-lc-rs", reason = "TLS is rustls on ring (ADR-0023)" },
+    { name = "aws-lc-sys", reason = "TLS is rustls on ring (ADR-0023)" },
 ]
 
 [sources]

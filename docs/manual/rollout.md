@@ -60,7 +60,7 @@ version_args = ["--version"]
 ```
 
 Without `[packages] verification_key` the Client takes no package at all, and says so at startup
-([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)).
+([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)).
 
 Two things this block gets right that are easy to get wrong:
 
@@ -178,7 +178,7 @@ $ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --
 Put the public key in every Client's `[packages] verification_key`. Signing is not optional: a
 Client without the key takes no package, an offer without a signature is refused before anything is
 downloaded, and the Server offers no entry its Deployment has not signed
-([ADR-0045](../adr/0045-packages-and-deployments-that-sign-every-package.md)). Keep the private key
+([ADR-0021](../adr/0021-packages-and-deployments-that-sign-every-package.md)). Keep the private key
 off the Server host.
 
 The download route requires the Client's certificate, and the content hash and this signature are
@@ -383,14 +383,14 @@ something that happens.
 The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in the
 channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the version
 that Agent reports installed
-([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)), so once the channel reports
+([ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md)), so once the channel reports
 3.1.0 the older one reaches nobody: the channel's act answers `{"assigned_agents": 0}` and the
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
 version it reports *running* instead
-([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)),
+([ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md)),
 so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
 the version it reports *running* decides and the package status is not read beside it
-([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
+([ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
 install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for
@@ -408,7 +408,7 @@ only moves forward.
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
-| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0027); the Client drops such a record when it starts. |
+| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0014); the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |

@@ -1,5 +1,5 @@
-//! The listener an OpAMP endpoint is served on (ADR-0036): TLS from the material the application
-//! hands it, the bounds on connection setup of ADR-0012, and what the handshake learned carried
+//! The listener an OpAMP endpoint is served on (ADR-0024): TLS from the material the application
+//! hands it, the bounds on connection setup of ADR-0023, and what the handshake learned carried
 //! into every request.
 //!
 //! Every other limit an endpoint enforces starts at a request. A peer that completes the TCP
@@ -48,13 +48,13 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// ([`Listener::with_max_connections`]).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 
-/// The HTTP/2 streams one connection may have open at once (ADR-0038).
+/// The HTTP/2 streams one connection may have open at once (ADR-0023).
 pub const H2_MAX_CONCURRENT_STREAMS: u32 = 100;
 
-/// How often an HTTP/2 connection is pinged (ADR-0038).
+/// How often an HTTP/2 connection is pinged (ADR-0023).
 pub const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How long a ping may go unanswered before the HTTP/2 connection is dropped (ADR-0038).
+/// How long a ping may go unanswered before the HTTP/2 connection is dropped (ADR-0023).
 pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long the TLS handshake may take before the connection is dropped — `axum_server`'s default,
@@ -177,7 +177,7 @@ impl Listener {
     }
 
     /// Sets the floor on the pace of bodies and messages, [`PACE_WINDOW`] and [`MIN_PACE_BYTES`]
-    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0054 clause 14).
+    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0023 clause 14).
     #[doc(hidden)]
     #[must_use]
     pub fn with_pace(mut self, window: Duration, min_bytes: u64) -> Self {
@@ -186,7 +186,7 @@ impl Listener {
     }
 
     /// Caps the connections held at once. A connection past the cap is closed on accept, before
-    /// any TLS handshake, and the ones already held keep working (ADR-0038).
+    /// any TLS handshake, and the ones already held keep working (ADR-0023).
     #[must_use]
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
@@ -236,7 +236,7 @@ impl Listener {
 
 /// The header-read bound, with the timer it needs first: without the timer hyper discards the
 /// default, and with the timeout set but no timer it panics. HTTP/2 has no header phase to time,
-/// so it is bounded by its streams and its pings instead (ADR-0038).
+/// so it is bounded by its streams and its pings instead (ADR-0023).
 fn bounded<A>(mut server: Server<A>, header_read_timeout: Duration) -> Server<A> {
     let builder = server.http_builder();
     builder

@@ -16,7 +16,7 @@
 fleet-configs/
 client-state/
 # Package artifacts are programs — hundreds of megabytes each; they belong in a store, never in
-# the repository (ADR-0019).
+# the repository (ADR-0018).
 fleet-packages/
 
 # Environment files — never tracked, in any directory (they may hold secrets);

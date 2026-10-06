@@ -311,7 +311,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 
 By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
 `--run-as` drops that
-([ADR-0061](../adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)):
+([ADR-0028](../adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)):
 the service — and every Managed Process its Supervisors spawn — runs as the account you name, and
 the install hands its files over to it: the configuration file, the state directory, **and the
 executable layout**. The layout too because
@@ -375,7 +375,7 @@ installed opamp-fleet
 ```
 
 What it asks about is only what has no useful default here
-([ADR-0061](../adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)):
+([ADR-0028](../adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)):
 
 - **the endpoint**, suggesting `wss://127.0.0.1:4320/v1/opamp`. A `ws://` or `http://` endpoint is
   refused unless its host is `127.0.0.1` or `::1`, and the question is asked again;
@@ -453,7 +453,7 @@ binary.
 
 On Windows the `.msi` asks for the installation folder, the endpoint, and the self-update consent.
 The endpoint field is prefilled with `wss://127.0.0.1:4320/v1/opamp` in the interactive install
-only ([ADR-0062](../adr/0062-releases-installers-and-the-name-supervisor-secure-by-default.md)).
+only ([ADR-0029](../adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)).
 The folder holds only the delivered program; `service install` puts the layout, `supervisor.toml`
 and the state under `%ProgramData%\opamp-fleet`. The same file installs unattended with the same
 answers, which is how Intune, Group Policy and SCCM deploy it:
@@ -849,7 +849,7 @@ Server's instruction.
 `cert_file` and `key_file` are this Client's own certificate, and they go together or not at all.
 The Server asks for a client certificate in every TLS handshake, so the Client refuses to start
 without one
-([ADR-0059](../adr/0059-admission-by-a-client-certificate-alone.md)). The pair
+([ADR-0026](../adr/0026-admission-by-a-client-certificate-alone.md)). The pair
 written here is the identity an operator provisions: a certificate the client CA issued, or the
 **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
 the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
@@ -927,7 +927,7 @@ the Deployment that holds the package, never a key in this file.
 
 A download goes to the Server's own origin — the scheme, host and port of this Client's OpAMP
 endpoint — or to a source `allowed_sources` lists
-([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)). The Server's own origin
+([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)). The Server's own origin
 needs no entry, and an empty list allows it alone.
 
 - **An entry is an `https://` URL prefix.** `http://` is accepted only when the host is
@@ -946,7 +946,7 @@ needs no entry, and an empty list allows it alone.
 - **The client certificate goes only to the Server's own origin.** To a mirror, and on a hop that
   leaves the Server's origin, the Client presents none.
 - **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**
-  ([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). That origin answers so when its rate limit is reached, or —
+  ([ADR-0033](../adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). That origin answers so when its rate limit is reached, or —
   for a Client behind a Gateway — while the Gateway is still fetching the artifact. Each wait is
   the `Retry-After`, at least 1 and at most 60 seconds, and the asking stops 30 minutes after the
   download's first request; the status stays `Downloading` meanwhile, and a shutdown ends it. Past that, or for such an answer from any
@@ -964,7 +964,7 @@ package = "supervisor"             # the default: this Client's own Agent type
 ```
 
 See [Updating the Client itself](#updating-the-client-itself). **An absent section is the consent**
-([ADR-0044](../adr/0044-the-client-updates-itself-from-a-signed-package.md)): a Client the fleet
+([ADR-0020](../adr/0020-the-client-updates-itself-from-a-signed-package.md)): a Client the fleet
 cannot update is the one program on the host left to patch by hand. What bounds it is the name — an
 offer under any other is refused and reported, never applied. The default name is this Client's own
 Agent type, `supervisor`, which is the type the Package carrying this Client is built for. The
@@ -989,7 +989,7 @@ A Client can stand at a network boundary and carry other Clients' Agents upstrea
 of connections — for a segmented network the Server cannot reach into, or simply for a
 fleet too large to give every Agent its own connection. The Gateway admits Agents, so it serves
 them over mutual TLS 1.3 only, and `[gateway.tls]` with its `client_ca_file` is required
-([ADR-0071](../adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)):
+([ADR-0034](../adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)):
 
 ```toml
 [gateway]
@@ -1024,7 +1024,7 @@ gateway for others.
 
 A Gateway delivers the packages the Server hosts to the Agents behind it, so that one artifact
 crosses the Gateway's upstream link once instead of once per Agent
-([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)):
+([ADR-0033](../adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)):
 
 - **What it fetches.** When the Gateway relays a package offer whose `download_url` is a path on
   the Server's download route — what the Server offers for an uploaded artifact while its
@@ -1119,10 +1119,10 @@ OpAMP.
 
 **Three are wrappers**, each knowing one agent's program, its layout on each platform and its
 invocation, so its block says which host runs it and little else
-([ADR-0015](../adr/0015-supervisor-mode-and-its-kinds.md)): `icinga2` for a daemon that takes its
+([ADR-0010](../adr/0010-supervisor-mode-and-its-kinds.md)): `icinga2` for a daemon that takes its
 directories as `-D` constants rather than flags, validates a configuration before applying it, and
 needs a certificate from a master before it can do anything
-([ADR-0029](../adr/0029-icinga-2.md)); `glpi` for the GLPI
+([ADR-0016](../adr/0016-icinga-2.md)); `glpi` for the GLPI
 inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
 reload signal could not be written in a block a mixed fleet could use.
 
@@ -1431,7 +1431,7 @@ is called.
 For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
 its state, its template library and its account are on **every** invocation, it creates none of
 those directories itself, and it obtains a certificate from an Icinga master before it can do
-anything ([ADR-0029](../adr/0029-icinga-2.md)).
+anything ([ADR-0016](../adr/0016-icinga-2.md)).
 
 It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
 **installation this host is joining**. Nothing here can compute them: the ticket was minted on the
@@ -1441,7 +1441,7 @@ parent for one common name, and a node that differs from it does not enrol.
 |---|---|
 | `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
 | `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
-| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0029). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
+| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0016). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
 | `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Not named at all falls back to trust on first sight, which is logged as such; a named file that is not there makes enrolment wait for it, never fall back. |
 
 Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
@@ -1657,7 +1657,7 @@ package = "supervisor"
 
 The consent takes effect only while `[packages] verification_key` is set, and the artifact must
 carry a signature that verifies against it
-([ADR-0044](../adr/0044-the-client-updates-itself-from-a-signed-package.md)). An offer without a
+([ADR-0020](../adr/0020-the-client-updates-itself-from-a-signed-package.md)). An offer without a
 signature, or with one that does not verify, is reported `InstallFailed` and nothing is staged. An
 offer older than the running version is refused too: a signature carries no ordering, so an old
 release stays validly signed forever.
@@ -1667,7 +1667,7 @@ guards, and it is the one on this side of the wire: the Server will not offer a 
 another Agent type either, and this Client's type is the constant `supervisor` — the same string,
 which is why the Package that carries the Client is typed with it. The Agent type *is* the name a
 Package carries on the wire
-([ADR-0045](../adr/0045-packages-and-deployments-that-sign-every-package.md)), so the two cannot
+([ADR-0021](../adr/0021-packages-and-deployments-that-sign-every-package.md)), so the two cannot
 drift apart.
 Neither guard replaces the other — an operator who types a Collector artifact as `supervisor` gets
 past the Server, and this name is what is left.
@@ -1688,7 +1688,7 @@ restart.
 **What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
 an `.rpm`, an MSI or a hand did. It reports that under the name `[self_update]` consents to from its
 very first report, which is what lets the Server hold a Package against it: since
-[ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md) a Package reaches an Agent only as
+[ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md) a Package reaches an Agent only as
 an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
 The practical consequence: a Client installed by hand is not taken over by the fleet's package the
 moment one is published at the version it already is — it comes under package management with the
@@ -1704,7 +1704,7 @@ Client, withdraw its consent with `enabled = false` under `[self_update]`.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
 `supervisor_<version>_<os>_<arch>.tar.gz`
-([ADR-0062](../adr/0062-releases-installers-and-the-name-supervisor-secure-by-default.md)) — and
+([ADR-0029](../adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — and
 that file *is* a package artifact: it holds the Client under the name the install layout gives
 it, so it is uploaded exactly as downloaded, and the SHA-256 the release published is the one the
 Agent verifies. Nothing repacks it. The files are named after the **Package** they become, not after the product inside them:
@@ -1750,14 +1750,14 @@ connection. Nothing else differs: both carry the same messages, and the Server a
 once.
 
 **TLS 1.3, and plaintext on the loopback alone**
-([ADR-0038](../adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)). Every
+([ADR-0023](../adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). Every
 connection the Client makes off the host is TLS 1.3, so a peer that speaks only TLS 1.2 cannot
 be reached. `ws://` and `http://` are accepted only when the endpoint's host is the IP literal
 `127.0.0.1` or `::1`. A host name is never the loopback, `localhost` included, and a private
 address is not either. Any other plaintext endpoint fails at startup with a message naming it.
 
 **One proof on every connection**
-([ADR-0059](../adr/0059-admission-by-a-client-certificate-alone.md)). The Client presents its
+([ADR-0026](../adr/0026-admission-by-a-client-certificate-alone.md)). The Client presents its
 client certificate in the TLS handshake, on both transports, and the Server admits it on that
 alone. It sends no `Authorization` header. A `401` after the handshake means the Server refused
 the certificate — revoked, or a bootstrap certificate where an issued one is needed; it is logged
@@ -1769,7 +1769,7 @@ admissions; fix the certificate, and the back-off ends by itself.
 honours the Server's `UNAVAILABLE` retry hints.
 
 **Server-offered connection settings**
-([ADR-0060](../adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)). When
+([ADR-0027](../adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)). When
 the Server offers a new heartbeat interval, endpoint, or certificate, the Client
 **verifies the offer by actually connecting with it**, persists it, and only then switches —
 across transports if the offered endpoint demands it. An offered `ws://` or `http://` endpoint

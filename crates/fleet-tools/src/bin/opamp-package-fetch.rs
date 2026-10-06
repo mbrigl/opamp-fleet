@@ -1,22 +1,22 @@
 //! `opamp-package-fetch` — an operator helper that turns an agent release into package artifacts
-//! this fleet can install, and optionally uploads them (ADR-0019, ADR-0020, ADR-0028).
+//! this fleet can install, and optionally uploads them (ADR-0018, ADR-0019, ADR-0015).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
 //! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`,
-//! `telegraf`, `icinga2`, and `supervisor`, this fleet's own Client (ADR-0023) — and asks the
+//! `telegraf`, `icinga2`, and `supervisor`, this fleet's own Client (ADR-0029) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
 //!
 //! Two rules shape what it produces:
 //!
 //! - **As published wherever possible.** An artifact that reaches the fleet unaltered is one whose
-//!   SHA-256 an operator can compare against the release page, and ADR-0019's line from author to
+//!   SHA-256 an operator can compare against the release page, and ADR-0018's line from author to
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** The GLPI Agent has no self-contained Linux archive — its
-//!   `.tar.gz` is source — so its AppImage is extracted and repacked deterministically (ADR-0028).
+//!   `.tar.gz` is source — so its AppImage is extracted and repacked deterministically (ADR-0015).
 //!   That is the one place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 /// one turns out badly, few enough to read without scrolling.
 const SERIES_SHOWN: usize = 3;
 
-/// The member cap a tree package is held to (ADR-0019). Checked while packing rather than
+/// The member cap a tree package is held to (ADR-0018). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
 const MAX_TREE_MEMBERS: usize = 10_000;
 
@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long, default_value = ".")]
     out_dir: PathBuf,
     /// Upload to this Server when the artifacts are ready, e.g. `https://127.0.0.1:4321`. The
-    /// Operator plane serves TLS 1.3 only (ADR-0038).
+    /// Operator plane serves TLS 1.3 only (ADR-0023).
     #[arg(long, value_name = "URL")]
     server: Option<String>,
     /// Write the artifacts and stop — no upload, and no question about one.
@@ -70,7 +70,7 @@ struct Cli {
     /// only. Omitted, it is this host's own — the only one it can build for, since the tree
     /// bundles the libraries found here; naming another is how you get told that this is the wrong
     /// host for it. It is also the artifact's reach: build on the oldest distribution you serve,
-    /// since glibc cannot travel and is backward compatible (ADR-0029).
+    /// since glibc cannot travel and is backward compatible (ADR-0016).
     #[arg(long, value_name = "CODENAME")]
     distro: Option<String>,
 }
@@ -91,17 +91,17 @@ enum AgentKind {
     /// Telegraf.
     #[value(name = "telegraf")]
     Telegraf,
-    /// Icinga 2, repacked from the vendor's distribution packages (ADR-0029).
+    /// Icinga 2, repacked from the vendor's distribution packages (ADR-0016).
     #[value(name = "icinga2")]
     Icinga2,
-    /// This fleet's own Client — the package a Client updates *itself* from (ADR-0021, ADR-0023).
+    /// This fleet's own Client — the package a Client updates *itself* from (ADR-0020, ADR-0029).
     #[value(name = "supervisor")]
     Supervisor,
 }
 
 /// Everything that differs between one upstream project and the next, in one place.
 struct Source {
-    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0020) — also this
+    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0019) — also this
     /// tool's default package name.
     service_name: &'static str,
     /// The GitHub repository whose tags name the versions. Telegraf's binaries do not live there,
@@ -132,9 +132,9 @@ impl AgentKind {
                 service_name: "icinga2",
                 repo: "Icinga/icinga2",
             },
-            // This repository's own releases. The Client is an Agent like any other (ADR-0021), so
+            // This repository's own releases. The Client is an Agent like any other (ADR-0020), so
             // the artifact that updates it is fetched the way every other agent's is — and since
-            // ADR-0023 it is named and packed like one too, which is what makes that possible.
+            // ADR-0029 it is named and packed like one too, which is what makes that possible.
             AgentKind::Supervisor => Source {
                 service_name: "supervisor",
                 repo: "mbrigl/opamp-fleet",
@@ -163,7 +163,7 @@ impl AgentKind {
     }
 
     /// What each project puts in front of the version in its tags: `v`, the `version/` this
-    /// project's release workflow creates them under (ADR-0013), and nothing at all for GLPI.
+    /// project's release workflow creates them under (ADR-0017), and nothing at all for GLPI.
     fn tag_prefix(self) -> &'static str {
         match self {
             AgentKind::Otelcol
@@ -208,7 +208,7 @@ impl AgentKind {
                     .map(|(os, arch, _, _)| (*os, *arch)),
             ),
             // This column answers one question for every agent alike — does it run on the hosts I
-            // have — so Icinga 2 states its *reach*, and the reach is this host's (ADR-0029): the
+            // have — so Icinga 2 states its *reach*, and the reach is this host's (ADR-0016): the
             // tree bundles the libraries found here, so the artifact this run can produce is the
             // one for the distribution this run is on, and no other. Asking the host is therefore
             // not a convenience, it is the only way the line can be true of the build that follows.
@@ -232,7 +232,7 @@ impl AgentKind {
     ///
     /// Every other agent is installed by a Supervisor, which needs a block; this fleet's own Client
     /// is installed *by itself* over itself, and what admits that is a consent rather than a block
-    /// (ADR-0021). One sentence, so the hints below it read as the answer to it.
+    /// (ADR-0020). One sentence, so the hints below it read as the answer to it.
     fn install_hint(self) -> &'static str {
         match self {
             AgentKind::Supervisor => "What a Client needs to take these:",
@@ -244,13 +244,13 @@ impl AgentKind {
     /// `scripts/seed_test_configs.sh` aims them — which is where these bodies come from, and why
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     ///
-    /// Icinga 2 gets two, because it reads one root file and includes the rest by name (ADR-0029).
+    /// Icinga 2 gets two, because it reads one root file and includes the rest by name (ADR-0016).
     /// Its ticket and its parent's certificate are *not* here: both are per host, one is a secret,
     /// and neither has a sensible default — see `docs/manual/icinga2.md`.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
         // Aiming differs by how an Agent's type becomes known. The Collectors report a
         // `service.name` of their own, so a Selector on that attribute is what reaches them; the
-        // rest are matched by Agent type (ADR-0016).
+        // rest are matched by Agent type (ADR-0011).
         match self {
             AgentKind::Otelcol => &[DefaultConfiguration {
                 name: "otelcol-conf",
@@ -277,7 +277,7 @@ impl AgentKind {
                 body: include_str!("../../../../config/examples/telegraf-conf.toml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
-            // deliberately does not own (ADR-0022 admits only `[[supervisor]]` blocks), and none
+            // deliberately does not own (ADR-0032 admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
             AgentKind::Icinga2 => &[
@@ -302,7 +302,7 @@ impl AgentKind {
 /// that name yet.
 ///
 /// The body is compiled in rather than read from the repository: this tool is released as a
-/// binary an operator runs anywhere (ADR-0011), so a file path beside it would be a default that
+/// binary an operator runs anywhere (ADR-0025), so a file path beside it would be a default that
 /// only works in a checkout.
 struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config
@@ -310,7 +310,7 @@ struct DefaultConfiguration {
     name: &'static str,
     /// Equality pairs against the Agent's attributes; empty aims at every Agent of the type below.
     selector: &'static [(&'static str, &'static str)],
-    /// The Agent type this is for (ADR-0016); empty is every type.
+    /// The Agent type this is for (ADR-0011); empty is every type.
     service_name: &'static str,
     body: &'static str,
 }
@@ -323,11 +323,11 @@ struct Download {
 
 /// One platform's artifact, planned before anything is downloaded.
 struct Plan {
-    /// The platform as *this fleet* names it (ADR-0020), which is what the upload path carries.
+    /// The platform as *this fleet* names it (ADR-0019), which is what the upload path carries.
     os: String,
     arch: String,
     /// What has to be fetched. Usually one file; a repacked Icinga 2 tree needs the vendor's
-    /// binary package *and* the one holding the ITL, so this is a list (ADR-0029). Every one of
+    /// binary package *and* the one holding the ITL, so this is a list (ADR-0016). Every one of
     /// them is verified before any of them is used.
     sources: Vec<Download>,
     /// What has to happen to the downloaded bytes before they are a package artifact.
@@ -338,7 +338,7 @@ struct Plan {
     /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
-    /// For a **wrapped** agent it is now the `type` alone (ADR-0015): the Client's kind knows the
+    /// For a **wrapped** agent it is now the `type` alone (ADR-0010): the Client's kind knows the
     /// program's name, where it sits in the tree, and how it is invoked, so this tool no longer
     /// dictates a line for a host to transcribe. What it used to name lives in that agent's
     /// artifact document under `docs/artifacts/`, which the kind's own tests pin — the two ends of
@@ -361,11 +361,11 @@ enum ChecksumSource {
     BareDigest { url: String },
     /// The digest is already known — read out of a repository index rather than a sidecar. Icinga
     /// signs its repositories with GPG instead of publishing per-file checksums, so the `SHA256:`
-    /// field of the `Packages` index is where its hash comes from (ADR-0029).
+    /// field of the `Packages` index is where its hash comes from (ADR-0016).
     Known { sha256: String },
     /// No digest is published at all, and the file signs itself: an Authenticode-signed Windows
     /// artifact, verified against its own contents and **pinned to the publisher** named here
-    /// (ADR-0029). Stronger than a digest from the same server, which an attacker holding that
+    /// (ADR-0016). Stronger than a digest from the same server, which an attacker holding that
     /// server could rewrite along with the file.
     Publisher { expected: &'static str },
 }
@@ -373,17 +373,17 @@ enum ChecksumSource {
 /// What happens between the download and the artifact.
 enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
-    /// verifies is the hash on the release page (ADR-0019).
+    /// verifies is the hash on the release page (ADR-0018).
     AsPublished,
-    /// Extract the AppImage and repack the tree deterministically (ADR-0028) — the one case where
+    /// Extract the AppImage and repack the tree deterministically (ADR-0015) — the one case where
     /// upstream publishes no archive a Client can install.
     RepackAppImage { wrapper: String },
-    /// Unpack the Windows MSI's payload into the same normalised shape and pack that (ADR-0029).
+    /// Unpack the Windows MSI's payload into the same normalised shape and pack that (ADR-0016).
     /// No libraries are gathered: the payload already carries its DLLs beside the executable,
     /// which is where Windows looks first.
     RepackMsi { wrapper: String },
     /// Unpack the vendor's Debian packages into one normalised, link-free tree and pack that
-    /// (ADR-0029): Icinga 2 publishes distribution packages and an MSI, and no portable tree.
+    /// (ADR-0016): Icinga 2 publishes distribution packages and an MSI, and no portable tree.
     ///
     /// `dependencies` is what the vendor package itself declares it needs. The tree bundles what
     /// `ldd` resolves on the build host, so a host missing one of them cannot produce a complete
@@ -400,7 +400,7 @@ enum Action {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     // reqwest is built with `rustls-no-provider`, which refuses to construct a TLS client until a
-    // process-wide provider exists (ADR-0012).
+    // process-wide provider exists (ADR-0023).
     opamp::tls::install_ring_provider();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -432,14 +432,14 @@ async fn run(cli: Cli) -> Result<(), String> {
     let available = plans(agent, &version, &assets, cli.distro.as_deref()).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
-        // the operator a trip to the release page: everything published before ADR-0023 carries
+        // the operator a trip to the release page: everything published before ADR-0029 carries
         // the old name and container, and a Set built from those fits no Client reporting the type
-        // `supervisor` anyway (ADR-0023).
+        // `supervisor` anyway (ADR-0029).
         let why = match agent {
             AgentKind::Supervisor => {
                 " — a release from before the rename publishes \
                  `opamp-fleet-client_<version>_<os>_<arch>.7z`, which is a package no Client of \
-                 this type installs (ADR-0023)"
+                 this type installs (ADR-0029)"
             }
             _ => "",
         };
@@ -489,7 +489,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             version = version
         );
         // Silent for an agent that has none — the Client's own configuration is its host's
-        // (ADR-0022), so there is nothing here to offer and nothing to apologise for.
+        // (ADR-0032), so there is nothing here to offer and nothing to apologise for.
         if !agent.default_configurations().is_empty() {
             eprintln!(
                 "  The default configuration ({}) is not uploaded either; an upload puts it there \
@@ -513,7 +513,7 @@ async fn run(cli: Cli) -> Result<(), String> {
 ///
 /// Each row is the vendor's own `libc6 (>= …)` floor for that build, read back as the systems it
 /// covers — glibc is backward compatible, so a floor is the whole of it and the distribution
-/// family is none of it (ADR-0029). The floors are Icinga's, from the `Depends` of the
+/// family is none of it (ADR-0016). The floors are Icinga's, from the `Depends` of the
 /// `icinga2-bin` each build publishes, and they are what this tool prints for real once the
 /// repository index has been read (`icinga2_plans`).
 ///
@@ -798,7 +798,7 @@ async fn plans(
         AgentKind::Telegraf => Ok(telegraf_plans(version)),
         AgentKind::Icinga2 => {
             // Omitted, it is *this host* — the only distribution it can build for, since the tree
-            // carries the libraries found here (ADR-0029). Asking a question with one possible
+            // carries the libraries found here (ADR-0016). Asking a question with one possible
             // answer would be theatre; stating which build is being made is not.
             let distro = match distro {
                 Some(distro) => {
@@ -829,7 +829,7 @@ async fn plans(
 ///
 /// The tree carries the libraries `ldd` finds *here*, so building bookworm's artifact on trixie
 /// would bundle trixie's — an artifact that runs on neither reliably. The check is the host's own
-/// `/etc/os-release`, and the answer is a container of the right distribution (ADR-0029).
+/// `/etc/os-release`, and the answer is a container of the right distribution (ADR-0016).
 fn same_distro(distro: &str) -> Result<(), String> {
     let codename = host_codename()?;
     if codename == distro {
@@ -862,14 +862,14 @@ const ICINGA_REPO: &str = "https://packages.icinga.com/debian";
 
 /// Where the *check plugins* come from. They are not Icinga's to publish — `monitoring-plugins` is
 /// its own project, packaged by the distribution — but an Icinga Agent without `check_disk` and its
-/// siblings can barely check anything, so the artifact carries them (ADR-0029's "(+ plugins)").
+/// siblings can barely check anything, so the artifact carries them (ADR-0016's "(+ plugins)").
 const DEBIAN_REPO: &str = "https://deb.debian.org/debian";
 
 /// What Icinga 2 offers for one distribution build, read out of that repository's own index.
 ///
 /// Two packages make one tree: `icinga2-bin` carries the daemon, `icinga2-common` the ITL. Their
 /// SHA-256 comes from the `Packages` index — Icinga signs repositories with GPG rather than
-/// publishing per-file checksums, and the index is where the digests live (ADR-0029).
+/// publishing per-file checksums, and the index is where the digests live (ADR-0016).
 ///
 /// Only `linux/amd64` for now, and deliberately: an artifact's reach is decided by the glibc of
 /// the host it was built on, so each build is its own act rather than a loop over architectures
@@ -931,7 +931,7 @@ async fn icinga2_plans(version: &str, distro: Option<&str>) -> Result<Vec<Plan>,
     dependencies.sort();
     dependencies.dedup();
     // The vendor's own statement about how old a libc may be. It is the artifact's reach, and it
-    // belongs in front of an operator before the rollout rather than after it (ADR-0029).
+    // belongs in front of an operator before the rollout rather than after it (ADR-0016).
     if let Some(floor) = floor {
         eprintln!("  this build needs glibc >= {floor} on every host it is rolled out to");
     }
@@ -949,7 +949,7 @@ async fn icinga2_plans(version: &str, distro: Option<&str>) -> Result<Vec<Plan>,
     Ok(plans)
 }
 
-/// Where Icinga publishes the Windows installer, and who signs it (ADR-0029).
+/// Where Icinga publishes the Windows installer, and who signs it (ADR-0016).
 const ICINGA_WINDOWS: &str = "https://packages.icinga.com/windows";
 const ICINGA_PUBLISHER: &str = "O=Icinga GmbH";
 
@@ -1143,7 +1143,7 @@ const SUPERVISOR_PLATFORMS: [(&str, &str); 5] = [
 ];
 
 /// This fleet's own Client, as its release publishes it: one `.tar.gz` per platform named
-/// `supervisor_<version>_<os>_<arch>` (ADR-0023), holding the binary under the name it is installed
+/// `supervisor_<version>_<os>_<arch>` (ADR-0029), holding the binary under the name it is installed
 /// as. Nothing is repacked — the artifact *is* the package, which is the point of packing the
 /// release with this project's own packer.
 ///
@@ -1174,7 +1174,7 @@ fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
             action: Action::AsPublished,
             out_name: name.clone(),
             // Not a `[[supervisor]]` block: a Client installs this one over itself, and what
-            // admits that is the consent in its own `supervisor.toml` (ADR-0021) — which
+            // admits that is the consent in its own `supervisor.toml` (ADR-0020) — which
             // names this very package by default, so most hosts need no line at all.
             block_hint: format!("[self_update] package = {package:?}  (the default)"),
         });
@@ -1207,7 +1207,7 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
 }
 
 /// GLPI publishes two self-contained builds: a portable zip for Windows, which travels as
-/// published, and an AppImage for Linux, which is repacked (ADR-0028). Everything else in the
+/// published, and an AppImage for Linux, which is repacked (ADR-0015). Everything else in the
 /// release is an installer for a machine to run, not an artifact a fleet installs.
 fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
     let sums: Option<String> = assets
@@ -1307,7 +1307,7 @@ fn telegraf_plans(version: &str) -> Vec<Plan> {
         .collect()
 }
 
-/// Upstream's platform words in this fleet's vocabulary (ADR-0020), or `None` for one this fleet
+/// Upstream's platform words in this fleet's vocabulary (ADR-0019), or `None` for one this fleet
 /// has no name for — an Agent reports `os.type` and `host.arch`, and a package entry no Agent can
 /// match is one nobody would ever be offered.
 fn normalize_os(os: &str) -> Option<String> {
@@ -1397,7 +1397,7 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
     Ok(artifact)
 }
 
-/// Verifies an Authenticode-signed file and that it was signed by `expected` (ADR-0029).
+/// Verifies an Authenticode-signed file and that it was signed by `expected` (ADR-0016).
 ///
 /// Two conditions, both required: the signature verifies against the file's own contents, and the
 /// signer's subject names the publisher this agent expects. What is deliberately *not* required is
@@ -1421,7 +1421,7 @@ fn verify_publisher(artifact: &Path, expected: &str) -> Result<String, String> {
         .map_err(|reason| format!("{}: {reason}", artifact.display()))?;
     eprintln!("  verified the signature of {signer}");
     // Said rather than glossed: the signature binds the bytes to a key, and this host cannot say
-    // which certificate authority vouches for that key (ADR-0029).
+    // which certificate authority vouches for that key (ADR-0016).
     eprintln!("  (the issuing chain is not validated on this host)");
     Ok(signer)
 }
@@ -1432,7 +1432,7 @@ fn verify_publisher(artifact: &Path, expected: &str) -> Result<String, String> {
 /// Two conditions, both required: at least one signature verified against the file's contents, and
 /// the signer's subject names the expected publisher. Note what is *not* read: the tool's own
 /// overall "Succeeded/Failed", which says Failed on a host without Authenticode roots even when the
-/// signature itself is sound (ADR-0029).
+/// signature itself is sound (ADR-0016).
 fn publisher_verdict(report: &str, expected: &str) -> Result<String, String> {
     let verified = report
         .lines()
@@ -1463,9 +1463,9 @@ fn publisher_verdict(report: &str, expected: &str) -> Result<String, String> {
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
 async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<String, String> {
     let urls = match source {
-        // Already read out of a repository index (ADR-0029) — there is nothing to fetch.
+        // Already read out of a repository index (ADR-0016) — there is nothing to fetch.
         ChecksumSource::Known { sha256 } => return Ok(sha256.clone()),
-        // Verified by its own signature instead, before this is ever reached (ADR-0029).
+        // Verified by its own signature instead, before this is ever reached (ADR-0016).
         ChecksumSource::Publisher { .. } => {
             return Err("this source is verified by its signature, not by a digest".to_string())
         }
@@ -1512,7 +1512,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
         .map(|(hash, _)| hash.trim().to_string())
 }
 
-/// Extracts the AppImage and packs the tree it holds (ADR-0028).
+/// Extracts the AppImage and packs the tree it holds (ADR-0015).
 ///
 /// The AppImage is upstream's only self-contained Linux build, and extracting it here is what
 /// spares every fleet host the FUSE dependency — or the re-extraction on every start that avoiding
@@ -1555,7 +1555,7 @@ fn repack_appimage(appimage: &Path, wrapper: &str, out: &Path) -> Result<(), Str
     let tree = staging.join("squashfs-root");
     // The desktop icon is a link to itself by another name, and the Debian packaging the AppImage
     // is built from leaves links pointing at files no tree carries. Neither survives a package
-    // (ADR-0019), and neither is missed.
+    // (ADR-0018), and neither is missed.
     let _ = std::fs::remove_file(tree.join(".DirIcon"));
     if !tree.join("AppRun").exists() {
         return Err("the extracted tree has no AppRun".to_string());
@@ -1566,7 +1566,7 @@ fn repack_appimage(appimage: &Path, wrapper: &str, out: &Path) -> Result<(), Str
     Ok(())
 }
 
-/// Turns the Windows MSI's payload into the same normalised tree the Linux artifact has (ADR-0029).
+/// Turns the Windows MSI's payload into the same normalised tree the Linux artifact has (ADR-0016).
 ///
 /// Simpler than its Debian counterpart in two ways, and both are properties of the payload rather
 /// than decisions taken here: the DLLs already sit beside `icinga2.exe`, which is the first place
@@ -1651,7 +1651,7 @@ fn find_below(root: &Path, name: &str, dir: bool) -> Option<PathBuf> {
     None
 }
 
-/// Turns the vendor's Debian packages into one normalised, link-free tree (ADR-0029).
+/// Turns the vendor's Debian packages into one normalised, link-free tree (ADR-0016).
 ///
 /// The layout is normalised rather than kept, so that **one** `program_path` serves every
 /// distribution: Debian puts the binary under `/usr/lib/<triplet>/icinga2/sbin` and RHEL under
@@ -1661,7 +1661,7 @@ fn find_below(root: &Path, name: &str, dir: bool) -> Option<PathBuf> {
 ///
 /// Left out on purpose: `/etc/icinga2` (the fleet delivers configuration), the systemd unit and
 /// init script, and the `prepare-dirs`/`safe-reload` helpers, which need a `nagios` account that a
-/// fleet-managed host does not have — the Supervisor does that work instead (ADR-0029).
+/// fleet-managed host does not have — the Supervisor does that work instead (ADR-0016).
 fn repack_debs(
     debs: &[PathBuf],
     wrapper: &str,
@@ -1696,7 +1696,7 @@ fn repack_debs(
             .map_err(|e| format!("cannot create {}: {e}", tree.join(dir).display()))?;
     }
     // The real binary, not `/usr/sbin/icinga2` — that is a shell wrapper, and what the Supervisor
-    // spawns has to be the process it then watches (ADR-0028's lesson).
+    // spawns has to be the process it then watches (ADR-0015's lesson).
     let binary = find_file(&extracted.join("usr/lib"), "icinga2")?;
     copy_file(&binary, &tree.join("sbin/icinga2"))?;
     copy_dir(
@@ -1716,7 +1716,7 @@ fn repack_debs(
         }
     }
     // Repacking is redistribution, so the vendor's copyright files travel — and only those; the
-    // changelogs are weight nobody unpacks on a monitored host (ADR-0029).
+    // changelogs are weight nobody unpacks on a monitored host (ADR-0016).
     for package in ["icinga2-bin", "icinga2-common"] {
         let copyright = extracted
             .join("usr/share/doc")
@@ -1830,7 +1830,7 @@ fn winning_alternatives(script: &str) -> Vec<(String, String)> {
 /// Those two cannot travel: a libc without its matching loader does not work, and with it the
 /// program would have to *be* the loader, which a Supervisor's program path cannot express. What
 /// follows is the artifact's reach — it runs where the glibc is at least as new as this host's
-/// (ADR-0029) — and the Supervisor points `LD_LIBRARY_PATH` at what lands here, which wins over
+/// (ADR-0016) — and the Supervisor points `LD_LIBRARY_PATH` at what lands here, which wins over
 /// the binary's own RUNPATH.
 fn bundle_libraries(
     programs: &[PathBuf],
@@ -1918,7 +1918,7 @@ fn bundle_one(program: &Path, lib_dir: &Path, dependencies: &[String]) -> Result
             continue;
         }
         // Resolved, so a `.so.1` symlink becomes the file it points at: the Client refuses an
-        // archive that carries a link at all (ADR-0019).
+        // archive that carries a link at all (ADR-0018).
         copy_file(Path::new(path), &target)?;
         bundled += 1;
     }
@@ -1946,7 +1946,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Copies a directory, resolving links into the files they name — the tree must carry none
-/// (ADR-0019).
+/// (ADR-0018).
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(from)
         .map_err(|e| format!("cannot read {}: {e}", from.display()))?
@@ -1972,7 +1972,7 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
 /// and order are therefore fixed, exactly as `opamp-package-sign pack` fixes them for one file.
 ///
-/// Links are resolved rather than carried because a tree package refuses them (ADR-0019): what a
+/// Links are resolved rather than carried because a tree package refuses them (ADR-0018): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link
 /// pointing at nothing is dropped.
 fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
@@ -2097,8 +2097,8 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
 // ── The Server ──────────────────────────────────────────────────────────────
 
 /// Creates the Set if it is not there and stores this platform's artifact as its entry
-/// (ADR-0020). Nothing is distributed by either call: a Set reaches an Agent only through a
-/// rollout act (ADR-0027), which stays the operator's.
+/// (ADR-0019). Nothing is distributed by either call: a Set reaches an Agent only through a
+/// rollout act (ADR-0014), which stays the operator's.
 async fn upload(
     server: &str,
     service_name: &str,
@@ -2121,7 +2121,7 @@ async fn upload(
     expect_ok(response, &entry).await?;
     eprintln!(
         "  stored as the {}/{} entry — and it reaches nobody yet: a package aims at nothing by \
-         itself (ADR-0030). Put it in a deployment when it should reach hosts:\n    \
+         itself (ADR-0021). Put it in a deployment when it should reach hosts:\n    \
          curl -X PUT <server>/api/v1/deployments/<ring>/packages/{}/{}",
         plan.os, plan.arch, service_name, version
     );
@@ -2137,7 +2137,7 @@ async fn upload(
 ///
 /// Two rules keep it from being a surprise. **An existing Configuration is never touched** — the
 /// name is asked for first, and one that answers is left exactly as the operator left it, edits and
-/// all. And **nothing is distributed**: saving only saves (ADR-0027), so the default reaches no
+/// all. And **nothing is distributed**: saving only saves (ADR-0014), so the default reaches no
 /// Agent until an operator reads it and presses the rollout. That matters here, because these
 /// bodies are starting points with example values in them — a parent host to correct, a plugin
 /// path to confirm.
@@ -2202,8 +2202,8 @@ async fn put_json(url: &str, body: String) -> Result<(), String> {
 /// Why an upload never came back with a status.
 ///
 /// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
-/// created, a Set already assigned and therefore immutable (ADR-0027), a store at its ceiling
-/// (ADR-0019). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
+/// created, a Set already assigned and therefore immutable (ADR-0014), a store at its ceiling
+/// (ADR-0018). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
 /// them back — HTTP's own remedy for exactly this, which this client does not speak — that
 /// response races the upload, the connection resets, and what arrives here is a transport error
 /// carrying no status at all. Reporting it as "cannot reach" would name the one thing that is not
@@ -2255,7 +2255,7 @@ async fn expect_ok(response: reqwest::Response, url: &str) -> Result<(), String>
 
 fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        // TLS 1.3 alone, as every connection of this project (ADR-0038).
+        // TLS 1.3 alone, as every connection of this project (ADR-0023).
         .tls_version_min(reqwest::tls::Version::TLS_1_3)
         // Release hosts redirect to their CDN, so redirects are followed — but never to http.
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -2388,7 +2388,7 @@ mod tests {
     /// versions — "Debian" alone still leaves a RHEL 8 or Ubuntu 18.04 operator guessing — both
     /// platforms are offered, and no build-host codename appears. That last one is the defect this
     /// test exists for: a line that named the container was read as the reach, and left every Red
-    /// Hat host looking unserved (ADR-0029).
+    /// Hat host looking unserved (ADR-0016).
     #[test]
     fn icinga_2s_line_is_the_reach_of_the_host_it_is_read_on() {
         for (codename, _) in super::ICINGA2_REACH {
@@ -2463,7 +2463,7 @@ mod tests {
         }
     }
 
-    /// ADR-0029: the Windows artifact publishes no digest, so what stands in for one is its own
+    /// ADR-0016: the Windows artifact publishes no digest, so what stands in for one is its own
     /// signature — and the verdict is read from the two things that matter, not from the tool's
     /// overall result, which says `Failed` on a Linux host for want of Authenticode roots even when
     /// the signature is sound. The fixtures below are that real output, abbreviated.
@@ -2558,7 +2558,7 @@ echo done
         assert!(super::winning_alternatives("echo nothing to do").is_empty());
     }
 
-    /// ADR-0029: the digests come out of the repository's own index, because Icinga signs
+    /// ADR-0016: the digests come out of the repository's own index, because Icinga signs
     /// repositories with GPG instead of publishing per-file checksums. The parse has to find both
     /// packages of one version among the many versions a pool index carries.
     #[test]
@@ -2601,7 +2601,7 @@ SHA256: cccc
         // The older version is still in the index and must not be picked by accident.
         assert_eq!(find("icinga2-bin", "2.16.3-").sha256, "bbbb");
 
-        // The vendor's own statement of how old a libc may be: the artifact's reach (ADR-0029).
+        // The vendor's own statement of how old a libc may be: the artifact's reach (ADR-0016).
         assert_eq!(
             super::libc_floor(&find("icinga2-bin", "2.16.4-").depends).as_deref(),
             Some("2.38")
@@ -2828,7 +2828,7 @@ SHA256: cccc
         );
     }
 
-    /// This project's own release is fetched like any other agent's (ADR-0023): the `.tar.gz` per
+    /// This project's own release is fetched like any other agent's (ADR-0029): the `.tar.gz` per
     /// platform is the package, the installers beside it are not, and the one `SHA256SUMS` the
     /// publish job writes is what every artifact is verified against.
     #[test]
@@ -2894,7 +2894,7 @@ SHA256: cccc
             );
         }
 
-        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0022).
+        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0032).
         assert!(AgentKind::Supervisor.default_configurations().is_empty());
     }
 
@@ -2923,7 +2923,7 @@ SHA256: cccc
 
     /// Icinga 2's Windows artifact, which is the half of its plan that needs no repository index
     /// — so it is the half a test can state. The MSI carries no digest of its own, so it is
-    /// verified by its publisher instead (ADR-0029), and the block is the kind alone (ADR-0029).
+    /// verified by its publisher instead (ADR-0016), and the block is the kind alone (ADR-0016).
     ///
     /// The packing half of `docs/artifacts/icinga2.md`; its client half is in
     /// `crates/fleet-agent/src/supervisor/icinga2.rs`.
@@ -3001,7 +3001,7 @@ SHA256: cccc
         assert!(url("linux", "amd64").ends_with("telegraf-1.39.3_linux_amd64.tar.gz"));
         assert!(url("windows", "amd64").ends_with("_windows_amd64.zip"));
         assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
-        // The block is the kind and nothing else now (ADR-0028): the program's name per platform
+        // The block is the kind and nothing else now (ADR-0015): the program's name per platform
         // is the Client's to know, and `docs/artifacts/telegraf.md` is where the two sides meet.
         assert_eq!(
             find("windows", "amd64").block_hint,
@@ -3081,7 +3081,7 @@ SHA256: cccc
         );
     }
 
-    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0027), an
+    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0014), an
     /// unknown identity, a full store — leaves the operator with a transport error and no status:
     /// the refusal races a body already in flight and loses. What the operator must still be told
     /// is *why the Server said no*, never "cannot reach" about a Server that answered.
@@ -3093,7 +3093,7 @@ SHA256: cccc
     async fn a_refusal_lost_with_the_upload_is_asked_for_again() {
         use std::io::Write;
 
-        // What `main` does before anything builds a client (ADR-0012).
+        // What `main` does before anything builds a client (ADR-0023).
         opamp::tls::install_ring_provider();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3174,7 +3174,7 @@ SHA256: cccc
     }
 
     /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
-    /// is storable: the name follows the ADR-0014 grammar the Server enforces (which admits no dot,
+    /// is storable: the name follows the ADR-0028 grammar the Server enforces (which admits no dot,
     /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
     /// aimed at something — by Selector or by Agent type — rather than at the whole fleet.
     ///
@@ -3188,9 +3188,9 @@ SHA256: cccc
             let service_name = agent.source().service_name;
             if matches!(agent, AgentKind::Supervisor) {
                 // The one package nothing supervises. A Client reads `supervisor.toml` on its own
-                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0022), so
+                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0032), so
                 // there is no body this tool could put on a Server — and an offer needs none: the
-                // consent that admits this package is already in that file (ADR-0021).
+                // consent that admits this package is already in that file (ADR-0020).
                 assert!(
                     defaults.is_empty(),
                     "{service_name} is the Client itself; a Configuration for it would be a \
@@ -3229,7 +3229,7 @@ SHA256: cccc
         assert_eq!(
             names,
             vec!["icinga2-conf", "icinga2-zones"],
-            "Icinga 2 reads a root file that includes the other by name (ADR-0029), so both travel"
+            "Icinga 2 reads a root file that includes the other by name (ADR-0016), so both travel"
         );
     }
 

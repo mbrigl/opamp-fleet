@@ -1,4 +1,4 @@
-//! Server-set labels on the filesystem (ADR-0026): the default adapter behind
+//! Server-set labels on the filesystem (ADR-0013): the default adapter behind
 //! [`LabelStore`](crate::labels::LabelStore).
 
 use std::collections::{BTreeMap, HashMap};
@@ -20,7 +20,7 @@ pub struct FsLabelStore {
 impl FsLabelStore {
     /// Opens the store, creating the directory and loading every persisted set. A file that does
     /// not parse fails startup rather than being skipped: a rollout channel that silently vanished is
-    /// worse than one that refuses to start (ADR-0011's principle).
+    /// worse than one that refuses to start (ADR-0025's principle).
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;

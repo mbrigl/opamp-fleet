@@ -1,4 +1,4 @@
-//! Connection-settings rotation end to end (ADR-0018): the real Server armed with an offer, the
+//! Connection-settings rotation end to end (ADR-0027): the real Server armed with an offer, the
 //! real Client binary as a single self-Agent. The Client verifies the offer by actually
 //! connecting, persists it, reconnects, and reports `APPLIED`; the Server, seeing the reported
 //! hash match, stops offering. A restarted Client is not re-offered what it already runs.
@@ -67,7 +67,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
-/// Verifies: ADR-0060
+/// Verifies: ADR-0027
 #[tokio::test]
 async fn an_offer_is_verified_persisted_and_reported_applied() {
     let (addr, state, dir) = spawn_armed_server().await;

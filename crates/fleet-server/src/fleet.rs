@@ -1,5 +1,5 @@
 //! In-memory fleet state and the OpAMP control loop, keyed by Instance UID — never by the
-//! connection that carried a message (ADR-0009).
+//! connection that carried a message (ADR-0034).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -41,13 +41,13 @@ pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 /// caller can fill by uploading under many names (see `server.toml`, `max_total_package_bytes`).
 pub const DEFAULT_MAX_TOTAL_PACKAGE_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
-/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0026).
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0013).
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 
 /// The most Agent records the fleet holds when nothing configures a ceiling (see `server.toml`,
 /// `max_agents`). Generous enough that a real fleet never meets it, low enough that the in-memory
 /// map and the per-Agent files it mirrors to disk stay bounded when an unauthenticated endpoint is
-/// flooded with fresh, self-asserted UIDs (ADR-0017).
+/// flooded with fresh, self-asserted UIDs (ADR-0026).
 pub const DEFAULT_MAX_AGENTS: usize = 100_000;
 
 /// The Capability Set this Server declares (see docs/CONFORMANCE.md).
@@ -56,7 +56,7 @@ pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::AcceptsEffectiveConfig as u64;
 
 /// Identifies one WebSocket connection for the duplicate detection the Baseline asks of the
-/// Server. Never a routing key — Agents are routed by `instance_uid` alone (ADR-0009); this only
+/// Server. Never a routing key — Agents are routed by `instance_uid` alone (ADR-0034); this only
 /// answers "is this identity already alive on *another* connection?".
 pub type ConnId = u64;
 
@@ -102,26 +102,26 @@ pub struct AgentRecord {
     pub restart_pending: bool,
     /// The Agent's available components — hash-only until the full map was demanded and arrived.
     pub available_components: Option<AvailableComponents>,
-    /// The outcome of the last connection-settings offer this Agent reported (ADR-0018); its
+    /// The outcome of the last connection-settings offer this Agent reported (ADR-0027); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
-    /// The package statuses this Agent last reported (ADR-0019); the
+    /// The package statuses this Agent last reported (ADR-0018); the
     /// `server_provided_all_packages_hash` inside is what gates re-offering packages.
     pub package_statuses: Option<PackageStatuses>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
-    /// The operator's labels for this Agent (ADR-0026), mirrored from the persisted store so that
+    /// The operator's labels for this Agent (ADR-0013), mirrored from the persisted store so that
     /// every place a Selector is matched sees them without a second lookup. The store is the
     /// authority; this copy is written when the labels are and when the record is created.
     pub labels: BTreeMap<String, String>,
-    /// The Configurations the operator rolled out to this Agent (ADR-0027): name → the pinned
+    /// The Configurations the operator rolled out to this Agent (ADR-0014): name → the pinned
     /// revision's hash in the `ConfigStore`'s retained revisions. **Every config offer is
     /// composed from this**; matching only proposes. Written by the rollout acts, persisted like
-    /// `restart_pending` — operator intent that survives a restart (ADR-0026).
+    /// `restart_pending` — operator intent that survives a restart (ADR-0013).
     pub config_assignments: BTreeMap<String, String>,
-    /// What the operator rolled out to this Agent (ADR-0027, ADR-0030): the Deployment the act
+    /// What the operator rolled out to this Agent (ADR-0014, ADR-0021): the Deployment the act
     /// named and the Package it pinned. `None` is what it says — nothing has been rolled out —
     /// and there is exactly one, because an Agent belongs to at most one Deployment and a
     /// Deployment holds one Package per Agent type. The Baseline's "one top-level package" is
@@ -132,7 +132,7 @@ pub struct AgentRecord {
 /// One Agent's package assignment: the channel it was released through, and the release itself.
 ///
 /// The Deployment is carried alongside the Package rather than derived from it, because it is what
-/// supplies the signature the offer travels with (ADR-0030 point 14) — and because a Deployment
+/// supplies the signature the offer travels with (ADR-0021 point 14) — and because a Deployment
 /// re-aimed after the act must not change what an Agent was already given.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageAssignment {
@@ -142,7 +142,7 @@ pub struct PackageAssignment {
 
 impl AgentRecord {
     /// What a Selector is matched against: what the Agent reported, plus the labels that do not
-    /// collide with it (ADR-0026).
+    /// collide with it (ADR-0013).
     ///
     /// Borrowed when there are no labels, which is the overwhelming majority of Agents — labelling
     /// should cost the fleet view nothing on the hosts nobody has labelled.
@@ -159,7 +159,7 @@ impl AgentRecord {
         self.package_assignment.as_ref().map(|a| &a.package)
     }
 
-    /// What this Agent last reported as installed, per package name (ADR-0027): the versions
+    /// What this Agent last reported as installed, per package name (ADR-0014): the versions
     /// the upgrade test measures a Package against. A package reported with an empty
     /// `agent_has_version` — offered, not yet installed — carries no version and is left out, so
     /// it reads as "nothing installed under that name" rather than as an unorderable value.
@@ -172,7 +172,7 @@ impl AgentRecord {
             .collect()
     }
 
-    /// What of this record survives a restart (ADR-0026): everything report-derived or
+    /// What of this record survives a restart (ADR-0013): everything report-derived or
     /// operator-queued, never what a live connection knows.
     fn to_persisted(&self) -> PersistedAgent {
         PersistedAgent {
@@ -194,7 +194,7 @@ impl AgentRecord {
     }
 
     /// A restored record is **disconnected with no owning connection** until live evidence says
-    /// otherwise — connectedness is runtime-only (ADR-0026). The labels mirror is filled from
+    /// otherwise — connectedness is runtime-only (ADR-0013). The labels mirror is filled from
     /// the `LabelStore`, which stays their single authority.
     fn from_persisted(persisted: PersistedAgent, labels: BTreeMap<String, String>) -> AgentRecord {
         AgentRecord {
@@ -228,7 +228,7 @@ pub enum RestartError {
     NoCapability,
 }
 
-/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0026).
+/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0013).
 pub enum ForgetError {
     /// No Agent of that identity is known.
     UnknownAgent,
@@ -238,7 +238,7 @@ pub enum ForgetError {
     StillReporting,
 }
 
-/// Why a rollout act (ADR-0027) was refused.
+/// Why a rollout act (ADR-0014) was refused.
 #[derive(Debug)]
 pub enum RolloutError {
     /// No Agent of that identity is known.
@@ -253,7 +253,7 @@ pub enum RolloutError {
     Storage(String),
 }
 
-/// What one per-Agent rollout act releases (ADR-0027).
+/// What one per-Agent rollout act releases (ADR-0014).
 pub enum RolloutTarget {
     /// Everything currently waiting for the Agent: every candidate Configuration, and the
     /// candidate Package of the Deployment that claims it.
@@ -261,7 +261,7 @@ pub enum RolloutTarget {
     /// One Configuration by name.
     Configuration(String),
     /// One Deployment by name — the one that claims the Agent; the act releases the Package it
-    /// holds for the Agent's type (ADR-0030).
+    /// holds for the Agent's type (ADR-0021).
     Deployment(String),
 }
 
@@ -275,18 +275,18 @@ pub struct Processed {
     pub disconnected: bool,
 }
 
-/// The one `OpAMPConnectionSettings` this Server offers (ADR-0018), precompiled from the
+/// The one `OpAMPConnectionSettings` this Server offers (ADR-0027), precompiled from the
 /// `[connection_offer]` section with the hash that gates its delivery.
 pub struct ConnectionOffer {
     settings: OpAmpConnectionSettings,
 }
 
-/// The own-telemetry destinations this Server offers (ADR-0025), precompiled from
+/// The own-telemetry destinations this Server offers (ADR-0022), precompiled from
 /// `[telemetry_offer]`. Part of the same `ConnectionSettingsOffers` message the OpAMP settings
 /// ride, and hashed with them: one offer, one hash, one acknowledgement.
 ///
 /// A field here is `Some` for every signal the section mentions, **including one it withdraws** —
-/// a destination whose endpoint is empty (ADR-0025). That is why a withdrawal counts as something
+/// a destination whose endpoint is empty (ADR-0022). That is why a withdrawal counts as something
 /// to offer in [`is_empty`](Self::is_empty): it has to reach the Agent to take effect, and a
 /// Server that has it to say declares `OffersConnectionSettings` for it like any other offer.
 #[derive(Default, Clone)]
@@ -304,7 +304,7 @@ impl TelemetryOffer {
 
 impl ConnectionOffer {
     /// The offer of `settings`. Its hash is computed over the whole `ConnectionSettingsOffers` at
-    /// send time, because an offer carries telemetry destinations too (ADR-0025) and the Agent
+    /// send time, because an offer carries telemetry destinations too (ADR-0022) and the Agent
     /// acknowledges the message rather than any one part of it.
     pub fn new(settings: OpAmpConnectionSettings) -> Self {
         ConnectionOffer { settings }
@@ -312,14 +312,14 @@ impl ConnectionOffer {
 }
 
 /// The wall clock's port (ADR-0006): when an Agent was last heard from, and how long ago that
-/// is (ADR-0026). The system clock ([`SystemClock`](crate::clock::SystemClock)) is what the
+/// is (ADR-0013). The system clock ([`SystemClock`](crate::clock::SystemClock)) is what the
 /// composition root wires.
 pub trait Clock: Send + Sync {
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> u64;
 }
 
-/// The CSR flow's port (ADR-0017): what signs an Agent's certificate signing request. The local
+/// The CSR flow's port (ADR-0026): what signs an Agent's certificate signing request. The local
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
@@ -329,21 +329,21 @@ pub trait CertificateSigner: Send + Sync {
     /// Returns an error when the request does not parse or cannot be signed.
     fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String>;
 
-    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0059
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0026
     /// clause 27); `Ok(None)` when it carries none.
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not hold.
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String>;
 
-    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0050).
+    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0026).
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a request that claims another identity.
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
 }
 
-/// Why the package store refuses an upload: its whole-store ceiling (ADR-0019).
+/// Why the package store refuses an upload: its whole-store ceiling (ADR-0018).
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreFull {
     /// The store is already at its ceiling.
@@ -368,7 +368,7 @@ impl std::fmt::Display for StoreFull {
     }
 }
 
-/// The package store plus the base URL each `download_url` is built from (ADR-0019).
+/// The package store plus the base URL each `download_url` is built from (ADR-0018).
 pub struct PackageOffering {
     store: PackageStore,
     deployments: DeploymentStore,
@@ -378,7 +378,7 @@ pub struct PackageOffering {
 impl PackageOffering {
     /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
     /// against its own endpoint — which is the Agent plane, where the download is served
-    /// (ADR-0012), behind the same handshake as `/v1/opamp` (ADR-0059 clause 23).
+    /// (ADR-0023), behind the same handshake as `/v1/opamp` (ADR-0026 clause 23).
     pub fn with_deployments(
         store: PackageStore,
         deployments: DeploymentStore,
@@ -404,68 +404,68 @@ impl PackageOffering {
 /// WebSocket loops subscribe to.
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
-    /// Where Agent records survive a restart (ADR-0026) — the port, never a concrete backend:
+    /// Where Agent records survive a restart (ADR-0013) — the port, never a concrete backend:
     /// the filesystem adapter is merely what [`AppState::new`] wires by default.
     agent_store: Box<dyn AgentStore>,
     /// Each persisted record's durable digest as last written — the dirty check that keeps a
-    /// heartbeat from reaching any storage backend (ADR-0026). Locked strictly after `fleet`.
+    /// heartbeat from reaching any storage backend (ADR-0013). Locked strictly after `fleet`.
     written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     configs: ConfigStore,
-    /// The operator's labels on Agents (ADR-0026), which join what a Selector matches. Persisted
+    /// The operator's labels on Agents (ADR-0013), which join what a Selector matches. Persisted
     /// beside the Configurations, because they are the same kind of thing: intent about the fleet
     /// that has to be there after a restart.
     labels: Box<dyn LabelStore>,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
-    /// The connection settings offered to the fleet (ADR-0018); `None` offers nothing and leaves
+    /// The connection settings offered to the fleet (ADR-0027); `None` offers nothing and leaves
     /// `OffersConnectionSettings` undeclared.
     connection_offer: Option<ConnectionOffer>,
-    /// The packages offered to the fleet (ADR-0019); `None` offers nothing and leaves
+    /// The packages offered to the fleet (ADR-0018); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
-    /// The authority that signs Agent CSRs (ADR-0017); `None` signs nothing and leaves
+    /// The authority that signs Agent CSRs (ADR-0026); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
-    /// The enrolment window and its queue (ADR-0059); `None` while `[enrolment]` is not set, and no
+    /// The enrolment window and its queue (ADR-0026); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
-    /// What the client CA signed and what is revoked (ADR-0065); `None` only where a test serves
+    /// What the client CA signed and what is revoked (ADR-0031); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
-    /// The audit record every security decision goes to (ADR-0063); `None` only in tests.
+    /// The audit record every security decision goes to (ADR-0030); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
-    /// How often an admitted peer may be heard (ADR-0066); `None` only in tests.
+    /// How often an admitted peer may be heard (ADR-0023); `None` only in tests.
     agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
-    /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
+    /// Where Agents send their own telemetry (ADR-0022); empty offers no destination.
     telemetry_offer: TelemetryOffer,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0019) — a program, not a
+    /// The largest package artifact the REST API accepts on upload (ADR-0018) — a program, not a
     /// message, so it is bounded separately and far more generously.
     max_package_size: usize,
     /// The total size of all stored artifacts the REST API keeps before it refuses a new upload
-    /// (ADR-0019): what bounds the store — and so the disk — against many uploads under distinct
+    /// (ADR-0018): what bounds the store — and so the disk — against many uploads under distinct
     /// names, where `max_package_size` bounds only one.
     max_total_package_bytes: u64,
     /// How long an Agent that promised to report periodically may be silent before the fleet view
-    /// calls it stale (ADR-0026). Overridden by an offered heartbeat interval, which is the period
+    /// calls it stale (ADR-0013). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
     stale_after: Duration,
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
     /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
     /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
-    /// disk (a self-asserted UID is free to mint, ADR-0017). Existing Agents keep reporting; only
+    /// disk (a self-asserted UID is free to mint, ADR-0026). Existing Agents keep reporting; only
     /// growth past the ceiling is refused. The real defence against a flood is admission by client
-    /// certificate (ADR-0059); this is the backstop that bounds what an admitted peer can do.
+    /// certificate (ADR-0026); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
 }
 
 impl AppState {
-    /// Builds the state on any backend for the Agent records, the labels (ADR-0026) and the
-    /// Configurations (ADR-0027). The ports are the only thing the fleet logic knows about that
+    /// Builds the state on any backend for the Agent records, the labels (ADR-0013) and the
+    /// Configurations (ADR-0014). The ports are the only thing the fleet logic knows about that
     /// persistence, so a database or an external store is an implementation of [`AgentStore`],
     /// [`LabelStore`] or [`ConfigBackend`] plus one wiring call.
     pub fn with_stores(
@@ -483,7 +483,7 @@ impl AppState {
             );
         }
         // Every restored Agent comes back disconnected — what it last reported is knowledge,
-        // whether it is still there is not (ADR-0026) — and in the channel its labels put it in.
+        // whether it is still there is not (ADR-0013) — and in the channel its labels put it in.
         //
         // A record carrying no assignments is simply one nothing has been rolled out to. There is
         // no seed to run: the store this Server would have migrated from is not supported, so an
@@ -536,7 +536,7 @@ impl AppState {
         self.max_message_size
     }
 
-    /// Sets the largest package artifact the REST API accepts on upload (ADR-0019).
+    /// Sets the largest package artifact the REST API accepts on upload (ADR-0018).
     #[must_use]
     pub fn with_max_package_size(mut self, limit: usize) -> Self {
         self.max_package_size = limit;
@@ -549,7 +549,7 @@ impl AppState {
     }
 
     /// Sets the whole-store size limit the REST API enforces before accepting a new upload
-    /// (ADR-0019).
+    /// (ADR-0018).
     #[must_use]
     pub fn with_max_total_package_bytes(mut self, limit: u64) -> Self {
         self.max_total_package_bytes = limit;
@@ -569,7 +569,7 @@ impl AppState {
             .map_or(0, |p| p.store().total_bytes())
     }
 
-    /// Whether the package store takes another upload at all (ADR-0019): one already at its
+    /// Whether the package store takes another upload at all (ADR-0018): one already at its
     /// ceiling takes nothing more. Asked before an upload is streamed, so a gibibyte that would only
     /// be rejected is never read.
     ///
@@ -583,7 +583,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Whether an uploaded artifact of `size` bytes may be committed (ADR-0019): not when it would
+    /// Whether an uploaded artifact of `size` bytes may be committed (ADR-0018): not when it would
     /// take the store past its ceiling. With [`admit_upload`](Self::admit_upload) before the
     /// stream, this is what stops a caller filling the disk under distinct names. An upload still
     /// staged is not yet an artifact, so the store does not count it.
@@ -598,7 +598,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Arms the connection-settings offer (ADR-0018); with it the Server declares
+    /// Arms the connection-settings offer (ADR-0027); with it the Server declares
     /// `OffersConnectionSettings`.
     #[must_use]
     pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
@@ -606,7 +606,7 @@ impl AppState {
         self
     }
 
-    /// Sets how long a heartbeating Agent may be silent before it reads as stale (ADR-0026).
+    /// Sets how long a heartbeating Agent may be silent before it reads as stale (ADR-0013).
     #[must_use]
     pub fn with_stale_after(mut self, stale_after: Duration) -> Self {
         self.stale_after = stale_after;
@@ -614,7 +614,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk (ADR-0059 clause 14).
+    /// fresh UIDs to exhaust memory and disk (ADR-0026 clause 14).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -637,14 +637,14 @@ impl AppState {
         }
     }
 
-    /// Offers the fleet somewhere to send its own telemetry (ADR-0025).
+    /// Offers the fleet somewhere to send its own telemetry (ADR-0022).
     #[must_use]
     pub fn with_telemetry_offer(mut self, offer: TelemetryOffer) -> Self {
         self.telemetry_offer = offer;
         self
     }
 
-    /// Arms the CSR flow (ADR-0017); with it the Server declares
+    /// Arms the CSR flow (ADR-0026); with it the Server declares
     /// `AcceptsConnectionSettingsRequest` and signs the requests Agents send.
     #[must_use]
     pub fn with_client_ca(mut self, client_ca: Option<impl CertificateSigner + 'static>) -> Self {
@@ -652,7 +652,7 @@ impl AppState {
         self
     }
 
-    /// Arms enrolment (ADR-0059): a host with a bootstrap certificate may ask for its first one,
+    /// Arms enrolment (ADR-0026): a host with a bootstrap certificate may ask for its first one,
     /// and an operator decides.
     #[must_use]
     pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
@@ -660,7 +660,7 @@ impl AppState {
         self
     }
 
-    /// Arms the register and the revocation list (ADR-0065).
+    /// Arms the register and the revocation list (ADR-0031).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
@@ -672,7 +672,7 @@ impl AppState {
         self.revocations.as_ref()
     }
 
-    /// Arms the audit record (ADR-0063).
+    /// Arms the audit record (ADR-0030).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -684,7 +684,7 @@ impl AppState {
         self.audit.as_ref()
     }
 
-    /// Arms the rate limit on the Agent plane (ADR-0066).
+    /// Arms the rate limit on the Agent plane (ADR-0023).
     #[must_use]
     pub fn with_agent_rate(
         mut self,
@@ -700,7 +700,7 @@ impl AppState {
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
-    /// (ADR-0063 clause 6).
+    /// (ADR-0030 clause 6).
     fn audited(&self, entry: Entry) -> Result<(), String> {
         match &self.audit {
             Some(audit) => audit
@@ -717,8 +717,8 @@ impl AppState {
         }
     }
 
-    /// Records a certificate the client CA signed, before it is offered (ADR-0065 clause 2,
-    /// ADR-0063 clause 1).
+    /// Records a certificate the client CA signed, before it is offered (ADR-0031 clause 2,
+    /// ADR-0030 clause 1).
     fn record_issued(
         &self,
         signed: &Signed,
@@ -761,7 +761,7 @@ impl AppState {
         }
     }
 
-    /// What a CSR renews, and the host the new certificate is for (ADR-0059 clause 27). A renewal
+    /// What a CSR renews, and the host the new certificate is for (ADR-0026 clause 27). A renewal
     /// proof names the certificate whose key signed the new one — through a Gateway too — and the
     /// host carries on from it; without one, the certificate the connection presented is renewed.
     /// A certificate that names no host — one an operator provisioned — gets a host derived from
@@ -806,7 +806,7 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0059 clause 22).
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0026 clause 22).
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
@@ -816,14 +816,14 @@ impl AppState {
         let signer = self.client_ca.as_deref().ok_or_else(|| {
             DecisionError::Sign("this Server issues no client certificates".into())
         })?;
-        // A new host: its identity is minted here and carried by every renewal (ADR-0059 clause 7).
+        // A new host: its identity is minted here and carried by every renewal (ADR-0026 clause 7).
         let host = InstanceUid::default().to_string();
         enrolment.approve(id, signer, &host, &|signed, instance_uid| {
             self.record_issued(signed, instance_uid, None)
         })
     }
 
-    /// What an enrolment connection is told (ADR-0059 clause 21): the capabilities that say it may
+    /// What an enrolment connection is told (ADR-0026 clause 21): the capabilities that say it may
     /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
     /// connection-settings offer with no private key in it.
     pub fn enrolment_answer(
@@ -855,7 +855,7 @@ impl AppState {
         }
     }
 
-    /// Arms package delivery (ADR-0019); with a non-empty store the Server declares
+    /// Arms package delivery (ADR-0018); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
     pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
@@ -868,7 +868,7 @@ impl AppState {
         self.packages.as_ref().map(PackageOffering::store)
     }
 
-    /// Read access to the Deployment store, armed by the same `packages_dir` (ADR-0030).
+    /// Read access to the Deployment store, armed by the same `packages_dir` (ADR-0021).
     pub fn deployment_store(&self) -> Option<&DeploymentStore> {
         self.packages.as_ref().map(PackageOffering::deployments)
     }
@@ -879,7 +879,7 @@ impl AppState {
     /// declared one never hollow.
     fn capabilities(&self) -> u64 {
         let mut caps = SERVER_CAPABILITIES;
-        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0018 clause 3): the
+        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0027 clause 3): the
         // standing `[connection_offer]`, the own-telemetry destinations of `[telemetry_offer]`, and
         // the certificate a `[client_ca]` issues in answer to a CSR — which travels as an ordinary
         // offer. Keying the bit on the first alone left the other two exercising a capability this
@@ -917,7 +917,7 @@ impl AppState {
     }
 
     /// Creates a Configuration or replaces its saved revision, and persists it. **Saving only
-    /// saves** (ADR-0027): nothing is offered and no WebSocket loop wakes — every Agent keeps
+    /// saves** (ADR-0014): nothing is offered and no WebSocket loop wakes — every Agent keeps
     /// the revision its assignment pins, and the fleet view shows the newer save waiting.
     pub fn save_configuration(
         &self,
@@ -929,7 +929,7 @@ impl AppState {
         Ok(config)
     }
 
-    /// The Deployment claiming one Agent (ADR-0030), or the conflict that says why none does.
+    /// The Deployment claiming one Agent (ADR-0021), or the conflict that says why none does.
     fn deployment_of(&self, record: &AgentRecord) -> Result<Option<Deployment>, String> {
         let Some(store) = self.deployment_store() else {
             return Ok(None);
@@ -938,7 +938,7 @@ impl AppState {
         deployment_for(&all, record.effective_description().as_deref()).map(|found| found.cloned())
     }
 
-    /// One rollout act toward one Agent (ADR-0027): releases the target — a named Configuration,
+    /// One rollout act toward one Agent (ADR-0014): releases the target — a named Configuration,
     /// a named Deployment, or everything currently waiting — to it, pinning the content as of
     /// this press, and wakes the WebSocket loops so a connected Agent hears it now.
     pub fn rollout_to_agent(
@@ -974,7 +974,7 @@ impl AppState {
                 // Naming a Deployment is not a way past a conflict. An operator who names one has
                 // said which they mean, and refusing anyway is deliberate: otherwise the conflict
                 // is sidestepped for good instead of fixed, and the per-Agent path becomes the way
-                // into a state the fleet-wide one forbids (ADR-0030 point 16).
+                // into a state the fleet-wide one forbids (ADR-0021 point 16).
                 let claiming = self
                     .deployment_of(record)
                     .map_err(RolloutError::NotApplicable)?;
@@ -1059,7 +1059,7 @@ impl AppState {
         Ok(())
     }
 
-    /// The resource-level rollout act for a Configuration (ADR-0027 point 5): releases the saved
+    /// The resource-level rollout act for a Configuration (ADR-0014 point 5): releases the saved
     /// revision to **every Agent it currently fits and aims at** — a bulk write of the same
     /// per-Agent assignments — and returns how many Agents that was. An Agent that appears later
     /// waits for its own act (point 6).
@@ -1094,7 +1094,7 @@ impl AppState {
         Ok(assigned)
     }
 
-    /// The rollout act for a Deployment (ADR-0027 point 5, ADR-0030 point 15): releases it to
+    /// The rollout act for a Deployment (ADR-0014 point 5, ADR-0021 point 15): releases it to
     /// every Agent it claims, and returns how many Agents that was.
     ///
     /// An Agent some *other* Deployment also claims is skipped rather than counted — the conflict
@@ -1151,7 +1151,7 @@ impl AppState {
             return Err(RestartError::NoCapability);
         }
         record.restart_pending = true;
-        // Operator intent survives a Server restart like any other durable state (ADR-0026).
+        // Operator intent survives a Server restart like any other durable state (ADR-0013).
         self.persist_if_dirty(uid, record);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -1159,14 +1159,14 @@ impl AppState {
         Ok(())
     }
 
-    /// Replaces an Agent's labels (ADR-0026), which changes what Selectors match it.
+    /// Replaces an Agent's labels (ADR-0013), which changes what Selectors match it.
     ///
     /// A key the Agent already reports is **refused**, not applied: `os.type` and `host.arch`
-    /// choose which artifact it is offered (ADR-0020) and `service.name` decides which packages fit
-    /// it at all (ADR-0020), so a label that outranked them would let a slip here offer this Agent
+    /// choose which artifact it is offered (ADR-0019) and `service.name` decides which packages fit
+    /// it at all (ADR-0019), so a label that outranked them would let a slip here offer this Agent
     /// an artifact built for another machine. Labels annotate; they do not correct.
     ///
-    /// Since ADR-0027 a label move changes only what the fleet view **proposes**: the Agent's
+    /// Since ADR-0014 a label move changes only what the fleet view **proposes**: the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
     pub fn set_labels(
         &self,
@@ -1185,7 +1185,7 @@ impl AppState {
             .map_err(LabelError::Storage)?;
         record.labels = set;
         drop(fleet);
-        info!(agent = %uid, "labels set — candidates follow, nothing is distributed (ADR-0027)");
+        info!(agent = %uid, "labels set — candidates follow, nothing is distributed (ADR-0014)");
         Ok(())
     }
 
@@ -1195,7 +1195,7 @@ impl AppState {
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
-    /// answers "whom would this reach", now that it does not aim by itself (ADR-0030).
+    /// answers "whom would this reach", now that it does not aim by itself (ADR-0021).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let Some(store) = self.deployment_store() else {
@@ -1264,10 +1264,10 @@ impl AppState {
         reach
     }
 
-    /// Forgets everything this Server knows about one Agent (ADR-0026): the record is dropped and
+    /// Forgets everything this Server knows about one Agent (ADR-0013): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
     /// certificate revoked, since a certificate here proves fleet membership and its host, never
-    /// which Agent is speaking (ADR-0059 clause 7). A Client still running therefore reappears on its next
+    /// which Agent is speaking (ADR-0026 clause 7). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
@@ -1289,9 +1289,9 @@ impl AppState {
         }
         let removed = fleet.remove(uid);
         // Forgetting that left a stored record behind would be the "remembering under another
-        // name" ADR-0026 rejected — the record leaves the store with the row (ADR-0026).
+        // name" ADR-0013 rejected — the record leaves the store with the row (ADR-0013).
         self.unpersist(uid);
-        // A pinned revision only this Agent referenced is unreferenced now (ADR-0027).
+        // A pinned revision only this Agent referenced is unreferenced now (ADR-0014).
         if let Some(record) = removed {
             for name in record.config_assignments.keys() {
                 let referenced = referenced_hashes(&fleet, name);
@@ -1319,7 +1319,7 @@ impl AppState {
         Some(restart_command(uid, self.capabilities()))
     }
 
-    /// Deletes a Configuration and removes every assignment that referenced it (ADR-0027 point
+    /// Deletes a Configuration and removes every assignment that referenced it (ADR-0014 point
     /// 7); `false` when none of that name exists. That is **not inert** for an Agent that had it
     /// assigned: its composed map shrinks and it applies the map without the entry — only an
     /// Agent left assigned nothing keeps running what it runs (goal 9).
@@ -1340,7 +1340,7 @@ impl AppState {
     }
 
     /// Persists one record when — and only when — its durable content changed since it was last
-    /// written (ADR-0026). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// written (ADR-0013). `last_seen_ms` and `sequence_num` are outside the comparison and ride
     /// along on whatever write happens, so the common heartbeat reaches no storage backend at
     /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
@@ -1361,7 +1361,7 @@ impl AppState {
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
-    /// forgetting (ADR-0026, extended by ADR-0026) and of an identity reassignment.
+    /// forgetting (ADR-0013) and of an identity reassignment.
     fn unpersist(&self, uid: &InstanceUid) {
         if let Err(e) = self.agent_store.remove(uid) {
             warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
@@ -1370,7 +1370,7 @@ impl AppState {
     }
 
     /// Writes every record's current state, timestamps and sequence numbers included — the
-    /// graceful-shutdown flush (ADR-0026) that lets the ordinary restart restore a fleet whose
+    /// graceful-shutdown flush (ADR-0013) that lets the ordinary restart restore a fleet whose
     /// `last_seen` is current and whose next compressed report is accepted without a gap.
     pub fn flush_agents(&self) {
         let fleet = self.fleet.lock().expect("fleet lock");
@@ -1386,13 +1386,13 @@ impl AppState {
         }
     }
 
-    /// The control loop for one report, shared by both transports (ADR-0012): update what we know,
+    /// The control loop for one report, shared by both transports (ADR-0023): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
     /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
     ///
     /// The reported `instance_uid` is taken at face value: admission proved fleet membership, not
     /// which Agent is speaking, so within an admitted fleet a report's identity is self-asserted and
-    /// not authorized against any other Agent (ADR-0017). The plain-HTTP path in particular offers
+    /// not authorized against any other Agent (ADR-0026). The plain-HTTP path in particular offers
     /// nothing to tell two pollers apart; the WebSocket duplicate-`instance_uid` rekey below is
     /// collision handling, not authorization.
     pub fn process(
@@ -1406,7 +1406,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// (ADR-0065 clause 2, ADR-0059 clauses 7 and 27).
+    /// (ADR-0031 clause 2, ADR-0026 clauses 7 and 27).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -1431,7 +1431,7 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
-        // An instance_uid belongs to the host whose certificate first reported it (ADR-0059
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0026
         // clause 7): a certificate of another host does not speak for it, nor re-keys it. Such a
         // reporter is re-keyed — it gets an identity of its own, never the one it claimed.
         if let (Some(host), Some(revocations)) =
@@ -1472,7 +1472,7 @@ impl AppState {
             let new_uid = InstanceUid::default();
             if let Some(record) = fleet.remove(&uid) {
                 fleet.insert(new_uid, record);
-                // The persisted record follows the identity (ADR-0026): the old key leaves the
+                // The persisted record follows the identity (ADR-0013): the old key leaves the
                 // store now, the new one is written by the dirty check at this exchange's end.
                 self.unpersist(&uid);
             }
@@ -1480,7 +1480,7 @@ impl AppState {
             identification = Some(AgentIdentification {
                 new_instance_uid: new_uid.as_bytes().to_vec(),
             });
-            // A re-key the Agent asked for keeps its host (ADR-0059 clause 7).
+            // A re-key the Agent asked for keeps its host (ADR-0026 clause 7).
             if let Some(revocations) = &self.revocations {
                 if let Err(e) = revocations.rebind(uid.as_bytes(), new_uid.as_bytes()) {
                     warn!(error = %e, "cannot move the host binding to the new instance_uid");
@@ -1511,10 +1511,10 @@ impl AppState {
 
         let known = fleet.contains_key(&uid);
         // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
-        // UIDs (ADR-0017) grow the in-memory map and its per-Agent disk mirror without bound. Known
+        // UIDs (ADR-0026) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
         // that legitimately raced in retries rather than gives up. The real gate is admission
-        // (ADR-0017); this bounds the damage while the endpoint is open.
+        // (ADR-0026); this bounds the damage while the endpoint is open.
         if !known && fleet.len() >= self.max_agents {
             drop(fleet);
             warn!(
@@ -1531,7 +1531,7 @@ impl AppState {
                 disconnected: false,
             };
         }
-        // Labels outlive the record (ADR-0026): a host that was forgotten, or that this Server has
+        // Labels outlive the record (ADR-0013): a host that was forgotten, or that this Server has
         // only just restarted into, comes back in the channel the operator put it in.
         let persisted_labels = self.labels.get(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
@@ -1552,7 +1552,7 @@ impl AppState {
                 connection_settings_status: None,
                 package_statuses: None,
                 owner: conn,
-                // A new Agent waits (ADR-0027 point 6): it is assigned nothing until an
+                // A new Agent waits (ADR-0014 point 6): it is assigned nothing until an
                 // operator's rollout act says so, and the fleet view shows what it could get.
                 config_assignments: BTreeMap::new(),
                 package_assignment: None,
@@ -1653,7 +1653,7 @@ impl AppState {
             }
         }
 
-        // The Agent asked to be issued a client certificate (ADR-0017). Signing it here, on the
+        // The Agent asked to be issued a client certificate (ADR-0026). Signing it here, on the
         // connection it arrived over, is the whole of the approval: admission already required
         // every proof this endpoint asks of any message, which is what the Baseline's flow means
         // by awaiting one.
@@ -1666,7 +1666,7 @@ impl AppState {
             None => None,
             Some(request) => {
                 // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
-                // which the Agent retries (ADR-0063 clause 6).
+                // which the Agent retries (ADR-0030 clause 6).
                 let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
                     // The Baseline's MUST when the Server cannot act on the request. An Agent
                     // reaching here ignored the undeclared capability, so it is a client error.
@@ -1674,7 +1674,7 @@ impl AppState {
                     Some(ca) => match String::from_utf8(request.csr.clone())
                         .map_err(|_| "the certificate signing request is not PEM".to_string())
                         .and_then(|csr| {
-                            // The message's own instance_uid, before any re-key (ADR-0050).
+                            // The message's own instance_uid, before any re-key (ADR-0026).
                             ca.check_claims(&csr, &sender)?;
                             let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
                             Ok((ca.sign(&csr, &host)?, predecessor))
@@ -1720,7 +1720,7 @@ impl AppState {
                                 .with("reason", e.clone()),
                         );
                         // The report's updates above are already in the record, so they are
-                        // persisted even though the CSR is refused (ADR-0026).
+                        // persisted even though the CSR is refused (ADR-0013).
                         self.persist_if_dirty(&uid, record);
                         return Processed {
                             reply: bad_request(&e),
@@ -1774,10 +1774,10 @@ impl AppState {
         }
 
         // Everything this report changed is in the record now; persist it if it moved the
-        // durable state (ADR-0026) — a heartbeat did not, and writes nothing.
+        // durable state (ADR-0013) — a heartbeat did not, and writes nothing.
         self.persist_if_dirty(&uid, record);
 
-        // The config offer — composed from this Agent's assignments (ADR-0027), gated by the
+        // The config offer — composed from this Agent's assignments (ADR-0014), gated by the
         // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
         // AcceptsRemoteConfig (capability negotiation is binding). Matching proposes; only an
         // operator's rollout act made anything an assignment.
@@ -1788,7 +1788,7 @@ impl AppState {
             offer(record, desired.as_ref())
         };
 
-        // The connection-settings offer (ADR-0018), gated the same way: by capability and by
+        // The connection-settings offer (ADR-0027), gated the same way: by capability and by
         // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
         let connection_settings = if disconnected {
             None
@@ -1796,7 +1796,7 @@ impl AppState {
             self.settings_offer(record, issued)
         };
 
-        // The package offer (ADR-0019), gated by capability and the reported
+        // The package offer (ADR-0018), gated by capability and the reported
         // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
         let packages_available = if disconnected {
             None
@@ -1820,7 +1820,7 @@ impl AppState {
         }
     }
 
-    /// The package offer for one Agent, composed from its **assignments** (ADR-0027), or `None`
+    /// The package offer for one Agent, composed from its **assignments** (ADR-0014), or `None`
     /// when it cannot accept packages, is assigned nothing it fits, or the aggregate hash it last
     /// reported already matches what it is assigned.
     ///
@@ -1858,7 +1858,7 @@ impl AppState {
     }
 
     /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
-    /// the download route (ADR-0070): it is offered to an Agent the host speaks for. The offer's
+    /// the download route (ADR-0033): it is offered to an Agent the host speaks for. The offer's
     /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
     /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
     /// register.
@@ -1900,12 +1900,12 @@ impl AppState {
     }
 
     /// Why this Agent is **proposed** nothing although it accepts packages: more than one
-    /// Deployment claims it, and an Agent belongs to at most one (ADR-0030 point 12). `None` when
+    /// Deployment claims it, and an Agent belongs to at most one (ADR-0021 point 12). `None` when
     /// nothing is wrong.
     ///
     /// A conflict takes the *candidate* away and never a standing assignment: an Agent already
     /// rolled out to keeps its offer, because nothing distributes or un-distributes by itself
-    /// (ADR-0027). Creating an overlapping channel must not withdraw software from a running host.
+    /// (ADR-0014). Creating an overlapping channel must not withdraw software from a running host.
     ///
     /// `claim` is what [`deployment_for`] answered for this Agent — `Ok(None)` when package
     /// delivery is not configured, since then no Deployment exists to claim it.
@@ -1922,7 +1922,7 @@ impl AppState {
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
     /// reported hash says it already runs (or refused) exactly this offer.
     ///
-    /// `issued` is a certificate just signed for this Agent (ADR-0017). It overrides the hash gate
+    /// `issued` is a certificate just signed for this Agent (ADR-0026). It overrides the hash gate
     /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
     /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
     /// with it, exactly as the Baseline describes.
@@ -1931,7 +1931,7 @@ impl AppState {
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
-        // The own-telemetry destinations (ADR-0025), offered only for the signals this Agent says
+        // The own-telemetry destinations (ADR-0022), offered only for the signals this Agent says
         // it can report — the protocol's negotiation rule, and an offer for a capability the peer
         // lacks is one nobody will ever act on.
         let telemetry = TelemetryOffer {
@@ -2010,7 +2010,7 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0027 point 8). Only the fleet can answer it, which is why the
+    /// Package's bytes immutable (ADR-0014 point 8). Only the fleet can answer it, which is why the
     /// store does not try to.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
         let fleet = self.fleet.lock().expect("fleet lock");
@@ -2021,7 +2021,7 @@ impl AppState {
 
     /// Whether any Agent's assignment was released through *this* Deployment and pins *this*
     /// Package — the gate that freezes a channel's signature and its hold on that Package
-    /// (ADR-0030 point 17).
+    /// (ADR-0021 point 17).
     ///
     /// It is not the same question as [`package_set_assigned`](Self::package_set_assigned): a
     /// Package may be assigned through one channel while another holds it untouched, and only the
@@ -2072,7 +2072,7 @@ impl AppState {
         Ok(store)
     }
 
-    /// Puts a Package into a channel (ADR-0030 point 9). Not gated: adding one for an Agent type
+    /// Puts a Package into a channel (ADR-0021 point 9). Not gated: adding one for an Agent type
     /// the channel does not hold surfaces as waiting on the Agents of that type, and replacing the
     /// one it holds is how a rollout proceeds — an Agent already rolled out to keeps the Package
     /// its assignment pins until the next act.
@@ -2157,7 +2157,7 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// The refusal every write to an assigned Package answers with (ADR-0027 point 8).
+    /// The refusal every write to an assigned Package answers with (ADR-0014 point 8).
     fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), String> {
         if self.package_set_assigned(id) {
             return Err(format!(
@@ -2168,7 +2168,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Creates a Package (ADR-0030). **Nothing is distributed** (ADR-0027), and there is nothing
+    /// Creates a Package (ADR-0021). **Nothing is distributed** (ADR-0014), and there is nothing
     /// to update: a Package is its identity and its entries, so creating one that exists is the
     /// same request arriving twice.
     pub fn create_package_set(&self, id: &PackageId) -> Result<(), String> {
@@ -2177,8 +2177,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0020). Refused while the Package is
-    /// assigned to an Agent (ADR-0027 point 8); no push, because saving never distributes.
+    /// Stores one streamed upload as an entry of a Package (ADR-0019). Refused while the Package is
+    /// assigned to an Agent (ADR-0014 point 8); no push, because saving never distributes.
     pub fn put_package_entry(
         &self,
         id: &PackageId,
@@ -2192,7 +2192,7 @@ impl AppState {
     }
 
     /// Where an upload for one entry is streamed before it becomes an artifact. Refused while
-    /// the Package is assigned to an Agent (ADR-0027 point 8), so a refused upload is refused
+    /// the Package is assigned to an Agent (ADR-0014 point 8), so a refused upload is refused
     /// before its bytes are streamed.
     pub fn package_staging_path(
         &self,
@@ -2203,8 +2203,8 @@ impl AppState {
         self.package_store()?.staging_path(id, platform)
     }
 
-    /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0019, per ADR-0020).
-    /// Refused while the Package is assigned to an Agent (ADR-0027 point 8).
+    /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0018, per ADR-0019).
+    /// Refused while the Package is assigned to an Agent (ADR-0014 point 8).
     pub fn set_package_entry_source(
         &self,
         id: &PackageId,
@@ -2220,7 +2220,7 @@ impl AppState {
     }
 
     /// Deletes one entry of a Package; `Ok(false)` when the Package or entry does not exist.
-    /// Refused while the Package is assigned to an Agent (ADR-0027 point 8).
+    /// Refused while the Package is assigned to an Agent (ADR-0014 point 8).
     pub fn delete_package_entry(
         &self,
         id: &PackageId,
@@ -2234,9 +2234,9 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Deletes a Package and removes every assignment that referenced it (ADR-0027 point 7);
+    /// Deletes a Package and removes every assignment that referenced it (ADR-0014 point 7);
     /// `Ok(false)` when none of that identity exists. The withdrawal uninstalls nothing — an
-    /// Agent keeps running what it installed (ADR-0020) — and the loops wake so a pending offer
+    /// Agent keeps running what it installed (ADR-0019) — and the loops wake so a pending offer
     /// is not delivered after its Package is gone.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
         let mut fleet = self.fleet.lock().expect("fleet lock");
@@ -2292,10 +2292,10 @@ impl AppState {
                 let package_conflict = Self::package_conflict(record, &claim);
                 let claimed = claim.ok().flatten();
                 // Which channel claims it *now* — the other half of the answer, so "no channel" and
-                // "a channel with nothing for me" are not the same empty row (ADR-0030 point 11).
+                // "a channel with nothing for me" are not the same empty row (ADR-0021 point 11).
                 let claiming_deployment = claimed.map(|d| d.name.clone()).unwrap_or_default();
 
-                // What is waiting (ADR-0027 point 4): the difference between the candidates a
+                // What is waiting (ADR-0014 point 4): the difference between the candidates a
                 // rollout act would release and what the assignments pin.
                 let pending_configurations: Vec<PendingConfigurationView> = self
                     .configs
@@ -2314,7 +2314,7 @@ impl AppState {
                     })
                     .collect();
                 // At most one, because an Agent belongs to at most one Deployment and that
-                // Deployment holds one Package for its type (ADR-0030). A conflict proposes
+                // Deployment holds one Package for its type (ADR-0021). A conflict proposes
                 // nothing — `package_conflict` above says why.
                 let pending_packages: Vec<PendingPackageView> = self
                     .packages()
@@ -2370,7 +2370,7 @@ fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> B
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
-/// (ADR-0070 clause 1).
+/// (ADR-0033 clause 1).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
 }
@@ -2386,7 +2386,7 @@ fn assigned_deployment(offering: &PackageOffering, record: &AgentRecord) -> Opti
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
 /// it — the "no redundant reconfiguration" goal in one place. Every assigned Configuration is one
-/// named entry; the Managed Process does its own merging (ADR-0016).
+/// named entry; the Managed Process does its own merging (ADR-0011).
 fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentRemoteConfig> {
     let desired = desired?;
     if record.capabilities & opamp::proto::AgentCapabilities::AcceptsRemoteConfig as u64 == 0 {
@@ -2411,7 +2411,7 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
                         AgentConfigObject {
                             body: entry.body.clone().into_bytes(),
                             content_type: String::new(),
-                            // The operator's role, verbatim (ADR-0016). Empty — the default —
+                            // The operator's role, verbatim (ADR-0011). Empty — the default —
                             // leaves the field unset, which is top-level configuration and what
                             // every Configuration predating that decision carries.
                             role: entry.role.clone(),
@@ -2425,7 +2425,7 @@ fn offer(record: &AgentRecord, desired: Option<&DesiredConfig>) -> Option<AgentR
 }
 
 /// The version a reader of the fleet table wants: the release, without the commit the build came
-/// from (ADR-0013).
+/// from (ADR-0017).
 ///
 /// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
 /// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
@@ -2441,62 +2441,62 @@ fn display_version(reported: &str) -> String {
 pub struct AgentView {
     pub instance_uid: String,
     /// The Agent *type* — the Baseline's "reverse FQDN that uniquely identifies the Agent type"
-    /// (ADR-0024). For a managed Collector this is the `dist.name` it was built with, so every
+    /// (ADR-0012). For a managed Collector this is the `dist.name` it was built with, so every
     /// Collector of one distribution reports the same value. It answers "what is this", never
     /// "which one is this": that is [`service_instance_name`](Self::service_instance_name).
     pub service_name: String,
-    /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (ADR-0024). Empty
+    /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (ADR-0012). Empty
     /// for a foreign OpAMP client that reports no `service.instance.name`, which is why the UI
     /// falls back through the type to the UID rather than showing a blank row.
     pub service_instance_name: String,
     /// The release the Agent reports — `MAJOR.MINOR.PATCH`, with the pre-release when it is not a
-    /// release build (ADR-0013). This is what belongs in a column headed "Version"; the commit the
+    /// release build (ADR-0017). This is what belongs in a column headed "Version"; the commit the
     /// build came from is [`service_build`](Self::service_build). A reported value that is not a
     /// version at all is passed through unchanged, since a Foreign Agent numbers itself however it
     /// likes.
     pub service_version: String,
     /// Exactly what the Agent reported, commit metadata and all — the answer to "which build is on
-    /// that host", which is a question a fleet exists to answer (ADR-0013).
+    /// that host", which is a question a fleet exists to answer (ADR-0017).
     pub service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
-    /// Every reported identifying attribute — what a Selector can match on (ADR-0016).
+    /// Every reported identifying attribute — what a Selector can match on (ADR-0011).
     pub identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     pub non_identifying_attributes: BTreeMap<String, String>,
     /// The Configurations whose saved revision currently matches this Agent — the **candidates**
-    /// a rollout act would release to it (ADR-0027), in name order. Never what it runs; that is
+    /// a rollout act would release to it (ADR-0014), in name order. Never what it runs; that is
     /// [`assigned_configurations`](Self::assigned_configurations).
     pub matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0027), in name order — what its offer is
+    /// The Configurations rolled out to this Agent (ADR-0014), in name order — what its offer is
     /// composed from.
     pub assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0030 point 11). Empty here with
+    /// tells four states apart that would otherwise look alike (ADR-0021 point 11). Empty here with
     /// no conflict means the host is in **no channel**: label it, or give it a `channel` attribute. Set
     /// here with nothing assigned and nothing pending means the channel holds nothing this Agent can
     /// take — no Package for its type, or none for its platform. The operator's next move differs
     /// in each case, which is why the Server says which one it is rather than showing an empty
     /// row three ways.
     pub deployment: String,
-    /// The Deployment this Agent's package was released **through** (ADR-0030), or empty when
+    /// The Deployment this Agent's package was released **through** (ADR-0021), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     pub assigned_deployment: String,
-    /// The Package rolled out to this Agent (ADR-0027), as `<agent type>@<version>`, or empty.
+    /// The Package rolled out to this Agent (ADR-0014), as `<agent type>@<version>`, or empty.
     ///
     /// It is pinned as of the act that released it: re-aiming its Deployment afterwards, or
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     pub assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0027 point 4): a
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0014 point 4): a
     /// candidate not yet assigned (`change: "new"`), or one whose saved revision is newer than
     /// the assigned one (`change: "update"`). The Server never acts on this by itself.
     pub pending_configurations: Vec<PendingConfigurationView>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0027 point 4) — at most one,
+    /// The Package waiting for a rollout act toward this Agent (ADR-0014 point 4) — at most one,
     /// the candidate of the Deployment that claims it, when that is not what it is assigned.
     pub pending_packages: Vec<PendingPackageView>,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
@@ -2507,16 +2507,16 @@ pub struct AgentView {
     pub capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     pub available_components: Vec<String>,
-    /// The Agent's package installations (ADR-0019), in name order; empty until reported.
+    /// The Agent's package installations (ADR-0018), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
     /// Why this Agent is proposed no package although it accepts them — more than one Deployment
-    /// claims it, and an Agent belongs to at most one (ADR-0030 point 12). The message names every
+    /// claims it, and an Agent belongs to at most one (ADR-0021 point 12). The message names every
     /// Deployment in the way. Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
     /// What the Agent said about the *offer* rather than about a package it holds — an offer it
     /// refuses outright has no package status to carry the reason, and the Client's own Agent
-    /// refusing a package it was not configured to take (ADR-0021) is exactly that case. Empty
+    /// refusing a package it was not configured to take (ADR-0020) is exactly that case. Empty
     /// when the Agent has nothing to complain about.
     pub package_error: String,
     pub transport: String,
@@ -2532,7 +2532,7 @@ pub struct AgentView {
     pub in_sync: bool,
     pub sequence_num: u64,
     pub last_seen_ms: u64,
-    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0026).
+    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0013).
     ///
     /// Beside [`connected`](Self::connected), never instead of it: that one says a connection
     /// carrying this Agent is open — behind a Gateway, the *Gateway's* — and this one says whether
@@ -2542,20 +2542,20 @@ pub struct AgentView {
     /// Only an Agent declaring `ReportsHeartbeat` can be stale: that capability is the promise that
     /// makes silence mean something. Derived on read, never stored.
     pub stale: bool,
-    /// The operator's labels on this Agent (ADR-0026) — matched by Selectors exactly like a
+    /// The operator's labels on this Agent (ADR-0013) — matched by Selectors exactly like a
     /// reported attribute, but set here rather than in `supervisor.toml` on the host, so moving a host
     /// between rollout channels is an API call instead of an edit and a restart.
     pub labels: BTreeMap<String, String>,
     /// Labels this Agent's own reports shadow: set, matching nothing, and therefore doing nothing.
     ///
-    /// Reported attributes always win (ADR-0026) — they decide which artifact fits this machine.
+    /// Reported attributes always win (ADR-0013) — they decide which artifact fits this machine.
     /// A collision is refused when the label is set, so this fills only when an Agent *starts*
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
 }
 
-/// One Configuration waiting for a rollout act toward one Agent (ADR-0027).
+/// One Configuration waiting for a rollout act toward one Agent (ADR-0014).
 #[derive(Serialize)]
 pub struct PendingConfigurationView {
     pub name: String,
@@ -2564,7 +2564,7 @@ pub struct PendingConfigurationView {
     pub change: String,
 }
 
-/// Whom one Deployment reaches in the fleet as reported so far (ADR-0030): the Agents it claims,
+/// Whom one Deployment reaches in the fleet as reported so far (ADR-0021): the Agents it claims,
 /// the subset a rollout act would actually change, and those another Deployment also claims.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DeploymentReach {
@@ -2574,11 +2574,11 @@ pub struct DeploymentReach {
     /// report and it is an upgrade. Zero with a non-zero `claiming` means everyone is up to date.
     pub targeted: usize,
     /// Agents this Deployment matches that **another one matches too**. They are offered nothing
-    /// new until an operator narrows a Selector (ADR-0030 point 12).
+    /// new until an operator narrows a Selector (ADR-0021 point 12).
     pub conflicting: usize,
 }
 
-/// The Package waiting for a rollout act toward one Agent (ADR-0027).
+/// The Package waiting for a rollout act toward one Agent (ADR-0014).
 #[derive(Serialize)]
 pub struct PendingPackageView {
     /// The Deployment that would release it — the channel this Agent belongs to.
@@ -2592,7 +2592,7 @@ pub struct PendingPackageView {
     pub change: String,
 }
 
-/// One package's installation state as the REST API and UI see it (ADR-0019).
+/// One package's installation state as the REST API and UI see it (ADR-0018).
 #[derive(Serialize)]
 pub struct PackageStatusView {
     pub name: String,
@@ -2684,7 +2684,7 @@ fn capability_names(mask: u64) -> Vec<String> {
 }
 
 /// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
-/// conventions give `host.ip` and `host.mac`, ADR-0024) joined with a comma, other value kinds in
+/// conventions give `host.ip` and `host.mac`, ADR-0012) joined with a comma, other value kinds in
 /// their debug form — the view is for reading, the wire keeps the typed original.
 fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
     fn text(value: &any_value::Value) -> String {
@@ -2747,7 +2747,7 @@ impl AgentView {
                 status.map(|s| s.last_remote_config_hash.as_slice()) == Some(d.hash.as_slice())
             }
         };
-        // What the Agent said, and what a reader of a table wants out of it (ADR-0013).
+        // What the Agent said, and what a reader of a table wants out of it (ADR-0017).
         let service_build = lookup(&identifying, attributes::SERVICE_VERSION);
         AgentView {
             instance_uid: uid.to_string(),
@@ -2832,7 +2832,7 @@ impl AgentView {
     }
 }
 
-/// Whether nothing has been heard from this Agent for longer than its budget (ADR-0026).
+/// Whether nothing has been heard from this Agent for longer than its budget (ADR-0013).
 ///
 /// Gated on `ReportsHeartbeat`: an Agent that never promised to report periodically is not late,
 /// however long it has been quiet, and flagging it would train an operator to ignore the flag.
@@ -2848,7 +2848,7 @@ fn is_stale(record: &AgentRecord, stale_after: Duration, now_ms: u64) -> bool {
 ///
 /// The two are deliberately not the same test. Calling an Agent *stale* accuses it of being late,
 /// which is only fair when it declared `ReportsHeartbeat` and so promised to be punctual. Asking
-/// whether it is safe to forget (ADR-0026) is a question about evidence, not about promises: an
+/// whether it is safe to forget (ADR-0013) is a question about evidence, not about promises: an
 /// Agent nobody has heard from cannot be disturbed by being forgotten, whatever it once declared.
 fn is_silent(record: &AgentRecord, budget: Duration, now_ms: u64) -> bool {
     now_ms.saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
@@ -2916,7 +2916,7 @@ pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
 /// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
 /// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (ADR-0066 clause 7).
+/// field a Client and a Gateway route a reply by (ADR-0023 clause 25).
 pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
         instance_uid: instance_uid.to_vec(),
@@ -2957,7 +2957,7 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
 }
 
 /// Refuses a rollout of a Deployment that lacks a signature for any entry of any Package it holds,
-/// naming each such Package and its platforms; nothing is released (ADR-0045).
+/// naming each such Package and its platforms; nothing is released (ADR-0021).
 fn refuse_unsigned(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,
@@ -2985,7 +2985,7 @@ mod tests {
     }
 
     /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
-    /// (ADR-0024): joined for reading, not dumped in debug form.
+    /// (ADR-0012): joined for reading, not dumped in debug form.
     #[test]
     fn the_view_joins_a_string_array_attribute() {
         let attrs = vec![
@@ -3002,8 +3002,8 @@ mod tests {
 
     /// The gatewayed case, which is why this exists: the connection is up — it is the Gateway's —
     /// and the Agent behind it has stopped talking. Both facts are reported, neither overwrites
-    /// the other (ADR-0026).
-    // Verifies: ADR-0026
+    /// the other (ADR-0013).
+    // Verifies: ADR-0013
     #[test]
     fn an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up() {
         let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
@@ -3033,7 +3033,7 @@ mod tests {
 
     /// The offered interval wins over the configured default: it is the period this Server actually
     /// asked for, so it is the one silence should be measured against.
-    /// Verifies: ADR-0060
+    /// Verifies: ADR-0027
     #[test]
     fn an_offered_heartbeat_interval_sets_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3054,7 +3054,7 @@ mod tests {
         );
     }
 
-    /// ADR-0026. The tidy-up case: a host that was decommissioned, its Agent gone with it.
+    /// ADR-0013. The tidy-up case: a host that was decommissioned, its Agent gone with it.
     #[test]
     fn a_disconnected_agent_is_forgotten() {
         let state = forgettable_state();
@@ -3091,7 +3091,7 @@ mod tests {
         assert!(state.forget_agent(&uid).is_ok());
     }
 
-    /// The case that made the rule test silence rather than staleness (ADR-0026): an Agent that
+    /// The case that made the rule test silence rather than staleness (ADR-0013): an Agent that
     /// promised no heartbeat is never *stale*, and plain-HTTP polling never clears `connected` —
     /// so gating on the flag would have left this row on a dead host permanently unremovable.
     #[test]
@@ -3182,9 +3182,9 @@ mod tests {
         }
     }
 
-    /// ADR-0026: the fleet survives a restart — the record is restored with everything the Agent
+    /// ADR-0013: the fleet survives a restart — the record is restored with everything the Agent
     /// reported, shown honestly as disconnected until live evidence says otherwise.
-    // Verifies: ADR-0026
+    // Verifies: ADR-0013
     #[test]
     fn the_fleet_is_restored_disconnected_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3205,8 +3205,8 @@ mod tests {
 
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
-    /// hammering (ADR-0059 clause 21, ADR-0063 clause 6).
-    /// Verifies: ADR-0059, ADR-0063, ADR-0066
+    /// hammering (ADR-0026 clause 21, ADR-0030 clause 6).
+    /// Verifies: ADR-0026, ADR-0030, ADR-0023
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
         let reply = unavailable(&[7; 16], "busy");
@@ -3222,7 +3222,7 @@ mod tests {
     }
 
     /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
-    /// so a peer minting fresh self-asserted UIDs (ADR-0017) cannot grow the fleet — and its
+    /// so a peer minting fresh self-asserted UIDs (ADR-0026) cannot grow the fleet — and its
     /// in-memory map and per-Agent disk mirror — without bound. Agents already known keep reporting.
     #[test]
     fn a_new_agent_past_the_ceiling_is_refused() {
@@ -3263,7 +3263,7 @@ mod tests {
         assert_eq!(state.snapshot().len(), 2);
     }
 
-    /// ADR-0026: a restored sequence number means the next compressed heartbeat is accepted in
+    /// ADR-0013: a restored sequence number means the next compressed heartbeat is accepted in
     /// place of a fleet-wide ReportFullState stampede.
     #[test]
     fn a_restored_agent_is_not_demanded_a_full_report() {
@@ -3288,9 +3288,9 @@ mod tests {
         );
     }
 
-    /// ADR-0026: a heartbeat exists to change nothing, and it reaches no storage backend — the
+    /// ADR-0013: a heartbeat exists to change nothing, and it reaches no storage backend — the
     /// stored record still carries the durable state's write, not the heartbeat's.
-    // Verifies: ADR-0026
+    // Verifies: ADR-0013
     #[test]
     fn a_heartbeat_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3309,7 +3309,7 @@ mod tests {
         assert_eq!(written, after, "the heartbeat performed no write");
     }
 
-    /// ADR-0026 with ADR-0026: forgetting removes the stored record with the row — nothing
+    /// ADR-0013: forgetting removes the stored record with the row — nothing
     /// remembers under another name.
     #[test]
     fn forgetting_an_agent_removes_its_stored_record() {
@@ -3330,7 +3330,7 @@ mod tests {
         assert!(!path.exists(), "forgetting frees the store too");
     }
 
-    /// ADR-0026: the persisted record follows a reassigned identity — one record, one file.
+    /// ADR-0013: the persisted record follows a reassigned identity — one record, one file.
     #[test]
     fn a_rekeyed_agent_moves_its_stored_record() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3348,7 +3348,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment fields loads as **assigned nothing** —
     /// the Server never invents a rollout at startup — and what it could receive shows up as
     /// waiting instead, which is the one thing an operator has to act on.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0021
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3385,13 +3385,13 @@ mod tests {
         );
         assert_eq!(
             view.pending_configurations[0].change, "new",
-            "what it could receive waits for an explicit act (ADR-0027)"
+            "what it could receive waits for an explicit act (ADR-0014)"
         );
     }
 
-    /// ADR-0027: saving proposes, the acts assign — and an Agent that appears after the bulk act
+    /// ADR-0014: saving proposes, the acts assign — and an Agent that appears after the bulk act
     /// waits for one of its own (point 6).
-    // Verifies: ADR-0027
+    // Verifies: ADR-0014
     #[test]
     fn rollout_acts_assign_and_a_late_agent_waits() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3446,7 +3446,7 @@ mod tests {
         assert!(late_view.pending_configurations.is_empty());
     }
 
-    /// ADR-0026: a queued restart is operator intent and survives the Server restarting.
+    /// ADR-0013: a queued restart is operator intent and survives the Server restarting.
     #[test]
     fn a_queued_restart_survives_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3463,7 +3463,7 @@ mod tests {
         assert!(fleet[&uid].restart_pending, "the intent was restored");
     }
 
-    /// ADR-0013: the fleet table shows the release, and the build stays reachable beside it. A
+    /// ADR-0017: the fleet table shows the release, and the build stays reachable beside it. A
     /// Foreign Agent that numbers itself in its own way is shown as it reported.
     #[test]
     fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
@@ -3540,7 +3540,7 @@ mod tests {
         assert_eq!(installing.download_bytes_per_second, None);
     }
 
-    /// The whole-store ceiling (ADR-0019), decided without a request: a store at its limit takes
+    /// The whole-store ceiling (ADR-0018), decided without a request: a store at its limit takes
     /// no upload, and an artifact is refused when it alone would take the store past it.
     #[test]
     fn the_package_store_ceiling_admits_up_to_its_limit() {
@@ -3563,7 +3563,7 @@ mod tests {
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
     /// to an identity of its own, and the Agent it claimed keeps its record.
-    /// Verifies: ADR-0059, G-17
+    /// Verifies: ADR-0026, G-17
     #[test]
     fn a_host_cannot_report_for_another_hosts_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3630,7 +3630,7 @@ mod tests {
         );
     }
 
-    // ---- Who may fetch an uploaded artifact (ADR-0070) ----
+    // ---- Who may fetch an uploaded artifact (ADR-0033) ----
 
     /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
     /// channel that claims every `otelcol`, with a host register.
@@ -3716,7 +3716,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0070
+    /// Verifies: ADR-0033
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3755,7 +3755,7 @@ mod tests {
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
     /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
-    /// Verifies: ADR-0070
+    /// Verifies: ADR-0033
     #[test]
     fn an_offer_still_stands_after_its_hash_is_echoed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3774,7 +3774,7 @@ mod tests {
 
     /// A version saved into the channel but not yet released by an operator's press is no one's
     /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
-    /// Verifies: ADR-0070
+    /// Verifies: ADR-0033
     #[test]
     fn a_version_waiting_for_its_press_is_offered_to_no_host() {
         let dir = tempfile::tempdir().expect("tempdir");

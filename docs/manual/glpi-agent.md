@@ -12,7 +12,7 @@ other agent uses — with the same block shape on both platforms.
 
 **The fleet owns the installation.** Nothing is preinstalled, and the host needs neither Perl nor
 FUSE. A program is named by a **bare file name**, which is the only shape a block accepts
-([ADR-0022](../adr/0022-a-supervisors-directory-program-and-set.md)), so an agent the
+([ADR-0032](../adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)), so an agent the
 machine's package manager installed cannot be supervised where it sits — the way across is to
 repack that version and deliver it, which is what this page does. A host may keep its
 `apt`/`dnf`/MSI installation; it simply stays outside the fleet, and
@@ -33,7 +33,7 @@ repack that version and deliver it, which is what this page does. A host may kee
 
 The [rollout walkthrough](rollout.md) ships a program the fleet builds. Here the program is a
 third party's release, and the only work is repacking it into something the Client can unpack
-(ADR-0028) — after that it is an ordinary package, and everything the walkthrough says about
+(ADR-0015) — after that it is an ordinary package, and everything the walkthrough says about
 rollout, health-gating and rollback applies unchanged. Three things are specific to this agent:
 
 - **It must be made to run in the foreground**, which its own flags do — see

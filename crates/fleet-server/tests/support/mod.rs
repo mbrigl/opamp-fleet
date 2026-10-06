@@ -11,9 +11,9 @@ use opamp::uid::InstanceUid;
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct TestServer {
-    /// The Agent plane (ADR-0012): `/v1/opamp` and the package download.
+    /// The Agent plane (ADR-0023): `/v1/opamp` and the package download.
     pub addr: SocketAddr,
-    /// The Operator plane (ADR-0012): the REST API, its docs, and the UI — a second listener, as
+    /// The Operator plane (ADR-0023): the REST API, its docs, and the UI — a second listener, as
     /// in a real deployment, so a test that calls the wrong one finds out.
     pub rest_addr: SocketAddr,
     pub state: Arc<AppState>,
@@ -34,7 +34,7 @@ pub async fn spawn_with_limit(limit: usize) -> TestServer {
     spawn_full(None, limit, DEFAULT_STALE_AFTER).await
 }
 
-/// The same real router with a tightened staleness budget (ADR-0026), for the tests that need an
+/// The same real router with a tightened staleness budget (ADR-0013), for the tests that need an
 /// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
@@ -44,7 +44,7 @@ pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestSer
 /// The Server's own default, restated here so a scaffolded Server behaves like a real one.
 const DEFAULT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The full shape: an optional connection-settings offer (ADR-0060).
+/// The full shape: an optional connection-settings offer (ADR-0027).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with(offer: Option<fleet_server::fleet::ConnectionOffer>) -> TestServer {
     spawn_full(
@@ -79,7 +79,7 @@ async fn spawn_full(
     }
 }
 
-/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0012), and
+/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0023), and
 /// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
@@ -89,7 +89,7 @@ pub async fn serve(
     serve_guarded(state, admission, None).await
 }
 
-/// The same two planes, with the Operator plane's credential check active (ADR-0017).
+/// The same two planes, with the Operator plane's credential check active (ADR-0026).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve_guarded(
     state: Arc<AppState>,
@@ -103,7 +103,7 @@ pub async fn serve_guarded(
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let addr = agent_listener.local_addr().expect("local addr");
     let rest_addr = operator_listener.local_addr().expect("local addr");
-    // Through `listen::plane`, as the binary serves them (ADR-0012), so the whole suite runs
+    // Through `listen::plane`, as the binary serves them (ADR-0023), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
     let handle = opamp::server::listen::Handle::new();
     tokio::spawn(
@@ -115,9 +115,9 @@ pub async fn serve_guarded(
     (addr, rest_addr)
 }
 
-/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0024). It is a constant
+/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0012). It is a constant
 /// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
-/// which is also what makes one package able to reach several of them (ADR-0020).
+/// which is also what makes one package able to reach several of them (ADR-0019).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
 
@@ -141,7 +141,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                 }),
             }],
             non_identifying_attributes: vec![
-                // The operator's name for this Agent (ADR-0024) — what distinguishes it from its
+                // The operator's name for this Agent (ADR-0012) — what distinguishes it from its
                 // neighbours, now that `service.name` says only what kind of thing it is.
                 KeyValue {
                     key: "service.instance.name".to_string(),
@@ -155,7 +155,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                         value: Some(any_value::Value::StringValue("linux".to_string())),
                     }),
                 },
-                // The other half of the Platform a package is fitted against (ADR-0020). An Agent
+                // The other half of the Platform a package is fitted against (ADR-0019). An Agent
                 // reporting no `host.arch` fits no artifact at all, which is its own test.
                 KeyValue {
                     key: "host.arch".to_string(),
@@ -188,14 +188,14 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 }
 
 /// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
-/// portal) does — two calls since ADR-0027, because saving alone distributes nothing and the
+/// portal) does — two calls since ADR-0014, because saving alone distributes nothing and the
 /// rollout act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
 pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
     distribute_with_role(rest_addr, name, selector, body, "").await;
 }
 
-/// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0016); an empty role is the
+/// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0011); an empty role is the
 /// ordinary top-level configuration and stays out of the request.
 pub async fn distribute_with_role(
     rest_addr: SocketAddr,
@@ -227,7 +227,7 @@ pub async fn distribute_with_role(
     assert_eq!(response.status(), 200, "the configuration is rolled out");
 }
 
-/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0066).
+/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0023).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct ManualClock(pub std::sync::atomic::AtomicU64);
 
@@ -251,7 +251,7 @@ impl ManualClock {
     }
 }
 
-/// The same real router with the Agent plane's rate limit armed (ADR-0066), its buckets on a clock
+/// The same real router with the Agent plane's rate limit armed (ADR-0023), its buckets on a clock
 /// the test moves.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_agent_rate(
@@ -281,7 +281,7 @@ pub async fn spawn_with_agent_rate(
     )
 }
 
-/// The same real router with own-telemetry destinations to offer (ADR-0025).
+/// The same real router with own-telemetry destinations to offer (ADR-0022).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) -> TestServer {
     opamp::tls::install_ring_provider();

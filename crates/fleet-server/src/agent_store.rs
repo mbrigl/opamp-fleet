@@ -1,4 +1,4 @@
-//! The Agent-record storage port (ADR-0026).
+//! The Agent-record storage port (ADR-0013).
 //!
 //! The fleet is loaded whole at startup and held in memory; at runtime the store only ever
 //! receives writes and deletions for single Agents. That narrow access pattern is what the port
@@ -38,16 +38,16 @@ pub struct PersistedAgent {
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
     pub package_statuses: Option<PackageStatuses>,
     pub available_components: Option<AvailableComponents>,
-    /// The transport the last report arrived on — informational, never a routing key (ADR-0009).
+    /// The transport the last report arrived on — informational, never a routing key (ADR-0034).
     pub transport: Transport,
     pub last_seen_ms: u64,
-    /// A queued restart is operator intent and survives like any other (ADR-0026).
+    /// A queued restart is operator intent and survives like any other (ADR-0013).
     pub restart_pending: bool,
-    /// The Configurations the operator rolled out to this Agent (ADR-0027): name → the pinned
+    /// The Configurations the operator rolled out to this Agent (ADR-0014): name → the pinned
     /// revision's hash. `None` marks a record persisted before the ADR, whose assignments the
     /// fleet seeds at startup from what was published then (point 9).
     pub config_assignments: Option<BTreeMap<String, String>>,
-    /// The package Sets the operator rolled out to this Agent (ADR-0027), keyed by package name.
+    /// The package Sets the operator rolled out to this Agent (ADR-0014), keyed by package name.
     /// `None` marks a record whose seed has not run — it runs when package delivery is armed.
     pub package_assignment: Option<crate::fleet::PackageAssignment>,
 }
@@ -55,7 +55,7 @@ pub struct PersistedAgent {
 impl PersistedAgent {
     /// A digest over the *durable* content — everything except `last_seen_ms` and `sequence_num`,
     /// which move on every report. This is what the caller's dirty check compares, so the common
-    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0026).
+    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0013).
     ///
     /// It is computed from the record itself, never from an adapter's format (ADR-0006): each
     /// field length-prefixed so neighbours cannot run together, the wire-typed ones in their
@@ -119,18 +119,18 @@ impl PersistedAgent {
     }
 }
 
-/// The storage port (ADR-0026): the only thing the fleet logic knows about persistence. A
+/// The storage port (ADR-0013): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these four operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
     /// Every persisted record, once, at startup. A record that cannot be read fails loudly — a
-    /// fleet that silently lost members is worse than one that refuses to start (ADR-0011).
+    /// fleet that silently lost members is worse than one that refuses to start (ADR-0025).
     fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String>;
 
     /// Creates or replaces one record.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
-    /// Forgets one record (ADR-0026); removing what is already absent is not an error.
+    /// Forgets one record (ADR-0013); removing what is already absent is not an error.
     fn remove(&self, uid: &InstanceUid) -> Result<(), String>;
 
     /// The identity reassignment (`RequestInstanceUid`): one operation, so an adapter with atomic

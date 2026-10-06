@@ -1,4 +1,4 @@
-//! The proof a certificate renewal carries (ADR-0059 clause 27): the certificate being renewed, and
+//! The proof a certificate renewal carries (ADR-0026 clause 27): the certificate being renewed, and
 //! a signature made with its key over the new key. The Server reads which host a renewal is for from
 //! the proof, not from the connection it arrives on — behind a Gateway that connection presents the
 //! Gateway's certificate.
@@ -48,7 +48,7 @@ pub fn decode(content: &[u8]) -> Option<(&[u8], &[u8])> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn a_proof_round_trips_and_a_torn_one_does_not_parse() {
         let content = encode(b"cert", b"sig");

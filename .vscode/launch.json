@@ -15,7 +15,7 @@
       "cwd": "${workspaceFolder}"
     },
     {
-      // The package is `fleet-agent`, the binary it produces is `supervisor` (ADR-0023):
+      // The package is `fleet-agent`, the binary it produces is `supervisor` (ADR-0029):
       // `--package` takes the first, `--bin` and the filter take the second.
       "type": "lldb",
       "request": "launch",

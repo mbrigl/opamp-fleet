@@ -1,9 +1,9 @@
 //! The OpAMP endpoint's protocol shell — what any server-side of this protocol must do with a
-//! request body, framework-free (ADR-0011).
+//! request body, framework-free (ADR-0025).
 //!
 //! There are two OpAMP server endpoints in this project: the Server's, and the Client's own when it
 //! runs as a Gateway — downstream, a Gateway *is* an OpAMP server
-//! ([ADR-0009](../../../docs/adr/0009-client-modes-and-the-gateway.md)). Both accept the same path, the same media
+//! ([ADR-0034](../../../docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). Both accept the same path, the same media
 //! type and the same bodies, and both were written separately. The Baseline's gzip MUST, and with
 //! it the rule that the size limit applies *after* decompression, ended up in exactly one of them.
 //!
@@ -182,7 +182,7 @@ mod tests {
 
     /// The rule this module exists for: a small gzip that decompresses past the limit is refused,
     /// and decompression stops at the limit rather than running to completion first.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0025
     #[test]
     fn a_gzip_bomb_buys_no_more_memory_than_a_plain_body_would() {
         let body = gzipped(&vec![b'a'; 10 * 1024 * 1024]);
@@ -196,7 +196,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0025
     #[test]
     fn what_is_not_gzip_under_a_gzip_header_is_refused() {
         assert_eq!(
@@ -211,7 +211,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0025
     #[test]
     fn an_encoding_this_endpoint_does_not_implement_names_itself() {
         assert_eq!(
@@ -224,7 +224,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0057, ADR-0054
+    /// Verifies: ADR-0024, ADR-0023
     #[test]
     fn only_the_loopback_literals_are_loopback() {
         for host in ["127.0.0.1", "::1", "[::1]"] {
@@ -243,7 +243,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0057
+    /// Verifies: ADR-0024
     #[test]
     fn plaintext_urls_are_accepted_on_the_loopback_literals_alone() {
         for url in [

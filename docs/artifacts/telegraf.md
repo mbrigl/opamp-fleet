@@ -5,8 +5,8 @@
 
 **Who reads this.** Whoever changes how Telegraf is packed, and whoever changes what the `telegraf`
 kind knows. It is the one place both sides state the same facts, so a release that moves something
-can be answered on both at once ([ADR-0015](../adr/0015-supervisor-mode-and-its-kinds.md) clause 9,
-[ADR-0028](../adr/0028-glpi-agent-and-telegraf.md)).
+can be answered on both at once ([ADR-0010](../adr/0010-supervisor-mode-and-its-kinds.md) clause 9,
+[ADR-0015](../adr/0015-glpi-agent-and-telegraf.md)).
 
 It is the thinnest of the three artifact documents, because the artifact is installed exactly as
 InfluxData published it: there is no repack to keep in step, and no tree whose internal layout
@@ -31,7 +31,7 @@ list cannot be read from anywhere and is this tool's own (`TELEGRAF_PLATFORMS`).
 ## 2. Assets per platform
 
 `telegraf-<version>_<os>_<arch>.tar.gz`, and `.zip` for Windows. Upstream spells 32-bit `i386`
-where this fleet says `386` ([ADR-0020](../adr/0020-the-package-store.md)); the mapping is the
+where this fleet says `386` ([ADR-0019](../adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)); the mapping is the
 third and fourth column of `TELEGRAF_PLATFORMS`:
 
 | This fleet | Upstream |
@@ -55,14 +55,14 @@ unpacked, gathered or rewritten.
 
 ## 5. Form in the delivered tree
 
-A **single-file package** ([ADR-0019](../adr/0019-package-delivery-on-the-agent.md)). The archive wraps
+A **single-file package** ([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)). The archive wraps
 everything in a version-named directory, and the program sits at `usr/bin/telegraf` on Unix but at
 the archive root on Windows — and **neither matters**, because the Client finds the member by its
 *file name*. That is the whole reason this kind has no `program_path`.
 
 The installed program therefore lands in this Supervisor's own `program/` directory
-([ADR-0022](../adr/0022-a-supervisors-directory-program-and-set.md)), which is also where the process
-starts ([ADR-0015](../adr/0015-supervisor-mode-and-its-kinds.md)).
+([ADR-0032](../adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)), which is also where the process
+starts ([ADR-0010](../adr/0010-supervisor-mode-and-its-kinds.md)).
 
 ## 6. What the Client derives
 
@@ -85,7 +85,7 @@ block.
 
 The **version arguments serve twice**: as the probe that gives the Agent its `service.version`, and
 as the preflight run against a *staged* program before the running one is stopped
-([ADR-0029](../adr/0029-icinga-2.md)). What makes them a version
+([ADR-0016](../adr/0016-icinga-2.md)). What makes them a version
 probe is what makes them a safe check — cheap, and touching no state.
 
 ## 7. Configurations

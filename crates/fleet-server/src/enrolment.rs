@@ -1,4 +1,4 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0059 clauses 19 to 22).
+//! Enrolment: how a host gets its first client certificate (ADR-0026 clauses 19 to 22).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
 //! only while an operator holds an **enrolment window** open, and the certificate signing request
@@ -34,7 +34,7 @@ pub struct Request {
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
-    /// The `instance_uid` of the message that carried it, for the register (ADR-0065 clause 2).
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0031 clause 2).
     pub instance_uid: Vec<u8>,
 }
 
@@ -107,7 +107,7 @@ pub struct Enrolment {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
-    /// Where a window that runs out records the requests that expired with it (ADR-0063).
+    /// Where a window that runs out records the requests that expired with it (ADR-0030).
     audit: std::sync::OnceLock<Arc<dyn crate::audit::Audit>>,
 }
 
@@ -221,7 +221,7 @@ impl Enrolment {
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and
     /// [`DecisionError::Sign`] when the CA refuses the request.
     /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
-    /// `record` keeps what was signed before the host can collect it (ADR-0065 clause 2); a
+    /// `record` keeps what was signed before the host can collect it (ADR-0031 clause 2); a
     /// failure there leaves the request pending.
     pub fn approve(
         &self,
@@ -376,7 +376,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn the_window_is_closed_by_default_and_bounded() {
         let (enrolment, clock) = enrolment();
@@ -393,7 +393,7 @@ mod tests {
         assert!(!enrolment.is_open(), "the window closes on its own");
     }
 
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn a_request_waits_for_an_operator_and_is_answered_once_decided() {
         let (enrolment, _) = enrolment();
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(enrolment.reject("unknown"), Err(DecisionError::NotFound));
     }
 
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn closing_the_window_expires_every_request() {
         let (enrolment, clock) = enrolment();
@@ -450,7 +450,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();

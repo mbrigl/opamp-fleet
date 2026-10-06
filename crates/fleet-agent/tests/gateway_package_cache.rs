@@ -1,4 +1,4 @@
-//! A Gateway's package cache (ADR-0070 clauses 8 to 14): the Gateway fetches each uploaded artifact
+//! A Gateway's package cache (ADR-0033 clauses 8 to 14): the Gateway fetches each uploaded artifact
 //! it relays an offer of once, verifies it against the offered hash, and passes it on only to a
 //! downstream host whose Agent it relayed that offer to. Most tests run against an upstream the test
 //! controls, which counts and can hold back every fetch; the last one runs against the real Server
@@ -436,7 +436,7 @@ fn held(dir: &Path) -> Vec<String> {
 /// relays the first offer, before anyone asks; requests while that fetch runs are answered `503`
 /// with `Retry-After: 30`, the second offer starts no fetch of its own, and the upstream serves
 /// the artifact once.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_relayed_artifact_is_fetched_once_before_any_request_and_served_to_its_host() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -492,7 +492,7 @@ async fn a_relayed_artifact_is_fetched_once_before_any_request_and_served_to_its
 
 /// A peer of another host, and a peer whose certificate names no host, are answered exactly as a
 /// request for an artifact nobody was offered: the Gateway does not say what it holds.
-/// Verifies: ADR-0070, ADR-0071
+/// Verifies: ADR-0033, ADR-0034
 #[tokio::test]
 async fn another_host_and_a_certificate_naming_no_host_are_answered_as_for_an_artifact_not_held() {
     let upstream = Arc::new(Upstream::default());
@@ -526,7 +526,7 @@ async fn another_host_and_a_certificate_naming_no_host_are_answered_as_for_an_ar
 
 /// An Agent's offer is the last one relayed to it: a later offer of another version replaces it,
 /// and the artifact it no longer names is not served, though the Gateway still holds it.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_later_offer_replaces_what_an_agent_was_offered() {
     let upstream = Arc::new(Upstream::default());
@@ -556,7 +556,7 @@ async fn a_later_offer_replaces_what_an_agent_was_offered() {
 
 /// An offered file with an absolute URL — here a mirror the upstream also serves — is neither
 /// fetched nor served by the Gateway; the Server-hosted artifact beside it is.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_referenced_artifact_is_neither_fetched_nor_served() {
     let upstream = Arc::new(Upstream::default());
@@ -591,7 +591,7 @@ async fn a_referenced_artifact_is_neither_fetched_nor_served() {
 }
 
 /// Bytes that do not match the offered hash are deleted, never held, and never served.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn an_artifact_that_fails_its_hash_is_neither_stored_nor_served() {
     let upstream = Arc::new(Upstream::default());
@@ -616,7 +616,7 @@ async fn an_artifact_that_fails_its_hash_is_neither_stored_nor_served() {
 
 /// An artifact larger than `package_cache_bytes` is not stored and not streamed through: it is
 /// answered `404`, and fetched once, not again on the next request.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn an_artifact_larger_than_the_cache_is_refused_and_not_fetched_again() {
     let upstream = Arc::new(Upstream::default());
@@ -638,7 +638,7 @@ async fn an_artifact_larger_than_the_cache_is_refused_and_not_fetched_again() {
 
 /// The download route admits as `/v1/opamp` does: while the Gateway holds no revocation list it
 /// answers `503`, on both.
-/// Verifies: ADR-0070, ADR-0071
+/// Verifies: ADR-0033, ADR-0034
 #[tokio::test]
 async fn the_download_route_answers_503_while_the_gateway_holds_no_revocation_list() {
     let upstream = Arc::new(Upstream {
@@ -670,7 +670,7 @@ async fn the_download_route_answers_503_while_the_gateway_holds_no_revocation_li
 /// is relayed over B's connection. The `instance_uid` is A's, bound by A's first report: the offer is
 /// not recorded for B, which is answered exactly as for an artifact nobody was offered, and A is
 /// served once the next offer reaches it.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_host_reporting_another_hosts_instance_uid_before_the_reply_is_not_served() {
     let (messages, seen) = tokio::sync::watch::channel(0usize);
@@ -743,7 +743,7 @@ async fn a_host_reporting_another_hosts_instance_uid_before_the_reply_is_not_ser
 /// A fetch that fails is not repeated by the requests that follow, nor by offers of the same
 /// artifact relayed again to the same Agent: each request is answered `404` and the upstream sees
 /// the one fetch. When the artifact newly appears in an Agent's offer it is fetched again.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_failed_fetch_is_not_repeated_by_requests_or_re_offers_and_is_retried_when_newly_offered()
 {
@@ -798,7 +798,7 @@ async fn a_failed_fetch_is_not_repeated_by_requests_or_re_offers_and_is_retried_
 
 /// A downstream Client on a WebSocket receives its offer over the socket, and then the artifact
 /// over the download route with the same certificate.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_websocket_downstream_receives_the_offer_and_the_artifact() {
     use futures_util::{SinkExt as _, StreamExt as _};
@@ -877,7 +877,7 @@ async fn a_websocket_downstream_receives_the_offer_and_the_artifact() {
 
 /// A body sent without `Content-Length` is cut where it passes the limit: nothing is held, the
 /// request is answered `404`, and the artifact is not fetched again.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_body_without_content_length_is_cut_at_the_limit() {
     let upstream = Arc::new(Upstream {
@@ -901,7 +901,7 @@ async fn a_body_without_content_length_is_cut_at_the_limit() {
 }
 
 /// A certificate the Server revoked is refused `401` on the download route, as on `/v1/opamp`.
-/// Verifies: ADR-0070, ADR-0071
+/// Verifies: ADR-0033, ADR-0034
 #[tokio::test]
 async fn a_revoked_certificate_is_refused_on_the_download_route() {
     let pki = Pki::new();
@@ -935,7 +935,7 @@ const SHORT_WAITS: fleet_agent::packages::Patience = fleet_agent::packages::Pati
 /// Client says so in its log and asks again as told, and once the fetch completes its own download
 /// code fetches and verifies the artifact. The Client's log line is told apart from other tests'
 /// by the Gateway's address it names.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_client_behind_a_gateway_installs_from_an_upstream_slower_than_its_read_timeout() {
     let log = captured_log();
@@ -1089,7 +1089,7 @@ impl std::io::Write for Captured {
 /// Server lets a marked Gateway do for what is offered to any Agent — and the Client's own download
 /// code, resolving the offered path against its endpoint (the Gateway), fetches it from there and
 /// verifies its hash and signature.
-/// Verifies: ADR-0070
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_it() {
     opamp::tls::install_ring_provider();

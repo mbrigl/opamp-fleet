@@ -1,13 +1,13 @@
-//! What `service-manager` leaves undone on Windows: the recovery actions that make ADR-0014's
-//! "restart on failure" true there as well, the display name of ADR-0014, and the logon account
-//! of ADR-0014.
+//! What `service-manager` leaves undone on Windows: the recovery actions that make ADR-0028's
+//! "restart on failure" true there as well, the display name of ADR-0028, and the logon account
+//! of ADR-0028.
 //!
 //! On systemd and launchd the restart policy handed to `service-manager` is written straight into
 //! the unit (`Restart=on-failure`) or the plist (`KeepAlive{SuccessfulExit:false}`). Its Windows
 //! backend is the `sc.exe` wrapper, whose `install` matches on the policy **only to log a
 //! warning** — *"sc.exe does not support automatic restart policies through 'sc create'; service
 //! '…' will not restart automatically"* — and registers no recovery actions at all. A Windows
-//! Client therefore never came back from any failure, which contradicts ADR-0014 on one of its
+//! Client therefore never came back from any failure, which contradicts ADR-0028 on one of its
 //! three platforms.
 //!
 //! Two calls close that, both on the `windows-service` crate already used for the SCM runtime
@@ -23,7 +23,7 @@
 //!    restarted. The flag is false by default.
 //!
 //! The display name is the third gap. The backend's `sc create` sets `displayname=` to the service
-//! name, so the Windows services list would read `supervisor` where ADR-0014 promised
+//! name, so the Windows services list would read `supervisor` where ADR-0028 promised
 //! the product's display name — a promise never actually kept. It is set afterwards with
 //! `sc.exe config`, deliberately **not** with the crate's `Service::change_config`: that call maps
 //! onto `ChangeServiceConfigW` with every field supplied from a `ServiceInfo`, so setting one field
@@ -40,7 +40,7 @@
 //! Everything here is a no-op on Unix.
 
 /// Configure what the Windows backend does not: failure recovery, the display name, the
-/// description — and, when `--run-as` named one, the logon account (ADR-0014).
+/// description — and, when `--run-as` named one, the logon account (ADR-0028).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
@@ -103,7 +103,7 @@ pub fn configure(
             format!("cannot enable recovery on reported failures for {service_name}: {e}")
         })?;
 
-    // The name the services list shows (ADR-0014). `sc.exe` wants `displayname=` with the space
+    // The name the services list shows (ADR-0028). `sc.exe` wants `displayname=` with the space
     // **after** the equals sign: the token is the option and the *next* argument is its value, so
     // `displayname=x` as one word is parsed as an option nobody knows and silently changes nothing.
     sc(
@@ -121,7 +121,7 @@ pub fn configure(
         &format!("description of {service_name}"),
     )?;
 
-    // The logon account (ADR-0014). `service-manager`'s `sc.exe` backend ignores the ctx's
+    // The logon account (ADR-0028). `service-manager`'s `sc.exe` backend ignores the ctx's
     // `username`, so the account is set here — and set *without* a `password=`, which every form
     // `run_as` admits (the service's virtual account, a gMSA, the built-ins) is defined not to
     // need. No *Log on as a service* grant follows: the default security policy grants it to

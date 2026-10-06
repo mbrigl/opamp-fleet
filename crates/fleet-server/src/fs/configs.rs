@@ -1,4 +1,4 @@
-//! Configurations on the filesystem (ADR-0016, ADR-0027): the default adapter behind
+//! Configurations on the filesystem (ADR-0011, ADR-0014): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration, written in
 //! one step.
 
@@ -93,7 +93,7 @@ mod tests {
 
     /// No legacy reader: a file in a shape this Server no longer writes is a startup error that
     /// names the path, not a file quietly read as something else. Both retired shapes are covered
-    /// — the flat pre-ADR-0027 record and the two-revision ADR-0027 one.
+    /// — the flat pre-ADR-0014 record and the two-revision ADR-0014 one.
     #[test]
     fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
         for (file, body) in [

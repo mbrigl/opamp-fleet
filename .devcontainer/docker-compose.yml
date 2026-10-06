@@ -13,7 +13,7 @@
 # all. What it costs is named in OBSERVABILITY.md — read it before assuming this is strictly better.
 #
 # Nothing shipped depends on the three observability services. They exist so own telemetry
-# (ADR-0025) can be looked at while working on the Client and the Server, and dropping them from
+# (ADR-0022) can be looked at while working on the Client and the Server, and dropping them from
 # `runServices` in devcontainer.json is how they are turned off.
 #
 # This does not weaken ADR-0002. No Docker socket is mounted and nothing in the workspace container
@@ -33,10 +33,10 @@ services:
   # The container VS Code attaches to — `service` in devcontainer.json names it.
   workspace:
     # Pinned to a Debian *release*, not the floating `:debian` tag: this container is the build host
-    # for the Icinga 2 artifact, so its glibc is that artifact's reach (ADR-0029) and a tag
+    # for the Icinga 2 artifact, so its glibc is that artifact's reach (ADR-0016) and a tag
     # that moves would move the reach with it. bookworm => `libc6 >= 2.34` => Debian 12+, Ubuntu
     # 22.04+, RHEL 9+. Changing this line is a decision about which hosts the fleet can serve — see
-    # ADR-0029.
+    # ADR-0016.
     image: mcr.microsoft.com/devcontainers/base:debian12
     # The Dev Containers CLI replaces the entrypoint with a keep-alive of its own, so this matters
     # only when the project is brought up with a plain `docker compose up`.
@@ -45,7 +45,7 @@ services:
       # Relative to .devcontainer/ (see the header), which makes this the repository root.
       - ..:/workspace
     ports:
-      # The Agent plane (ADR-0012), where the fleet connects: bound to 0.0.0.0 so the Server is
+      # The Agent plane (ADR-0023), where the fleet connects: bound to 0.0.0.0 so the Server is
       # reachable under the host's own IP, not only from the host via localhost. This is what
       # `appPort` used to do — a Compose-based Dev Container ignores that property, so the
       # publication lives here now.
@@ -89,7 +89,7 @@ services:
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
     # The one service that cannot just be a neighbour. The Client refuses a cleartext OTLP
-    # destination beyond the private address space (ADR-0025) — it is refused, not warned
+    # destination beyond the private address space (ADR-0022) — it is refused, not warned
     # about — and `otel-collector` resolves to no address at all outside Compose's own network.
     # Sharing the workspace container's network namespace puts the Collector's receivers on that
     # container's loopback, so `http://localhost:4318/v1/logs` means inside the container exactly

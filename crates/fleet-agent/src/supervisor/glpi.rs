@@ -1,11 +1,11 @@
-//! The `glpi` plugin (ADR-0028): the GLPI Agent, delivered as a package tree and run out of this
+//! The `glpi` plugin (ADR-0015): the GLPI Agent, delivered as a package tree and run out of this
 //! Supervisor's own directory.
 //!
 //! This is the agent that shows most plainly why a kind beats a recipe. Its two platform
 //! invocations differ in nearly everything — the program's name and where it sits in the tree, the
 //! working directory, and on Windows four Perl `-I` paths and the script named by path — and not
 //! one of those differences is a decision anybody makes. They follow from `EXE_SUFFIX` and from
-//! where the AppImage this project repacks puts its interpreter (ADR-0028), so they belong to the
+//! where the AppImage this project repacks puts its interpreter (ADR-0015), so they belong to the
 //! side that packs the artifact, not to every host's file.
 //!
 //! Two flags are supervision requirements rather than preferences, and are therefore not the
@@ -22,7 +22,7 @@ use crate::supervisor::ports::{
 };
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
 
-/// What this project's own packaging puts in the tree, per platform (ADR-0028,
+/// What this project's own packaging puts in the tree, per platform (ADR-0015,
 /// `docs/artifacts/glpi-agent.md`). On Linux the repacked AppImage's entry point is `AppRun` at the
 /// tree root — it bundles several programs, and `--script=glpi-agent` picks this one. On Windows
 /// upstream's zip is installed as published, with the program deep inside the bundled Perl.
@@ -38,7 +38,7 @@ const PROGRAM: &str = "AppRun";
 #[cfg(not(windows))]
 const PROGRAM_PATH: &str = "AppRun";
 
-/// The Agent type every GLPI Configuration is aimed at (ADR-0024), and the Configuration name
+/// The Agent type every GLPI Configuration is aimed at (ADR-0012), and the Configuration name
 /// `opamp-package-fetch` uploads — both properties of the packing side, written on every host until
 /// now.
 const SERVICE_NAME: &str = "glpi-agent";
@@ -54,11 +54,11 @@ const LOG_FILE: &str = "glpi-agent.log";
 const LOG_MAX_SIZE: &str = "16";
 
 /// How the GLPI Agent is asked for its version — and, run against a *staged* program before the
-/// running one is stopped, this kind's preflight (ADR-0029). It answers the question a repacked
+/// running one is stopped, this kind's preflight (ADR-0016). It answers the question a repacked
 /// tree raises: does this host satisfy the interpreter we shipped it?
 const VERSION_ARGS: &[&str] = &["--version"];
 
-/// The keys the `command` recipe carried and this kind now supplies (ADR-0028), each with what
+/// The keys the `command` recipe carried and this kind now supplies (ADR-0015), each with what
 /// answers it now — refused by name, so an operator rewriting the old block is told where each
 /// value went rather than meeting serde's "unknown field".
 const RETIRED: &[(&str, &str)] = &[
@@ -86,7 +86,7 @@ const RETIRED: &[(&str, &str)] = &[
 ];
 
 /// The root of the delivered tree — `program/tree` under this Supervisor's own directory
-/// (ADR-0019).
+/// (ADR-0018).
 fn tree_root(ctx: &SupervisorContext) -> PathBuf {
     ctx.supervisor_dir
         .join(crate::config::PROGRAM_DIR)
@@ -96,7 +96,7 @@ fn tree_root(ctx: &SupervisorContext) -> PathBuf {
 /// Where the process starts.
 ///
 /// On Linux this is `None`: the program *is* the tree root's `AppRun`, so the general derivation
-/// (ADR-0015) already lands there. On Windows the program sits at `perl/bin/`, four levels from
+/// (ADR-0010) already lands there. On Windows the program sits at `perl/bin/`, four levels from
 /// what the bundled Perl expects as its base — so the kind names the tree root, which is exactly
 /// what upstream's own portable `.bat` launcher does before invoking the agent.
 fn working_dir(ctx: &SupervisorContext) -> Option<PathBuf> {
@@ -159,7 +159,7 @@ impl Plugin for GlpiPlugin {
         "command"
     }
 
-    /// What `opamp-package-fetch --agent glpi` packs decides, per platform (ADR-0028): the
+    /// What `opamp-package-fetch --agent glpi` packs decides, per platform (ADR-0015): the
     /// program's file name, where it sits inside the tree, and the Agent type it presents.
     fn defaults(&self) -> KindDefaults {
         KindDefaults {
@@ -167,7 +167,7 @@ impl Plugin for GlpiPlugin {
             program_path: Some(PROGRAM_PATH),
             service_name: Some(SERVICE_NAME),
             // Wrapped, with nothing to correct: the fleet's `[supervisors]`/`[updates]` policy
-            // stands, and the block says nothing about it (ADR-0015).
+            // stands, and the block says nothing about it (ADR-0010).
             timing: Some(KindTiming::default()),
             // The GLPI Agent speaks no OpAMP to us; its Endpoint is bound and nothing connects.
             endpoint_port: false,
@@ -176,7 +176,7 @@ impl Plugin for GlpiPlugin {
 
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
         // Strictly empty: a wrapper that needed an escape hatch would be a wrapper that does not
-        // know its agent (ADR-0015).
+        // know its agent (ADR-0010).
         let _: GlpiSettings = parse_settings(
             &ctx.name,
             self.kind(),
@@ -207,7 +207,7 @@ impl Plugin for GlpiPlugin {
                 env: Vec::new(),
             }),
             // The GLPI Agent has no reload signal of its own, so a configuration applies by the
-            // restart ADR-0015 defines.
+            // restart ADR-0010 defines.
             reload_signal: None,
             events: ctx.events,
             commands: command_rx,
@@ -235,7 +235,7 @@ impl Plugin for GlpiPlugin {
     }
 }
 
-/// This kind has no settings at all (ADR-0028): the block is `type` and `name`.
+/// This kind has no settings at all (ADR-0015): the block is `type` and `name`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GlpiSettings {}

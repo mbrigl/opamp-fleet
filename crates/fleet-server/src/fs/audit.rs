@@ -1,4 +1,4 @@
-//! The audit record on the filesystem (ADR-0063): the default adapter behind
+//! The audit record on the filesystem (ADR-0030): the default adapter behind
 //! [`AuditStore`](crate::audit_log::AuditStore).
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -223,7 +223,7 @@ impl AuditStore for FsAuditStore {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0063
+    /// Verifies: ADR-0030
     #[test]
     fn the_record_is_owner_only_and_continues_where_it_ended() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -271,7 +271,7 @@ mod tests {
 
     /// A record a crash cut mid-line goes on from its last whole entry, on a line of its own, and
     /// says it was torn; an empty newest file is passed over.
-    /// Verifies: ADR-0063
+    /// Verifies: ADR-0030
     #[test]
     fn a_torn_record_goes_on_from_its_last_whole_entry() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,9 +1,9 @@
-//! The `icinga2` plugin (ADR-0029): Icinga 2 in the Agent role, delivered as a package and run
+//! The `icinga2` plugin (ADR-0016): Icinga 2 in the Agent role, delivered as a package and run
 //! out of this Supervisor's own directory.
 //!
 //! Icinga 2 relocates only if it is *told* to, on every invocation, and the arguments that tell it
 //! are not operator choices: the account it may run under follows the Client's service account
-//! (ADR-0014), the include directory follows the delivered tree, and the state directories follow
+//! (ADR-0028), the include directory follows the delivered tree, and the state directories follow
 //! `supervisor_dir`. So the block states values — the parent, the node name, where state lives —
 //! and this plugin assembles the command line. What supervision *means* is unchanged: the shared
 //! [`Runner`] spawns, watches, swaps packages, gates health, and stops.
@@ -19,7 +19,7 @@
 //!   configuration, so every apply is validated with `daemon -C` before it reaches the Runner —
 //!   otherwise the fleet would be told `APPLIED` for a configuration that never took effect.
 //!
-//! Enrolment (ADR-0029) rides in the adapter beside the Runner: the daemon stays unstarted until
+//! Enrolment (ADR-0016) rides in the adapter beside the Runner: the daemon stays unstarted until
 //! the Icinga parent has signed this node's certificate, and an unreachable parent is a wait with
 //! a reason rather than a crash loop.
 
@@ -35,9 +35,9 @@ use crate::supervisor::ports::{
 use crate::supervisor::process::{sighup, unhealthy, Preflight, ProcessSpec, Runner, VersionProbe};
 use opamp::client::Backoff;
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0011.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0025.
 ///
-/// `binary` is not among them: the core takes it out and resolves it (ADR-0022), and what arrives
+/// `binary` is not among them: the core takes it out and resolves it (ADR-0032), and what arrives
 /// here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,14 +45,14 @@ struct Icinga2Settings {
     /// This node's common name: its `NodeName`, the CN of its certificate, and its Endpoint name
     /// — Icinga requires the three to be the same string, and the master's ticket was minted for
     /// exactly it. Not derivable for that reason: nothing on this side can know what was typed on
-    /// the other (ADR-0029).
+    /// the other (ADR-0016).
     node_name: Option<String>,
     /// The parent (master or satellite) this Agent enrols with and connects to, as `host` or
     /// `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no
     /// enrolment, no certificate to fetch, only local checks.
     parent_host: Option<String>,
     /// The file holding this host's enrolment ticket — a Configuration delivered with
-    /// `role = "supplementary"` and a Selector naming one Agent (ADR-0029). Absent means the
+    /// `role = "supplementary"` and a Selector naming one Agent (ADR-0016). Absent means the
     /// signing request waits for `icinga2 ca sign` on the parent.
     ticket_file: Option<String>,
     /// The parent's certificate — **its own**, not the CA that signed it: `pki request` compares
@@ -62,7 +62,7 @@ struct Icinga2Settings {
     trusted_cert_file: Option<String>,
 }
 
-/// The keys this kind used to take and now supplies itself (ADR-0029), each with what answers it
+/// The keys this kind used to take and now supplies itself (ADR-0016), each with what answers it
 /// now. Refused by name rather than met with serde's "unknown field": a block that carries one was
 /// written against a Client that needed it, and the operator deleting the line deserves to be told
 /// where the value went — the pattern `package` and `accepts_packages` already run.
@@ -122,7 +122,7 @@ const RETIRED: &[(&str, &str)] = &[
 pub struct Layout {
     program: PathBuf,
     /// Where the fleet's Configuration entries land; the root is resolved out of it on demand
-    /// (ADR-0029), because which entry is the root can change with every rollout.
+    /// (ADR-0016), because which entry is the root can change with every rollout.
     config_dir: PathBuf,
     include_dir: PathBuf,
     plugin_dir: PathBuf,
@@ -135,7 +135,7 @@ pub struct Layout {
     run_as: Option<(String, String)>,
     parent: Option<(String, u16)>,
     /// Where the enrolment ticket is read from — a Configuration entry, delivered per host
-    /// (ADR-0029). Absent means on-demand signing: the request waits in the parent's queue.
+    /// (ADR-0016). Absent means on-demand signing: the request waits in the parent's queue.
     ticket_file: Option<PathBuf>,
     /// The parent certificate to pin, as delivered. Copied out of `config/` at enrolment, because
     /// the next apply empties that directory.
@@ -145,13 +145,13 @@ pub struct Layout {
     /// How close to expiry a certificate may come before it is renewed.
     renew_before: Duration,
     /// What was enrolled, so the ordinary start costs no subprocess. The certificate on disk is
-    /// the state; this is a hint (ADR-0029).
+    /// the state; this is a hint (ADR-0016).
     marker: PathBuf,
 }
 
 impl Layout {
     /// Where the enrolled certificate and key live — `DataDir/certs`, which is where the
-    /// `ApiListener` looks for `<NodeName>.crt` without being told (ADR-0029).
+    /// `ApiListener` looks for `<NodeName>.crt` without being told (ADR-0016).
     pub fn certs_dir(&self) -> PathBuf {
         self.data_dir.join("certs")
     }
@@ -195,7 +195,7 @@ impl Layout {
     /// **The mark is a role, and a role is the kind's to define.** The Baseline says so of
     /// `AgentConfigFile.role`: *"The values and their semantics are Agent type-specific."* So
     /// `main` means *this* to `icinga2` and nothing to anyone else, which is the field working as
-    /// intended rather than being borrowed. ADR-0016's own two values stay what they are for kinds
+    /// intended rather than being borrowed. ADR-0011's own two values stay what they are for kinds
     /// that define nothing further.
     ///
     /// Resolved on every spawn rather than once at start: which entry is the root is the fleet's
@@ -258,7 +258,7 @@ impl Layout {
     }
 
     /// The ticket this host enrols with, read from the file the fleet delivered it in. A file that
-    /// is not there is not an error: it means on-demand signing (ADR-0029).
+    /// is not there is not an error: it means on-demand signing (ADR-0016).
     fn ticket(&self) -> Result<Option<String>, String> {
         let Some(path) = self.ticket_file.as_ref().filter(|p| p.is_file()) else {
             return Ok(None);
@@ -271,7 +271,7 @@ impl Layout {
 
     /// Whether the marker says this is the enrolment we want — same node, same parent. It answers
     /// *"has anything changed?"*, never *"is there a certificate?"*, which is what the file on disk
-    /// answers (ADR-0029).
+    /// answers (ADR-0016).
     fn enrolled_for(&self, want: &Enrolment) -> bool {
         std::fs::read_to_string(&self.marker)
             .ok()
@@ -301,7 +301,7 @@ impl Layout {
 
     /// Validates a configuration exactly as the daemon would, without touching what runs.
     ///
-    /// This is the gate ADR-0029 requires: Icinga aborts a reload it cannot validate and **keeps
+    /// This is the gate ADR-0016 requires: Icinga aborts a reload it cannot validate and **keeps
     /// running the old configuration**, printing the reason to stderr — so a Supervisor that
     /// forwarded the apply blindly would report `APPLIED` for a configuration that never took
     /// effect.
@@ -313,7 +313,7 @@ impl Layout {
     }
 
     /// The daemon's argument vector. Foreground — no `-d`, no `--close-stdio` — because the Runner
-    /// supervises what it started and the Client's logging carries the output (ADR-0014).
+    /// supervises what it started and the Client's logging carries the output (ADR-0028).
     fn daemon_args(&self, root: &std::path::Path) -> Vec<String> {
         let mut args = vec![
             "daemon".to_string(),
@@ -351,7 +351,7 @@ const SUBCOMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `-D RunAsUser`/`-D RunAsGroup` are not a daemon concern: **every** subcommand drops privileges
 /// to the compiled-in account first and refuses when it cannot, so `pki` needs them exactly as the
-/// daemon does (ADR-0029).
+/// daemon does (ADR-0016).
 async fn run_subcommand(layout: &Layout, args: &[String]) -> Result<String, String> {
     let mut command = tokio::process::Command::new(&layout.program);
     command.args(args);
@@ -410,7 +410,7 @@ fn valid_until(text: &str) -> Option<time::OffsetDateTime> {
         .map(|stamp| stamp.assume_utc())
 }
 
-/// What the enrolment marker records — a hint, never the authority (ADR-0029).
+/// What the enrolment marker records — a hint, never the authority (ADR-0016).
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct Enrolment {
     common_name: String,
@@ -421,7 +421,7 @@ struct Enrolment {
 
 /// Obtains a certificate for this node from its Icinga parent, once.
 ///
-/// The order matters and is ADR-0029's: a usable certificate ends it before anything runs; the key
+/// The order matters and is ADR-0016's: a usable certificate ends it before anything runs; the key
 /// is generated locally and never travels; the parent is pinned before it is talked to; and the
 /// ticket — when there is one — turns the request into an immediate signature instead of a queue
 /// entry. `Ok(false)` means there was nothing to do.
@@ -443,7 +443,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
     };
     // Whether this is a *renewal* — an existing certificate near its expiry — rather than a first
     // enrolment. The two differ in one place each: a renewal keeps its key, and it authenticates
-    // itself with the certificate it already holds instead of with a ticket (ADR-0029).
+    // itself with the certificate it already holds instead of with a ticket (ADR-0016).
     let mut renewing = false;
     if cert.is_file() && ca.is_file() && layout.enrolled_for(&want) {
         // The certificate is the state, so it is *verified* rather than assumed: one that does not
@@ -484,7 +484,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
 
     // The parent is pinned before it is talked to, and before a key is made for it. A named file
     // that is missing — not yet arrived, or a path mistyped — is an error the enrolment retries:
-    // ADR-0029 clause 12 trusts on first use only when none was delivered. That holds for a renewal
+    // ADR-0016 clause 12 trusts on first use only when none was delivered. That holds for a renewal
     // too: the pin kept from an earlier run may itself have come from trust on first use.
     if let Some(delivered) = layout.trusted_cert_file.as_ref().filter(|f| !f.is_file()) {
         return Err(format!(
@@ -497,7 +497,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
     tracing::info!(node = %layout.node_name, parent = %host, renewing, "requesting an Icinga certificate");
     if !renewing {
         // A renewal must not do this: it would overwrite the very key and certificate that
-        // authenticate the renewal, leaving a request nothing can prove (ADR-0029).
+        // authenticate the renewal, leaving a request nothing can prove (ADR-0016).
         run_subcommand(
             layout,
             &[
@@ -531,7 +531,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
             tracing::warn!(
                 parent = %host,
                 "no parent certificate was delivered: trusting the one the parent presents now \
-                 (trust on first use, ADR-0029)"
+                 (trust on first use, ADR-0016)"
             );
             run_subcommand(
                 layout,
@@ -574,7 +574,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
         ),
         None => tracing::info!(
             node = %layout.node_name,
-            "no ticket: the signing request waits for `icinga2 ca sign` on the parent (ADR-0029)"
+            "no ticket: the signing request waits for `icinga2 ca sign` on the parent (ADR-0016)"
         ),
     }
     run_subcommand(layout, &request).await?;
@@ -585,7 +585,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
 
 /// Icinga's own version banner is `icinga2 … (version: r2.14.6-1)`: an `r`, and a packaging
 /// revision the strict SemVer read rejects outright. Reported as `2.14.6`, which is the version an
-/// operator compares and the one a package Set is named after (ADR-0013).
+/// operator compares and the one a package Set is named after (ADR-0017).
 fn parse_version(text: &str) -> Option<String> {
     fn numeric(part: Option<&str>) -> bool {
         part.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
@@ -600,7 +600,7 @@ fn parse_version(text: &str) -> Option<String> {
 }
 
 /// The account this Client runs as, which is the account Icinga may drop to. Resolved with `id(1)`
-/// — the idiom ADR-0014's account handling already uses, rather than `getpwuid(3)` behind `unsafe`
+/// — the idiom ADR-0028's account handling already uses, rather than `getpwuid(3)` behind `unsafe`
 /// or a user-lookup dependency for two strings.
 #[cfg(unix)]
 fn current_account() -> Option<(String, String)> {
@@ -624,14 +624,14 @@ pub struct Icinga2Plugin;
 
 impl Icinga2Plugin {
     /// Resolves the block against this Supervisor's directories. Everything an operator may write
-    /// goes through the placeholders of ADR-0022; the defaults are expressed in them too, so a
+    /// goes through the placeholders of ADR-0032; the defaults are expressed in them too, so a
     /// relocated `supervisor_dir` moves the state with it.
     fn layout(ctx: &SupervisorContext, settings: &Icinga2Settings) -> Layout {
         let path = |below: &str| -> PathBuf { PathBuf::from(ctx.expand(below)) };
-        // Inside the tree this kind delivers (ADR-0029): the ITL the root configuration `include`s,
+        // Inside the tree this kind delivers (ADR-0016): the ITL the root configuration `include`s,
         // and the check plugins. On Windows the checks stay beside the daemon in `sbin`, because a
         // Windows program finds its DLLs in its own directory first and the checks share that
-        // runtime (ADR-0029).
+        // runtime (ADR-0016).
         let tree = ctx
             .supervisor_dir
             .join(crate::config::PROGRAM_DIR)
@@ -652,7 +652,7 @@ impl Icinga2Plugin {
             run_dir: path("${supervisor_dir}/run"),
             // The operator's, else this host's fully qualified name, else the Supervisor's own —
             // which the instance-name grammar cannot spell as an FQDN, so it is the last resort
-            // rather than the default it used to be (ADR-0029).
+            // rather than the default it used to be (ADR-0016).
             node_name: settings
                 .node_name
                 .clone()
@@ -675,7 +675,7 @@ impl Icinga2Plugin {
     }
 }
 
-/// What the delivered tree needs in its environment (ADR-0029): on Unix its own libraries, so the
+/// What the delivered tree needs in its environment (ADR-0016): on Unix its own libraries, so the
 /// bundled copies win over whatever the machine has. Windows needs none — a program there finds its
 /// DLLs beside itself.
 fn tree_environment(ctx: &SupervisorContext) -> Vec<(String, String)> {
@@ -693,7 +693,7 @@ fn tree_environment(ctx: &SupervisorContext) -> Vec<(String, String)> {
     )]
 }
 
-/// This host's fully qualified name, if it has one — the default for `node_name` (ADR-0029).
+/// This host's fully qualified name, if it has one — the default for `node_name` (ADR-0016).
 ///
 /// **Why a resolution rather than the host name this Agent already reports.** That one is
 /// `gethostname`, which the semantic conventions permit to be either form and which is the short
@@ -753,17 +753,17 @@ fn read_fqdn() -> Option<String> {
     None
 }
 
-/// The role a delivered Configuration carries to say it is Icinga's root (ADR-0029), and the name
+/// The role a delivered Configuration carries to say it is Icinga's root (ADR-0016), and the name
 /// that stands in where the fleet marked nothing — the one `opamp-package-fetch` uploads.
 const ROOT_ROLE: &str = "main";
 const CONVENTIONAL_ROOT: &str = "icinga2-conf";
 
 /// The console severity the daemon is started with (`-x`). Icinga's own default, and no longer a
 /// block key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration
-/// is the place, which the fleet rolls out (ADR-0029).
+/// is the place, which the fleet rolls out (ADR-0016).
 const DEFAULT_LOG_LEVEL: &str = "information";
 
-/// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-0029).
+/// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-0016).
 ///
 /// One address is one value. A bare IPv6 address has colons of its own, so the split is taken from
 /// the **last** one and only when what follows is a port — `::1` stays a host, `[::1]:5665` and
@@ -792,11 +792,11 @@ fn parent_address(raw: &str) -> (String, u16) {
     (raw.to_string(), DEFAULT_PARENT_PORT)
 }
 
-/// The daemon's file name and its place inside the delivered tree (ADR-0029), per platform.
+/// The daemon's file name and its place inside the delivered tree (ADR-0016), per platform.
 ///
 /// Windows carries the `.exe` and — the difference that is easy to miss — keeps the check plugins
 /// beside the daemon in `sbin` rather than in `plugins/`, because a Windows program finds its DLLs
-/// in its own directory first and the checks share that runtime (ADR-0029).
+/// in its own directory first and the checks share that runtime (ADR-0016).
 #[cfg(windows)]
 const PROGRAM: &str = "icinga2.exe";
 #[cfg(not(windows))]
@@ -811,13 +811,13 @@ const DEFAULT_PARENT_PORT: u16 = 5665;
 
 /// How long before expiry a certificate is renewed by default. Icinga's own default validity is
 /// years, and the daemon renews over its established connection; this is the start-time safety net
-/// for the host that was switched off for longer than that (ADR-0029).
+/// for the host that was switched off for longer than that (ADR-0016).
 const DEFAULT_RENEW_BEFORE_DAYS: u64 = 30;
 
 /// Enrols this node, retrying until it succeeds, and nudges the Runner when it does.
 ///
 /// An unreachable parent is a *wait*, not a failure: the health says what is missing, the attempt
-/// backs off, and no daemon is started — a crash loop would say nothing about why (ADR-0029). The
+/// backs off, and no daemon is started — a crash loop would say nothing about why (ADR-0016). The
 /// nudge is an ordinary `Restart`, because the gate this opens is the one `build()` reads.
 async fn enrol(layout: Layout, runner: mpsc::Sender<ProcessCommand>, events: EventSender) {
     let mut backoff = Backoff::new();
@@ -848,7 +848,7 @@ async fn enrol(layout: Layout, runner: mpsc::Sender<ProcessCommand>, events: Eve
 ///
 /// Everything else is forwarded untouched. A configuration that does not validate is answered
 /// `ConfigApplied{Err}` **and swallowed**: the running daemon is not stopped, not reloaded, and not
-/// left claiming to run something it refused (ADR-0029).
+/// left claiming to run something it refused (ADR-0016).
 async fn intercept(
     mut from_core: mpsc::Receiver<ProcessCommand>,
     runner: mpsc::Sender<ProcessCommand>,
@@ -862,7 +862,7 @@ async fn intercept(
                 Err(e) => {
                     tracing::warn!(error = %e, "refusing a configuration Icinga 2 will not accept");
                     // The apply ends here rather than at the Runner, so this is where its trace
-                    // learns why (ADR-0025).
+                    // learns why (ADR-0022).
                     crate::telemetry::failed(&span, &e);
                     events
                         .send(ProcessEvent::ConfigApplied {
@@ -882,7 +882,7 @@ async fn intercept(
 }
 
 /// `node_name` names the certificate and key files of this host, so it is one plain file-name
-/// component and nothing that could climb out of the certificate directory (ADR-0069 clause 19).
+/// component and nothing that could climb out of the certificate directory (ADR-0032 clause 19).
 fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
     let Some(node_name) = node_name else {
         return Ok(());
@@ -912,7 +912,7 @@ impl Plugin for Icinga2Plugin {
     }
 
     /// What the tree `opamp-package-fetch --agent icinga2` packs decides, per platform
-    /// (ADR-0029): the daemon's file name, where it sits inside that tree, and the Agent type
+    /// (ADR-0016): the daemon's file name, where it sits inside that tree, and the Agent type
     /// every Icinga Configuration is aimed at. None of the three is a decision a host makes.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults {
@@ -943,14 +943,14 @@ impl Plugin for Icinga2Plugin {
         )?;
         check_node_name(&ctx.name, settings.node_name.as_deref())?;
         let layout = Self::layout(&ctx, &settings);
-        // What the delivered tree needs to run at all, and nothing else (ADR-0029): its own
+        // What the delivered tree needs to run at all, and nothing else (ADR-0016): its own
         // libraries have to win over whatever the machine has, which is the whole point of a
-        // relocatable tree (ADR-0029). Windows needs no equivalent — a program there finds its
+        // relocatable tree (ADR-0016). Windows needs no equivalent — a program there finds its
         // DLLs in its own directory first, which is also why the check plugins sit beside the
         // daemon on that platform.
         let env: Vec<(String, String)> = tree_environment(&ctx);
         // Two channels, not one: what the core holds goes through the validation gate first, and
-        // what the Runner receives is what survived it (ADR-0029).
+        // what the Runner receives is what survived it (ADR-0016).
         let (commands, from_core) = mpsc::channel(16);
         let (to_runner, command_rx) = mpsc::channel(16);
         let name = ctx.name.clone();
@@ -971,13 +971,13 @@ impl Plugin for Icinga2Plugin {
             }),
             // The delivered tree carries its own libraries, so what proves it runs must be run
             // against *those* — a version banner costs 30 ms and answers the one question a
-            // repacked tree raises: does this host's libc satisfy it (ADR-0029)?
+            // repacked tree raises: does this host's libc satisfy it (ADR-0016)?
             preflight: Some(Preflight {
                 args: vec!["--version".to_string()],
                 env: vec![("LD_LIBRARY_PATH".to_string(), "${staged}/lib".to_string())],
             }),
             // Icinga re-reads its configuration on SIGHUP and keeps the umbrella's pid, so the
-            // reload of ADR-0015 applies as it stands. Windows refuses the concept, and the
+            // reload of ADR-0010 applies as it stands. Windows refuses the concept, and the
             // Runner falls back to the restart there.
             reload_signal: sighup(),
             events: ctx.events,
@@ -996,10 +996,10 @@ impl Plugin for Icinga2Plugin {
                         args: layout.daemon_args(&root),
                         env: env.clone(),
                         working_dir: None,
-                        // Its worker must not survive the stop (ADR-0029).
+                        // Its worker must not survive the stop (ADR-0016).
                         own_process_group: true,
                         // Icinga creates none of its directories and exits when one is missing
-                        // (ADR-0029). Naming them here rather than making them in this closure is
+                        // (ADR-0016). Naming them here rather than making them in this closure is
                         // the same guarantee through the seam every kind now uses: made before
                         // every spawn, so one an operator removed comes back.
                         ensure_dirs: layout.state_dirs(),
@@ -1015,7 +1015,7 @@ impl Plugin for Icinga2Plugin {
             events.clone(),
         ));
         // In the adapter, never in `start`: a parent that is down must not hold up the Client's
-        // startup (ADR-0029).
+        // startup (ADR-0016).
         tokio::spawn(enrol(gate, to_runner, events));
         Ok(commands)
     }
@@ -1023,13 +1023,13 @@ impl Plugin for Icinga2Plugin {
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
         // Retired keys are refused before the strict parse, so a block written against an older
         // Client is told where its value went instead of meeting serde's "unknown field"
-        // (ADR-0029).
+        // (ADR-0016).
         let settings = parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings)?;
         check_node_name(name, settings.node_name.as_deref())
     }
 
     /// A delivered block reads its ticket and the parent's certificate only from its own
-    /// configuration directory, and pins the parent it names (ADR-0069 clause 19): otherwise the
+    /// configuration directory, and pins the parent it names (ADR-0032 clause 19): otherwise the
     /// Server could name any file on the host and a parent to send it to.
     fn check_delivered(
         &self,
@@ -1092,7 +1092,7 @@ mod tests {
             .expect("settings")
     }
 
-    /// The paths this kind used to be told are now the tree's own (ADR-0029), and the state
+    /// The paths this kind used to be told are now the tree's own (ADR-0016), and the state
     /// directories sit beside it. Asserted against a context rather than against the settings,
     /// because after this change the settings have nothing to say about any of them.
     #[test]
@@ -1149,7 +1149,7 @@ mod tests {
         );
     }
 
-    /// One address is one value (ADR-0029). The IPv6 case is why the split is taken from the last
+    /// One address is one value (ADR-0016). The IPv6 case is why the split is taken from the last
     /// colon and only when what follows it is a port.
     #[test]
     fn a_parent_carries_its_port_or_icingas_default() {
@@ -1223,7 +1223,7 @@ mod tests {
         }
     }
 
-    /// What is left after ADR-0029: the root Configuration's name, and the enrolment. Everything
+    /// What is left after ADR-0016: the root Configuration's name, and the enrolment. Everything
     /// else this kind supplies itself, so a block naming one is an unknown key here — and is
     /// refused by name a step earlier, which the test below covers.
     #[test]
@@ -1250,7 +1250,7 @@ mod tests {
         }
     }
 
-    /// The three arguments an operator must never have to write, and the shape ADR-0029 fixes:
+    /// The three arguments an operator must never have to write, and the shape ADR-0016 fixes:
     /// the account, the include directory, and every state directory.
     #[test]
     fn the_daemon_arguments_carry_the_relocation() {
@@ -1279,14 +1279,14 @@ mod tests {
             );
         }
         // Foreground: the Runner supervises what it started, and a daemonized Icinga would
-        // detach from it (ADR-0028's lesson, ADR-0029's requirement).
+        // detach from it (ADR-0015's lesson, ADR-0016's requirement).
         assert!(
             !args.iter().any(|a| a == "-d" || a == "--daemonize"),
             "{joined}"
         );
         assert!(!args.iter().any(|a| a == "--close-stdio"), "{joined}");
         // Icinga's own console severity, last: verbosity is the fleet's to raise in Icinga's
-        // configuration, not a value this command line takes from anywhere (ADR-0029).
+        // configuration, not a value this command line takes from anywhere (ADR-0016).
         assert_eq!(&args[args.len() - 2..], ["-x", "information"], "{joined}");
     }
 
@@ -1352,7 +1352,7 @@ mod tests {
     }
 
     /// And the operator's value outranks it, because a master may know this host under a name no
-    /// resolver here would produce (ADR-0029).
+    /// resolver here would produce (ADR-0016).
     #[test]
     fn a_configured_node_name_outranks_the_resolved_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1482,7 +1482,7 @@ mod tests {
         layout
     }
 
-    /// The whole of ADR-0029's happy path: a key generated here, a parent pinned, a signature — and
+    /// The whole of ADR-0016's happy path: a key generated here, a parent pinned, a signature — and
     /// then nothing at all, because the certificate on disk is the state.
     #[tokio::test]
     async fn enrolment_obtains_a_certificate_once() {
@@ -1517,7 +1517,7 @@ mod tests {
     /// A `trusted_cert_file` that is named but not there — not yet delivered, or mistyped — never
     /// falls back to trust on first use: enrolment fails, nothing is saved from the parent, and it
     /// pins the file once it arrives.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0016
     #[tokio::test]
     async fn a_named_parent_certificate_that_is_missing_is_waited_for_not_trusted_on_sight() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1607,7 +1607,7 @@ mod tests {
         assert_eq!(valid_until(" Valid Until:         whenever"), None);
     }
 
-    /// ADR-0029's renewal, and the two things that make it a renewal rather than an enrolment: the
+    /// ADR-0016's renewal, and the two things that make it a renewal rather than an enrolment: the
     /// key is kept — it is what authenticates the request — and no ticket is used.
     #[tokio::test]
     async fn a_certificate_near_expiry_is_renewed_without_a_new_key() {
@@ -1643,7 +1643,7 @@ mod tests {
     /// A renewal whose named parent certificate is gone waits for it too: the pin kept from the
     /// first enrolment is not reused and the parent is not trusted on sight, while the held
     /// certificate is kept untouched.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0016
     #[tokio::test]
     async fn a_renewal_whose_named_parent_certificate_is_gone_waits_for_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1671,7 +1671,7 @@ mod tests {
         );
     }
 
-    /// The measured case behind ADR-0029's validation gate: Icinga aborts a reload it cannot
+    /// The measured case behind ADR-0016's validation gate: Icinga aborts a reload it cannot
     /// validate and keeps running the old configuration, so the apply has to be refused *before*
     /// it reaches the running daemon.
     #[tokio::test]
@@ -1696,7 +1696,7 @@ mod tests {
         assert!(err.contains("syntax error"), "{err}");
     }
 
-    /// ADR-0022: an offered Supervisor set is validated before a running process is touched — and
+    /// ADR-0032: an offered Supervisor set is validated before a running process is touched — and
     /// what it refuses now is a block that still carries a key this kind supplies itself.
     #[test]
     fn check_refuses_a_block_that_names_a_retired_key() {

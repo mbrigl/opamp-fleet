@@ -7,7 +7,7 @@
 #   wss:// → WebSocket (the default: Server pushes changes within seconds)
 #   https:// → plain HTTP polling (see poll_interval_secs)
 # Both are TLS 1.3. ws:// and http:// are accepted only to 127.0.0.1 or ::1; to any other host,
-# the name localhost included, the Client refuses to start (ADR-0038).
+# the name localhost included, the Client refuses to start (ADR-0023).
 endpoint = "wss://127.0.0.1:4320/v1/opamp"
 
 # The Agent's service.instance.name — the operator's name for *this* Client, shown in the fleet UI
@@ -85,7 +85,7 @@ state_dir = "client-state"
 # a Gateway.
 #
 # The Gateway fetches each package the Server hosts once, when it relays an offer of it, and serves
-# it on its listen address only to the hosts whose Agents it relayed that offer to (ADR-0070). It
+# it on its listen address only to the hosts whose Agents it relayed that offer to (ADR-0033). It
 # holds them under <state_dir>/gateway-packages, bounded by package_cache_bytes; an artifact larger
 # than that is not delivered through the Gateway.
 # [gateway]
@@ -96,10 +96,10 @@ state_dir = "client-state"
 # cert_file = "gateway.pem"
 # key_file = "gateway-key.pem"
 # client_ca_file = "client-ca.pem"   # the fleet's client CA — never a bootstrap CA: downstream
-#                                    # Agents travel upstream as members (ADR-0071)
+#                                    # Agents travel upstream as members (ADR-0034)
 
 # TLS toward the Server. ca_file trusts a private CA; cert_file and key_file are this Client's
-# identity, and the Client refuses to start without one (ADR-0059) — the Server asks for it in the
+# identity, and the Client refuses to start without one (ADR-0026) — the Server asks for it in the
 # handshake and admits by it alone. The Client sends no credential; a leftover [auth] section from
 # an earlier version is ignored, with one warning at startup, and can be deleted.
 # [tls]
@@ -117,7 +117,7 @@ state_dir = "client-state"
 # approves the request with that fingerprint; the issued certificate arrives through the ordinary
 # offer flow and is used from then on, renewed the same way two thirds through its life.
 
-# Package verification (ADR-0042). REQUIRED to take packages: every Server-offered package MUST
+# Package verification (ADR-0018). REQUIRED to take packages: every Server-offered package MUST
 # carry a valid Ed25519 signature over its artifact, and without a key this Client takes no
 # package at all — its own self-update included — and says so at startup. A [[supervisor]] block
 # takes package delivery by naming its program with a bare file name (see the blocks below);
@@ -138,7 +138,7 @@ state_dir = "client-state"
 #                          # wherever it is stored and is opened only on the host that runs it.
 
 # Consent for the Server to replace *this Client's own* binary. **Absent — as here — means the
-# consent stands**, under the name below (ADR-0021): a Client the fleet cannot update is the one
+# consent stands**, under the name below (ADR-0020): a Client the fleet cannot update is the one
 # program on the host that has to be patched by hand. Write `enabled = false` to withdraw it, and
 # the Client's Agent then declares no package capability at all — no offer can reach it.
 #
@@ -185,17 +185,17 @@ state_dir = "client-state"
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 # delivered_env = []       # environment names a Server-delivered block may set ("OTEL_*" for a
-#                          # prefix); never PATH, LD_* or DYLD_* (ADR-0069)
+#                          # prefix); never PATH, LD_* or DYLD_* (ADR-0032)
 # delivered_args = false   # whether a Server-delivered block may state its own arguments
 # remote_config_disabled = []   # Supervisor names whose Agents take no remote configuration and
 #                               # run only on the files placed in <supervisor_dir>/<name>/config/,
 #                               # e.g. ["telegraf"]; a delivered block must repeat their running
 #                               # block exactly
-#                               # (ADR-0067)
+#                               # (ADR-0032)
 # server_manages_set = true     # false: the Server offers this Client no Supervisor set, and the
 #                               # [[supervisor]] blocks below, including any a set wrote earlier,
 #                               # are the operator's alone; review them before switching it off
-#                               # (ADR-0069)
+#                               # (ADR-0032)
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory

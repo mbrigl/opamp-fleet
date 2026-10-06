@@ -5,7 +5,7 @@
 //! `CHANGE_CONFIG` handle [`windows_config`](super::windows_config) opens for the recovery actions,
 //! and the `sc config` / `sc description` calls after it. A running process cannot raise its own
 //! token, so a refusal from inside the install is not something the install can do anything about —
-//! ADR-0014 says such an install "must fail with a clear message", and this is where that message
+//! ADR-0028 says such an install "must fail with a clear message", and this is where that message
 //! comes from.
 //!
 //! It is a **capability probe, not an identity check**: opening the SCM with
@@ -139,7 +139,7 @@ mod tests {
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators, each granted by SID.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))
@@ -160,7 +160,7 @@ mod tests {
     }
 
     /// The message *is* the feature: this check exists only so that a refusal says what was
-    /// refused and what to do about it (ADR-0014). It must not offer `--user` as the way out —
+    /// refused and what to do about it (ADR-0028). It must not offer `--user` as the way out —
     /// Windows has no user-scope service, so that would send an operator somewhere with no door.
     #[test]
     fn the_refusal_says_what_to_do_about_it() {

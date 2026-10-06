@@ -1,15 +1,15 @@
 name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
-# (ADR-0023, amended by ADR-0023 for the container and the artifact name).
+# (ADR-0029, the container and the artifact name included).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
-# `version/*` tag from it (ADR-0013) — *before* it builds, so ADR-0013's `build.rs` finds a tag on
+# `version/*` tag from it (ADR-0017) — *before* it builds, so ADR-0017's `build.rs` finds a tag on
 # HEAD and bakes the same number into the binary with its commit metadata. Nothing about how a
 # binary learns its own version changed; only who decides it and who types the tag.
 #
 # The artifacts are packed by this project's own `opamp-package-sign`, so each one is also a valid
-# package artifact for a fleet self-update (ADR-0019, ADR-0021) — the file an operator downloads is
+# package artifact for a fleet self-update (ADR-0018, ADR-0020) — the file an operator downloads is
 # the file they hand the Server.
 
 on:
@@ -30,13 +30,13 @@ permissions:
 
 env:
   # What every published artifact is named after, and the name of the Set an operator uploads them
-  # to (ADR-0023). The same string the Client's own Agent reports as its type since ADR-0023 and —
-  # since ADR-0023 — the name of the program inside the archive and of its configuration file.
+  # to (ADR-0029). The same string the Client's own Agent reports as its type, and the name of the
+  # program inside the archive and of its configuration file.
   # A Set built from these files is `supervisor@<version>@supervisor`.
   #
   # The names that are *not* this are the ones that identify an installation rather than a program:
   # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
-  # `opamp-fleet` (ADR-0014). Keeping the program's name off the product's is what lets one
+  # `opamp-fleet` (ADR-0028). Keeping the program's name off the product's is what lets one
   # published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
@@ -47,7 +47,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     permissions:
-      # Pushing the tag (ADR-0013). Read alone would be enough for everything else here.
+      # Pushing the tag (ADR-0017). Read alone would be enough for everything else here.
       contents: write
     outputs:
       version: ${{ steps.read.outputs.version }}
@@ -72,7 +72,7 @@ jobs:
           esac
 
           # A hand-pushed tag still releases, but only if the two agree — this is the drift
-          # ADR-0013 accepts and refuses to resolve silently.
+          # ADR-0017 accepts and refuses to resolve silently.
           if [ "${{ github.event_name }}" = "push" ]; then
             tagged="${GITHUB_REF_NAME#version/}"
             if [ "$tagged" != "$version" ]; then
@@ -89,7 +89,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       # Nothing is built until it is certain this number is still free. A version that already
       # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
-      # to move a tag or replace an artifact somebody may already hold (ADR-0013). Both are asked
+      # to move a tag or replace an artifact somebody may already hold (ADR-0017). Both are asked
       # because either can exist alone: a draft release reserves a tag name without the tag being
       # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
       # run — whether a version can be released does not depend on whether this run intends to.
@@ -119,7 +119,7 @@ jobs:
           fi
 
           if [ -n "$taken" ]; then
-            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0013)"
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0017)"
             exit 1
           fi
           echo "$tag is free"
@@ -139,13 +139,13 @@ jobs:
         run: |
           set -euo pipefail
           # `-p fleet-agent` is the package (its name is a build-time identifier); the binary it
-          # produces is the shipped name (ADR-0023).
+          # produces is the shipped name (ADR-0029).
           cargo build -p fleet-agent --bin supervisor --locked
           full=$(./target/debug/supervisor --version | awk '{print $NF}')
           echo "the binary reports $full"
           version='${{ steps.read.outputs.version }}'
           if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
-            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0013)"
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0017)"
             exit 1
           fi
           # The name carries the base version; the full string, build metadata and all, is what an
@@ -167,7 +167,7 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true }
           # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
-          # than depending on an Intel macOS runner label (ADR-0023). Nothing here can run it, so
+          # than depending on an Intel macOS runner label (ADR-0029). Nothing here can run it, so
           # the version assertion below is skipped for this one row.
           - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false }
           - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true }
@@ -199,12 +199,12 @@ jobs:
         id: pack
         run: |
           # `_` between the four fields, because two of them contain `-`: the name grammar is
-          # `[a-z0-9-]` (ADR-0014) and a prerelease version spells itself with a hyphen, so a
-          # hyphen-separated name does not parse back (ADR-0023).
+          # `[a-z0-9-]` (ADR-0028) and a prerelease version spells itself with a hyphen, so a
+          # hyphen-separated name does not parse back (ADR-0029).
           name="${ARTIFACT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
           # The packer names the single member after the program — `supervisor`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
-          # The *file* is named after the Set (ADR-0023); the member inside it is the product.
+          # The *file* is named after the Set (ADR-0029); the member inside it is the product.
           sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
             --format tar.gz \
             --out "$name" \
@@ -212,10 +212,10 @@ jobs:
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           # Every artifact of this row shares these four fields; only the extension differs
-          # (ADR-0023 clause 8).
+          # (ADR-0029 clause 8).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
-      # ---- ADR-0023: the native installers, beside the archive and never instead of it. ----
+      # ---- ADR-0029: the native installers, beside the archive and never instead of it. ----
       #
       # All of them package the binary built above rather than building their own, so the bytes an
       # operator installs from a `.deb` are the bytes the `.tar.gz` carries and the checksum published
@@ -256,23 +256,23 @@ jobs:
           echo "$scripts"
           grep -q 'service install' <<<"$scripts"
           grep -q 'service uninstall' <<<"$scripts"
-          # ADR-0023: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
+          # ADR-0029: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          # The two halves of ADR-0023's remove/purge distinction, redrawn across the two roots by
-          # ADR-0014 clause 8: a removal takes the executable layout under /opt, and only a purge
+          # The two halves of ADR-0029's remove/purge distinction, redrawn across the two roots by
+          # ADR-0028 clause 8: a removal takes the executable layout under /opt, and only a purge
           # takes the data root with the identity and the credential in it. Asserting both is what
           # makes a scriptlet that silently became its own file name fail here.
           #
-          # This used to assert `rm -rf "$data_root/versions"` — the pre-ADR-0014 leftovers a host
-          # upgraded across that change still carried beside its data. ADR-0014 clause 10 removed
+          # This used to assert `rm -rf "$data_root/versions"` — the pre-ADR-0028 leftovers a host
+          # upgraded across that change still carried beside its data. ADR-0028 clause 10 removed
           # that cleanup with every other migration branch, because no host was ever installed
           # under the paths it swept.
           #
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
-          # And the arch inside the package is the ecosystem's, not the file name's (ADR-0023).
+          # And the arch inside the package is the ecosystem's, not the file name's (ADR-0029).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 
       - name: Install the WiX Toolset
@@ -304,7 +304,7 @@ jobs:
         run: |
           set -euo pipefail
           # The archive already has its checksum, from the packer's own stdout — that one is the
-          # content hash an Agent verifies (ADR-0019) and is not recomputed here.
+          # content hash an Agent verifies (ADR-0018) and is not recomputed here.
           for f in "$STEM".deb "$STEM".rpm "$STEM".msi; do
             [ -f "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
@@ -354,7 +354,7 @@ jobs:
           Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
 
           The assets come in two kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0023):
+          (ADR-0029):
 
           | you want to | take |
           |---|---|
@@ -367,8 +367,8 @@ jobs:
           themselves — the same install every platform gets, not a second one. \`supervisor\` is the
           **program**; what lands on your \`PATH\` is \`opamp-fleet\`, the **product**, as a symlink
           through the layout's \`current\` pointer, so the command always answers for the version the
-          service runs (ADR-0014). **They register the service and leave it stopped**: a Client with no configuration would dial the development
-          default and manage nothing (ADR-0014), so starting it is the last step and it is yours.
+          service runs (ADR-0028). **They register the service and leave it stopped**: a Client with no configuration would dial the development
+          default and manage nothing (ADR-0028), so starting it is the last step and it is yours.
 
           \`\`\`console
           # Debian, Ubuntu
@@ -386,7 +386,7 @@ jobs:
 
           On Windows the \`.msi\` asks for the installation folder and the endpoint. That folder
           holds the program; the configuration and the state go to \`%ProgramData%\opamp-fleet\`,
-          which is what an uninstall leaves behind (ADR-0014). The same file installs unattended,
+          which is what an uninstall leaves behind (ADR-0028). The same file installs unattended,
           which is how Intune, Group Policy and SCCM deploy it:
 
           \`\`\`console
@@ -401,18 +401,18 @@ jobs:
           ## Updating a fleet
 
           Hand the \`.tar.gz\` artifacts to a Server under its release number for a Client self-update
-          (ADR-0021, ADR-0013) — the commit this build carries,
+          (ADR-0020, ADR-0017) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
-          Upload **all** of them into **one** Set (ADR-0020) — identified by the package name, the
+          Upload **all** of them into **one** Set (ADR-0019) — identified by the package name, the
           Agent type \`supervisor\`, and this release's version — with one entry per
           platform: the Server offers each Agent the entry built for the machine it reported
-          (ADR-0020), so a mixed fleet updates from a single
+          (ADR-0019), so a mixed fleet updates from a single
           \`[self_update] package = "supervisor"\`. Each file is named
-          \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0023), and the last two fields are exactly the
+          \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0029), and the last two fields are exactly the
           pair an Agent reports as \`os.type\` and \`host.arch\` — so the upload reads them out of
           the name and needs no table. The Set is a draft until the final publication call, so all
-          five platforms release together (ADR-0027):
+          five platforms release together (ADR-0014):
 
           \`\`\`console
           set="http://<server>:4321/api/v1/packages/supervisor/supervisor/${{ needs.version.outputs.version }}"
@@ -425,7 +425,7 @@ jobs:
           \`\`\`
 
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
-          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0019).
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0018).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
           executable mode, so there is no \`chmod +x\` step. This is also the install path on macOS,

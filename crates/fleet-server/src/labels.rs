@@ -1,18 +1,18 @@
-//! Server-set labels on an Agent (ADR-0026).
+//! Server-set labels on an Agent (ADR-0013).
 //!
 //! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and
 //! until now it could only be invented in `supervisor.toml` on the machine. Moving a host between channels
-//! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0020 set out to
+//! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0019 set out to
 //! remove, surviving in the one place it mattered most.
 //!
-//! A label joins the attribute set a Selector matches against — for Configurations (ADR-0016) and
-//! for packages (ADR-0020) alike, since both resolve against the same `AgentDescription`. It never
+//! A label joins the attribute set a Selector matches against — for Configurations (ADR-0011) and
+//! for packages (ADR-0019) alike, since both resolve against the same `AgentDescription`. It never
 //! travels to the Agent: it is an input to matching here, and the Agent experiences it only as the
 //! Configuration and the packages it is offered.
 //!
 //! **A label can never restate a reported attribute.** `os.type` and `host.arch` decide which
-//! artifact an Agent is offered (ADR-0020) and `service.name` decides which packages fit it at all
-//! (ADR-0020), so a label that outranked them would let a typo hand a Windows binary to a Linux
+//! artifact an Agent is offered (ADR-0019) and `service.name` decides which packages fit it at all
+//! (ADR-0019), so a label that outranked them would let a typo hand a Windows binary to a Linux
 //! host. Labels annotate; they do not correct.
 
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use opamp::proto::AgentDescription;
 use opamp::uid::InstanceUid;
 
-/// The label store's port (ADR-0026): the labels of one Agent, which survive a restart. The
+/// The label store's port (ADR-0013): the labels of one Agent, which survive a restart. The
 /// filesystem adapter ([`FsLabelStore`](crate::fs::FsLabelStore)) is what the composition root
 /// wires; the fleet logic names only this.
 pub trait LabelStore: Send + Sync {
@@ -40,7 +40,7 @@ pub enum LabelError {
     UnknownAgent,
     /// A label key the Agent already reports. Refused rather than applied: a label that could
     /// override `os.type`, `host.arch`, or `service.name` would let a slip in the UI offer an
-    /// Agent an artifact built for another machine (ADR-0020).
+    /// Agent an artifact built for another machine (ADR-0019).
     RestatesReported(String),
     /// The store could not be written.
     Storage(String),
@@ -108,7 +108,7 @@ pub fn effective_description(
 /// The labels this Agent has that its own reports shadow — set, and matching nothing.
 ///
 /// Surfaced on the fleet row rather than dropped in silence: doing what can be done and saying what
-/// was not is the correction ADR-0018 already made for connection settings.
+/// was not is the correction ADR-0027 already made for connection settings.
 pub fn shadowed(
     description: Option<&AgentDescription>,
     labels: &BTreeMap<String, String>,
@@ -160,9 +160,9 @@ mod tests {
         ));
     }
 
-    /// The crux (ADR-0026 point 18): reported wins. A label that could rewrite `os.type` would let a
+    /// The crux (ADR-0013 point 18): reported wins. A label that could rewrite `os.type` would let a
     /// slip in the UI offer this Agent an artifact built for another machine.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0019
     #[test]
     fn a_label_never_overrides_what_the_agent_reports() {
         let described = described(&[("os.type", "linux")]);

@@ -175,9 +175,9 @@ Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICAT
 The toolchain is **Rust stable**, provided by the Dev Container; the code is one Cargo workspace 
 with five crates — `opamp` (the OpAMP communication layer, publishable on its own, with an Agent's
 client and a server endpoint with their TLS and listener behind the `client` and `server` features,
-ADR-0036),
+ADR-0024),
 `fleet-core` (what both ends share beyond the protocol), `fleet-server` (the Server),
-`fleet-agent` (the Client, in all its modes), and `fleet-tools` (the operator command-line tools, ADR-0011). 
+`fleet-agent` (the Client, in all its modes), and `fleet-tools` (the operator command-line tools, ADR-0025). 
 This section is the single source for build/test/run commands — both humans and agents rely on 
 it (AGENTS.md links here).
 
@@ -187,7 +187,7 @@ it (AGENTS.md links here).
 - **Lint `opamp` per feature:**
   `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done`
   — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
-  build of each feature on its own shows that it stands alone (ADR-0036).
+  build of each feature on its own shows that it stands alone (ADR-0024).
 - **Check the Windows build:**
   `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
   (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
@@ -202,7 +202,7 @@ it (AGENTS.md links here).
   [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
   downloaded artifact has one (specification Q-2)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
-  TLS (ADR-0038); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
+  TLS (ADR-0023); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
   `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
   configurations run it when `.dev-pki/` has no configuration yet
 - **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
@@ -212,7 +212,7 @@ it (AGENTS.md links here).
   sign an artifact out of any program) — both documented in
   [the manual](docs/manual/tools.md); an installed release ships them beside the Client.
 
-Both binaries read a TOML configuration file ([ADR-0011](docs/adr/0011-workspace-crates-and-configuration.md));
+Both binaries read a TOML configuration file ([ADR-0025](docs/adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
 [`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly these
 build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the `rust` job of
@@ -220,24 +220,23 @@ build/test/lint commands, locally through `scripts/check-all.sh` and in CI as th
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) additionally checks the Client on Windows and
 macOS and release-builds the Client for Linux, Windows, and macOS and the Server for Linux.
 
-**Releases** ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md),
-[ADR-0013](docs/adr/0013-versions.md)): the version is
+**Releases** ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md),
+[ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)): the version is
 `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), and the `Release` workflow makes the
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
 `supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
 ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
-([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)) — and since
-[ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) the program inside them and
-its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
+([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — and the program inside them and its configuration
+file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
 the **product's** name, `opamp-fleet`
-([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)): that is the name that
+([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
-contain `-` ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)),
+contain `-` ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)),
 and the last two are exactly what an Agent reports as `os.type` and `host.arch` (`linux_amd64`,
 `darwin_arm64`, …), so uploading a whole release under one package
-name needs no translation ([ADR-0020](docs/adr/0020-the-package-store.md)). Started with `dry_run` (the default) it builds and packs everything and
+name needs no translation ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)). Started with `dry_run` (the default) it builds and packs everything and
 publishes nothing. Before it builds anything at all it checks that the version is still free — a
 `version/*` tag or a release already carrying that number fails the run on the spot, dry or not, so a
 forgotten bump costs seconds rather than five build jobs — and the built binary must report the
@@ -255,14 +254,14 @@ of both ends — is the **[User Manual](docs/manual/README.md)**:
 A minimal closed control loop on one machine:
 
 1. **Start the Server:** `cargo run -p fleet-server -- --config config/server.toml` — it serves two
-   planes on two ports ([ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md)).
+   planes on two ports ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
    The **Agent plane** on `4320`: the OpAMP endpoint at `/v1/opamp` (plain HTTP **and** WebSocket,
-   [ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md)) and the package downloads the offers point
+   [ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)) and the package downloads the offers point
    at. The **Operator plane** on `127.0.0.1:4321`: the REST API under `/api/v1/`
-   ([ADR-0016](docs/adr/0016-configurations-and-the-rest-api.md)), the API
+   ([ADR-0011](docs/adr/0011-configurations-and-the-rest-api.md)), the API
    docs, and the bundled UI at `/` — on loopback, because it is open until `[rest.auth]` guards it
    with Basic credentials
-   ([ADR-0017](docs/adr/0017-admission-and-authentication.md)).
+   ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)).
 2. **Start a Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml` — it connects over
    WebSocket by default (`ws://127.0.0.1:4320/v1/opamp`), reports its description and health, and
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
@@ -289,15 +288,15 @@ $ curl -X PUT -H 'Content-Type: application/json' \
        http://127.0.0.1:4321/api/v1/configurations/linux-base  # distribute to a subset
 $ curl -X DELETE http://127.0.0.1:4321/api/v1/configurations/linux-base
 
-# Content the agent reads by path rather than is configured with (ADR-0016): written next to the
+# Content the agent reads by path rather than is configured with (ADR-0011): written next to the
 # configuration under its own name, never passed to the process as configuration.
 $ curl -X PUT -H 'Content-Type: application/json' \
        -d '{"body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4321/api/v1/configurations/ruleset
 
-# A package defines a Set (ADR-0020), identified by name, Agent type, and version, with one entry
-# per platform (ADR-0020); each Agent is offered the entry that fits it. Saving stages a draft —
-# nothing reaches the fleet until the Set is published (ADR-0027).
+# A package defines a Set (ADR-0019), identified by name, Agent type, and version, with one entry
+# per platform (ADR-0019); each Agent is offered the entry that fits it. Saving stages a draft —
+# nothing reaches the fleet until the Set is published (ADR-0014).
 $ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0
 $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
@@ -305,7 +304,7 @@ $ curl -X PUT --data-binary @otelcol-linux-amd64.tar.gz \
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
 
-# Rolling back is a publication move (ADR-0020): retract the newest version, and the fleet falls
+# Rolling back is a publication move (ADR-0019): retract the newest version, and the fleet falls
 # back to the newest one still published under the same name.
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
        http://127.0.0.1:4321/api/v1/packages/otelcol/otelcol-contrib/0.109.0/publication
@@ -317,7 +316,7 @@ For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client
 ### Running as an OS service
 
 The Client registers *itself* as a native service on Linux (systemd), macOS (launchd), and Windows
-(SCM) — [ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md):
+(SCM) — [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md):
 
 ```console
 $ supervisor service install --config /etc/opamp/supervisor.toml     # system service (root/Administrator)
@@ -330,7 +329,7 @@ $ supervisor service uninstall                                   # never deletes
 - **One service per build:** the service is named after the product, `opamp-fleet`, with no suffix
   and nothing to look up — so the verbs above take no name at all. A second installation on one
   host is a second *build* with its own `PRODUCT_NAME`, not a runtime flag
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)).
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
 - **Two roots:** `--root <dir>` given alone puts everything under the one directory it names;
   nothing is ever installed to a fixed path. Without it, a Linux system install splits the
   defaults: the executable layout — `versions/supervisor-<version>-<commit>/` and the `current`
@@ -346,7 +345,7 @@ $ supervisor service uninstall                                   # never deletes
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
   control on Windows); after a crash the manager restarts the service, after an explicit stop it
   stays down.
-- **Self-update** ([ADR-0021](docs/adr/0021-the-client-updates-itself.md)): the Client is always its own
+- **Self-update** ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)): the Client is always its own
   Agent, so the Server can see which version each host runs. Letting the Server *replace* that
   version is opt-in per Client and names the package it will take — anything else is refused,
   because a package aimed at the whole fleet would otherwise be written over the Client itself:
@@ -373,10 +372,10 @@ What still needs a human, per platform: starting at **boot** (a runner never reb
 (`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
 the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
 answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
-an AVC denial in `ausearch -m avc` is the failure ADR-0014 clause 8 exists to prevent. Known platform gaps (tracked in the ADR):
+an AVC denial in `ausearch -m avc` is the failure ADR-0028 clause 8 exists to prevent. Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
-`<state_dir>/logs` on every platform (ADR-0014), which is where to look when the manager shows a
+`<state_dir>/logs` on every platform (ADR-0028), which is where to look when the manager shows a
 service that will not start.
 
 ## Project Layout
@@ -433,7 +432,7 @@ container, and from inside it:
 | ClickHouse           | `clickhouse:9000` / `:8123`   |
 
 The Collector answers on `localhost` because it shares the workspace container's network namespace:
-the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0025](docs/adr/0025-own-telemetry.md)),
+the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)),
 so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
 container as on the host. Grafana stays on <http://localhost:3001> from the host's browser.
 

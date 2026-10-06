@@ -6,10 +6,9 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
 `[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
-`version/*` tag from ([ADR-0035](docs/adr/0035-versions-resolved-in-the-internal-crate.md),
-superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date once its tag exists.
+`version/*` tag from ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A section carries a date once its tag exists.
 
-> **Where this file starts.** Entries begin with ADR-0022. The work before that point — package
+> **Where this file starts.** Entries begin with ADR-0032. The work before that point — package
 > delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
@@ -19,7 +18,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **Admitted Agents are rate-limited per host**
-  ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md)). Every OpAMP message
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). Every OpAMP message
   and every package download takes a token from the bucket of the host the certificate names — for
   a host marked as a Gateway, from the bucket of the Agent the message names and from the
   Gateway's aggregate. A message past the limit is answered `Unavailable` with `retry_info` of
@@ -30,7 +29,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `heartbeat_interval_secs` is short raises `messages_per_sec`; the Server warns at startup when
   one host cannot report for 256 Agents at that interval.
 - **Remote configuration can be switched off per Supervisor**
-  ([ADR-0067](docs/adr/0067-remote-configuration-switched-off-per-supervisor-on-the-host.md)).
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)).
   `[supervisors] remote_config_disabled` in `supervisor.toml` lists Supervisor names whose Agents
   declare neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig` and run only on the files placed
   in `<supervisor_dir>/<name>/config/`. A delivered block brings a listed Supervisor no `args`,
@@ -42,7 +41,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   move anything there you want to keep, since the first delivered configuration replaces every
   file in it.
 - **A host can keep its Supervisor set from the Server**
-  ([ADR-0069](docs/adr/0069-a-host-can-keep-its-supervisor-set-from-the-server.md)).
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)).
   `[supervisors] server_manages_set = false` in `supervisor.toml` builds the Client's own Agent
   without `AcceptsRemoteConfig` and `ReportsRemoteConfig`, so the Server offers it no Supervisor
   set; one that arrives anyway is ignored and logged once per hash. Every other capability stays,
@@ -54,7 +53,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   delivered earlier may have written some of them; switching it back on lets the first released
   set replace every block.
 - **A Gateway delivers uploaded packages to the Clients behind it**
-  ([ADR-0070](docs/adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)). When it relays an offer of an
+  ([ADR-0033](docs/adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)). When it relays an offer of an
   artifact the Server hosts, the Gateway fetches it once with its own certificate, checks its
   SHA-256 against the offer, and serves it on its own listener at the path the offer names, only to
   a host whose Agent it relayed that offer to; everything else is answered `404`. It holds the
@@ -67,26 +66,26 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `advertised_url` unset in a fleet with Gateways, and give the Gateway's `state_dir` room for the
   cache.
 - **A download waits out `Retry-After` from the Server's own origin**
-  ([ADR-0070](docs/adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). A `429` or `503` with
+  ([ADR-0033](docs/adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). A `429` or `503` with
   `Retry-After` in seconds — the Server's rate limit, or a Gateway still fetching — is waited out,
   each wait at most 60 seconds and all waits of one download at most 30 minutes, before the
   download is reported failed. **What to do:** nothing.
 - **Every `Unavailable` names the Agent it answers**
-  ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md) clause 7): the
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 25): the
   Agent-record ceiling, a certificate request held back for its audit record, the full enrolment
   queue and the closed enrolment window now carry the message's `instance_uid`, so the Client and
   a Gateway route the reply to its Agent and the Agent waits as told.
 - **A refused request for the Gateways' revocation list is recorded**
-  ([ADR-0063](docs/adr/0063-an-append-only-audit-record-chained-by-hash.md) clause 1): a member
+  ([ADR-0030](docs/adr/0030-an-append-only-audit-record-chained-by-hash.md) clause 1): a member
   whose host is not marked as a Gateway leaves a `gateway_list.refused` line naming its host.
 - **`Unavailable` tells the Agent when to retry**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md) clause 21,
-  [ADR-0063](docs/adr/0063-an-append-only-audit-record-chained-by-hash.md) clause 6): a full
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md) clause 21,
+  [ADR-0030](docs/adr/0030-an-append-only-audit-record-chained-by-hash.md) clause 6): a full
   enrolment queue, the Agent-record ceiling and a certificate request held back while the audit
   record cannot be written are answered with `retry_info` of 30 seconds; the last was answered
   `BadRequest`, which told the Agent to give up.
 - **A certificate names its host, and a host speaks only for its own Agents**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md) clauses 7,
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md) clauses 7,
   14 and 27). Every certificate the Server signs carries `urn:opamp-fleet:host:<id>`; a connection
   reporting for an Agent another host reported first is re-keyed, and a host holds at most three
   valid certificates. A Client's renewal proves, with its current key, which certificate it renews.
@@ -96,14 +95,14 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   are bound to it.
 
 - **The Supervisor Endpoint admits only the process its Supervisor started**
-  ([ADR-0053](docs/adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)). Every
+  ([ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). Every
   Managed Process finds a token in `OPAMP_SUPERVISOR_TOKEN`, and the endpoint answers any
   connection without `Authorization: Bearer <token>` with `401`. **What to do:** add
   `headers: { Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}" }` to the `opampextension`'s
   `server.ws` in every Collector configuration that reports through the endpoint.
 
 - **An audit record of every security decision**
-  ([ADR-0063](docs/adr/0063-an-append-only-audit-record-chained-by-hash.md)): admissions and
+  ([ADR-0030](docs/adr/0030-an-append-only-audit-record-chained-by-hash.md)): admissions and
   refusals, enrolment, issuance, revocation and the sessions it ends, operator acts with the
   operator's name, and package outcomes, as JSON lines in `config_dir/audit/`, each
   chained to the one before by its hash. `server audit-verify <dir>` checks the chain. A Server
@@ -113,14 +112,14 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   rewrite it unseen.
 
 - **`server.toml` holds no credential that authenticates on its own**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md) clause 26). An operator's
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md) clause 26). An operator's
   Basic password in `[rest.auth]` is listed as an Argon2id hash; `server hash-credential --basic`
   makes the entry. **What to do:** before upgrading, replace every password in `[rest.auth]` with
   the entry `hash-credential --basic` prints; a Server with a password in clear refuses to start,
   naming the entry.
 
 - **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
-  signature** ([ADR-0051](docs/adr/0051-a-delivered-block-brings-nothing-past-the-signature.md)).
+  signature** ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)).
   It may set `env`, `args` and `version_args` only as the running block of the same name already
   has them, or as the new `[supervisors] delivered_env` and `delivered_args` allow; never `PATH`,
   `LD_*` or `DYLD_*`. A delivered `icinga2` block reads `ticket_file` and `trusted_cert_file` only
@@ -129,7 +128,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   is refused, naming the block and the key, and the running set stays as it is.
 
 - **Revocation that takes effect at once**
-  ([ADR-0065](docs/adr/0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
+  ([ADR-0031](docs/adr/0031-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
   `POST /api/v1/revocations` revokes a certificate, by issuing CA (`client` or `bootstrap`) and
   serial and with every renewal of it; the Server refuses it and closes every session it admitted.
   `GET /api/v1/certificates` lists what the client CA signed. Every certificate the client CA
@@ -137,13 +136,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   list is kept in `config_dir/revocation/`. **What to do:** nothing; back that directory up with
   the rest of `config_dir`.
 - **A CSR naming another Agent's `instance_uid` is refused**
-  ([ADR-0050](docs/adr/0050-a-csr-naming-an-instance-uid-must-name-its-sender.md)). The Client of
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)). The Client of
   this project names none and is not affected.
 
 ### Changed
 
 - **Breaking: a host fetches from the download route only the artifact offered to its own
-  Agents** ([ADR-0068](docs/adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)).
+  Agents** ([ADR-0033](docs/adr/0033-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)).
   An uploaded artifact is served only to a certificate whose host speaks for an Agent that a
   rollout assigned it to — the Agents that reported with that certificate, or any Agent for a host
   marked as a Gateway. Everything else is answered `404`, exactly as an artifact the store does
@@ -155,13 +154,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   no host gets `404` for uploaded artifacts, and the Server says so at startup. Referenced
   artifacts are unaffected.
 - **Breaking: the Agent plane admits by a client certificate alone, and the fleet credential is
-  gone** ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md),
-  [ADR-0060](docs/adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md),
-  [ADR-0061](docs/adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md),
-  [ADR-0062](docs/adr/0062-releases-installers-and-the-name-supervisor-secure-by-default.md),
-  [ADR-0063](docs/adr/0063-an-append-only-audit-record-chained-by-hash.md),
-  [ADR-0064](docs/adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md),
-  [ADR-0065](docs/adr/0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
+  gone** ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md),
+  [ADR-0027](docs/adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md),
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md),
+  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md),
+  [ADR-0030](docs/adr/0030-an-append-only-audit-record-chained-by-hash.md),
+  [ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md),
+  [ADR-0031](docs/adr/0031-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
   The Server reads no `Authorization` header on `/v1/opamp` or the download route; one an older
   Client sends is ignored. It refuses to start with an `[auth]` section, and with
   `bearer_token_file`, `username`, `password_file`, `bearer_token` or `password` in
@@ -180,8 +179,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   the Clients and Gateways. Delete `[auth]` from each `supervisor.toml` when convenient; every
   Client needs a client certificate.
 - **A Gateway refuses a certificate the Server revoked, and admits nobody until its host is
-  marked** ([ADR-0064](docs/adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md),
-  [ADR-0065](docs/adr/0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)). A host
+  marked** ([ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md),
+  [ADR-0031](docs/adr/0031-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)). A host
   marked as a Gateway fetches the revoked certificates of the client CA from
   `GET /v1/gateway/revocations` every 30 s and refuses them downstream with `401`, closing their
   sessions with `1008`. A Gateway with no list younger than 300 s answers every downstream peer
@@ -191,29 +190,29 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `PUT /api/v1/hosts/<host>/gateway` before the Gateway is upgraded. An unmarked Gateway admits
   nobody.
 - **A package signature now covers the Agent type, the version and the SHA-256**
-  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md)), and a
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)), and a
   Supervisor refuses a package for another Agent type or older than the one it runs. **What to
   do:** sign every Deployment's entries again with `opamp-package-sign sign --agent-type <type>
   --version <version> <artifact>` and `PUT` the new signatures; signatures over the bytes alone no
   longer verify.
 
 - **Client certificates live 30 days by default, not 90**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md) clause 9);
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md) clause 9);
   a Client renews at two thirds of the life. **What to do:** nothing, unless a host is offline
   longer than about 20 days; then set `[client_ca] validity_days` higher.
 - **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
-  ([ADR-0060](docs/adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md) clause 5). **What to
+  ([ADR-0027](docs/adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md) clause 5). **What to
   do:** set `ca_file` on every Client before offering a new endpoint.
 
 - **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
-  ([ADR-0038](docs/adr/0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md)).
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
   `ws://` and `http://` are accepted only to `127.0.0.1` or `::1` — not to `localhost`, not to a
   private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
-  ([ADR-0060](docs/adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)), a
+  ([ADR-0027](docs/adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)), a
   referenced package `url`
-  ([ADR-0043](docs/adr/0043-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md))
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md))
   and an own-telemetry destination
-  ([ADR-0048](docs/adr/0048-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). A
+  ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). A
   peer that speaks only TLS 1.2 can no longer connect. **What to do:** move every such URL to
   `wss://` or `https://`, and put TLS 1.3 in front of any Collector or mirror that lacks it.
 - **The Server requires `[tls]` and listens on the loopback by default.** Without `[tls]` it does
@@ -222,13 +221,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   (`scripts/dev-pki.sh` makes a development set), set `listen = "0.0.0.0:4320"` to serve the
   fleet, and point clients of the REST API at `https://`.
 - **The Client's default endpoint is `wss://127.0.0.1:4320/v1/opamp`**, and so is the MSI's
-  prefill ([ADR-0062](docs/adr/0062-releases-installers-and-the-name-supervisor-secure-by-default.md)).
+  prefill ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)).
   **What to do:** a Client that relied on the old `ws://` default needs `[tls] ca_file` for the
   Server's certificate.
 - **Nothing is installed without a signature**
-  ([ADR-0042](docs/adr/0042-signed-package-delivery-from-allowed-sources.md),
-  [ADR-0044](docs/adr/0044-the-client-updates-itself-from-a-signed-package.md),
-  [ADR-0045](docs/adr/0045-packages-and-deployments-that-sign-every-package.md)). A Client without
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md),
+  [ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0021](docs/adr/0021-packages-and-deployments-that-sign-every-package.md)). A Client without
   `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
   its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
   entry. A download goes only to the Server's own origin or to an https prefix in `[packages]
@@ -236,9 +235,9 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   Client, sign every entry of every Deployment before rolling it out, and list any mirror in
   `allowed_sources`.
 - **Every Agent is admitted by a client certificate, and a new host is approved by an operator**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md),
-  [ADR-0064](docs/adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md),
-  [ADR-0061](docs/adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md),
+  [ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md),
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
   The Server requires `[tls] client_ca_file`, and asks for the client certificate in
   the TLS handshake — the package download included. A fresh host enrols with a bootstrap
   certificate from `[enrolment] bootstrap_ca_file`, only while an operator holds the enrolment
@@ -266,21 +265,21 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **The Gateway's downstream endpoint and the Supervisor Endpoint bound connection setup** as the
   Server's two planes do: a peer has 30 seconds to send its request headers, and on a TLS Gateway
   10 seconds to complete the handshake
-  ([ADR-0036](docs/adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). A
+  ([ADR-0024](docs/adr/0024-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)). A
   plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
   **What to do:** nothing.
 
 ### Fixed
 
 - **A named parent certificate that is missing is waited for, never trusted on sight**
-  ([ADR-0029](docs/adr/0029-icinga-2.md) clause 12). An `icinga2` Supervisor whose
+  ([ADR-0016](docs/adr/0016-icinga-2.md) clause 12). An `icinga2` Supervisor whose
   `trusted_cert_file` names a file that is not there — not yet delivered, or a mistyped path —
   fell back to trusting whatever the parent presented on first contact. It now keeps the Agent
   unhealthy, naming the path, and enrols once the file arrives. A block that names no
   `trusted_cert_file` still trusts on first use, logged as such.
 
 - **A request body or a WebSocket message that stalls is cut off**
-  ([ADR-0054](docs/adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
   Once its headers had arrived, a peer could hold any connection of the Server, a Gateway or a
   Supervisor Endpoint by sending its body, or a WebSocket message, a byte at a time or not at all.
   Every body and message that has begun must now deliver 64 KiB within each minute: a body that
@@ -288,7 +287,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   deadline, so a large upload over a slow link still completes, and an idle connection is left
   alone. **What to do:** nothing.
 - **An enrolment and a renewal each issue one certificate, not two**
-  ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md)). A
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)). A
   Client that received its certificate sent the request it had just been answered for once more
   on its next connection, and the Server signed it again, so every host held a second valid
   certificate it never used. **What to do:** nothing; a duplicate already issued expires with its
@@ -308,7 +307,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `supervisor.toml`, the private key and the stored connection settings were readable by any
   account on the host. `service install` now removes the inherited rights
   from the data root and leaves it to LocalSystem, the Administrators and the service account
-  ([ADR-0061](docs/adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
   clause 18). **What to do:** re-run `service install` on every Windows host, or apply the same
   with `icacls "%ProgramData%\<product>" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r
   *S-1-5-32-544:(OI)(CI)F` followed by a grant to the service account. Revoke the certificate of
@@ -325,8 +324,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **A package is now `(Agent type, version)`, and a new object — the **Deployment** — carries the
-  aim, the signature and the rollout act** ([ADR-0030](docs/adr/0030-packages-and-deployments.md),
-  [ADR-0030](docs/adr/0030-packages-and-deployments.md)). The free-form package name is
+  aim, the signature and the rollout act** ([ADR-0021](docs/adr/0021-packages-and-deployments-that-sign-every-package.md),
+  [ADR-0021](docs/adr/0021-packages-and-deployments-that-sign-every-package.md)). The free-form package name is
   gone; the Agent type is the identity and the name a package carries on the wire.
 
   **What you must do before starting the upgraded Server:**
@@ -382,10 +381,10 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **A wrapped agent's block is two lines.** `icinga2` keeps only its enrolment, and the GLPI Agent
   and Telegraf get kinds of their own — so a block now says *which host runs this agent* and
   nothing about how that agent is built
-  ([ADR-0015](docs/adr/0015-supervisor-mode-and-its-kinds.md),
-  [ADR-0029](docs/adr/0029-icinga-2.md),
-  [ADR-0028](docs/adr/0028-glpi-agent-and-telegraf.md),
-  [ADR-0028](docs/adr/0028-glpi-agent-and-telegraf.md)). Every retired key is refused **by
+  ([ADR-0010](docs/adr/0010-supervisor-mode-and-its-kinds.md),
+  [ADR-0016](docs/adr/0016-icinga-2.md),
+  [ADR-0015](docs/adr/0015-glpi-agent-and-telegraf.md),
+  [ADR-0015](docs/adr/0015-glpi-agent-and-telegraf.md)). Every retired key is refused **by
   name** at startup with a message saying what supplies the value now, and the same check refuses a
   Supervisor set the Server offers before any running process is touched.
 
@@ -461,7 +460,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Fixed
 
 - **A Client that updates itself into a configuration it cannot read now rolls back.** The
-  self-update's probation ([ADR-0021](docs/adr/0021-the-client-updates-itself.md)) counts a failed start
+  self-update's probation ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)) counts a failed start
   and returns the host to the previous version after three attempts — but it never saw this one: a
   run resolved its configuration *before* it resolved the update in flight, so a new version that
   refuses the file on this host exited before the attempt was counted. The service manager then
@@ -478,7 +477,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **An Agent reports its own traces.** The `own_traces` destination has been offered, persisted and
   exported to since 0.4.x, with nothing to export: no code created a span, and the bridge in force
   converts `tracing` events rather than spans. Five fleet operations are now traces
-  ([ADR-0025](docs/adr/0025-own-telemetry.md)) — installing a
+  ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)) — installing a
   package, applying a configuration (a Managed Process's, and the Supervisor set), applying offered
   connection settings, and the Client's own self-update — each with its phases as child spans and
   the outcome the Server is told as the span's status. A failed rollout is one trace naming the
@@ -499,7 +498,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
   carried the Agent's `service.instance.id` and the operator's name for it; it now also carries
   `service.name` — the Agent *type*
-  ([ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md)), which
+  ([ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md)), which
   differs per Agent within one Client and therefore belongs on the sample rather than on the
   Resource — while the OTLP Resource carries `os.type`, `host.arch` and `os.description` beside
   what identifies the Client. A series can be read as "this Agent, of this type, on this platform"
@@ -510,21 +509,21 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
   the running version, the configuration file, the state directory, the endpoint and the number of
   Supervisors — the version appeared in no log line until now, so a file a self-update left behind
-  ([ADR-0021](docs/adr/0021-the-client-updates-itself.md),
-  [ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)) could not be attributed to
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)) could not be attributed to
   the version that wrote it — and then the trust and the client certificate actually in force,
   which is a Server-issued one no `supervisor.toml` mentions when there is one
-  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)). A
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)). A
   configuration file that is not there is now said out loud as well, because a mistyped `--config`
   otherwise starts cleanly on defaults and supervises nothing. **What to do:** nothing; anything
   parsing the log gains lines, and loses none.
 
 - **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
   unpacked because it sits outside the program's own directory
-  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)) is now named, not only counted; the Collector
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)) is now named, not only counted; the Collector
   Supervisor states which config-map entries it hands the Collector on every (re)start; and the
   `command` Supervisor states the fully expanded invocation of its Foreign Agent
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)) — its
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)) — its
   environment by variable name only, never by value. **What to do:** nothing, unless you are
   chasing one of those, in which case `RUST_LOG=debug` now answers it.
 
@@ -533,27 +532,27 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`
-  ([ADR-0029](docs/adr/0029-icinga-2.md)), enrolment against an
-  Icinga master ([ADR-0029](docs/adr/0029-icinga-2.md)),
+  ([ADR-0016](docs/adr/0016-icinga-2.md)), enrolment against an
+  Icinga master ([ADR-0016](docs/adr/0016-icinga-2.md)),
   and artifacts repacked from the vendor's packages
-  ([ADR-0029](docs/adr/0029-icinga-2.md)). The fleet
+  ([ADR-0016](docs/adr/0016-icinga-2.md)). The fleet
   ships the program, creates its directories, obtains its certificate, distributes its
   configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf`, or an
   MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
   something. `opamp-package-fetch --agent icinga2` builds it for Linux and Windows alike, the
   Windows one verified by Icinga's own Authenticode signature
-  ([ADR-0029](docs/adr/0029-icinga-2.md)) since that
+  ([ADR-0016](docs/adr/0016-icinga-2.md)) since that
   download publishes no digest; the recipe is
   [docs/manual/icinga2.md](docs/manual/icinga2.md). **What to do:** nothing, unless you run Icinga.
   Today this covers **Linux amd64** — one artifact, built on the oldest glibc you serve, reaches
   Debian, Ubuntu and Red Hat hosts alike
-  ([ADR-0029](docs/adr/0029-icinga-2.md)); on
+  ([ADR-0016](docs/adr/0016-icinga-2.md)); on
   Windows the same kind supervises a machine-installed Icinga 2 by absolute path.
 
 - **`opamp-package-fetch` can fetch the Client itself** — `--agent supervisor` reads this project's
   own releases, verifies each `.tar.gz` against the `SHA256SUMS` the release publishes, and uploads
   the five platforms into one Set named and typed `supervisor`
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) is what made this
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) is what made this
   possible: the Client's release is now an ordinary fleet package). It replaces the download,
   checksum and `curl` loop from the release notes, and it is the same tool and the same questions as
   for every other agent — with one difference at the end, since nothing supervises a Client: it
@@ -564,7 +563,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
-  ([ADR-0025](docs/adr/0025-own-telemetry.md)). Own telemetry
+  ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). Own telemetry
   could be switched on and moved from the Server, and never switched off: a destination once in
   force survived reconnects and restarts, and every message that would have ended it was read as
   "unchanged". An offer that names any of the three signals is now the whole truth about own
@@ -583,7 +582,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   off.
 
 - **Own telemetry now carries the operator's name for the Agent it came from.** `service.instance.name`
-  ([ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md)) is
+  ([ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md)) is
   non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled with
   a `service.instance.id` uuid and nothing an operator could place against the fleet view they had
   searched by. The Resource now carries it beside the identifying attributes, and each process-metric
@@ -594,7 +593,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The version an Agent reports *running* now decides which packages reach it, and the version its
   package status claims is no longer read beside it**
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)). A Set had to be greater than the lower of the
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)). A Set had to be greater than the lower of the
   two versions an Agent reports *and* never lower than the one its package status claimed. That
   second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
   named `supervisor 0.4.2` after a self-update that staged and did not take, while its program
@@ -616,7 +615,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   to it. `http://` is now accepted to loopback and to `10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16` and `fc00::/7`, and refused everywhere else — reported back with the reason, as
   before, never warned about and never downgraded
-  ([ADR-0025](docs/adr/0025-own-telemetry.md)). The
+  ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). The
   judgement is made on the **address**, so a cleartext *host name* is still refused whatever it
   resolves to: an admission test a later DNS change can flip is not one an offer can be trusted
   against. Link-local and carrier-grade NAT are private but not the operator's, and stay refused.
@@ -630,7 +629,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **A fresh Client calls itself `Supervisor Agent`.** The top-level `name` — your name for *this*
   Client, reported as `service.instance.name` — defaulted to the program's own name, which since
-  [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) reads exactly
+  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) reads exactly
   like the Agent *type* it sits beside in the fleet view. It is now a display name instead: spaces
   and capitals, because nothing resolves a path or a service from this key.
   **What to do:** nothing. A host whose configuration names this Client keeps that name; only a
@@ -638,23 +637,21 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   name of yours first.
 
 - **Release artifacts are `.tar.gz` and are named `supervisor_…`**
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md), superseding
-  [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) clauses 3 and 4 and
-  [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) on the artifact name alone).
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)).
   A release published `opamp-fleet-client_<version>_<os>_<arch>.7z`; it now publishes
   `supervisor_<version>_<os>_<arch>.tar.gz`, and the `.deb`, `.rpm` and `.msi` beside it take the
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
   that carries the executable bit, unpacked the same way on every platform — and `supervisor` is the
   name of the Set these files become since
-  [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md). The documented upload
+  [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md). The documented upload
   procedure was building its Set at `.../packages/opamp-fleet-client/opamp-fleet-client/...`, whose
-  second field is the Agent type: since ADR-0023 no Client reports that type, so the Set fitted
+  second field is the Agent type: since ADR-0029 no Client reports that type, so the Set fitted
   nobody and the release was publishing a package the fleet could not install.
   **What to do:** three things, and the second is the one that bites.
   1. Scripts that fetch release assets by name need the new name and extension. There is no
      transition window — the old name published a package that no longer installs.
   2. **A Client already in the field will refuse the renamed package** until its `client.toml`
-     agrees. The self-update gate is the package name, so a host configured before ADR-0023 reports
+     agrees. The self-update gate is the package name, so a host configured before ADR-0029 reports
      *"this Agent installs only the package "opamp-fleet-client"; the Server offered "supervisor""*
      and stays on its version — loud, harmless, and stuck. Fix it on the host before rolling out:
      set `package = "supervisor"` under `[self_update]`, or delete the section and take the default,
@@ -664,9 +661,9 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
      `apt`, `dnf` or MSI upgrade across this release is an ordinary upgrade and not a second package
      beside the first.
 - **A package Set now reaches an Agent only as an upgrade**
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md), amending
-  [ADR-0020](docs/adr/0020-the-package-store.md) and
-  [ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)). What an Agent reports installed for a
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md), amending
+  [ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md) and
+  [ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)). What an Agent reports installed for a
   package is now part of matching, beside its type, its platform and the Selector: a Set reaches it
   only if the Set's version is **greater**, compared as SemVer. Equal does not count, and a
   reported version that cannot be ordered is refused rather than guessed at. Agents that report no
@@ -685,17 +682,15 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   (`supervisor-prod` for a named instance) on systemd, launchd and the SCM, the version directories
   are `supervisor-<version>-<hash>`, the `PATH` symlink is `/usr/bin/supervisor`, the log file is
   `supervisor.<date>.log`, and `client.toml` is **`supervisor.toml`**
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md), superseding
-  [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md) and
-  [ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md) on the two names, and amending
-  ADR-0014 and ADR-0023). It completes what ADR-0023 began: one word from the
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) and
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md) on the two names). It completes what ADR-0029 began: one word from the
   Agent type in the fleet view down to the unit you restart. The top-level `name` default follows
   it; a host that set one of its own keeps it.
 
   **This release cannot be delivered by self-update, and that is not a bug.** A Client extracts its
   own program from an artifact *by name*, so a host on any earlier release asks for
   `opamp-fleet-client`, does not find it, and stays exactly where it is — loud, and harmless. There is no compatibility
-  name: carrying both would re-create the two-names-for-one-file problem ADR-0023 removed.
+  name: carrying both would re-create the two-names-for-one-file problem ADR-0029 removed.
 
   **What to do on every host**, in this order:
 
@@ -722,8 +717,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The Client's own Agent now reports the type `supervisor`, and takes its own updates under that
   name** — it used to report and consent to `opamp-fleet-client`
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md), changing one value of
-  [ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md)). Two strings
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md), changing one value of
+  [ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md)). Two strings
   change, and they are the same string: the `service.name` every Client reports, and the default
   `[self_update] package` it consents to. The program, its service and its configuration file take
   the same name in this release — see *The program, the service and the configuration file are now
@@ -750,15 +745,15 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The Client now consents to its own updates unless you say otherwise** — a behaviour change on
   hosts that are already installed
-  ([ADR-0021](docs/adr/0021-the-client-updates-itself.md), superseding
-  [ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md) point 4). Until
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md), superseding
+  [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md) point 4). Until
   now an absent `[self_update]` section meant *no consent*, so a Client installed the documented way
   declared no package capability at all and the Server could never replace its binary — which made
   the Client the one program in the fleet left to patch by hand on every host. That is now the wrong
   way round: **an absent section is the consent**, narrowed to `package = "opamp-fleet-client"`, this
   Client's own Agent type. An offer under any other name is still refused and reported, and nothing
   is offered at all until an explicit rollout act assigns it
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)).
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)).
   **What to do:** if you want a host to keep managing its own Client binary, write this into its
   `client.toml` **before** upgrading — a host that has no `[self_update]` section today starts
   accepting self-update offers once it comes up on this version:
@@ -780,7 +775,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   nothing; files already on disk are untouched, and the fix only affects newly written ones. If you
   hit this, move the uncommented key above the first `[section]`.
 - **Both of the Server's listeners now hang up on a connection that never finishes its request**
-  ([ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md)). A peer gets 30 seconds for
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). A peer gets 30 seconds for
   its request line and headers and 10 seconds for the TLS handshake; until now it got forever,
   because hyper's own 30-second default is silently discarded while no timer is installed and
   neither axum nor axum-server installs one. The bound is on connection *setup* only: an established
@@ -795,7 +790,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   rollback. Icinga 2 and the Collector use their own `--version`; the `command` kind uses
   `version_args`, the arguments an operator has already declared safe to invoke the program with,
   and without that key it keeps no preflight at all. The health gate and rollback of
-  [ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md) are unchanged behind
+  [ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md) are unchanged behind
   it. **What to do:** nothing, unless a program you supervise cannot answer the arguments you gave
   it — a Collector that does not respond to `--version` within five seconds, or a `command` whose
   `version_args` exit non-zero, now has its *packages* refused as well as reporting no version.
@@ -838,7 +833,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   plus `icinga2-zones`. The bodies are the ones in `config/examples/`, compiled into the tool.
   **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
   untouched**, edits included, so a second upload changes nothing; and saving still distributes
-  nothing ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)) — read the default over and
+  nothing ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)) — read the default over and
   roll it out yourself, since it carries example values such as Icinga's `master.example.com`.
   Icinga 2's per-host pair, the enrolment ticket and the parent's certificate, is deliberately not
   among them.
@@ -849,7 +844,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   every host anyone ever installed. It now installs under `<base>/<product>` alone:
   `/opt/opamp-fleet` and `/var/lib/opamp-fleet` on Linux, `%ProgramData%\opamp-fleet` on Windows,
   `/Library/Application Support/opamp-fleet` on macOS
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)). The product's name is
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)). The product's name is
   fixed at build time (`OPAMP_FLEET_PRODUCT_NAME`, default `opamp-fleet`), and a second
   installation on one host is a **second build** rather than a runtime flag — the flag was
   reachable from no delivery path we ship, was read by nothing at runtime, and could not be
@@ -883,7 +878,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **A `[[supervisor]]` block can no longer name a program on the machine.** `binary` and `command`
   take a bare file name and nothing else; an absolute path — and the Windows drive-relative form
   with it — is refused at startup with a message naming the way across
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)). A Managed Process is
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)). A Managed Process is
   always one this Client installed, so every Supervisor now declares `AcceptsPackages` and the
   capability is a constant of the Client rather than something derived from a path.
   **What to do:** an agent the machine carries — a distribution-packaged GLPI Agent, a
@@ -895,7 +890,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
   a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
-  a private source ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)) — and the Client
+  a private source ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)) — and the Client
   dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
   The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
   for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
@@ -943,7 +938,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   and acknowledged, without a verification connection and without a reconnect — the protocol names
   three classes of destination with deliberately different sequences, and scopes its
   verify-by-connecting requirement to the OpAMP settings alone
-  ([ADR-0018](docs/adr/0018-connection-settings-and-server-capabilities.md)). A telemetry
+  ([ADR-0027](docs/adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)). A telemetry
   endpoint change no longer disconnects the fleet either.
   **What to do:** `[telemetry_offer]` alone is now enough; a `[connection_offer]` added only to work
   around this can be removed. A Server that can offer anything at all — settings, telemetry, or a
@@ -955,13 +950,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   status went to Servers without `AcceptsPackagesStatus`, connection-settings status to Servers
   without `OffersConnectionSettings`. Both are now gated by one stated rule — optimistic until the
   Server has declared anything, binding once it has
-  ([ADR-0018](docs/adr/0018-connection-settings-and-server-capabilities.md)). A Server that
+  ([ADR-0027](docs/adr/0027-connection-settings-offered-without-a-credential-and-server-capabilities.md)). A Server that
   has actually *sent* an offer still gets its acknowledgement whatever its bitmask says, because
   withholding it would leave that Server re-offering for ever. `remote_config_status` is
   deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
   the non-gate is not mistaken for an omission.
   **What to do:** nothing against this project's Server, which declares what it exercises. This
-  matters for third-party Servers (ADR-0010): one implementing only the two mandatory bits now sees
+  matters for third-party Servers (ADR-0009): one implementing only the two mandatory bits now sees
   a Client that respects that.
 
 - **A refused own-telemetry destination was acknowledged as applied.** A destination the Client would
@@ -969,7 +964,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   log and the offer was still reported `APPLIED`, so the fleet showed telemetry flowing that was not.
   The refusal now reaches the Server as a `FAILED` status naming what was dropped, including one
   found at startup when persisted settings are put back in force. An offered client `certificate` is
-  now honoured rather than ignored ([ADR-0025](docs/adr/0025-own-telemetry.md)):
+  now honoured rather than ignored ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)):
   the exporter presents it, paired with the key this Client generated for its signing request. A
   `private_key` *in the offer* is refused by name — this Client's private key never leaves its host
   and is never accepted from the Server.
@@ -1002,7 +997,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   reinstalled on top of the state directory — was held back for good: the fleet view showed
   `pkg: supervisor 0.4.1` on an agent reporting 0.4.0, and neither the rollout act nor the waiting
   list would offer it anything. A Set is now held against **both** versions an Agent reports
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)): it must be greater than the
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)): it must be greater than the
   lower of the two, and never lower than the version the package status claims — so what a program
   says it is running can admit a package, and can never propose moving one backwards. The Client
   side matches: an offer for its own package is settled by the version this process runs rather than
@@ -1016,7 +1011,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **A Client is no longer offered the version it already runs — or an older one.** A Set reached
   Clients that were already running its version, and a Client running a newer development build was
   offered the older release — a downgrade of the program that manages the host. Both came from the same gap: since
-  [ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md) a Set reaches an Agent only
+  [ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md) a Set reaches an Agent only
   as an upgrade over what that Agent reports *installed*, and a Client that arrived by `.deb`,
   `.rpm`, MSI or by hand had installed no package, so it reported nothing and there was nothing to
   hold the Set against. A Client now reports the version it runs under the name `[self_update]`
@@ -1030,8 +1025,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   once it runs this version — a Client already in the field will never report a package version,
   because the code that would report it is the code it does not have. So the Server now measures
   such an Agent by the version it reports *running*, its `service.version`
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md),
-  amending [ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md) point 2). A
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md),
+  amending [ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md) point 2). A
   version reported for the package itself still wins over it, and one nothing can order — a GLPI
   Agent's `1.19`, an appliance's `24.04.1` — says nothing rather than blocking, so no Agent becomes
   unreachable by numbering itself its own way.
@@ -1046,12 +1041,12 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **Basic authentication for the REST API and the UI**
-  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)). `[rest.auth.basic_users]`
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)). `[rest.auth.basic_users]`
   in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
   `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
   credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
   browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
-  plane stays open exactly as before — the loopback default of ADR-0012 is what protects it then.
+  plane stays open exactly as before — the loopback default of ADR-0023 is what protects it then.
   **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
   with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
   Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
@@ -1063,9 +1058,9 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **The REST API and the UI moved to their own port, on loopback**
-  ([ADR-0012](docs/adr/0012-transports-tls-and-the-servers-two-planes.md),
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
   superseding the single-listener decision of
-  [ADR-0011](docs/adr/0011-workspace-crates-and-configuration.md)). The Server now serves two planes,
+  [ADR-0025](docs/adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)). The Server now serves two planes,
   split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint and the
   package download an offer's `download_url` points at. The **Operator plane** is new — `[rest]
   listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the bundled UI.
@@ -1086,8 +1081,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
   decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
   already rolled out and therefore immutable
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)), a package store at its ceiling
-  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). With hundreds of megabytes
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)), a package store at its ceiling
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)). With hundreds of megabytes
   already in flight that answer races the upload, the connection resets, and what the tool could
   report was a transport error naming the one thing that was *not* the problem: the Server had
   answered, and said why. It now asks a second time with an empty artifact — refused in its own
@@ -1102,7 +1097,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **Publication is gone; a rollout is an explicit act, per Agent or per resource**
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)). Saving a Configuration or a
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)). Saving a Configuration or a
   package Set never distributes anything, and there is no draft/published state any more: what an
   Agent runs is its **assignment**, written only by a rollout act — `POST
   /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
@@ -1120,7 +1115,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **A package artifact may be a `.zip`**
-  ([ADR-0028](docs/adr/0028-glpi-agent-and-telegraf.md)). The
+  ([ADR-0015](docs/adr/0015-glpi-agent-and-telegraf.md)). The
   Client now opens three containers, still decided by leading bytes: `.tar.gz`, `.7z`, and
   `.zip` — as a single-file package and as a tree (`program_path`), held to the same member
   rules as the others (no links, no paths climbing out, the same member and size bounds). Zip
@@ -1133,7 +1128,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
   right container for a tree on Unix, being the one that carries file modes.
 - **The operator tools moved to their own crate**
-  ([ADR-0011](docs/adr/0011-workspace-crates-and-configuration.md)).
+  ([ADR-0025](docs/adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)).
   `opamp-package-sign` and the new `opamp-package-fetch` are `crates/package-tools`, not binaries
   of the Client: the crate that runs on every managed host no longer carries tooling that never
   runs there. The binaries keep their names and their behaviour.
@@ -1153,14 +1148,14 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **The GLPI Agent can be delivered by the fleet**
-  ([ADR-0028](docs/adr/0028-glpi-agent-and-telegraf.md)). On
+  ([ADR-0015](docs/adr/0015-glpi-agent-and-telegraf.md)). On
   Windows the official portable zip is the artifact, uploaded (or referenced) as published; on
   Linux the tool above builds one deterministically from the official AppImage — extracting it
   once so no fleet host needs FUSE. Both are amd64; see the
   [GLPI Agent recipe](docs/manual/glpi-agent.md).
   **What to do:** nothing — this is a new option beside supervising a machine-installed agent.
 - **A `command` Supervisor can reload instead of restart**
-  ([ADR-0015](docs/adr/0015-supervisor-mode-and-its-kinds.md)). A `[[supervisor]]` block of
+  ([ADR-0010](docs/adr/0010-supervisor-mode-and-its-kinds.md)). A `[[supervisor]]` block of
   `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
   with or without a `SIG` prefix): a configuration change is then applied by sending that signal,
   and the process keeps running with its in-flight state. If the signal cannot be delivered or
@@ -1172,7 +1167,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **Removing a Supervisor now deletes its directory**
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)). When an applied Supervisor set
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)). When an applied Supervisor set
   removes a Supervisor, the Client stops it as before and then deletes
   `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
   configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
@@ -1196,7 +1191,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Fixed
 
 - **The Client stops its Managed Processes cleanly when it updates itself.** The self-update
-  restart path exited without running the graceful shutdown ADR-0021 specifies, so the Managed
+  restart path exited without running the graceful shutdown ADR-0020 specifies, so the Managed
   Processes were left to the service manager. On systemd the unit's cgroup reaped them; on a manager
   that does not (launchd, the Windows SCM, a foreground or non-cgroup container run) they were
   orphaned, and the restarted Client spawned duplicates that fought over their ports. The self-update
@@ -1207,8 +1202,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **A Managed Process's package updates no longer loop, and keep a fallback**
-  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). Three changes to
-  how a Supervisor applies a package (ADR-0019):
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)). Three changes to
+  how a Supervisor applies a package (ADR-0018):
   - A **first** install that will not start is no longer discarded — the verified program is kept in
     place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
     the Server re-offering the same artifact in a download-crash-rollback loop.
@@ -1238,8 +1233,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Security
 
 - **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)).
-  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0022) is now refused
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)).
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0032) is now refused
   (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
   that would let the Server spawn a machine binary that never passed through package signing. A
   bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
@@ -1250,13 +1245,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **The Server bounds how many Agent records it holds** — a new `max_agents` in `server.toml`
   (default 100 000). A report bearing a *new* `instance_uid` past the ceiling is answered
   `Unavailable` (retry later) instead of admitted, so a peer minting fresh self-asserted UIDs
-  (ADR-0017) cannot exhaust memory and disk; Agents already known keep reporting.
+  (ADR-0026) cannot exhaust memory and disk; Agents already known keep reporting.
   **What to do:** nothing for a normal fleet. A very large deployment can raise `max_agents`; the
-  real defence against an anonymous flood is `[auth]` (ADR-0017), and this is the backstop while it
+  real defence against an anonymous flood is `[auth]` (ADR-0026), and this is the backstop while it
   is off.
 
 - **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
-  `[connection_offer]` credential (ADR-0018) or `[telemetry_offer]` headers (ADR-0025) are handed
+  `[connection_offer]` credential (ADR-0027) or `[telemetry_offer]` headers (ADR-0022) are handed
   to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
   peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
   unchanged.
@@ -1274,7 +1269,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Changed
 
-- **Saving a Configuration no longer distributes it** ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)).
+- **Saving a Configuration no longer distributes it** ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)).
   `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
   `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
   published Configuration stages the change (`pending_changes: true`) until the next publication.
@@ -1286,7 +1281,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   one extra publication call.
 
 - **A configuration offered to the Client's own Agent now means something — its Supervisor set**
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)). A
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)). A
   Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
   stops what left the set, writes the blocks into its own `client.toml` (preserving the
   operator's comments and everything outside them), and starts what arrived — unchanged
@@ -1294,7 +1289,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   endpoint, credentials, and state directory can never arrive over the wire. Previously the
   Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
   **What to do:** state whom your Configurations are for
-  (`service_name`, [ADR-0016](docs/adr/0016-configurations-and-the-rest-api.md)). An
+  (`service_name`, [ADR-0011](docs/adr/0011-configurations-and-the-rest-api.md)). An
   *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
   body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
   `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
@@ -1304,7 +1299,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **A Configuration can state the Agent type it is for**
-  ([ADR-0016](docs/adr/0016-configurations-and-the-rest-api.md)). The optional
+  ([ADR-0011](docs/adr/0011-configurations-and-the-rest-api.md)). The optional
   `service_name` field is compared raw against the `service.name` an Agent reports, before the
   Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
   currently reports as suggestions.
@@ -1331,7 +1326,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
   systemd start it (`status=203/EXEC`); `client.toml` and `state/` stay at
   `/var/lib/opamp-fleet/client/<instance>`, and `--root` still puts everything under the one
-  directory it names ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)).
+  directory it names ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
   **What to do:** nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit
   against `/opt`, restarts the service if it was running, moves no data, and cleans the orphaned
   binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
@@ -1344,7 +1339,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The fleet survives a Server restart.** Agent records now persist — one JSON file per Agent
   under `<config_dir>/agents/`, behind a storage port a database or external store can replace
-  ([ADR-0026](docs/adr/0026-the-fleet-record.md)). After a restart
+  ([ADR-0013](docs/adr/0013-the-fleet-record.md)). After a restart
   every Agent the Server knew keeps its row, its last-reported build, health, and configuration
   state, shown as disconnected until it reports again; a reconnecting Agent's compressed heartbeat
   is accepted without a fleet-wide `ReportFullState`, and a queued restart survives. Only
@@ -1361,10 +1356,10 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   a Selector, holds one entry per platform (an upload, or a source URL + sha256, optionally
   signed), and **saving never distributes**: every Set is a draft until
   `PUT …/publication` releases it, and a published Set's entries are immutable
-  ([ADR-0020](docs/adr/0020-the-package-store.md)). Among Sets of one name the most
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)). Among Sets of one name the most
   specific Selector wins and, at equal specificity, the greater version — so a canary ring is one
   Selector edit, and a rollback is retracting the newest version (the hidden one-step history of
-  ADR-0020 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
+  ADR-0019 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
   routes moved to `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}`
   beneath; `…/type` and `…/rollback` are gone. The Packages tab is now a master–detail view: a
   table of Sets, a detail form for the selected one (Create/OK/Cancel/Delete, publish as its own
@@ -1381,7 +1376,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
   Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
   capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
-  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0026) — the forget chip
+  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0013) — the forget chip
   in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
   No operator action required.
 
@@ -1395,7 +1390,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `host.cpu.model.name` and, where the platform stamps one, `os.build_id`. The fleet table gains a
   **Network** column — the first address of each kind at a glance, the full lists in the tooltip
   and the attribute chips — and everything stays searchable like any other reported attribute
-  ([ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md)). Addresses are re-read on
+  ([ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md)). Addresses are re-read on
   each description, so a DHCP move shows up. No operator action required; note that host addresses
   are now visible to anyone who can read the fleet API.
 
@@ -1404,7 +1399,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
   version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
   `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)), so
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)), so
   `opamp-fleet-client --version` — and every other CLI call — answers for the binary the service
   actually runs, even after a fleet self-update or a hand-reinstalled older package. A real removal
   (`apt remove`, `dnf remove`) now also deletes the staged `versions/` and the `current` pointer,
@@ -1416,7 +1411,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The MSI's endpoint page comes prefilled with the development default**
   (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
-  click-through (ADR-0023). Interactive installs only: clearing the field still means "configure
+  click-through (ADR-0029). Interactive installs only: clearing the field still means "configure
   later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
   install (`/qn`) without one still writes no configuration — unattended deployments are
   unaffected.
@@ -1441,7 +1436,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
   refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
   no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
-  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0019)
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0018)
   legitimately lives on an internal network. No operator action required unless a source URL
   deliberately used a link-local or CGNAT host.
 
@@ -1451,7 +1446,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   request same-origin — a browser stamps `Sec-Fetch-Site` and forbids page scripts from forging it,
   so a cross-site call is refused with `403`. Non-browser clients (`curl`, a portal) send no such
   header and are unaffected; no API client or token changes. This is not operator authentication,
-  which remains a separate decision (ADR-0017).
+  which remains a separate decision (ADR-0026).
 
 - **The package store has a whole-store size ceiling.** The upload route bounded a single artifact
   by `max_package_size_bytes` but nothing bounded the *store*, so a caller could fill the disk by
@@ -1461,8 +1456,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `max_total_package_bytes` in `server.toml`.
 
 - **A Gateway now serves its downstream hop over TLS, and `[gateway.tls] client_ca_file` gates who
-  may connect.** The `[gateway.tls]` section ([ADR-0009](docs/adr/0009-client-modes-and-the-gateway.md),
-  [ADR-0017](docs/adr/0017-admission-and-authentication.md)) was read and
+  may connect.** The `[gateway.tls]` section ([ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md),
+  [ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)) was read and
   then ignored: the endpoint stayed plaintext and the client CA verified nobody, so the downstream
   `Authorization` credential travelled in the clear and any peer could connect and report under any
   `instance_uid`. The section now takes effect — the Gateway presents its `cert_file`/`key_file`, and
@@ -1474,7 +1469,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   warning saying so.
 
 - **A Server-offered self-update version can no longer escape the install layout.** The offered
-  version string becomes a directory name under `versions/` (ADR-0014); a crafted value carrying
+  version string becomes a directory name under `versions/` (ADR-0028); a crafted value carrying
   `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged binary outside the layout
   and repoint `current` at it — an escape the package hash and signature never covered, because they
   sign the bytes, not the destination. The version is now validated before it names a path, and the
@@ -1482,17 +1477,17 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The Server-rotated connection credential is no longer left world-readable.** The
   `connection-settings.pb` in the state directory holds the `Authorization` value the Server rotates
-  in (ADR-0018), which outranks the one in `client.toml`. It was written at the umask default
+  in (ADR-0027), which outranks the one in `client.toml`. It was written at the umask default
   (typically `0644`), so on a multi-user host any local user could read the live fleet credential.
   It is now written `0600` and its state directory `0700`. No operator action required.
 
-- **The enrolment private key is written owner-only from the start.** `client-key.pem` (ADR-0017)
+- **The enrolment private key is written owner-only from the start.** `client-key.pem` (ADR-0026)
   was created at the umask default and narrowed to `0600` only afterwards, leaving a brief window in
   which another local user could read it. The mode is now set in the open call, closing the window.
   No operator action required.
 
 - **A referenced package's private-source token is stored owner-only on the Server.** A referenced
-  source (ADR-0019) can carry headers — a bearer token for a private artifact host — that were
+  source (ADR-0018) can carry headers — a bearer token for a private artifact host — that were
   persisted in the package store at the umask default, readable by other local users on the Server
   host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
   design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say so.
@@ -1502,13 +1497,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   chain.** The OpAMP endpoint is a fixed, operator-configured address, so its HTTP transport and the
   connection-settings probe now refuse redirects — a redirect there could only bounce an
   authenticated session elsewhere. Artifact downloads still follow redirects (a mirror is often a CDN
-  that bounces to signed storage, ADR-0019) but are now bounded to a short chain; integrity still
+  that bounces to signed storage, ADR-0018) but are now bounded to a short chain; integrity still
   rests on the content hash and signature, never on where the bytes came from. No operator action
   required unless an OpAMP endpoint was, unusually, served behind an HTTP redirect.
 
 - **The Agent's state and configuration directories are kept owner-only.** The persisted state
   directory and the `config/` directory the Managed Process reads from were created at the umask
-  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0016) can be a
+  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0011) can be a
   certificate or a key — so on a multi-user host that material was world-readable. The directories
   are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
   Process runs as the same user and still reads its own config. No operator action required.
@@ -1520,7 +1515,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   or supervisor directory) is now `0700`. No operator action required.
 
 - **A Client that installs packages without a verification key now says so at startup.** Package
-  signing is opt-in (ADR-0019): with no `[packages] verification_key`, an offered package or
+  signing is opt-in (ADR-0018): with no `[packages] verification_key`, an offered package or
   self-update is accepted on the Server-supplied content hash alone, with no signature binding the
   bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
   managed process's, or its own self-update) without a key now logs a warning at startup, so the
@@ -1562,7 +1557,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **A release now ships native installers: `.deb`, `.rpm` and `.msi`**
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)). They sit *beside* the five `.7z`
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)). They sit *beside* the five `.7z`
   archives, which are unchanged and are still the artifact a Server offers for a Client self-update —
   the Client cannot open a `.deb`. Which to take: the installer to put the Client on a host, the
   archive to update a fleet.
@@ -1588,7 +1583,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   shows an unknown publisher and `rpm` reports no signature. macOS keeps the archive only.
 
 - **`service install --endpoint <url>`** writes the first configuration file without asking
-  (ADR-0023, extending [ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)).
+  (ADR-0029, extending [ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
   It is what the installers above use, and what a provisioning run that has an endpoint but no
   terminal needs — `--interactive` is an error without one, on purpose. It writes the same file, is
   mutually exclusive with `--interactive`, and keeps an existing configuration rather than
@@ -1607,7 +1602,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **A Gateway now accepts a gzipped report.** Accepting `Content-Encoding: gzip` is a Baseline MUST
   for anything serving OpAMP, and a Client in Gateway Mode
-  ([ADR-0009](docs/adr/0009-client-modes-and-the-gateway.md)) *is* an OpAMP server to the Agents behind it. The
+  ([ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)) *is* an OpAMP server to the Agents behind it. The
   Server's endpoint implemented the rule; the Gateway's did not, and handed the compressed bytes
   straight to the protobuf decoder — so an Agent that compressed its reports worked against the
   Server and was answered `400 unreadable report` the moment a Gateway was put in front of it.
@@ -1618,7 +1613,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   running to completion first.
 
   Both endpoints now read one implementation of the rule
-  ([ADR-0011](docs/adr/0011-workspace-crates-and-configuration.md)). Nothing to change on any host — an
+  ([ADR-0025](docs/adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)). Nothing to change on any host — an
   affected Agent works through a Gateway as soon as it runs this version.
 
 - **`server --version` now names the build it is, not the release it is heading for.** It printed the
@@ -1627,8 +1622,8 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   to, and named no commit; two binaries of one workspace disagreed about their own version.
 
   Both ends now read the same helper, `opamp::version::current()`, which
-  [ADR-0013](docs/adr/0013-versions.md) always required and the Server had
-  opted out of ([ADR-0013](docs/adr/0013-versions.md)). A
+  [ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md) always required and the Server had
+  opted out of ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). A
   development build reports `0.2.0-dev+<commit>` and a released one `0.2.0+<commit>`.
 
   **Anything matching the Server's `--version` output exactly has to be relaxed** — a check for
@@ -1636,7 +1631,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   what it always was, and no Agent, configuration or stored file is touched.
 
 - **The fleet view shows an Agent's Instance UID again.** It had been the line under the agent name
-  until [ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md) gave a
+  until [ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md) gave a
   row both the operator's name for an Agent and the type it reports, and the UID moved into the name
   link's tooltip — where nothing on a printed, screenshotted or scrolled-past row carried it. It is a
   third line in the name cell now, below the type, and one click selects the whole of it.
@@ -1656,16 +1651,16 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
   The package itself goes when its last artifact does, so nothing is left behind either. Deleting
   uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)).
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)).
 
   `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
   sends the `?os=…&arch=…` form of it that
-  [ADR-0020](docs/adr/0020-the-package-store.md) added.
+  [ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md) added.
 
 ### Removed
 
 - **The ↩ Roll back button is gone from the package form.** The store still remembers the version
-  each artifact replaced ([ADR-0020](docs/adr/0020-the-package-store.md)) and
+  each artifact replaced ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)) and
   `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
   removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
   screen; asking for it is now a request rather than a press.
@@ -1674,7 +1669,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
-- **The Server can label an Agent** ([ADR-0026](docs/adr/0026-the-fleet-record.md)).
+- **The Server can label an Agent** ([ADR-0013](docs/adr/0013-the-fleet-record.md)).
   `PUT /api/v1/agents/{instance_uid}/labels` sets key/value pairs that join what a Selector matches,
   and the bundled UI has a `🏷 labels…` action on every fleet row.
 
@@ -1701,7 +1696,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Changed
 
 - **A package is published before it is offered — uploading only stages it**
-  ([ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)). A newly created
+  ([ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)). A newly created
   package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
   no Agent until it is released.
 
@@ -1717,7 +1712,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
   `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the package,
   and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
-  Selector stops matching it (ADR-0020). The protocol has no revert; this is not a recall.
+  Selector stops matching it (ADR-0019). The protocol has no revert; this is not a recall.
 
   **Nothing that is already running stops.** A package stored before this state existed loads as
   published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
@@ -1731,7 +1726,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   package that button reads *Retract*, and the package list marks a draft.
 
 - **The package form in the UI is one intent per button, and every one of them states the Agent
-  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0020) —
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0019) —
   the form used to make that the easiest state to produce by hand, with the type one optional-looking
   field among several and a separate button to remember afterwards.
 
@@ -1740,7 +1735,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   | | what it sends |
   | --- | --- |
   | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
-  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)), and the type and Selector are set either way |
+  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)), and the type and Selector are set either way |
   | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
 
   None of them runs without an Agent type, so the UI can no longer create a package that reaches
@@ -1752,13 +1747,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   button standing among the ones that write.
 
   The **Agent type** field now offers the types the fleet actually reports, with how many Agents
-  report each. The comparison is raw and has no canonical set to fall back on (ADR-0020), so a typo
+  report each. The comparison is raw and has no canonical set to fall back on (ADR-0019), so a typo
   is a rollout that silently never starts — picking from the list is the spelling that matches. A
   type no Agent has reported yet can still be typed in.
 
   The **name** now stands alone on the first line, and is filled in rather than asked for: from the
-  chosen artifact's file name, which states the package it belongs to (ADR-0023), else a
-  source url's last segment, else the Agent type folded into the ADR-0014 name grammar. It is
+  chosen artifact's file name, which states the package it belongs to (ADR-0029), else a
+  source url's last segment, else the Agent type folded into the ADR-0028 name grammar. It is
   derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
   named after itself. A name typed by hand outranks all three, and one that names a package that
   exists is not renamed by a correction to that package's type.
@@ -1766,7 +1761,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   Nothing about the API changed: the artifact, the source, the type and the Selector are still four
   requests over four sub-resources, and a package uploaded by script is still untyped until
   `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
-  name — that is the alternative ADR-0020 weighed and rejected.
+  name — that is the alternative ADR-0019 weighed and rejected.
 
 ### Fixed
 
@@ -1787,7 +1782,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   again, and **the host is updated back to the published version.** That is the point — the Server
   decides what the fleet runs. To keep a host on an older Client, retract the package first
   (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
-  [ADR-0027](docs/adr/0027-rollout-and-what-reaches-an-agent.md)); retracting uninstalls
+  [ADR-0014](docs/adr/0014-rollout-and-what-reaches-an-agent.md)); retracting uninstalls
   nothing, so the host stays where it is.
 
   This is the Client's own package only. A Managed Process's package record is unchanged: only the
@@ -1798,7 +1793,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 ### Added
 
 - **A Client running as a service now writes its own log to disk**
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)), at
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)), at
   `<state_dir>/logs/`, one file per day with seven days kept.
 
   **On Windows this closes a hole**: the SCM discards a service's stderr, so a Client installed
@@ -1809,7 +1804,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
   Running the Client in the foreground writes no file; stderr is already in front of you.
 
-  It is not a replacement for `ReportsOwnLogs` (ADR-0025): that ships to a destination the Server
+  It is not a replacement for `ReportsOwnLogs` (ADR-0022): that ships to a destination the Server
   offers, over a connection that must already work, and the failures most worth reading are the ones
   where it does not.
 
@@ -1829,7 +1824,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 
-  This closes a silent failure the follow-ups of ADR-0020, ADR-0024 and ADR-0020 all named: a
+  This closes a silent failure the follow-ups of ADR-0019 and ADR-0012 both named: a
   package can target nobody — through an Agent type that is unset or misspelled, artifacts for
   platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
   The package stored fine and reached no one, and nothing said so until somebody noticed the version
@@ -1844,7 +1839,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
-- **An Agent can be forgotten** ([ADR-0026](docs/adr/0026-the-fleet-record.md)).
+- **An Agent can be forgotten** ([ADR-0013](docs/adr/0013-the-fleet-record.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
   bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
   row forever.
@@ -1864,7 +1859,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   but the configuration is applied again, which for a managed agent is one restart.
 
 - **A fleet row now says when an Agent stopped talking**
-  ([ADR-0026](docs/adr/0026-the-fleet-record.md)). `AgentView` gains
+  ([ADR-0013](docs/adr/0013-the-fleet-record.md)). `AgentView` gains
   `stale`, and the bundled UI shows it beside the connection pill.
 
   It is a second fact, not a replacement: `connected` still means "a connection carrying this Agent
@@ -1879,7 +1874,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   Nothing changes for a stale Agent — it keeps its configuration, its packages, and its identity,
   and its next report clears the flag. Nothing is stored and no timer runs.
 
-- **Gateway Mode** ([ADR-0009](docs/adr/0009-client-modes-and-the-gateway.md)): a Client can now stand at a network
+- **Gateway Mode** ([ADR-0034](docs/adr/0034-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)): a Client can now stand at a network
   boundary, accept OpAMP from other Clients, and carry them upstream over a small pool of
   connections. This is the last of the specification's goals to be built.
 
@@ -1914,7 +1909,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   interval where one is configured.
 
 - **Every Agent can now report its own telemetry** — metrics, logs, and traces — to a destination
-  the **Server** names ([ADR-0025](docs/adr/0025-own-telemetry.md)).
+  the **Server** names ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
 
   Add a `[telemetry_offer]` section to `server.toml` with any of `metrics_endpoint`,
   `traces_endpoint`, `logs_endpoint` — full OTLP/HTTP URLs **with path**, e.g.
@@ -1932,7 +1927,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   the Agent's identifying attributes, so one host's several Agents stay apart at the receiving end.
 
   **What it does not send:** a Collector's *internal* telemetry. This Client must not touch a
-  Managed Process's configuration (ADR-0015), so what it reports is what it observes from the
+  Managed Process's configuration (ADR-0010), so what it reports is what it observes from the
   outside. Configure the Collector for its own internals as you would without OpAMP.
 
   **A cleartext destination is refused, not warned about.** `http://` beyond the loopback interface
@@ -1940,7 +1935,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   whatever the Client logs. The protocol explicitly permits this refusal.
 
 - **Mutual TLS, with client certificates this Server issues itself**
-  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)). Goal 17 is
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)). Goal 17 is
   complete: the connection is encrypted, and the peer at each end can now be proved.
 
   **On the Server**, `[tls]` gains an optional `client_ca_file`. With it set, every request to
@@ -1990,7 +1985,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   a fresh host cannot guess (endpoint, Agent name, credential, a private CA when the endpoint is
   `wss://`/`https://`, and last, defaulting to *no*, consent for the Server to update this Client's
   own binary), writes the file, and validates it before registering the service
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)).
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
 
   Nothing about existing invocations changes: the flag is opt-in, an existing file is kept rather
   than overwritten, and `--interactive` without a terminal on stdin fails instead of blocking a
@@ -2001,11 +1996,11 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **Released builds of the Client, one archive per platform.** A release publishes
   `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and Windows
   on `x86_64`, together with `SHA256SUMS`
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)). Until now there was nothing to
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)). Until now there was nothing to
   install but a build of your own.
 
   **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
-  `version/*` tag from it ([ADR-0013](docs/adr/0013-versions.md)) — so a release is
+  `version/*` tag from it ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)) — so a release is
   "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
   a version that already has a tag or a release is spent, and the run says so before it builds
   anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
@@ -2024,7 +2019,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   nothing migrates automatically.
 
 - **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
-  `env` values** ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)),
+  `env` values** ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)),
   so a Foreign Agent's command line is derived from the same place the Client derives it from:
 
   ```toml
@@ -2041,7 +2036,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
   SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
   `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
-  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). Until now the project could open the
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)). Until now the project could open the
   two container formats but gave an operator no supported way to produce one, and an encrypted
   `.7z` in particular had no answer at all.
 
@@ -2062,7 +2057,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   and configures a Foreign Agent entirely from the Server.
 
 - **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
-  ([ADR-0019](docs/adr/0019-package-delivery-on-the-agent.md)). An executable plus the shared objects it
+  ([ADR-0018](docs/adr/0018-signed-package-delivery-from-allowed-sources.md)). An executable plus the shared objects it
   loads — Fluent Bit is the case — could not be a package before, because exactly one archive
   member was installed. Naming where the program sits inside the package unpacks the whole archive
   instead:
@@ -2091,7 +2086,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
-  ([ADR-0025](docs/adr/0025-own-telemetry.md)).
+  ([ADR-0022](docs/adr/0022-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
 
   One consequence on upgrade: every Agent's stored hash stops matching, so the Server sends its
   standing offer once more and each Agent verifies and re-applies it. That is one extra exchange per
@@ -2102,7 +2097,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   so a Server offering either was told the settings were in force when they were not. It now applies
   everything it does honour — endpoint, credential, heartbeat, certificate — and reports `FAILED`
   with an `error_message` naming what it dropped
-  ([ADR-0017](docs/adr/0017-admission-and-authentication.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-a-client-certificate-alone.md)).
 
   Nothing to do on any host. A Server whose `[connection_offer]` never carried those fields — this
   project's Server cannot — sees no change at all.
@@ -2136,7 +2131,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   can target a distribution release, or pin one machine by its host name.
 
   **`host.name` in particular was promised and missing.**
-  [ADR-0020](docs/adr/0020-the-package-store.md) offers "a Selector matching that host's
+  [ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md) offers "a Selector matching that host's
   `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
   Selector silently matched nothing. It works now.
 
@@ -2153,7 +2148,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **`opamp-fleet-client service install` without `--config` now bakes `<root>/client.toml` into the unit**,
   inside the install root, instead of `client.toml` resolved against whatever the working directory
   happened to be
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)). A service
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)). A service
   manager's working directory is `/` or `System32`, so the old default pointed at a file the
   service could not have been relying on unless the install was run from exactly the right
   directory. **If you installed by running `install` from the directory holding your
@@ -2163,7 +2158,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **What a Client reports as its version now names the release it is heading *for*, not the one it
   descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
-  ([ADR-0013](docs/adr/0013-versions.md)): a build with no release tag on its commit
+  ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)): a build with no release tag on its commit
   reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
   fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
   shift with it,
@@ -2202,7 +2197,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **On macOS, a Client installed as a service could never update itself** — every offer was refused
   with "this Client does not run from a versioned install layout", and a torn `current` pointer was
-  never repaired either. The service is registered against `<root>/current/client` (ADR-0014), and
+  never repaired either. The service is registered against `<root>/current/client` (ADR-0028), and
   asking the operating system what is running answers with that path on macOS and with the version
   directory behind it on Linux; only the second shape says where in the layout the binary sits. The
   path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
@@ -2222,13 +2217,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
   field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
   reason — which is exactly what happens when the Client's own Agent is offered a package
-  `[self_update]` did not name (ADR-0021) — so the reason was reported by the Client, stored by the
+  `[self_update]` did not name (ADR-0020) — so the reason was reported by the Client, stored by the
   Server, and shown nowhere. It is now also logged.
 
 ### Changed — breaking
 
 - **A package now states the Agent type it is built for, and reaches no Agent of another**
-  ([ADR-0020](docs/adr/0020-the-package-store.md)). ADR-0020 made the
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)). ADR-0019 made the
   Server refuse to send an artifact to a machine it cannot run on; this does the same for an Agent it
   was not built for. A Promtail artifact can no longer be swapped over a Collector because someone
   forgot the Selector.
@@ -2248,13 +2243,13 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   before typing it. It belongs to the package name, not to an artifact, so it is set once for all
   platforms.
 
-  An Agent that reports no `service.name` at all is now offered no package, the same rule ADR-0020
+  An Agent that reports no `service.name` at all is now offered no package, the same rule ADR-0019
   applies to a missing platform. Every Client this project ships reports one.
 
   **New route** `PUT /api/v1/packages/{name}/type`; `PackageView` gains `service_name`.
 
 - **`service.name` now reports the Agent *type*, not the Agent's name**
-  ([ADR-0024](docs/adr/0024-what-an-agent-reports-about-itself.md)). The name an
+  ([ADR-0012](docs/adr/0012-what-an-agent-reports-about-itself.md)). The name an
   operator gives an Agent moved to a new attribute, `service.instance.name`. Before, a
   `[[supervisor]]` block's `name` was reported as `service.name` — the slot the protocol reserves
   for "a reverse FQDN that uniquely identifies the Agent type" — and a Collector carrying the
@@ -2289,7 +2284,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `service_instance_name` and fall back to `service_name`, which is what the bundled UI now does.
 
 - **A package now holds one artifact per platform, and `os`/`arch` are required**
-  ([ADR-0020](docs/adr/0020-the-package-store.md)). An Agent is offered only the artifact
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)). An Agent is offered only the artifact
   built for the operating system and architecture it reported, and never another — so uploading a
   Windows build no longer installs it over every Linux host in the fleet.
 
@@ -2316,7 +2311,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 - **The Client reports `host.arch` as `amd64`/`arm64`**, the semantic-convention values the protocol
   points at, where it used to report Rust's `x86_64`/`aarch64`
-  ([ADR-0020](docs/adr/0020-the-package-store.md)).
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)).
 
   **A Selector written against `host.arch` must be edited on the Server** — `{"host.arch": "x86_64"}`
   now matches nothing. Change it to `amd64` (or `aarch64` → `arm64`); nothing changes on any host.
@@ -2329,10 +2324,10 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **Release artifacts are named `<name>_<version>_<os>_<arch>.7z`** —
   `opamp-fleet-client_1.2.3_linux_amd64.7z`, `opamp-fleet-client_1.2.3_darwin_arm64.7z`. Both halves
   of that changed: the platform tokens, which used to say `macos` and `x86_64`
-  ([ADR-0020](docs/adr/0020-the-package-store.md)), and the separator between the four
+  ([ADR-0019](docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md)), and the separator between the four
   fields, which used to be `-`
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)) — both
-  superseding the naming in [ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md).
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)) — both
+  as [ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md) names them now.
 
   **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
   releases already published keep the names they have, and nothing is renamed.
@@ -2345,7 +2340,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   the name and version it has to strip first.
 
 - **The service is registered as `opamp-fleet-client` on every platform**
-  ([ADR-0014](docs/adr/0014-the-client-as-an-installed-service.md)). It used to be
+  ([ADR-0028](docs/adr/0028-the-client-as-an-installed-service-with-a-secure-first-configuration.md)). It used to be
   `opamp-fleet-client.default.service` on systemd and `io.opamp-fleet.client.default` on launchd and
   the Windows SCM — two names nobody chose, both falling out of how a reverse-DNS label happens to
   be split. Now: `systemctl status opamp-fleet-client`, `launchctl list opamp-fleet-client`,
@@ -2356,11 +2351,11 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `service uninstall` with the *old* binary, then `service install` with the new one. The install
   layout and the state directory are untouched by either.
 
-  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0014
+  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0028
   promised and never actually set.
 
 - **A version is compared and shown without its build metadata**
-  ([ADR-0013](docs/adr/0013-versions.md)). Two
+  ([ADR-0017](docs/adr/0017-versions-resolved-in-the-internal-crate.md)). Two
   things change, and one of them is an API break.
 
   **Uploading a Client package now takes the release number.** `?version=1.2.3` matches a binary
@@ -2382,7 +2377,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
   (`.exe` on Windows), and the version directory beside it is
   `versions/opamp-fleet-client-<version>-<commit>/`
-  ([ADR-0023](docs/adr/0023-releases-installers-and-the-name-supervisor.md)). One name from the download
+  ([ADR-0029](docs/adr/0029-releases-installers-and-the-name-supervisor-secure-by-default.md)). One name from the download
   to the process in `ps` to the Agent in the fleet view.
 
   **Nothing in a fleet has to be migrated, because nothing has been released yet** — this is the one
@@ -2398,7 +2393,7 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 - **`accepts_packages` is no longer a `[[supervisor]]` key** and a configuration still carrying it
   **fails at startup**. Whether a Managed Process takes Server-offered package updates is now
   decided by how its program is named
-  ([ADR-0022](docs/adr/0022-a-supervisors-directory-program-and-set.md)):
+  ([ADR-0032](docs/adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)):
 
   | `binary` / `command` | Meaning |
   |---|---|

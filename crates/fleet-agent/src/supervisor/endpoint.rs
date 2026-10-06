@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (ADR-0009, ADR-0015): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (ADR-0034, ADR-0010): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -7,7 +7,7 @@
 //! Supervisor's. It is not a Server in the specification's sense — it manages no fleet, holds
 //! no configuration, and serves exactly one local process; for a Foreign Agent nothing ever
 //! connects, and that is the whole of the handling. The communication itself is
-//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0032).
+//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0024).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ pub struct Endpoint {
     max_message_size: usize,
     /// How long a connection may take to send its request headers.
     header_read_timeout: Duration,
-    /// What a connection must present as `Authorization: Bearer …` (ADR-0053); empty asks nothing.
+    /// What a connection must present as `Authorization: Bearer …` (ADR-0034); empty asks nothing.
     token: String,
 }
 
@@ -65,7 +65,7 @@ impl Endpoint {
         })
     }
 
-    /// Asks every connection for `token` (ADR-0053).
+    /// Asks every connection for `token` (ADR-0034).
     #[must_use]
     pub fn with_token(mut self, token: String) -> Self {
         self.token = token;
@@ -73,7 +73,7 @@ impl Endpoint {
     }
 
     /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
-    /// listener applies (ADR-0036).
+    /// listener applies (ADR-0024).
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -108,7 +108,7 @@ impl Endpoint {
                 any_path: true,
             },
         );
-        // On the listener every OpAMP endpoint is served on (ADR-0036), so a local process that
+        // On the listener every OpAMP endpoint is served on (ADR-0024), so a local process that
         // falls silent mid-request is bounded as a remote one is.
         let handle = Handle::new();
         let trigger = handle.clone();
@@ -136,7 +136,7 @@ struct Folding {
     expected: Option<String>,
 }
 
-/// A fresh token for one Supervisor start (ADR-0053): 32 bytes from the system's secure random
+/// A fresh token for one Supervisor start (ADR-0034): 32 bytes from the system's secure random
 /// source, hex.
 ///
 /// # Errors
@@ -270,7 +270,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     /// A fake `opampextension`: connects, reports, and expects the capability echo.
-    /// Verifies: ADR-0071
+    /// Verifies: ADR-0034
     #[tokio::test]
     async fn extension_reports_are_folded_into_process_events() {
         let (event_tx, mut events) = mpsc::channel(16);
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(decoded.capabilities, ENDPOINT_CAPABILITIES);
     }
 
-    /// Verifies: ADR-0071
+    /// Verifies: ADR-0034
     #[tokio::test]
     async fn shutdown_stops_the_endpoint() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -398,7 +398,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0057
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -434,7 +434,7 @@ mod tests {
 
     /// Only the Managed Process reports through the endpoint: a connection without the token
     /// handed to the process is refused before the upgrade, one with it is served.
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0034
     #[tokio::test]
     async fn the_endpoint_admits_only_the_token_it_handed_out() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;

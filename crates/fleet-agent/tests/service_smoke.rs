@@ -1,5 +1,5 @@
 //! The Client under the machine's **real** service manager — systemd, launchd, or the SCM
-//! (ADR-0014, ADR-0021).
+//! (ADR-0028, ADR-0020).
 //!
 //! Every other test in this project stands in for the service manager: the self-update end-to-end
 //! test restarts the Client itself, "exactly as systemd would". That is what makes the update loop
@@ -33,11 +33,11 @@ use fleet_agent::service::{ServiceControl, ServiceLevel, ServiceState};
 use fleet_server::fleet::{AgentView, AppState};
 
 /// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
-/// reported as `service.instance.name` (ADR-0024), which is what the fleet view is searched by.
+/// reported as `service.instance.name` (ADR-0012), which is what the fleet view is searched by.
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
-/// `supervisor` (ADR-0023).
+/// `supervisor` (ADR-0029).
 ///
-/// Since ADR-0014 there is no `--instance` to isolate this run under, and the service it registers
+/// Since ADR-0028 there is no `--instance` to isolate this run under, and the service it registers
 /// carries the product's name like any other install. This test therefore takes over the host's
 /// one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
@@ -101,7 +101,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform since ADR-0014, so this is what systemd, launchd, and the SCM
+    // One name on every platform since ADR-0028, so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -196,7 +196,7 @@ fn spawn_server() -> (
 /// The kill is the assertion the stand-in service manager cannot make, and the reason this test
 /// exists: `RestartPolicy::OnFailure` is what a self-update relies on to come back at all, and on
 /// Windows it is a set of recovery actions this Client registers itself.
-/// Verifies: ADR-0044, ADR-0061, G-11
+/// Verifies: ADR-0020, ADR-0028, G-11
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop() {
@@ -227,7 +227,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     .expect("install the service");
     let _registered = Registered;
 
-    // launchd does not auto-start after an install (a known ADR-0014 gap), so every platform is
+    // launchd does not auto-start after an install (a known ADR-0028 gap), so every platform is
     // started explicitly — which is also what the README's checklist tells an operator to do.
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
@@ -282,7 +282,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::Stopped,
-        "an explicitly stopped service must stay down (ADR-0014)"
+        "an explicitly stopped service must stay down (ADR-0028)"
     );
 
     client(&["service", "uninstall"], &config).expect("uninstall the service");
